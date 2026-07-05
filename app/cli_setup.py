@@ -73,6 +73,8 @@ def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli
         "nginx_locations": cli_checks.check_nginx_locations(),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
+        "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
+        "static_pages_reachable": cli_checks.check_static_pages_reachable(raw),
     }
 
 
@@ -118,7 +120,10 @@ def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[s
     show(report["selinux"])
 
     print_fn("\n8. Static site (site/*.html on your live host):")
-    static_site_checks = report["static_site"] + report["static_site_compliance"]
+    static_site_checks = (
+        report["static_site"] + report["static_site_compliance"]
+        + report["static_pages_deployed"] + report["static_pages_reachable"]
+    )
     if static_site_checks:
         show(static_site_checks)
     else:
@@ -293,5 +298,49 @@ def interactive_setup(
                 print_fn(f"[ok] wrote {out_path}")
             except OSError as exc:
                 print_fn(f"[fail] could not write {out_path}: {exc}")
+
+        # index.html/impressum.html/terms.html: hand-authored, so never
+        # auto-copied silently -- but actively OFFER to copy each one your
+        # checkout has a real (or .example) source for, instead of just
+        # reporting "differs" and leaving you to find/run the cp yourself.
+        # Staying silent here was the actual bug (see the maintainer's local notes).
+        for label, level, detail in cli_checks.check_static_pages_deployed(raw, home):
+            print_fn(f"[{level}] {label}: {detail}")
+        for name in cli_checks._STATIC_PAGES_TO_DEPLOY:
+            source = cli_checks._resolve_static_source(home, name)
+            if source is None:
+                continue  # nothing in the checkout to offer copying from
+            deployed = Path(static_site_dir) / name
+            if prompt(f"Copy {source} to {deployed} now?"):
+                try:
+                    deployed.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                    print_fn(f"[ok] wrote {deployed}")
+                except OSError as exc:
+                    print_fn(f"[fail] could not write {deployed}: {exc}")
+
+        # Reachability from nginx's actual root -- a per-file symlink, never
+        # a static_site_dir rewrite (see check_static_pages_reachable()'s
+        # own comment: some setups keep static_site_dir as a separate
+        # git-tracked staging dir on purpose, symlinking in only what's
+        # meant to be public).
+        for label, level, detail in cli_checks.check_static_pages_reachable(raw):
+            if level == "ok":
+                print_fn(f"[ok] {label}: {detail}")
+                continue
+            print_fn(f"{label}: {detail}")
+            name = label.split(": ", 1)[1]
+            nginx_root = cli_checks._nginx_root_for_host(raw)
+            if nginx_root is None:
+                continue
+            link_path = Path(nginx_root) / name
+            target = Path(static_site_dir) / name
+            if not is_root():
+                print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+            elif prompt(f"Symlink {link_path} -> {target} now?"):
+                try:
+                    link_path.symlink_to(target)
+                    print_fn(f"[ok] symlinked {link_path} -> {target}")
+                except OSError as exc:
+                    print_fn(f"[fail] could not symlink {link_path}: {exc}")
 
     print_fn("\nDone. Re-run `my-bt status` any time to re-check everything.")

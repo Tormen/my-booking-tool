@@ -21,6 +21,7 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import site_render
 
@@ -141,6 +142,144 @@ def check_nginx_locations() -> list[Check]:
             checks.append((f"nginx location {path}", "warn",
                             "not found in the live config -- add it from "
                             "/usr/share/my-booking-tool/my-booking.conf.example"))
+    return checks
+
+
+def _iter_server_blocks(merged_config: str):
+    """Yields the raw text of each top-level `server { ... }` block in a
+    `nginx -T` dump. Depth-tracks braces rather than doing full parsing --
+    `nginx -T` only ever prints an already-`nginx -t`-valid config, so
+    braces are guaranteed balanced; this is just enough to isolate one
+    vhost's own directives (e.g. `root`) from any `location` sub-blocks it
+    contains, without needing a real nginx-config parser."""
+    depth = 0
+    current: list[str] | None = None
+    start_depth = None
+    for line in merged_config.splitlines():
+        if current is None and re.match(r"^\s*server\s*\{", line):
+            current = [line]
+            start_depth = depth
+            depth += line.count("{") - line.count("}")
+            continue
+        if current is not None:
+            current.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth == start_depth:
+                yield "\n".join(current)
+                current = None
+                start_depth = None
+            continue
+        depth += line.count("{") - line.count("}")
+
+
+def _nginx_root_for_host(raw: dict) -> str | None:
+    """Returns nginx's `root` for the server block matching
+    `[site].base_url`'s hostname, or None if nginx/that block/its root
+    can't be determined. Shared by check_static_pages_reachable()."""
+    hostname = urlparse(raw.get("site", {}).get("base_url", "")).hostname
+    if not hostname or not shutil.which("nginx"):
+        return None
+    result = subprocess.run(["nginx", "-T"], capture_output=True, text=True)
+    if result.returncode != 0:
+        return None
+    name_re = re.compile(r"^\s*server_name\s+([^;]+);", re.MULTILINE)
+    root_re = re.compile(r"^\s*root\s+([^;]+);", re.MULTILINE)
+    for block in _iter_server_blocks(result.stdout):
+        names = name_re.search(block)
+        if not names or hostname not in names.group(1).split():
+            continue
+        root_match = root_re.search(block)
+        return root_match.group(1).strip() if root_match else None
+    return None
+
+
+# Pages this tool never templates/generates (unlike privacy.html -- see
+# check_static_site_drift) but that still benefit from knowing whether the
+# LIVE deployed copy matches what's in the checkout.
+_STATIC_PAGES_TO_DEPLOY = ("index.html", "impressum.html", "terms.html")
+
+
+def check_static_pages_reachable(raw: dict) -> list[Check]:
+    """For each page my-bt has actually put in `[site].static_site_dir`,
+    checks it's reachable from nginx's real `root` for that host -- either
+    because static_site_dir IS that root, or because a symlink (or copy)
+    for that specific file exists there, same as an already-working
+    `index.html -> ../index.html` symlink would. Deliberately does NOT
+    assume static_site_dir should just equal nginx's root: some setups
+    keep a git-tracked staging directory (static_site_dir) separate from
+    the public webroot on purpose (e.g. to avoid exposing a `.git` folder
+    under the public root), symlinking in only the specific files meant to
+    be public -- see the maintainer's local notes. So the suggested fix here is always
+    a per-file symlink, never "change static_site_dir". Hit in practice
+    2026-07-05: privacy.html/terms.html/impressum.html existed in
+    static_site_dir but had no matching symlink in nginx's actual root, so
+    they 404'd for every visitor despite `status` reporting them fine."""
+    static_site_dir = raw.get("site", {}).get("static_site_dir")
+    if not static_site_dir:
+        return []
+    nginx_root = _nginx_root_for_host(raw)
+    if nginx_root is None:
+        return []  # nginx missing/not configured for this host -- nothing to cross-check
+    if Path(nginx_root).resolve() == Path(static_site_dir).resolve():
+        return []  # same directory -- every file is trivially reachable, nothing to report
+    checks: list[Check] = []
+    for name in (site_render.OUTPUT_NAME,) + _STATIC_PAGES_TO_DEPLOY:
+        managed = Path(static_site_dir) / name
+        if not managed.exists():
+            continue  # not deployed at all yet -- already covered by other checks
+        served = Path(nginx_root) / name
+        if served.exists() and served.resolve() == managed.resolve():
+            checks.append((f"nginx-reachable: {name}", "ok", f"symlinked/present at {served}"))
+        else:
+            checks.append((f"nginx-reachable: {name}", "warn",
+                            f"{managed} exists but nginx's root ({nginx_root}) has no matching "
+                            f"file -- visitors get a 404. Fix: ln -s {managed} {served}"))
+    return checks
+
+
+def _resolve_static_source(home: str, name: str) -> Path | None:
+    """The checkout's real site/<name>, falling back to site/<name>.example
+    if no real copy exists locally -- same real-preferred-over-.example
+    precedence as everywhere else in this project (scripts/render-site.py's
+    resolve_real_or_example(), scripts/install.sh's _src(), etc.)."""
+    real = Path(home) / "site" / name
+    if real.exists():
+        return real
+    example = Path(home) / "site" / f"{name}.example"
+    if example.exists():
+        return example
+    return None
+
+
+def check_static_pages_deployed(raw: dict, home: str) -> list[Check]:
+    """For each of index.html/impressum.html/terms.html: is it deployed to
+    [site].static_site_dir at all, and if so, does it match what's in this
+    checkout right now? Purely informational -- these pages are
+    hand-authored and deliberately never auto-copied (README.md
+    "Static-site pages") -- but staying silent about a missing or stale
+    page was itself the bug: an index.html footer edit sat in the checkout
+    for weeks without ever reaching the live site, and neither `status`
+    nor `setup` ever mentioned it (hit in practice 2026-07-05)."""
+    static_site_dir = raw.get("site", {}).get("static_site_dir")
+    if not static_site_dir:
+        return []
+    checks: list[Check] = []
+    for name in _STATIC_PAGES_TO_DEPLOY:
+        deployed = Path(static_site_dir) / name
+        source = _resolve_static_source(home, name)
+        if source is None:
+            continue  # nothing in the checkout to compare against either
+        if not deployed.exists():
+            checks.append((f"static site content ({deployed})", "warn",
+                            f"not deployed yet -- copy {source} there"))
+            continue
+        same = deployed.read_text(encoding="utf-8", errors="replace") == \
+            source.read_text(encoding="utf-8", errors="replace")
+        if same:
+            checks.append((f"static site content ({deployed})", "ok", "matches your checkout"))
+        else:
+            checks.append((f"static site content ({deployed})", "warn",
+                            f"differs from your checkout's {source} -- copy it over if that's the newer version"))
     return checks
 
 

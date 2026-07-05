@@ -103,7 +103,7 @@ app/                        the application (stdlib-only Python package)
   webapp.py                 wsgiref WSGI app / routes
   serve.py                  entrypoint (python3 -m app.serve)
 
-tests/                      unit tests (146, run with `my-bt test` or unittest)
+tests/                      unit tests (168, run with `my-bt test` or unittest)
 
 scripts/
   my-bt                     thin CLI wrapper -- see "The `my-bt` CLI" below
@@ -444,7 +444,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-146 tests covering slot generation (including DST via `zoneinfo`, and that
+168 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -565,6 +565,24 @@ deliberate, separate step, not something the RPM install does
 automatically: copy them to your live static-site host when you're ready,
 ideally at the same time as each course's booking link starts pointing at
 `/book/<shortname>`.
+
+`my-bt status`/`setup -i` actively help with that step now (added
+2026-07-05, after this exact gap caused a real stale-page incident):
+- **Deployed vs. checkout drift**: for each of `index.html`/`impressum.html`/
+  `terms.html`, compares the live copy in `[site].static_site_dir` against
+  this checkout's real (or `.example`) version, and warns if it's missing
+  or stale rather than staying silent. `setup -i` then actively offers to
+  copy the newer version over, the same way it already offers to
+  regenerate `privacy.html`.
+- **Reachability from nginx**: `[site].static_site_dir` and nginx's actual
+  `root` for your `base_url` hostname don't have to be the same directory
+  -- some setups keep a git-tracked staging directory separate from the
+  public webroot on purpose, symlinking in only what's meant to be public.
+  `setup -i` checks each managed page is actually reachable that way
+  (present in `static_site_dir`, and either identical to nginx's root or
+  symlinked into it) and, as root, offers to create the missing symlink --
+  never to repoint `static_site_dir` itself, since that's a deliberate
+  architectural choice this tool has no business overriding.
 
 ## Spots-left display (`[defaults]` in `settings.toml`)
 

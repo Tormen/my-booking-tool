@@ -313,6 +313,87 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         )
         self.assertFalse((self.static_dir / site_render.OUTPUT_NAME).exists())
 
+    def test_accepting_copy_deploys_a_stale_hand_authored_page(self):
+        # Regression coverage for 2026-07-05: an index.html footer edit sat
+        # in the checkout for weeks, never deployed, and nothing offered to
+        # fix it. Now `setup -i` should actively offer the copy.
+        (self.home / "site" / "index.html").write_text("new content with footer")
+        (self.static_dir / "index.html").write_text("old stale content")
+        raw = _raw(site={"static_site_dir": str(self.static_dir)})
+        prompt = FakePrompts({"Copy": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual((self.static_dir / "index.html").read_text(), "new content with footer")
+
+    def test_declining_copy_leaves_the_stale_page_alone(self):
+        (self.home / "site" / "index.html").write_text("new content")
+        (self.static_dir / "index.html").write_text("old content")
+        raw = _raw(site={"static_site_dir": str(self.static_dir)})
+        prompt = FakePrompts({"Copy": False})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual((self.static_dir / "index.html").read_text(), "old content")
+
+    def test_accepting_copy_deploys_a_never_deployed_page(self):
+        (self.home / "site" / "terms.html").write_text("terms content")
+        raw = _raw(site={"static_site_dir": str(self.static_dir)})
+        prompt = FakePrompts({"Copy": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual((self.static_dir / "terms.html").read_text(), "terms content")
+
+    def test_no_checkout_source_is_never_prompted_to_copy(self):
+        # Nothing under site/ for impressum.html (no real file, no
+        # .example) -- there's nothing to offer copying from.
+        raw = _raw(site={"static_site_dir": str(self.static_dir)})
+        prompt = FakePrompts({})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("impressum.html"), [])
+
+    def test_symlink_offered_and_created_when_root_and_confirmed(self):
+        nginx_root = self.home / "public_html"
+        nginx_root.mkdir()
+        (self.static_dir / "privacy.html").write_text("privacy content")
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "base_url": "https://example.org"})
+        prompt = FakePrompts({"Symlink": True})
+        with patch("app.cli_checks._nginx_root_for_host", return_value=str(nginx_root)):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        link = nginx_root / "privacy.html"
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link.resolve(), (self.static_dir / "privacy.html").resolve())
+
+    def test_symlink_not_offered_without_root(self):
+        nginx_root = self.home / "public_html"
+        nginx_root.mkdir()
+        (self.static_dir / "privacy.html").write_text("privacy content")
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "base_url": "https://example.org"})
+        prompt = FakePrompts({"Symlink": True})
+        with patch("app.cli_checks._nginx_root_for_host", return_value=str(nginx_root)):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(prompt.asked_matching("Symlink"), [])
+        self.assertFalse((nginx_root / "privacy.html").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

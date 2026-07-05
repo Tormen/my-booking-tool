@@ -287,6 +287,152 @@ class CheckNginxLocationsTest(unittest.TestCase):
         self.assertEqual(_levels(checks)["nginx location /my"], "warn")
 
 
+class NginxRootForHostTest(unittest.TestCase):
+    """`_nginx_root_for_host` isolates one `server { ... }` block's `root`
+    out of a full `nginx -T` dump via brace-depth tracking -- these tests
+    exercise that parsing directly, separately from check_static_pages_reachable()."""
+
+    def _raw(self, base_url="https://example.org"):
+        return {"site": {"static_site_dir": "/var/www/x", "base_url": base_url}}
+
+    def test_finds_root_for_matching_server_name(self):
+        merged = """
+        server {
+            listen 80;
+            server_name example.org www.example.org;
+            root /var/www/example.org/public_html;
+            location / { try_files $uri $uri/ =404; }
+        }
+        server {
+            server_name other.org;
+            root /var/www/other.org;
+        }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            root = cli_checks._nginx_root_for_host(self._raw())
+        self.assertEqual(root, "/var/www/example.org/public_html")
+
+    def test_no_matching_server_name_returns_none(self):
+        merged = "server {\n  server_name other.org;\n  root /var/www/other.org;\n}\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            root = cli_checks._nginx_root_for_host(self._raw())
+        self.assertIsNone(root)
+
+    def test_nginx_missing_returns_none(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            root = cli_checks._nginx_root_for_host(self._raw())
+        self.assertIsNone(root)
+
+    def test_no_base_url_returns_none(self):
+        root = cli_checks._nginx_root_for_host({"site": {}})
+        self.assertIsNone(root)
+
+
+class CheckStaticPagesReachableTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.static_dir = Path(self._tmp.name) / "static"
+        self.nginx_root = Path(self._tmp.name) / "public_html"
+        self.static_dir.mkdir()
+        self.nginx_root.mkdir()
+
+    def _raw(self):
+        return {"site": {"static_site_dir": str(self.static_dir), "base_url": "https://example.org"}}
+
+    def test_no_static_site_dir_is_noop(self):
+        self.assertEqual(cli_checks.check_static_pages_reachable({"site": {}}), [])
+
+    def test_no_nginx_root_found_is_noop(self):
+        with patch("app.cli_checks._nginx_root_for_host", return_value=None):
+            self.assertEqual(cli_checks.check_static_pages_reachable(self._raw()), [])
+
+    def test_same_directory_as_nginx_root_is_noop(self):
+        # static_site_dir IS nginx's root -- every file is trivially
+        # reachable, nothing worth reporting.
+        with patch("app.cli_checks._nginx_root_for_host", return_value=str(self.static_dir)):
+            self.assertEqual(cli_checks.check_static_pages_reachable(self._raw()), [])
+
+    def test_page_not_deployed_at_all_is_skipped(self):
+        # Nothing in static_site_dir yet -- check_static_pages_deployed()
+        # already covers "not deployed", this check has nothing to add.
+        with patch("app.cli_checks._nginx_root_for_host", return_value=str(self.nginx_root)):
+            self.assertEqual(cli_checks.check_static_pages_reachable(self._raw()), [])
+
+    def test_page_reachable_via_symlink_is_ok(self):
+        (self.static_dir / "privacy.html").write_text("hi")
+        (self.nginx_root / "privacy.html").symlink_to(self.static_dir / "privacy.html")
+        with patch("app.cli_checks._nginx_root_for_host", return_value=str(self.nginx_root)):
+            checks = cli_checks.check_static_pages_reachable(self._raw())
+        levels = _levels(checks)
+        self.assertEqual(levels["nginx-reachable: privacy.html"], "ok")
+
+    def test_page_deployed_but_not_symlinked_warns(self):
+        (self.static_dir / "privacy.html").write_text("hi")
+        # nginx_root has nothing pointing at it.
+        with patch("app.cli_checks._nginx_root_for_host", return_value=str(self.nginx_root)):
+            checks = cli_checks.check_static_pages_reachable(self._raw())
+        levels = _levels(checks)
+        self.assertEqual(levels["nginx-reachable: privacy.html"], "warn")
+        detail = {label: detail for label, _, detail in checks}["nginx-reachable: privacy.html"]
+        self.assertIn("ln -s", detail)
+
+
+class CheckStaticPagesDeployedTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "checkout"
+        self.static_dir = Path(self._tmp.name) / "static"
+        (self.home / "site").mkdir(parents=True)
+        self.static_dir.mkdir()
+
+    def _raw(self):
+        return {"site": {"static_site_dir": str(self.static_dir)}}
+
+    def test_no_static_site_dir_is_noop(self):
+        self.assertEqual(cli_checks.check_static_pages_deployed({"site": {}}, str(self.home)), [])
+
+    def test_no_checkout_source_is_skipped(self):
+        # Neither a real site/index.html nor an .example placeholder exists
+        # locally -- nothing to compare against, so no entry for it at all.
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        self.assertEqual(checks, [])
+
+    def test_matches_checkout_is_ok(self):
+        (self.home / "site" / "index.html").write_text("hello world")
+        (self.static_dir / "index.html").write_text("hello world")
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        levels = _levels(checks)
+        self.assertEqual(levels["static site content (" + str(self.static_dir / "index.html") + ")"], "ok")
+
+    def test_differs_from_checkout_warns(self):
+        (self.home / "site" / "index.html").write_text("new content")
+        (self.static_dir / "index.html").write_text("old content")
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("differs", detail)
+
+    def test_not_deployed_yet_warns(self):
+        (self.home / "site" / "terms.html").write_text("terms")
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("not deployed yet", detail)
+
+    def test_falls_back_to_example_when_no_real_file(self):
+        (self.home / "site" / "impressum.html.example").write_text("generic placeholder")
+        (self.static_dir / "impressum.html").write_text("generic placeholder")
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "ok")
+
+
 class CheckRpmVerifyTest(unittest.TestCase):
     def test_rpm_not_present_is_ok(self):
         with patch("app.cli_checks.shutil.which", return_value=None):
