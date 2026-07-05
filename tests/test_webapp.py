@@ -99,7 +99,7 @@ class ConflictCheckerTest(unittest.TestCase):
         # calendar_sync._uid_parts) -- make_settings()'s default base_url
         # is https://example.org, so "our own" events look like this.
         self.transport.report_responses["YogaBookings"] = Response(
-            207, {}, _report_with_event("example-org-lux-wed-yoga-2026-07-08@example.org")
+            207, {}, _report_with_event("example-org-yoga-class-1-2026-07-08@example.org")
         )
         check = self.app._conflict_checker(exclude_own=True)
         start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
@@ -141,7 +141,7 @@ class SpotsLeftDisplayTest(unittest.TestCase):
         d = date(2026, 7, 8)
         start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
         end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        return Occurrence("lux-wed-yoga", d, start, end, spots_taken, capacity)
+        return Occurrence("yoga-class-1", d, start, end, spots_taken, capacity)
 
     def test_default_offset_shows_the_real_number(self):
         app = self._app()
@@ -193,7 +193,7 @@ class LateBookingQuorumTest(unittest.TestCase):
     def _occ(self, spots_taken: int, start: datetime, capacity: int = 10) -> Occurrence:
         d = date(2026, 7, 8)
         end = start + timedelta(minutes=100)
-        return Occurrence("lux-wed-yoga", d, start, end, spots_taken, capacity)
+        return Occurrence("yoga-class-1", d, start, end, spots_taken, capacity)
 
     def test_default_min_required_participants_never_rejects(self):
         # Default is 1 -- always a no-op, even for a booking seconds before start.

@@ -88,7 +88,7 @@ def build_occurrences(
     cutoff here (see module docstring).
 
     Course times in settings.toml are local time in `settings.timezone`
-    (e.g. Europe/Luxembourg); `now` may be in any timezone (aware) or naive
+    (e.g. Europe/Berlin); `now` may be in any timezone (aware) or naive
     (assumed already local) -- both are normalized to `settings.timezone`
     via zoneinfo so DST transitions are handled correctly rather than by
     naive UTC-offset math.

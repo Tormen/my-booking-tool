@@ -29,16 +29,16 @@ class UserTest(StoreTestBase):
 class RegistrationTest(StoreTestBase):
     def test_add_and_count(self):
         u = self.store.upsert_user("a@b.com", "Alice", "h", "s")
-        self.store.add_registration("lux-wed-yoga", "2026-07-08", u.user_id, hash_token(new_token()))
-        self.assertEqual(self.store.count_confirmed("lux-wed-yoga", "2026-07-08"), 1)
-        self.assertEqual(self.store.count_confirmed("lux-wed-yoga", "2026-07-15"), 0)
+        self.store.add_registration("yoga-class-1", "2026-07-08", u.user_id, hash_token(new_token()))
+        self.assertEqual(self.store.count_confirmed("yoga-class-1", "2026-07-08"), 1)
+        self.assertEqual(self.store.count_confirmed("yoga-class-1", "2026-07-15"), 0)
 
     def test_cancel_is_idempotent(self):
         u = self.store.upsert_user("a@b.com", "Alice", "h", "s")
-        reg = self.store.add_registration("lux-wed-yoga", "2026-07-08", u.user_id, hash_token(new_token()))
+        reg = self.store.add_registration("yoga-class-1", "2026-07-08", u.user_id, hash_token(new_token()))
         self.assertTrue(self.store.cancel(reg.registration_id, canceled_by="guest"))
         self.assertFalse(self.store.cancel(reg.registration_id, canceled_by="guest"))
-        self.assertEqual(self.store.count_confirmed("lux-wed-yoga", "2026-07-08"), 0)
+        self.assertEqual(self.store.count_confirmed("yoga-class-1", "2026-07-08"), 0)
 
     def test_times_registered_counts_all_statuses(self):
         u = self.store.upsert_user("a@b.com", "Alice", "h", "s")

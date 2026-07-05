@@ -19,7 +19,7 @@ def _raw(**overrides) -> dict:
         "smtp": {"password_file": None},
         "admin": {"password_hash_file": None},
         "privacy": {"erasure_pepper_file": None, "retention_months": 24, "canceled_retention_months": 6},
-        "course": [{"shortname": "lux-wed-yoga"}],
+        "course": [{"shortname": "yoga-class-1"}],
     }
     base.update(overrides)
     return base

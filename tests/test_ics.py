@@ -7,7 +7,7 @@ from app.ics import VEvent, parse_uid, parse_window
 class VEventTest(unittest.TestCase):
     def test_roundtrip_uid(self):
         ev = VEvent(
-            uid="example-org-lux-wed-yoga-2026-07-08@example.org",
+            uid="example-org-yoga-class-1-2026-07-08@example.org",
             summary="Test (1/14)",
             description="line1\nline2",
             location="Somewhere",

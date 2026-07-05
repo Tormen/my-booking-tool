@@ -38,12 +38,12 @@ PROPFIND_BODY = """<?xml version="1.0"?>
 REPORT_BODY = """<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:response>
-    <D:href>/caldav/YogaBookings/example-org-lux-wed-yoga-2026-07-08.ics</D:href>
+    <D:href>/caldav/YogaBookings/example-org-yoga-class-1-2026-07-08.ics</D:href>
     <D:propstat><D:prop>
       <D:getetag>"abc123"</D:getetag>
       <C:calendar-data>BEGIN:VCALENDAR
 BEGIN:VEVENT
-UID:example-org-lux-wed-yoga-2026-07-08@example.org
+UID:example-org-yoga-class-1-2026-07-08@example.org
 DTSTART:20260708T171500Z
 DTEND:20260708T185500Z
 SUMMARY:Test
@@ -82,7 +82,7 @@ class CalDAVClientTest(unittest.TestCase):
         )
         self.assertEqual(len(events), 1)
         uid, ics, etag = events[0]
-        self.assertEqual(uid, "example-org-lux-wed-yoga-2026-07-08@example.org")
+        self.assertEqual(uid, "example-org-yoga-class-1-2026-07-08@example.org")
         self.assertEqual(etag, '"abc123"')
 
     def test_put_event_new_uses_if_none_match(self):

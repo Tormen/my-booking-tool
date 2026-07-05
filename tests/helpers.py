@@ -50,7 +50,7 @@ def make_settings(**overrides) -> Settings:
 
 def make_course(**overrides) -> Course:
     defaults = dict(
-        shortname="lux-wed-yoga",
+        shortname="yoga-class-1",
         title="Dynamic Ashtanga Vinyasa Yoga",
         location="Example Community Gym, Room 1",
         weekday="wed",
