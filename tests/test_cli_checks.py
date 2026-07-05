@@ -730,7 +730,7 @@ class CheckRpmVerifyTest(unittest.TestCase):
     def test_config_file_modification_is_excluded(self):
         # The "c" marker means settings.toml -- already tracked separately
         # via check_rpmnew(), so check_rpm_verify() shouldn't also flag it.
-        verify_output = "S.5....T.  c /opt/my-booking/settings.toml\n"
+        verify_output = "S.5....T.  c /etc/my-booking/settings.toml\n"
 
         def run(cmd, capture_output, text):
             if cmd[1] == "-q":

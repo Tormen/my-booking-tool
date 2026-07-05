@@ -191,7 +191,7 @@ full detail, for reference:
    `mv` (unlike `cp`) preserves a file's *original* label, so if you draft
    a secret elsewhere first and move it in, run `sudo restorecon -Rv
    /etc/my-booking/secrets` afterwards to be safe.
-2. Review `/opt/my-booking/settings.toml` and
+2. Review `/etc/my-booking/settings.toml` and
    `/opt/my-booking/site/privacy.html.tmpl` -- both are `%config(noreplace)`
    files (reinstalling/upgrading the RPM never overwrites your edits to
    either). If the packaged version of one also changed since you edited
@@ -199,7 +199,7 @@ full detail, for reference:
    as `<file>.rpmnew` instead, and `%post` (and `my-bt status`/`my-bt
    setup`) flag it loudly so a pending merge can't go unnoticed. Merge by
    hand, then remove the `.rpmnew`, e.g.:
-   `sudo vimdiff /opt/my-booking/settings.toml /opt/my-booking/settings.toml.rpmnew`.
+   `sudo vimdiff /etc/my-booking/settings.toml /etc/my-booking/settings.toml.rpmnew`.
 
    Every *other* file the package installs (systemd units, app code, the
    nginx example) isn't meant to be hand-edited, so it doesn't get the
@@ -670,8 +670,9 @@ submitting the form does.
 
 Two more `[[course]]` fields control the page header:
 `subtitle` (optional plain text -- omit it to auto-show
-"<Weekday>s -- <location>", set it to `""` to show nothing, or override
-it with your own text) and `description` (rendered as **raw HTML**, not
+"<Weekday>s <from>h<mm> - <till>h<mm> -- <location>" (e.g. "Saturdays
+10h45 - 12h45 -- Ayur Yoga Center Trier Nord"), set it to `""` to show
+nothing, or override it with your own text) and `description` (rendered as **raw HTML**, not
 escaped, so bold/italic/underline, links, and bullet lists all work --
 safe because this is your own settings.toml content, not guest input, the
 same trust boundary as the hand-authored `site/*.html` pages).

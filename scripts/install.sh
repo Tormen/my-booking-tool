@@ -32,12 +32,13 @@ install -m 644 "$HERE"/app/*.py /opt/my-booking/app/
 install -m 755 "$HERE"/scripts/my-bt /opt/my-booking/bin/my-bt
 ln -sf /opt/my-booking/bin/my-bt /usr/local/bin/my-bt
 
-if [ ! -f /opt/my-booking/settings.toml ]; then
-  install -m 644 "$(_src settings.toml)" /opt/my-booking/settings.toml
+install -d -m 755 /etc/my-booking
+if [ ! -f /etc/my-booking/settings.toml ]; then
+  install -m 644 "$(_src settings.toml)" /etc/my-booking/settings.toml
 else
   echo "settings.toml already exists -- not overwriting. If $HERE/settings.toml"
   echo "has changes you want (e.g. a new [defaults] key), merge by hand:"
-  echo "  vimdiff /opt/my-booking/settings.toml $HERE/settings.toml"
+  echo "  vimdiff /etc/my-booking/settings.toml $HERE/settings.toml"
 fi
 
 # site/privacy.html.tmpl: same not-overwriting treatment as settings.toml

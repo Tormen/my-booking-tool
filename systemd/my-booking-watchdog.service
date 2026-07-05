@@ -8,7 +8,7 @@ Group=my-booking
 # Reads /var/log/journal via journalctl (for the sshd failed-password
 # check) -- the my-booking user has no other reason to be in this group.
 SupplementaryGroups=systemd-journal
-ExecStart=/usr/bin/python3 -m app.watchdog --settings /opt/my-booking/settings.toml --data-dir /var/lib/my-booking
+ExecStart=/usr/bin/python3 -m app.watchdog --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking
 WorkingDirectory=/opt/my-booking
 Environment=PYTHONPATH=/opt/my-booking
 NoNewPrivileges=true

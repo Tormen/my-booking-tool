@@ -79,9 +79,8 @@ install -m 644 systemd/my-booking-retention.timer %{buildroot}%{_unitdir}/
 install -m 644 systemd/my-booking-watchdog.service %{buildroot}%{_unitdir}/
 install -m 644 systemd/my-booking-watchdog.timer %{buildroot}%{_unitdir}/
 
-install -d %{buildroot}/opt/my-booking
-install -m 644 settings.toml %{buildroot}/opt/my-booking/settings.toml
 install -d %{buildroot}/etc/my-booking
+install -m 644 settings.toml %{buildroot}/etc/my-booking/settings.toml
 # Always the tracked, generic settings.toml.example -- NEVER whatever
 # settings.toml happens to resolve to for this particular build (which,
 # for your own real deployment, is your actual real config). Without this
@@ -151,14 +150,14 @@ fi
 # way -- but the new version's changes then need merging in by hand. Flag
 # that loudly right here rather than relying on you noticing a spare
 # .rpmnew file later (`my-bt status`/`setup` check for these too).
-if [ -f /opt/my-booking/settings.toml.rpmnew ]; then
+if [ -f /etc/my-booking/settings.toml.rpmnew ]; then
   cat <<'MSG'
 
 my-booking-tool: settings.toml has local changes -- the new
 packaged version was saved alongside it, not applied. Merge by
 hand, then remove the .rpmnew:
-  sudo vimdiff /opt/my-booking/settings.toml \
-    /opt/my-booking/settings.toml.rpmnew
+  sudo vimdiff /etc/my-booking/settings.toml \
+    /etc/my-booking/settings.toml.rpmnew
 
 MSG
 fi
@@ -212,8 +211,8 @@ exit 0
 /opt/my-booking/GIT_COMMIT
 /usr/local/bin/my-bt
 %attr(755,root,root) /opt/my-booking/bin/my-bt
-%config(noreplace) /opt/my-booking/settings.toml
 %config(noreplace) /opt/my-booking/site/privacy.html.tmpl
+%config(noreplace) /etc/my-booking/settings.toml
 /etc/my-booking/settings.toml.example
 %dir %attr(700,my-booking,my-booking) /etc/my-booking/secrets
 %dir %attr(750,my-booking,my-booking) %{_sharedstatedir}/my-booking

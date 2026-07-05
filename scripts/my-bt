@@ -37,7 +37,12 @@ except ImportError as exc:  # pragma: no cover
     print("Set MY_BOOKING_HOME if it's installed somewhere else.", file=sys.stderr)
     sys.exit(1)
 
-DEFAULT_SETTINGS = os.environ.get("MY_BOOKING_SETTINGS", f"{HOME}/settings.toml")
+# Deliberately NOT HOME-relative: HOME (/opt/my-booking) is the app's code
+# directory, but settings.toml is real config, so it lives under
+# /etc/my-booking alongside secrets/ (moved there from /opt/my-booking on
+# 2026-07-05 -- see the maintainer's local notes; the two were only ever coupled by
+# accident, nothing about the code required it).
+DEFAULT_SETTINGS = os.environ.get("MY_BOOKING_SETTINGS", "/etc/my-booking/settings.toml")
 DEFAULT_DATA_DIR = os.environ.get("MY_BOOKING_DATA", "/var/lib/my-booking")
 
 

@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=my-booking
 Group=my-booking
-ExecStart=/usr/bin/python3 -m app.serve --settings /opt/my-booking/settings.toml --data-dir /var/lib/my-booking
+ExecStart=/usr/bin/python3 -m app.serve --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking
 WorkingDirectory=/opt/my-booking
 Environment=PYTHONPATH=/opt/my-booking
 Restart=on-failure

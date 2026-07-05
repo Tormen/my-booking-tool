@@ -92,7 +92,7 @@ def main() -> None:  # pragma: no cover - exercised via systemd, not tests
     from .logutil import configure_logging
 
     parser = argparse.ArgumentParser(description="Purge registrations past their GDPR retention window")
-    parser.add_argument("--settings", default="/opt/my-booking/settings.toml")
+    parser.add_argument("--settings", default="/etc/my-booking/settings.toml")
     parser.add_argument("--data-dir", default="/var/lib/my-booking")
     args = parser.parse_args()
 
