@@ -498,6 +498,12 @@ def main() -> None:
     debug = configure_logging()
     try:
         args.func(args)
+    except KeyboardInterrupt:
+        # Ctrl-C during a prompt (e.g. `setup -i`'s "Merged? Remove
+        # ...rpmnew now? [y/N]") is a normal, expected way to bail out --
+        # not a crash, so it never gets a traceback, even with --debug.
+        print("\nAborted (Ctrl-C).", file=sys.stderr)
+        sys.exit(130)  # 128 + SIGINT, the conventional shell exit code
     except Exception as exc:
         if debug:
             raise
