@@ -658,6 +658,22 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Email/password", body)
         self.assertIn("match", body)
 
+    def test_my_login_lockout_shows_a_disabled_button_with_a_live_countdown(self):
+        # Same visible-countdown treatment as admin/login (2026-07-05) --
+        # see AdminLoginRateLimitTest's equivalent test.
+        email = "lockout-target@example.org"
+        self.addCleanup(webapp.login_limiter.reset, f"guest:{email}")
+        user = self.store.upsert_user_for_booking(email, "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        for _ in range(5):
+            self._post(self.app.my, (), {"email": email, "password": "wrong"})
+        _status, _headers, body = self._post(self.app.my, (), {"email": email, "password": "wrong"})
+        self.assertIn("Too many attempts", body)
+        self.assertIn('id="my-login-btn"', body)
+        self.assertIn("btn.disabled = true;", body)
+        self.assertIn("View my bookings", body)
+
     # -- /my logged-in bookings table + cancel/delete dialogs (task #43) ----
 
     def _login_as_guest(self, email: str, name: str = "Alice") -> tuple:
@@ -776,7 +792,7 @@ class AdminLoginRateLimitTest(unittest.TestCase):
         # across every test in the process -- reset just the keys this
         # class touches, both before and after, so this test can't leak
         # state into (or be polluted by) any other test.
-        self._keys = [f"admin:203.0.113.{i}" for i in range(1, 5)]
+        self._keys = [f"admin:203.0.113.{i}" for i in range(1, 6)]
         for k in self._keys:
             webapp.login_limiter.reset(k)
         self.addCleanup(lambda: [webapp.login_limiter.reset(k) for k in self._keys])
@@ -815,6 +831,20 @@ class AdminLoginRateLimitTest(unittest.TestCase):
         for _ in range(5):
             self.assertIn("Wrong password", self._post("wrong", remote_addr=ip))
         self.assertIn("Too many attempts", self._post("wrong", remote_addr=ip))
+
+    def test_lockout_shows_a_disabled_button_with_a_live_countdown(self):
+        # 2026-07-05: the operator asked for a visible countdown wherever there's
+        # a login cooldown, matching the resend-button UX -- the button
+        # itself is disabled server-side (not just cosmetically) via a
+        # server-computed (not guessed) remaining-seconds value.
+        ip = "203.0.113.5"
+        for _ in range(5):
+            self._post("wrong", forwarded_for=ip)
+        body = self._post("wrong", forwarded_for=ip)
+        self.assertIn("Too many attempts", body)
+        self.assertIn('id="admin-login-btn"', body)
+        self.assertIn("btn.disabled = true;", body)
+        self.assertIn("Log in", body)
 
 
 if __name__ == "__main__":

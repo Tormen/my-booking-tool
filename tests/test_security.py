@@ -77,6 +77,35 @@ class RateLimiterTest(unittest.TestCase):
         self.assertTrue(rl.allow("a", now=now))
         self.assertTrue(rl.allow("b", now=now))
 
+    # -- retry_after: for the login form's visible countdown (2026-07-05) --
+
+    def test_retry_after_is_zero_when_not_blocked(self):
+        rl = RateLimiter(max_attempts=3, window_seconds=60)
+        now = time.time()
+        self.assertEqual(rl.retry_after("x", now=now), 0.0)
+        rl.allow("x", now=now)
+        self.assertEqual(rl.retry_after("x", now=now), 0.0)
+
+    def test_retry_after_counts_down_from_the_oldest_hit_aging_out(self):
+        rl = RateLimiter(max_attempts=2, window_seconds=60)
+        now = time.time()
+        rl.allow("x", now=now)
+        rl.allow("x", now=now + 10)
+        self.assertFalse(rl.allow("x", now=now + 20))
+        # oldest hit was at `now`, window is 60s -- ages out at now+60
+        self.assertAlmostEqual(rl.retry_after("x", now=now + 20), 40.0)
+        self.assertAlmostEqual(rl.retry_after("x", now=now + 55), 5.0)
+
+    def test_retry_after_does_not_consume_an_attempt(self):
+        rl = RateLimiter(max_attempts=1, window_seconds=60)
+        now = time.time()
+        rl.allow("x", now=now)
+        rl.retry_after("x", now=now)
+        rl.retry_after("x", now=now)
+        # Still exactly one hit recorded -- checking retry_after repeatedly
+        # must not itself count as more attempts.
+        self.assertTrue(rl.allow("x", now=now + 61))
+
 
 if __name__ == "__main__":
     unittest.main()

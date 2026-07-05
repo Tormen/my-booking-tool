@@ -120,3 +120,18 @@ class RateLimiter:
 
     def reset(self, key: str) -> None:
         self._hits.pop(key, None)
+
+    def retry_after(self, key: str, now: float | None = None) -> float:
+        """Seconds until `key` would be allowed again (0 if it's allowed
+        right now) -- purely informational, doesn't consume an attempt the
+        way allow() does. For a login form's visible lockout countdown
+        (see app/webapp.py's _lockout_countdown_script): call this right
+        after allow() returns False, passing the same `now`, so the two
+        agree on what "now" was."""
+        now = time.time() if now is None else now
+        q = self._hits[key]
+        while q and now - q[0] > self.window_seconds:
+            q.popleft()
+        if len(q) < self.max_attempts:
+            return 0.0
+        return max(0.0, self.window_seconds - (now - q[0]))

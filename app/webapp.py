@@ -196,6 +196,41 @@ def _resend_cooldown_inline_script(form_id: str, button_id: str, status_id: str,
     </script>"""
 
 
+def _lockout_countdown_script(seconds: float, button_id: str, label: str) -> str:
+    """Disables a login form's submit button and counts down from
+    `seconds` back to enabled -- `seconds` is the server-computed,
+    authoritative time left on login_limiter's lockout for this key (see
+    security.RateLimiter.retry_after), NOT a client guess. Unlike
+    _resend_cooldown_script/_resend_cooldown_inline_script above, this
+    needs no localStorage: the lockout state already lives server-side in
+    login_limiter, so every fresh page load (including a plain refresh)
+    already gets the true remaining time recomputed from scratch --
+    nothing to persist client-side across a reload. Re-enabling at 0 is
+    optimistic (a resubmit right at that instant is still re-checked
+    server-side and could show a fresh countdown if the clocks are a
+    touch off) -- exactly the same spirit as the resend cooldown above."""
+    return f"""<script>
+    (function() {{
+      var btn = document.getElementById({json.dumps(button_id)});
+      if (!btn) return;
+      var remaining = {int(seconds) + 1};
+      var original = {json.dumps(label)};
+      btn.disabled = true;
+      function tick() {{
+        if (remaining <= 0) {{
+          btn.disabled = false;
+          btn.textContent = original;
+          return;
+        }}
+        btn.textContent = original + " (" + remaining + "s)";
+        remaining -= 1;
+        setTimeout(tick, 1000);
+      }}
+      tick();
+    }})();
+    </script>"""
+
+
 _HTML_LI_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.IGNORECASE | re.DOTALL)
 _HTML_A_RE = re.compile(r'<a\b[^>]*?href="([^"]*)"[^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 _HTML_BLOCK_RE = re.compile(r"</?(p|div|ul|ol|br)\b[^>]*>", re.IGNORECASE)
@@ -832,11 +867,15 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
 
         error = None
+        lockout_seconds = 0.0
         if method == "POST":
             form = self._read_form(environ)
             email, password = form.get("email", "").strip(), form.get("password", "").strip()
-            if not login_limiter.allow(f"guest:{email.lower()}"):
+            now = time.time()
+            key = f"guest:{email.lower()}"
+            if not login_limiter.allow(key, now=now):
                 error = "Too many attempts -- try again later."
+                lockout_seconds = login_limiter.retry_after(key, now=now)
                 # WARNING (not DEBUG): a real signal the watchdog counts
                 # (see app/watchdog.py) -- masked, never the raw email.
                 log.warning("rate limit blocked: guest login for %s", _masked(email))
@@ -851,12 +890,15 @@ class App:
                     return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header(sid))], ""
                 error = "Email/password didn't match."
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
+        login_label = "View my bookings"
         body = f"""{err_html}<form method="post" class="card">
           <label>Email <input class="big-input" name="email" type="email" required></label>
           <label>Password <input class="big-input" name="password" type="password" required></label>
-          <div class="submit-row"><button type="submit">View my bookings</button></div>
+          <div class="submit-row"><button type="submit" id="my-login-btn">{esc(login_label)}</button></div>
         </form>
         <p><a href="/my/reset">Forgot your password, or still need to confirm your account?</a></p>"""
+        if lockout_seconds:
+            body += _lockout_countdown_script(lockout_seconds, "my-login-btn", login_label)
         return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
 
     def my_reset(self, method: str, environ):
@@ -1035,16 +1077,20 @@ class App:
 
     def admin_login(self, method: str, environ):
         error = None
+        lockout_seconds = 0.0
         if method == "POST":
             form = self._read_form(environ)
             password = form.get("password", "")
+            now = time.time()
             # Keyed by client IP, not a single global "admin" bucket --
             # otherwise anyone, unauthenticated, could lock the real admin
             # out of /admin/login for up to an hour with 5 wrong guesses
             # from any IP (a self-inflicted DoS the old global key allowed;
             # see the maintainer's local notes).
-            if not login_limiter.allow(f"admin:{_client_ip(environ)}"):
+            key = f"admin:{_client_ip(environ)}"
+            if not login_limiter.allow(key, now=now):
                 error = "Too many attempts -- try again later."
+                lockout_seconds = login_limiter.retry_after(key, now=now)
                 # WARNING, and the IP itself (not personal guest data, and
                 # already visible in nginx's own access log) -- counted by
                 # the watchdog (app/watchdog.py).
@@ -1055,10 +1101,13 @@ class App:
             else:
                 error = "Wrong password."
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
+        login_label = "Log in"
         body = f"""{err_html}<form method="post" class="card">
           <label>Admin password <input class="big-input" name="password" type="password" required></label>
-          <div class="submit-row"><button type="submit">Log in</button></div>
+          <div class="submit-row"><button type="submit" id="admin-login-btn">{esc(login_label)}</button></div>
         </form>"""
+        if lockout_seconds:
+            body += _lockout_countdown_script(lockout_seconds, "admin-login-btn", login_label)
         return "200 OK", [("Content-Type", "text/html")], page("Admin login", body)
 
     def admin_overview(self, method: str, environ):
