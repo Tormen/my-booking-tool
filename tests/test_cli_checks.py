@@ -390,6 +390,16 @@ class CheckStaticPagesDeployedTest(unittest.TestCase):
         self.static_dir = Path(self._tmp.name) / "static"
         (self.home / "site").mkdir(parents=True)
         self.static_dir.mkdir()
+        # Point the RPM-install fallback (normally the hardcoded
+        # /usr/share/doc/my-booking-tool/site) at a guaranteed-empty tmp
+        # dir, so these tests are deterministic regardless of whether
+        # my-booking-tool actually happens to be installed on the machine
+        # running the suite.
+        self.doc_site_dir = Path(self._tmp.name) / "doc-site"
+        self.doc_site_dir.mkdir()
+        patcher = patch("app.cli_checks._DOC_SITE_DIR", self.doc_site_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _raw(self):
         return {"site": {"static_site_dir": str(self.static_dir)}}
@@ -398,10 +408,35 @@ class CheckStaticPagesDeployedTest(unittest.TestCase):
         self.assertEqual(cli_checks.check_static_pages_deployed({"site": {}}, str(self.home)), [])
 
     def test_no_checkout_source_is_skipped(self):
-        # Neither a real site/index.html nor an .example placeholder exists
-        # locally -- nothing to compare against, so no entry for it at all.
+        # Neither a real site/index.html, an .example placeholder, nor a
+        # %doc reference copy exists -- nothing to compare against, so no
+        # entry for it at all.
         checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
         self.assertEqual(checks, [])
+
+    def test_falls_back_to_doc_dir_on_an_installed_system(self):
+        # Regression coverage for 2026-07-05: HOME (/opt/my-booking) never
+        # carries index.html/impressum.html/terms.html at all -- only the
+        # %doc copy under _DOC_SITE_DIR does (see packaging/*.spec). Before
+        # this fallback existed, check_static_pages_deployed() silently
+        # found nothing on a real installed server, even right after a
+        # rebuild with genuinely new content.
+        (self.doc_site_dir / "index.html").write_text("from the doc-dir copy")
+        (self.static_dir / "index.html").write_text("stale deployed copy")
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("differs", detail)
+
+    def test_home_site_takes_precedence_over_doc_dir(self):
+        # Running straight from a git checkout (dev/test) -- home/site/
+        # wins over the installed-system fallback.
+        (self.home / "site" / "index.html").write_text("checkout copy")
+        (self.doc_site_dir / "index.html").write_text("doc-dir copy")
+        (self.static_dir / "index.html").write_text("checkout copy")
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "ok")
 
     def test_matches_checkout_is_ok(self):
         (self.home / "site" / "index.html").write_text("hello world")

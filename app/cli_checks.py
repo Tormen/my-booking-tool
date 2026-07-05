@@ -237,17 +237,34 @@ def check_static_pages_reachable(raw: dict) -> list[Check]:
     return checks
 
 
+# Fallback source location on an INSTALLED system. `home` (HOME,
+# /opt/my-booking) deliberately does NOT carry index.html/impressum.html/
+# terms.html at all -- only privacy.html.tmpl, the one thing my-bt reads/
+# writes at runtime (see packaging/my-booking-tool.spec's %install: the
+# other three are installed under %{_docdir}/%{name}/site/ instead, as a
+# %doc reference copy, already resolved real-or-.example at build time by
+# scripts/build-rpm.sh's materialization step). Hit in practice
+# 2026-07-05: without this fallback, check_static_pages_deployed() found
+# nothing to compare against on a real installed server and silently
+# printed nothing at all for these three pages, even after a rebuild that
+# genuinely had newer content.
+_DOC_SITE_DIR = Path("/usr/share/doc/my-booking-tool/site")
+
+
 def _resolve_static_source(home: str, name: str) -> Path | None:
     """The checkout's real site/<name>, falling back to site/<name>.example
-    if no real copy exists locally -- same real-preferred-over-.example
-    precedence as everywhere else in this project (scripts/render-site.py's
-    resolve_real_or_example(), scripts/install.sh's _src(), etc.)."""
+    (both relative to `home` -- correct when running straight from a git
+    checkout), then to the RPM's installed %doc reference copy at
+    _DOC_SITE_DIR (correct on an actual installed system)."""
     real = Path(home) / "site" / name
     if real.exists():
         return real
     example = Path(home) / "site" / f"{name}.example"
     if example.exists():
         return example
+    doc_copy = _DOC_SITE_DIR / name
+    if doc_copy.exists():
+        return doc_copy
     return None
 
 
