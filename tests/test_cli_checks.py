@@ -174,13 +174,19 @@ class CheckSystemdTest(unittest.TestCase):
 
 
 class CheckWatchdogNginxAccessTest(unittest.TestCase):
+    """`_my_booking_can_read` actually shells out to `runuser` rather than
+    inspecting st_mode bits -- a real incident (2026-07-05) with the old
+    stat-based version: setfacl grants access via a POSIX ACL entry, which
+    never shows up in st_mode at all, so the old check kept reporting
+    "can't read" even right after the operator ran the exact setfacl command it
+    printed. These tests mock `_my_booking_can_read` directly (its own
+    subprocess-vs-root branching is exercised separately below) so this
+    class stays focused on check_watchdog_nginx_access's own branching."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
-        # A uid/gid that will never match this test process's real
-        # owner/group -- forces the check onto the world-permission branch,
-        # which is exactly what we control directly with chmod below.
         self._fake_pw = type("PW", (), {"pw_uid": 999999, "pw_gid": 999999})()
 
     def test_not_configured_is_a_noop(self):
@@ -195,33 +201,28 @@ class CheckWatchdogNginxAccessTest(unittest.TestCase):
         self.assertIn("doesn't exist yet", checks[0][2])
 
     def test_missing_file_warns(self):
-        with patch("pwd.getpwnam", return_value=self._fake_pw), \
-             patch("grp.getgrall", return_value=[]):
+        with patch("pwd.getpwnam", return_value=self._fake_pw):
             checks = cli_checks.check_watchdog_nginx_access(
                 {"watchdog": {"nginx_access_log": str(self.dir / "does-not-exist.log")}}
             )
         self.assertEqual(checks[0][1], "warn")
         self.assertIn("doesn't exist", checks[0][2])
 
-    def test_world_readable_file_and_dir_is_ok(self):
+    def test_readable_is_ok(self):
         log = self.dir / "access.log"
         log.write_text("test\n")
-        self.dir.chmod(0o755)
-        log.chmod(0o644)
         with patch("pwd.getpwnam", return_value=self._fake_pw), \
-             patch("grp.getgrall", return_value=[]):
+             patch("app.cli_checks._my_booking_can_read", return_value=True):
             checks = cli_checks.check_watchdog_nginx_access(
                 {"watchdog": {"nginx_access_log": str(log)}}
             )
         self.assertEqual(checks[0][1], "ok")
 
-    def test_unreadable_file_warns_with_setfacl_command(self):
+    def test_unreadable_warns_with_setfacl_command(self):
         log = self.dir / "access.log"
         log.write_text("test\n")
-        self.dir.chmod(0o700)  # no group/world traversal
-        log.chmod(0o600)       # no group/world read
         with patch("pwd.getpwnam", return_value=self._fake_pw), \
-             patch("grp.getgrall", return_value=[]):
+             patch("app.cli_checks._my_booking_can_read", return_value=False):
             checks = cli_checks.check_watchdog_nginx_access(
                 {"watchdog": {"nginx_access_log": str(log)}}
             )
@@ -229,22 +230,50 @@ class CheckWatchdogNginxAccessTest(unittest.TestCase):
         self.assertEqual(level, "warn")
         self.assertIn("setfacl", detail)
 
-    def test_group_membership_grants_read(self):
-        # Owner mismatch (fake uid), but my-booking's gid matches the
-        # file's group, and the group has read/traverse -- should be ok
-        # without relying on world permissions at all.
+    def test_cannot_verify_warns_without_claiming_unreadable(self):
+        # _my_booking_can_read returns None when it can't actually check
+        # (not root / runuser missing) -- must NOT be reported as the
+        # same "can't read, run setfacl" warning, since that would nag
+        # for a fix that might already be in place (the exact bug this
+        # whole rewrite fixes).
         log = self.dir / "access.log"
         log.write_text("test\n")
-        real_gid = log.stat().st_gid
-        self.dir.chmod(0o750)
-        log.chmod(0o640)
-        fake_pw = type("PW", (), {"pw_uid": 999999, "pw_gid": real_gid})()
-        with patch("pwd.getpwnam", return_value=fake_pw), \
-             patch("grp.getgrall", return_value=[]):
+        with patch("pwd.getpwnam", return_value=self._fake_pw), \
+             patch("app.cli_checks._my_booking_can_read", return_value=None):
             checks = cli_checks.check_watchdog_nginx_access(
                 {"watchdog": {"nginx_access_log": str(log)}}
             )
-        self.assertEqual(checks[0][1], "ok")
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertNotIn("setfacl", detail)
+        self.assertIn("root", detail)
+
+
+class MyBookingCanReadTest(unittest.TestCase):
+    def test_non_root_returns_none(self):
+        with patch("app.cli_checks.os.geteuid", return_value=1000), \
+             patch("app.cli_checks.shutil.which", return_value="/usr/sbin/runuser"):
+            self.assertIsNone(cli_checks._my_booking_can_read(Path("/some/path")))
+
+    def test_runuser_missing_returns_none(self):
+        with patch("app.cli_checks.os.geteuid", return_value=0), \
+             patch("app.cli_checks.shutil.which", return_value=None):
+            self.assertIsNone(cli_checks._my_booking_can_read(Path("/some/path")))
+
+    def test_root_with_runuser_reflects_exit_code(self):
+        with patch("app.cli_checks.os.geteuid", return_value=0), \
+             patch("app.cli_checks.shutil.which", return_value="/usr/sbin/runuser"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0})()) as run:
+            self.assertTrue(cli_checks._my_booking_can_read(Path("/some/path")))
+        self.assertEqual(run.call_args[0][0][:3], ["runuser", "-u", "my-booking"])
+
+    def test_root_with_runuser_denied(self):
+        with patch("app.cli_checks.os.geteuid", return_value=0), \
+             patch("app.cli_checks.shutil.which", return_value="/usr/sbin/runuser"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 1})()):
+            self.assertFalse(cli_checks._my_booking_can_read(Path("/some/path")))
 
 
 class CheckSelinuxTest(unittest.TestCase):
@@ -404,6 +433,122 @@ class NginxRootForHostTest(unittest.TestCase):
     def test_no_base_url_returns_none(self):
         root = cli_checks._nginx_root_for_host({"site": {}})
         self.assertIsNone(root)
+
+
+class NginxAccessLogForHostTest(unittest.TestCase):
+    def _raw(self, base_url="https://example.org"):
+        return {"site": {"base_url": base_url}}
+
+    def test_finds_access_log_in_matching_server_block(self):
+        merged = """
+        server {
+            server_name example.org;
+            access_log /var/log/nginx/example.access.log main;
+        }
+        server {
+            server_name other.org;
+            access_log /var/log/nginx/other.access.log;
+        }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            log = cli_checks._nginx_access_log_for_host(self._raw())
+        self.assertEqual(log, "/var/log/nginx/example.access.log")
+
+    def test_falls_back_to_http_level_directive(self):
+        merged = """
+        access_log /var/log/nginx/access.log combined;
+        server {
+            server_name example.org;
+            root /var/www/example.org;
+        }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            log = cli_checks._nginx_access_log_for_host(self._raw())
+        self.assertEqual(log, "/var/log/nginx/access.log")
+
+    def test_access_log_off_is_ignored(self):
+        merged = """
+        server {
+            server_name example.org;
+            access_log off;
+        }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            log = cli_checks._nginx_access_log_for_host(self._raw())
+        self.assertIsNone(log)
+
+    def test_syslog_target_is_ignored(self):
+        merged = """
+        server {
+            server_name example.org;
+            access_log syslog:server=unix:/dev/log combined;
+        }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            log = cli_checks._nginx_access_log_for_host(self._raw())
+        self.assertIsNone(log)
+
+    def test_nginx_missing_returns_none(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            log = cli_checks._nginx_access_log_for_host(self._raw())
+        self.assertIsNone(log)
+
+
+class CheckWatchdogNginxAccessLogConfigTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def _raw(self, nginx_access_log=None):
+        raw = {"site": {"base_url": "https://example.org"}}
+        if nginx_access_log is not None:
+            raw["watchdog"] = {"nginx_access_log": nginx_access_log}
+        return raw
+
+    def test_nothing_detectable_is_a_noop(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            self.assertEqual(cli_checks.check_watchdog_nginx_access_log_config(self._raw()), [])
+
+    def test_not_configured_but_detected_suggests_enabling(self):
+        merged = "server {\n  server_name example.org;\n  access_log /var/log/nginx/access.log;\n}\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            checks = cli_checks.check_watchdog_nginx_access_log_config(self._raw())
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("not enabled yet", detail)
+        self.assertIn("/var/log/nginx/access.log", detail)
+
+    def test_configured_and_matches_detected_is_ok(self):
+        log = self.dir / "access.log"
+        log.write_text('1.2.3.4 - - [05/Jul/2026:14:00:00 +0000] "GET / HTTP/1.1" 200 1 "-" "-"\n')
+        merged = f"server {{\n  server_name example.org;\n  access_log {log};\n}}\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            checks = cli_checks.check_watchdog_nginx_access_log_config(self._raw(str(log)))
+        self.assertEqual(checks[0][1], "ok")
+
+    def test_configured_but_differs_from_detected_warns(self):
+        merged = "server {\n  server_name example.org;\n  access_log /var/log/nginx/access.log;\n}\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            checks = cli_checks.check_watchdog_nginx_access_log_config(self._raw("/some/stale/path.log"))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("stale", detail)
+        self.assertIn("nginx's live config", detail)
 
 
 class CheckStaticPagesReachableTest(unittest.TestCase):

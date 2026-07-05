@@ -317,9 +317,10 @@ something seems off, or after any install/reinstall:
   flags any other packaged file (systemd units, app code, ...) that's
   been hand-modified since install, so drift there doesn't go unnoticed
   either. Doesn't block anything; it's a heads-up, not an enforcement.
-- If `[watchdog].nginx_access_log` is set: whether the `my-booking` user
-  can actually read it (see "Watchdog" above -- `setup -i` offers a
-  `setfacl` fix).
+- Whether `[watchdog].nginx_access_log` matches nginx's own live config
+  (offering to add/detect it if not), and if set, whether the
+  `my-booking` user can actually read it (see "Watchdog" above --
+  `setup -i` offers to fix both).
 - If `[site].static_site_dir` is set: whether the live `privacy.html` at
   that path actually matches what current `settings.toml` values would
   render (see "Static-site pages" below) -- catches a `retention_months`
@@ -461,7 +462,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-255 tests covering slot generation (including DST via `zoneinfo`, and that
+275 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -489,9 +490,14 @@ modified, deleted, or replaced by its `.example` counterpart), and the
 watchdog's four independent checks plus its single-combined-email
 behavior (`test_watchdog.py` -- every check is a pure function over
 already-read lines/rows, so none of it needs a real nginx log file,
-journald, or filesystem), and the nginx-log-readable check plus its
-interactive `setfacl` offer (`CheckWatchdogNginxAccessTest` in
-`test_cli_checks.py`, `InteractiveSetupWatchdogTest` in
+journald, or filesystem), the nginx `access_log` auto-detection/
+cross-check against a live `nginx -T` dump (`NginxAccessLogForHostTest`,
+`CheckWatchdogNginxAccessLogConfigTest`), the interactive offer to write
+`nginx_access_log` into `settings.toml` as plain text without disturbing
+any other line (`AddNginxAccessLogSettingTest`), and the read-access
+check's actual-OS-check-via-`runuser` behavior including its root/
+`runuser`-missing fallback (`MyBookingCanReadTest`, `CheckWatchdogNginxAccessTest`
+in `test_cli_checks.py`, `InteractiveSetupWatchdogTest` in
 `test_cli_setup.py`).
 
 ## GDPR notes
@@ -758,15 +764,41 @@ every check just becomes a no-op). See `settings.toml.example`'s
 `[watchdog]` section for every default value and a short explanation of
 each.
 
-**nginx log read access:** `my-bt status`/`setup` now check whether the
-`my-booking` user can actually read `nginx_access_log`, once it's set --
+**nginx_access_log auto-detection:** `my-bt status`/`setup` cross-check
+`[watchdog].nginx_access_log` against nginx's own live config (`nginx -T`,
+same live-config approach the nginx-location/SELinux/CalDAV checks
+already use) for the vhost matching `[site].base_url`. Three outcomes:
+not configured but a real `access_log` was detected for this vhost --
+`setup --interactive` offers to write `nginx_access_log = "..."` into
+`settings.toml` for you; configured but it doesn't match what nginx is
+actually logging to -- flagged so you can update it by hand; or already
+matches -- nothing to do. This is a detect-and-*offer*, never a silent
+auto-enable: nginx's `log_format` can be customized, and the nginx-burst
+parser only understands the standard combined format, so silently
+turning the check on could give false confidence that it's monitoring
+something it can't actually parse -- the detection also spot-checks the
+log's first line against that format and adds a caveat if it looks custom.
+
+**nginx log read access:** once `nginx_access_log` is set, `my-bt status`/
+`setup` also check whether the `my-booking` user can actually read it --
 `ReadOnlyPaths=-/var/log/nginx` in the watchdog's own systemd unit only
 grants a sandboxing exception, it does nothing about the file's actual
-owner/group/mode, which is nginx's/the distro's call. Fedora's nginx
+owner/group/mode/ACLs, which is nginx's/the distro's call. Fedora's nginx
 package typically leaves `/var/log/nginx` unreadable to another
-unprivileged user by default. `my-bt setup --interactive` offers to fix
-this for you (as root) via `setfacl`, including a default ACL so the fix
-survives nginx's own log rotation -- needs the `acl` package installed.
+unprivileged user by default. This check works by actually asking the OS
+(`runuser -u my-booking -- test -r <path>`, root only) rather than
+inspecting permission bits itself -- a bit-based version of this check
+was tried first and had a real bug: `setfacl` grants access via a POSIX
+ACL entry, which never shows up in the file's mode bits at all, so that
+version kept reporting "unreadable" even immediately after the exact
+`setfacl` fix it recommended had already been run. Without root, this
+check honestly reports "can't verify" rather than guessing.
+`setup --interactive` offers the `setfacl` fix itself (as root), including
+a default ACL so it survives nginx's own log rotation. `acl` (for
+`setfacl`) is deliberately **not** an RPM dependency -- it's only needed
+if you opt into nginx-burst checking, so `setup -i` just tells you to
+`sudo dnf install acl` first if it's missing, rather than making every
+install pull it in.
 
 ## Late-booking quorum (`min_notice_hours` / `min_required_participants`)
 

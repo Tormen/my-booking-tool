@@ -226,25 +226,129 @@ def _iter_server_blocks(merged_config: str):
         depth += line.count("{") - line.count("}")
 
 
-def _nginx_root_for_host(raw: dict) -> str | None:
-    """Returns nginx's `root` for the server block matching
-    `[site].base_url`'s hostname, or None if nginx/that block/its root
-    can't be determined. Shared by check_static_pages_reachable()."""
+def _live_nginx_config(raw: dict) -> str | None:
+    """The full `nginx -T` dump (every `include` resolved), or None if
+    nginx/the base_url hostname isn't available at all. Shared by every
+    live-nginx-config check below so each one doesn't re-invoke `nginx -T`
+    separately."""
     hostname = urlparse(raw.get("site", {}).get("base_url", "")).hostname
     if not hostname or not shutil.which("nginx"):
         return None
     result = subprocess.run(["nginx", "-T"], capture_output=True, text=True)
     if result.returncode != 0:
         return None
+    return result.stdout
+
+
+def _matching_server_block(raw: dict, merged: str) -> str | None:
+    """The one `server { ... }` block (if any) whose `server_name` list
+    includes `[site].base_url`'s hostname."""
+    hostname = urlparse(raw.get("site", {}).get("base_url", "")).hostname
     name_re = re.compile(r"^\s*server_name\s+([^;]+);", re.MULTILINE)
-    root_re = re.compile(r"^\s*root\s+([^;]+);", re.MULTILINE)
-    for block in _iter_server_blocks(result.stdout):
+    for block in _iter_server_blocks(merged):
         names = name_re.search(block)
-        if not names or hostname not in names.group(1).split():
-            continue
-        root_match = root_re.search(block)
-        return root_match.group(1).strip() if root_match else None
+        if names and hostname in names.group(1).split():
+            return block
     return None
+
+
+def _nginx_root_for_host(raw: dict) -> str | None:
+    """Returns nginx's `root` for the server block matching
+    `[site].base_url`'s hostname, or None if nginx/that block/its root
+    can't be determined. Shared by check_static_pages_reachable()."""
+    merged = _live_nginx_config(raw)
+    if merged is None:
+        return None
+    block = _matching_server_block(raw, merged)
+    if block is None:
+        return None
+    root_re = re.compile(r"^\s*root\s+([^;]+);", re.MULTILINE)
+    root_match = root_re.search(block)
+    return root_match.group(1).strip() if root_match else None
+
+
+_ACCESS_LOG_RE = re.compile(r"^\s*access_log\s+(\S+)(?:\s+\S+)*\s*;", re.MULTILINE)
+
+
+def _strip_server_blocks(merged: str) -> str:
+    """`merged` with every `server { ... }` body removed -- what's left is
+    the http-level (or otherwise outside-any-vhost) config, used as the
+    fallback search space for a directive a specific vhost doesn't
+    override (mirrors nginx's own inheritance: a server block that
+    doesn't set access_log itself inherits the http block's)."""
+    text = merged
+    for block in _iter_server_blocks(merged):
+        text = text.replace(block, "", 1)
+    return text
+
+
+def _nginx_access_log_for_host(raw: dict) -> str | None:
+    """Live `access_log` path for the vhost matching `[site].base_url`'s
+    hostname: checked in the matching server block first, falling back to
+    an http-level directive outside any server block if that vhost
+    doesn't override it. None if nginx/the vhost/a real file target can't
+    be determined, or logging there is disabled (`access_log off;`) or
+    sent to syslog rather than a file -- none of those are something
+    [watchdog].nginx_access_log could point at anyway."""
+    merged = _live_nginx_config(raw)
+    if merged is None:
+        return None
+    block = _matching_server_block(raw, merged)
+    for text in filter(None, (block, _strip_server_blocks(merged))):
+        m = _ACCESS_LOG_RE.search(text)
+        if m and m.group(1) not in ("off",) and not m.group(1).startswith("syslog:"):
+            return m.group(1)
+    return None
+
+
+def _looks_like_combined_log_format(path_str: str) -> bool | None:
+    """Spot-checks the first non-empty line of an access log against
+    app.watchdog's own combined-format parser -- surfaced only as a soft
+    hint. A custom nginx `log_format` wouldn't match it, which would make
+    the nginx-burst check silently useless forever (0 lines ever parsed)
+    if enabled without anyone noticing the mismatch. Returns None
+    (couldn't tell -- unreadable or empty) rather than False, so callers
+    don't turn an inconclusive result into a false warning."""
+    from .watchdog import _NGINX_LINE_RE
+    try:
+        with open(path_str, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.strip():
+                    return bool(_NGINX_LINE_RE.match(line))
+    except OSError:
+        return None
+    return None
+
+
+def check_watchdog_nginx_access_log_config(raw: dict) -> list[Check]:
+    """Cross-checks [watchdog].nginx_access_log against nginx's OWN live
+    config for the vhost, the same way check_static_pages_reachable()
+    cross-checks static_site_dir against nginx's real root -- catches a
+    stale/typo'd path, and (the more common case in practice) surfaces
+    that the nginx-burst check isn't even turned on yet when it easily
+    could be, without ever writing to settings.toml itself (that's
+    cli_setup.py's job -- see its interactive offer to add this same
+    setting for you). A no-op ([]) if nginx/the vhost/an access_log
+    directive can't be determined at all -- nothing useful to say then."""
+    detected = _nginx_access_log_for_host(raw)
+    configured = raw.get("watchdog", {}).get("nginx_access_log")
+    if configured and detected:
+        if Path(configured).resolve() == Path(detected).resolve():
+            return [("watchdog: nginx_access_log", "ok", "matches nginx's live config")]
+        return [("watchdog: nginx_access_log", "warn",
+                  f"settings.toml has {configured}, but nginx's live config for this vhost "
+                  f"logs to {detected} -- update settings.toml if that's stale")]
+    if not configured and detected:
+        looks_ok = _looks_like_combined_log_format(detected)
+        caveat = "" if looks_ok in (True, None) else (
+            " (note: its format doesn't look like the default combined log format the "
+            "burst-check parser expects -- enabling it might not actually detect anything)"
+        )
+        return [("watchdog: nginx-burst check", "warn",
+                  f'not enabled yet -- nginx\'s live config logs to {detected}. Add '
+                  f'nginx_access_log = "{detected}" under [watchdog] in settings.toml to '
+                  f"turn it on{caveat}")]
+    return []
 
 
 # Pages this tool never templates/generates (unlike privacy.html -- see
@@ -518,30 +622,31 @@ _UNSUBSTITUTED_PLACEHOLDER = re.compile(r"\$\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 _SITE_PAGES = ("index.html", "impressum.html", "terms.html", "privacy.html")
 
 
-def _posix_can_read(path: Path, uid: int, gids: set[int]) -> bool:
-    try:
-        st = path.stat()
-    except OSError:
-        return False
-    mode = st.st_mode
-    return (
-        (st.st_uid == uid and bool(mode & stat.S_IRUSR))
-        or (st.st_gid in gids and bool(mode & stat.S_IRGRP))
-        or bool(mode & stat.S_IROTH)
+def _my_booking_can_read(path: Path) -> bool | None:
+    """Actually ASKS the OS whether the my-booking user can read `path`
+    (via `runuser`), rather than reimplementing POSIX permission logic
+    ourselves -- hit in practice 2026-07-05: an earlier version of this
+    check inspected `st_mode` bits directly (owner/group/other), which is
+    blind to POSIX ACLs. `setfacl` (the fix this check itself recommends!)
+    grants access via an ACL entry, not a mode-bit change -- so the old
+    check kept reporting "can't read" even immediately after the operator ran
+    the exact setfacl command it printed, nagging him to redo a fix that
+    had already worked. `runuser -u my-booking -- test -r <path>` asks
+    the kernel directly, so it's correct regardless of ACLs, SELinux, or
+    anything else that could affect real access -- the same "ask the
+    system, don't model it" approach check_rpm_verify/check_selinux/
+    check_nginx_locations already use via their own subprocess calls.
+    Returns None (couldn't determine, not "can't read") if this process
+    isn't root or `runuser` isn't installed -- switching to another user
+    needs root, and a wrong guess here is worse than admitting we don't
+    know (see the incident above)."""
+    if os.geteuid() != 0 or not shutil.which("runuser"):
+        return None
+    result = subprocess.run(
+        ["runuser", "-u", "my-booking", "--", "test", "-r", str(path)],
+        capture_output=True,
     )
-
-
-def _posix_can_traverse(path: Path, uid: int, gids: set[int]) -> bool:
-    try:
-        st = path.stat()
-    except OSError:
-        return False
-    mode = st.st_mode
-    return (
-        (st.st_uid == uid and bool(mode & stat.S_IXUSR))
-        or (st.st_gid in gids and bool(mode & stat.S_IXGRP))
-        or bool(mode & stat.S_IXOTH)
-    )
+    return result.returncode == 0
 
 
 def check_watchdog_nginx_access(raw: dict) -> list[Check]:
@@ -549,7 +654,7 @@ def check_watchdog_nginx_access(raw: dict) -> list[Check]:
     user can actually read it -- the watchdog service's own
     ReadOnlyPaths=-/var/log/nginx (see systemd/my-booking-watchdog.service)
     only grants a systemd sandboxing EXCEPTION for that path; it does
-    nothing about the underlying file's owner/group/mode, which is
+    nothing about the underlying file's owner/group/mode/ACLs, which is
     nginx's/the distro's call, not this app's. Fedora's nginx package
     typically leaves /var/log/nginx root:root, not readable by another
     unprivileged user by default -- this is the concrete gap the operator hit in
@@ -560,19 +665,21 @@ def check_watchdog_nginx_access(raw: dict) -> list[Check]:
     if not log_path_str:
         return []
     log_path = Path(log_path_str)
-    import grp
     import pwd
     try:
-        my_booking = pwd.getpwnam("my-booking")
+        pwd.getpwnam("my-booking")
     except KeyError:
         return [("watchdog: nginx_access_log access", "warn",
                   "user 'my-booking' doesn't exist yet -- install the package first")]
-    uid = my_booking.pw_uid
-    gids = {my_booking.pw_gid} | {g.gr_gid for g in grp.getgrall() if "my-booking" in g.gr_mem}
     if not log_path.exists():
         return [(f"watchdog: nginx_access_log ({log_path})", "warn",
                   "configured but doesn't exist -- check [watchdog].nginx_access_log")]
-    if _posix_can_traverse(log_path.parent, uid, gids) and _posix_can_read(log_path, uid, gids):
+    can_read = _my_booking_can_read(log_path)
+    if can_read is None:
+        return [(f"watchdog: nginx_access_log ({log_path})", "warn",
+                  "can't verify read access without root -- re-run `sudo my-bt status`/"
+                  "`setup` for an authoritative check")]
+    if can_read:
         return [(f"watchdog: nginx_access_log ({log_path})", "ok", "my-booking can read it")]
     return [(
         f"watchdog: nginx_access_log ({log_path})", "warn",

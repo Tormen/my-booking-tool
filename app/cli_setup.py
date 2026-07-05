@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import getpass
 import os
+import re
 import secrets as _secrets
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable
@@ -45,6 +47,31 @@ def _run_tolerant(cmd: list[str], print_fn: Callable[[str], None]) -> None:
         print_fn(f"[fail] {cmd[0]}: not installed -- run this step manually: {' '.join(cmd)}")
 
 
+_WATCHDOG_HEADER_RE = re.compile(r"^\[watchdog\][ \t]*\r?\n", re.MULTILINE)
+
+
+def _add_nginx_access_log_setting(settings_path: str, value: str) -> None:
+    """Inserts `nginx_access_log = "<value>"` into settings.toml's
+    [watchdog] table (creating the table at the end of the file if it
+    doesn't exist yet). A plain text edit, not a parse-and-re-serialize
+    round-trip -- tomllib has no writer anyway, and re-emitting the whole
+    file from the parsed dict would silently drop every comment in this
+    hand-maintained file. Only ever called after confirming the key isn't
+    already set (see interactive_setup step 10), so this can't create a
+    duplicate key -- TOML doesn't allow one, and tomllib would refuse to
+    parse the result if it somehow happened."""
+    text = Path(settings_path).read_text(encoding="utf-8")
+    line = f'nginx_access_log = "{value}"\n'
+    m = _WATCHDOG_HEADER_RE.search(text)
+    if m is None:
+        if not text.endswith("\n"):
+            text += "\n"
+        text += f"\n[watchdog]\n{line}"
+    else:
+        text = text[:m.end()] + line + text[m.end():]
+    Path(settings_path).write_text(text, encoding="utf-8")
+
+
 def tmpl_path(home: str) -> Path:
     return Path(home) / "site" / site_render.TEMPLATE_NAME
 
@@ -76,6 +103,7 @@ def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
         "static_pages_reachable": cli_checks.check_static_pages_reachable(raw),
         "caldav_calendars": cli_checks.check_caldav_calendars(raw),
+        "watchdog_nginx_log_config": cli_checks.check_watchdog_nginx_access_log_config(raw),
         "watchdog_nginx_access": cli_checks.check_watchdog_nginx_access(raw),
     }
 
@@ -139,12 +167,12 @@ def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[s
     else:
         print_fn("   [SKIP] caldav_url/username/password not fully configured yet -- not checked")
 
-    print_fn("\n10. Watchdog (nginx_access_log readable by my-booking, if configured):")
-    watchdog_checks = report["watchdog_nginx_access"]
+    print_fn("\n10. Watchdog: nginx access log (configured + readable by my-booking):")
+    watchdog_checks = report["watchdog_nginx_log_config"] + report["watchdog_nginx_access"]
     if watchdog_checks:
         show(watchdog_checks)
     else:
-        print_fn("   [SKIP] [watchdog].nginx_access_log not configured -- not checked")
+        print_fn("   [SKIP] nginx not detected for this vhost -- not checked")
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 
@@ -401,14 +429,33 @@ def interactive_setup(
             print_fn("conflict_calendars to match a real calendar name on your CalDAV server")
             print_fn("(every /book/<shortname> page 500s until this matches).")
 
-    # 10. watchdog nginx log access -- an ACL fix, not a config-file edit,
-    # so (unlike the CalDAV step above) there IS a safe, always-correct
-    # auto-fix here: grant the my-booking user read access via setfacl,
-    # same reasoning/pattern as the SELinux/nginx-reload offers above.
-    print_fn("\n-- 10. Watchdog (nginx_access_log readable by my-booking) --")
+    # 10. Watchdog: nginx_access_log detection + read access. The `acl`
+    # package (setfacl) is deliberately NOT an RPM Requires -- it's only
+    # needed if you opt into the nginx-burst check at all, so making every
+    # install pull it in unconditionally would be the wrong trade-off for
+    # people who never touch this setting. Detect it's missing here and
+    # say so plainly instead of just letting the command silently fail.
+    print_fn("\n-- 10. Watchdog: nginx access log --")
+    detected = cli_checks._nginx_access_log_for_host(raw)
+    configured = raw.get("watchdog", {}).get("nginx_access_log")
+    if not configured and detected:
+        print_fn(f"nginx_access_log not set -- nginx's live config for this vhost logs to {detected}.")
+        if prompt(f'Add nginx_access_log = "{detected}" to settings.toml now?'):
+            try:
+                _add_nginx_access_log_setting(settings_path, detected)
+                raw.setdefault("watchdog", {})["nginx_access_log"] = detected
+                configured = detected
+                print_fn(f"[ok] wrote nginx_access_log to {settings_path}")
+            except OSError as exc:
+                print_fn(f"[fail] could not write {settings_path}: {exc}")
+    elif configured and detected and Path(configured).resolve() != Path(detected).resolve():
+        print_fn(f"[warn] settings.toml has nginx_access_log = {configured}, but nginx's live "
+                 f"config for this vhost logs to {detected} -- update settings.toml by hand "
+                 "if that's stale.")
+
     watchdog_checks = cli_checks.check_watchdog_nginx_access(raw)
     if not watchdog_checks:
-        print_fn("[skip] [watchdog].nginx_access_log not configured -- not checked")
+        print_fn("[skip] [watchdog].nginx_access_log not configured -- read-access not checked")
     else:
         for label, level, detail in watchdog_checks:
             if level == "ok":
@@ -420,6 +467,10 @@ def interactive_setup(
             log_path = Path(raw["watchdog"]["nginx_access_log"])
             if not log_path.exists():
                 continue  # bad path -- fix settings.toml by hand, nothing to setfacl
+            if not shutil.which("setfacl"):
+                print_fn("setfacl not found -- install it first (e.g. `sudo dnf install acl`), "
+                         "then re-run `sudo my-bt setup -i`.")
+                continue
             if not is_root():
                 print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
             elif prompt(f"Run setfacl to grant my-booking read access under {log_path.parent} now?"):

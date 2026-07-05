@@ -542,9 +542,15 @@ class InteractiveSetupWatchdogTest(unittest.TestCase):
         )
         self.assertEqual(prompt.asked_matching("setfacl"), [])
 
+    # shutil.which is patched selectively (not a blanket return_value) --
+    # `shutil` is one shared module object, so an unconditional patch here
+    # would also make cli_checks.check_nginx_locations()'s own
+    # shutil.which("nginx") call (step 4, always run) return truthy and
+    # then actually try to subprocess.run(["nginx", "-T"]) for real.
+    @patch("app.cli_setup.shutil.which", side_effect=lambda name: "/usr/sbin/setfacl" if name == "setfacl" else None)
     @patch("app.cli_checks.check_watchdog_nginx_access",
            return_value=[("watchdog: nginx_access_log (x)", "warn", "my-booking can't read this yet -- sudo setfacl ...")])
-    def test_root_accepting_prompt_runs_both_setfacl_commands(self, _mock):
+    def test_root_accepting_prompt_runs_both_setfacl_commands(self, _mock, _which):
         prompt = FakePrompts({"setfacl": True})
         calls: list[list[str]] = []
         cli_setup.interactive_setup(
@@ -557,9 +563,24 @@ class InteractiveSetupWatchdogTest(unittest.TestCase):
         self.assertTrue(all(c[0] == "setfacl" for c in calls))
         self.assertTrue(any("-d" in c for c in calls))
 
+    @patch("app.cli_setup.shutil.which", return_value=None)
     @patch("app.cli_checks.check_watchdog_nginx_access",
            return_value=[("watchdog: nginx_access_log (x)", "warn", "my-booking can't read this yet -- sudo setfacl ...")])
-    def test_declining_prompt_runs_nothing(self, _mock):
+    def test_setfacl_missing_shows_install_hint_and_never_prompts(self, _mock, _which):
+        prompt = FakePrompts({"setfacl": True})
+        lines: list[str] = []
+        cli_setup.interactive_setup(
+            self._raw_with_log(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+            print_fn=lines.append,
+        )
+        self.assertEqual(prompt.asked_matching("setfacl"), [])
+        self.assertTrue(any("dnf install acl" in ln for ln in lines))
+
+    @patch("app.cli_setup.shutil.which", side_effect=lambda name: "/usr/sbin/setfacl" if name == "setfacl" else None)
+    @patch("app.cli_checks.check_watchdog_nginx_access",
+           return_value=[("watchdog: nginx_access_log (x)", "warn", "my-booking can't read this yet -- sudo setfacl ...")])
+    def test_declining_prompt_runs_nothing(self, _mock, _which):
         prompt = FakePrompts({"setfacl": False})
         calls: list[list[str]] = []
         cli_setup.interactive_setup(
@@ -579,6 +600,91 @@ class InteractiveSetupWatchdogTest(unittest.TestCase):
             print_fn=lambda *_: None,
         )
         self.assertEqual(prompt.asked_matching("setfacl"), [])
+
+    @patch("app.cli_checks.check_watchdog_nginx_access", return_value=[])
+    @patch("app.cli_checks._nginx_access_log_for_host", return_value=None)
+    def test_nothing_detected_never_offers_to_write(self, _detect, _access):
+        prompt = FakePrompts()
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("Add nginx_access_log"), [])
+
+    @patch("app.cli_checks.check_watchdog_nginx_access", return_value=[])
+    def test_detected_but_unconfigured_offers_to_write_and_accepting_writes_it(self, _access):
+        with patch("app.cli_checks._nginx_access_log_for_host", return_value=str(self.log_path)):
+            prompt = FakePrompts({"Add nginx_access_log": True})
+            raw = _raw()
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(len(prompt.asked_matching("Add nginx_access_log")), 1)
+        written = Path(self.settings_path).read_text()
+        self.assertIn(f'nginx_access_log = "{self.log_path}"', written)
+        # in-memory raw is updated too, so the readability check in the
+        # same run sees it immediately rather than requiring a re-run.
+        self.assertEqual(raw["watchdog"]["nginx_access_log"], str(self.log_path))
+
+    @patch("app.cli_checks.check_watchdog_nginx_access", return_value=[])
+    def test_detected_but_unconfigured_declining_writes_nothing(self, _access):
+        with patch("app.cli_checks._nginx_access_log_for_host", return_value=str(self.log_path)):
+            prompt = FakePrompts({"Add nginx_access_log": False})
+            cli_setup.interactive_setup(
+                _raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        self.assertNotIn("nginx_access_log", Path(self.settings_path).read_text())
+
+    @patch("app.cli_checks.check_watchdog_nginx_access", return_value=[])
+    def test_configured_value_differing_from_detected_warns_without_prompting(self, _access):
+        with patch("app.cli_checks._nginx_access_log_for_host", return_value=str(self.log_path)):
+            prompt = FakePrompts()
+            lines: list[str] = []
+            cli_setup.interactive_setup(
+                _raw(watchdog={"nginx_access_log": "/some/stale/path.log"}),
+                self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lines.append,
+            )
+        self.assertEqual(prompt.asked_matching("Add nginx_access_log"), [])
+        self.assertTrue(any("stale" in ln for ln in lines))
+
+
+class AddNginxAccessLogSettingTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.settings_path = str(Path(self._tmp.name) / "settings.toml")
+
+    def test_creates_watchdog_section_when_absent(self):
+        Path(self.settings_path).write_text("[site]\nadmin_email = \"a@b.com\"\n")
+        cli_setup._add_nginx_access_log_setting(self.settings_path, "/var/log/nginx/access.log")
+        text = Path(self.settings_path).read_text()
+        self.assertIn("[watchdog]", text)
+        self.assertIn('nginx_access_log = "/var/log/nginx/access.log"', text)
+        # the original section is untouched
+        self.assertIn('admin_email = "a@b.com"', text)
+
+    def test_inserts_into_existing_watchdog_section_preserving_other_lines(self):
+        Path(self.settings_path).write_text(
+            "[watchdog]\nenabled = true\nwindow_minutes = 15\n\n[[course]]\nshortname = \"x\"\n"
+        )
+        cli_setup._add_nginx_access_log_setting(self.settings_path, "/var/log/nginx/access.log")
+        text = Path(self.settings_path).read_text()
+        self.assertIn('nginx_access_log = "/var/log/nginx/access.log"', text)
+        self.assertIn("enabled = true", text)
+        self.assertIn("window_minutes = 15", text)
+        self.assertIn('shortname = "x"', text)
+        # inserted right after the [watchdog] header, before its other keys
+        watchdog_idx = text.index("[watchdog]")
+        new_line_idx = text.index("nginx_access_log")
+        enabled_idx = text.index("enabled = true")
+        self.assertTrue(watchdog_idx < new_line_idx < enabled_idx)
 
 
 if __name__ == "__main__":
