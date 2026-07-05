@@ -424,7 +424,7 @@ class BookingFlowTest(unittest.TestCase):
     def test_new_email_gets_only_a_confirm_email_not_a_booking_email(self):
         self._book("newguest@example.org")
         subjects = [s for _, s, _ in self.sent_emails]
-        self.assertEqual(subjects, ["Confirm your account"])
+        self.assertEqual(subjects, ["Confirm your example.org account"])
 
     def test_returning_unconfirmed_email_adds_another_pending_and_resends(self):
         self._book("newguest@example.org", occ_date=self.occ_date)
@@ -432,7 +432,7 @@ class BookingFlowTest(unittest.TestCase):
         user = self.store.find_user_by_email("newguest@example.org")
         self.assertEqual(len(self.store.registrations_for_user(user.user_id)), 2)
         subjects = [s for _, s, _ in self.sent_emails]
-        self.assertEqual(subjects, ["Confirm your account", "Confirm your account"])
+        self.assertEqual(subjects, ["Confirm your example.org account", "Confirm your example.org account"])
 
     # -- the account-hijack fix --------------------------------------------
 
@@ -527,7 +527,7 @@ class BookingFlowTest(unittest.TestCase):
         self.sent_emails.clear()
         self._post(self.app.my_reset, (), {"email": "newguest@example.org"})
         subjects = [s for _, s, _ in self.sent_emails]
-        self.assertEqual(subjects, ["Confirm your account"])
+        self.assertEqual(subjects, ["Confirm your example.org account"])
 
     def test_my_reset_emails_confirmed_account_a_reset_link(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
@@ -535,7 +535,7 @@ class BookingFlowTest(unittest.TestCase):
         self.store.set_password(user.user_id, h, s)
         self._post(self.app.my_reset, (), {"email": "regular@example.org"})
         subjects = [s for _, s, _ in self.sent_emails]
-        self.assertEqual(subjects, ["Reset your password"])
+        self.assertEqual(subjects, ["Reset your example.org password"])
 
     # -- /my password login --------------------------------------------------
 

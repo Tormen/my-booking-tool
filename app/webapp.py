@@ -35,7 +35,7 @@ import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from http import cookies
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
@@ -298,9 +298,9 @@ class App:
             )
             self._send_confirm_email(user)
             body = (
-                f"<p>Almost there -- we've emailed <b>{esc(email)}</b> a link to confirm your account. "
-                f"Your spot for <b>{esc(course.title)}</b> on {esc(occ_date)} is held only once you "
-                "click it and set a password, not before.</p>"
+                f"<p>Almost there -- we've emailed <b>{esc(email)}</b> a link to confirm your account.</p>"
+                f"<p>Your spot for <b>{esc(course.title)}</b> on {esc(occ_date)} will only be reserved "
+                "for you,<br>once you click the link in the email and set a password.</p>"
                 '<p>Didn\'t get it? <a href="/my/reset">Resend the confirmation email</a>.</p>'
             )
             return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Almost there", body)
@@ -333,6 +333,17 @@ class App:
             f"{course.shortname} on {occ_date}.",
         )
 
+    def _site_label(self) -> str:
+        """A short, human name for this deployment to put in guest-facing
+        emails that otherwise have no other context (e.g. the account
+        confirmation email below) -- derived from settings.base_url's
+        hostname (e.g. "https://booking.example.org" -> "booking.example.org") rather than a
+        separate settings.toml key, since base_url already has to be
+        correct and unique per deployment anyway. Falls back to the raw
+        base_url on the rare malformed/missing-hostname case rather than
+        showing nothing."""
+        return urlparse(self.settings.base_url).hostname or self.settings.base_url
+
     def _send_confirm_email(self, user) -> None:
         """(Re)generates a confirm-or-reset token and emails the "set your
         password" link -- called from a booking under a not-yet-confirmed
@@ -340,13 +351,21 @@ class App:
         Regenerating unconditionally on every call is deliberate: simpler
         than trying to detect/reuse an already-outstanding token, and it
         invalidates any earlier link, which is exactly the right behavior
-        for a "resend" anyway."""
+        for a "resend" anyway.
+
+        Names the site in both subject and body (see _site_label()) --
+        without it this email is just "Confirm your account" with no
+        indication of what account, for what, or from whom, which is
+        confusing on its own out of context (caught in practice
+        2026-07-05: "explain in the email an account for WHAT ?!")."""
         token = new_token()
         self.store.set_confirm_token(user.user_id, hash_token(token), now_iso())
         confirm_url = f"{self.settings.base_url}/my/confirm/{token}"
         first_time = not user.password_hash
-        subject = "Confirm your account" if first_time else "Reset your password"
-        verb = "confirm your account and set a password" if first_time else "set a new password"
+        site = self._site_label()
+        subject = f"Confirm your {site} account" if first_time else f"Reset your {site} password"
+        verb = (f"confirm your {site} booking account and set a password"
+                if first_time else f"set a new password for your {site} booking account")
         send_mail(
             self.settings, user.email, subject,
             f"Click below to {verb}:\n\n{confirm_url}\n\n"
