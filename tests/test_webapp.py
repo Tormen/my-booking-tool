@@ -2,6 +2,7 @@ import io
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from http import cookies
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -9,7 +10,9 @@ from app import webapp
 from app.caldav_client import CalDAVClient, Response
 from app.security import hash_secret
 from app.slots import Occurrence, build_occurrences
-from app.storage import STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store
+from app.storage import (
+    STATUS_CANCELED_BY_GUEST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store,
+)
 from app.webapp import App
 
 from .helpers import make_course, make_settings
@@ -336,6 +339,36 @@ class LateBookingQuorumTest(unittest.TestCase):
         self.assertIsNone(app._late_booking_rejection(occ, now))
 
 
+class HtmlToTextTest(unittest.TestCase):
+    """_html_to_text() converts course.description's operator-authored rich
+    HTML into plain text for the booking-confirmed/waitlisted emails (see
+    App._send_booking_result_email) -- send_mail has no HTML alternative."""
+
+    def test_strips_tags_and_converts_list_items_to_dashes(self):
+        markup = (
+            "<p><b>Please:</b></p>"
+            "<ul><li>Use a working email address</li>"
+            "<li>Book week by week</li></ul>"
+        )
+        text = webapp._html_to_text(markup)
+        self.assertNotIn("<", text)
+        self.assertIn("Please:", text)
+        self.assertIn("- Use a working email address", text)
+        self.assertIn("- Book week by week", text)
+
+    def test_converts_link_to_text_plus_url(self):
+        markup = '<p>Details: <a href="https://example.org" target="_blank">example.org</a></p>'
+        text = webapp._html_to_text(markup)
+        self.assertIn("example.org (https://example.org)", text)
+
+    def test_unescapes_html_entities(self):
+        text = webapp._html_to_text("<p>Bek&auml;mpft &amp; getestet</p>")
+        self.assertIn("Bekämpft & getestet", text)
+
+    def test_plain_text_passes_through_unchanged(self):
+        self.assertEqual(webapp._html_to_text("test"), "test")
+
+
 class PolicyNoteTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -472,6 +505,14 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(self.store.count_confirmed("yoga-class-1", self.occ_date), 1)
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertIn("Booking confirmed: Dynamic Ashtanga Vinyasa Yoga on " + self.occ_date, subjects)
+        email_body = next(b for _, s, b in self.sent_emails if s.startswith("Booking confirmed:"))
+        self.assertIn("Your spot is confirmed:", email_body)
+        self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", email_body)
+        self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", email_body)
+        self.assertIn("Where: Example Community Gym, Room 1", email_body)
+        self.assertIn("test", email_body)  # course.description, repeated in full
+        self.assertIn("Manage your bookings any time: https://example.org/my", email_body)
+        self.assertIn("Cancel this booking directly: https://example.org/cancel/", email_body)
 
     def test_confirmed_account_waitlisted_when_full(self):
         for i in range(2):
@@ -483,6 +524,12 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("waitlist", body)
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertTrue(any(s.startswith("Waitlisted:") for s in subjects))
+        email_body = next(b for _, s, b in self.sent_emails if s.startswith("Waitlisted:"))
+        self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", email_body)
+        self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", email_body)
+        self.assertIn("Where: Example Community Gym, Room 1", email_body)
+        self.assertIn("Manage your bookings any time: https://example.org/my", email_body)
+        self.assertIn("Leave the waitlist directly: https://example.org/cancel/", email_body)
 
     # -- my_confirm: sets password, promotes pending ------------------------
 
@@ -503,7 +550,9 @@ class BookingFlowTest(unittest.TestCase):
         self._book("newguest@example.org")
         token = self._confirm_token_from_last_email()
         _status, headers, body = self._post(self.app.my_confirm, (token,), {"password": "hunter22"})
-        self.assertIn("Account confirmed", body)
+        self.assertIn("Account &amp; booking confirmed", body)
+        self.assertIn("did succeed for", body)
+        self.assertIn("at 17h15 - 18h55 (Example Community Gym, Room 1)", body)
         self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
         user = self.store.find_user_by_email("newguest@example.org")
         self.assertNotEqual(user.password_hash, "")
@@ -590,6 +639,106 @@ class BookingFlowTest(unittest.TestCase):
         self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))
         self.assertIn("Email/password", body)
         self.assertIn("match", body)
+
+    # -- /my logged-in bookings table + cancel/delete dialogs (task #43) ----
+
+    def _login_as_guest(self, email: str, name: str = "Alice") -> tuple:
+        """Returns (user, environ) for a confirmed guest -- bypasses the
+        actual login form (already covered above) since these tests are
+        about what the logged-in page renders/does, not the login itself."""
+        user = self.store.upsert_user_for_booking(email, name)
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        sid = webapp._new_session({"kind": "guest", "user_id": user.user_id})
+        return user, {"HTTP_COOKIE": f"session={sid}"}
+
+    def test_my_bookings_table_shows_title_time_location_not_shortname(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
+        self.assertIn("17h15 - 18h55", body)
+        self.assertIn("Example Community Gym, Room 1", body)
+        self.assertNotIn("yoga-class-1", body)
+
+    def test_my_bookings_cancel_button_opens_dialog_with_reason_field(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self.app.my("GET", environ)
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        cancel_id = f"cancel-{reg.registration_id}"
+        self.assertIn(f'<dialog id="{cancel_id}-dialog" class="card">', body)
+        self.assertIn("Are you sure?", body)
+        self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{cancel_id}-form">', body)
+        self.assertIn("Confirm cancellation", body)
+        self.assertIn("Never mind", body)
+
+    def test_my_bookings_delete_account_dialog_has_exact_requested_wording(self):
+        _user, environ = self._login_as_guest("regular@example.org")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn('<dialog id="delete-account-dialog" class="card">', body)
+        self.assertIn(
+            "Delete your account and all related data? This will cancel any booking you still have!",
+            body,
+        )
+        self.assertIn("Yes, delete everything", body)
+        # No-JS/no-<dialog>-support fallback must still be a real confirmation,
+        # not silently removed (see the maintainer's local notes -- this was a regression
+        # caught and fixed while wiring up the dialog).
+        self.assertIn(
+            "onsubmit=\"return confirm('Delete your account and all related data? "
+            "This will cancel any booking you still have!');\"",
+            body,
+        )
+
+    def test_my_logout_clears_session_and_redirects_to_my(self):
+        _user, environ = self._login_as_guest("regular@example.org")
+        sid = cookies.SimpleCookie()
+        sid.load(environ["HTTP_COOKIE"])
+        session_id = sid["session"].value
+        status, headers, _body = self.app.my_logout("POST", environ)
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my")
+        self.assertNotIn(session_id, webapp.SESSIONS)
+        # session cookie is actually cleared, not just left alone
+        set_cookie = dict(headers)["Set-Cookie"]
+        self.assertIn("Max-Age=0", set_cookie)
+
+    def test_my_cancel_captures_optional_reason_and_notifies_admin(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": "can't make it"}, environ)
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, STATUS_CANCELED_BY_GUEST)
+        admin_mail = next(b for _, s, b in self.sent_emails if s.startswith("Cancellation:"))
+        self.assertIn("Reason: can't make it", admin_mail)
+
+    def test_my_cancel_without_reason_omits_reason_line(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        admin_mail = next(b for _, s, b in self.sent_emails if s.startswith("Cancellation:"))
+        self.assertNotIn("Reason:", admin_mail)
+
+    def _post_with_session(self, fn, args, form: dict, environ: dict):
+        body = urlencode(form).encode()
+        full_environ = {**environ, "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+        return fn("POST", *args, full_environ)
+
+    # -- /admin overview: same shortname-leak audit as /my's table ----------
+
+    def test_admin_overview_shows_course_title_not_shortname(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
+        self.assertNotIn("yoga-class-1", body)
 
 
 class AdminLoginRateLimitTest(unittest.TestCase):

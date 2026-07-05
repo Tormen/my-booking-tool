@@ -10,6 +10,7 @@
                                      the same response either way -- doesn't reveal
                                      whether an email is registered)
   POST     /my/cancel/<reg_id>      guest cancels one of their own bookings
+  POST     /my/logout               guest logout
   POST     /my/delete-account       guest erases their own account (Art. 17)
   GET/POST /admin/login             admin login
   GET      /admin                   admin overview (today+future by default)
@@ -30,6 +31,7 @@ silent surprise later.
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -194,6 +196,31 @@ def _resend_cooldown_inline_script(form_id: str, button_id: str, status_id: str,
     </script>"""
 
 
+_HTML_LI_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.IGNORECASE | re.DOTALL)
+_HTML_A_RE = re.compile(r'<a\b[^>]*?href="([^"]*)"[^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+_HTML_BLOCK_RE = re.compile(r"</?(p|div|ul|ol|br)\b[^>]*>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _html_to_text(markup: str) -> str:
+    """Best-effort HTML -> plain text for course.description (operator-
+    authored rich text -- see app/config.py's docstring on that field) when
+    it needs to go into a plain-text email: app/emailer.py's send_mail only
+    ever calls msg.set_content(body), there's no HTML alternative part. This
+    is NOT a general HTML sanitizer/renderer -- it only handles the tags a
+    course description realistically uses (p/div/ul/ol/li/br/b/i/u/a), which
+    is all settings.toml.example and every real course description in
+    the maintainer's local notes's deployment actually contain.
+    """
+    text = _HTML_A_RE.sub(lambda m: f"{_HTML_TAG_RE.sub('', m.group(2))} ({m.group(1)})", markup)
+    text = _HTML_LI_RE.sub(lambda m: f"- {_HTML_TAG_RE.sub('', m.group(1)).strip()}\n", text)
+    text = _HTML_BLOCK_RE.sub("\n", text)
+    text = _HTML_TAG_RE.sub("", text)
+    text = html.unescape(text)
+    lines = [ln.strip() for ln in text.splitlines()]
+    return "\n".join(ln for ln in lines if ln)
+
+
 class App:
     def __init__(self, settings: Settings, store: Store):
         self.settings = settings
@@ -296,6 +323,8 @@ class App:
             return self.my_confirm(method, m.group(1), environ)
         if m := re.fullmatch(r"/my/cancel/([0-9a-fA-F-]+)", path):
             return self.my_cancel(method, m.group(1), environ)
+        if path == "/my/logout":
+            return self.my_logout(method, environ)
         if path == "/my/delete-account":
             return self.my_delete_account(method, environ)
         if path == "/admin/login":
@@ -410,26 +439,49 @@ class App:
         """The guest-facing booked/waitlisted email + admin notification --
         shared by the instant-booking path above and by my_confirm()'s
         promotion of a newly-confirmed account's pending registrations, so
-        the two paths can never drift out of sync in wording."""
+        the two paths can never drift out of sync in wording.
+
+        Body is a fixed What/When/Where block (the operator's requested layout,
+        2026-07-05) followed by the course's own rich description repeated
+        in full -- via _html_to_text(), since send_mail is plain-text only
+        -- so a guest never has to go back to the booking page to see what
+        they signed up for. Every guest now gets an account (see
+        my_confirm()), so this also invites them to /my rather than only
+        handing them a one-shot cancel link.
+        """
         cancel_url = f"{self.settings.base_url}/cancel/{cancel_token}"
+        my_url = f"{self.settings.base_url}/my"
+        when = f"{occ_date} {course.time_range_label()}"
+        details = (
+            f"\U0001F4CC What: {course.title}\n"
+            f"\U0001F550 When: {when}\n"
+            f"\U0001F4CD Where: {course.location}\n"
+        )
+        description_text = _html_to_text(course.description) if course.description else ""
         if status == STATUS_WAITLISTED:
             send_mail(
                 self.settings, user.email, f"Waitlisted: {course.title} on {occ_date}",
-                f"{course.title} on {occ_date} at {course.start_time} is full. You've been added "
-                "to the waitlist and will be confirmed automatically by email if a spot opens up.\n\n"
-                f"Leave the waitlist any time: {cancel_url}\n",
+                "You're on the waitlist -- full for now, but you'll be confirmed automatically "
+                "by email if a spot opens up:\n\n"
+                f"{details}\n"
+                + (f"{description_text}\n\n" if description_text else "\n")
+                + f"Manage your bookings any time: {my_url}\n"
+                f"Leave the waitlist directly: {cancel_url}\n",
             )
         else:
             send_mail(
                 self.settings, user.email, f"Booking confirmed: {course.title} on {occ_date}",
-                f"Your spot for {course.title} on {occ_date} at {course.start_time} is confirmed.\n\n"
-                f"Cancel any time: {cancel_url}\n",
+                "Your spot is confirmed:\n\n"
+                f"{details}\n"
+                + (f"{description_text}\n\n" if description_text else "\n")
+                + f"Manage your bookings any time: {my_url}\n"
+                f"Cancel this booking directly: {cancel_url}\n",
             )
         send_mail(
             self.settings, self.settings.admin_email,
             f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
             f"{user.name} <{user.email}> {'joined the waitlist for' if status == STATUS_WAITLISTED else 'booked'} "
-            f"{course.shortname} on {occ_date}.",
+            f"{course.title} on {occ_date}.",
         )
 
     def _site_label(self) -> str:
@@ -664,18 +716,101 @@ class App:
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
             regs = self.store.registrations_for_user(session["user_id"])
-            rows = "".join(
-                f"<tr><td>{esc(r.course_shortname)}</td><td>{esc(r.occurrence_date)}</td>"
-                f"<td>{esc(r.status)}</td>"
-                f'<td><form method="post" action="/my/cancel/{esc(r.registration_id)}">'
-                f'<button {"disabled" if r.status != STATUS_CONFIRMED else ""}>Cancel</button></form></td></tr>'
-                for r in regs
-            )
+
+            def _row(r):
+                # course_shortname is the CSV's own key -- an internal
+                # identifier, not something a guest should have to read.
+                # Translate it to the human-facing title/time/location for
+                # display; None only if the course was removed from
+                # settings.toml since booking (old row, nothing to look up
+                # anymore) -- fall back to the shortname rather than
+                # showing a blank so the row is still identifiable.
+                course = self.settings.course(r.course_shortname)
+                title = course.title if course else r.course_shortname
+                time_range = course.time_range_label() if course else ""
+                location = course.location if course else ""
+                cancel_id = f"cancel-{esc(r.registration_id)}"
+                disabled = r.status != STATUS_CONFIRMED
+                # A <dialog> (real pop-up) asking for an optional reason,
+                # opened by intercepting the Cancel button's click in JS
+                # below -- progressive enhancement: without JS (or on a
+                # browser predating <dialog>/showModal), the button is a
+                # plain type="submit" and cancels immediately with no
+                # reason, exactly like before this feature existed.
+                actions = (
+                    f'<form method="post" action="/my/cancel/{esc(r.registration_id)}" id="{cancel_id}-form">'
+                    f'<button type="submit" class="confirm-dialog-btn" data-dialog="{cancel_id}-dialog" '
+                    f'{"disabled" if disabled else ""}>Cancel</button>'
+                    "</form>"
+                    f'<dialog id="{cancel_id}-dialog" class="card">'
+                    f"<p><b>Are you sure?</b></p>"
+                    f"<p>Cancel your booking for <b>{esc(title)}</b> on {esc(r.occurrence_date)}?</p>"
+                    f'<label>Optional reason <textarea name="message" rows="2" class="big-input" '
+                    f'form="{cancel_id}-form"></textarea></label>'
+                    '<div class="submit-row">'
+                    f'<button type="submit" form="{cancel_id}-form">Confirm cancellation</button> '
+                    f'<button type="button" class="dialog-close-btn" data-dialog="{cancel_id}-dialog">Never mind</button>'
+                    "</div></dialog>"
+                )
+                return (
+                    f"<tr><td>{esc(title)}</td><td>{esc(r.occurrence_date)}</td>"
+                    f"<td>{esc(time_range)}</td><td>{esc(location)}</td>"
+                    f"<td>{esc(r.status)}</td>"
+                    f"<td>{actions}</td></tr>"
+                )
+
+            rows = "".join(_row(r) for r in regs)
             body = f"""
-            <table border="1" cellpadding="6"><tr><th>Course</th><th>Date</th><th>Status</th><th>Actions</th></tr>{rows}</table>
-            <form method="post" action="/my/delete-account" onsubmit="return confirm('Delete your account and all booking history? This cancels any future bookings too.');">
-              <button type="submit">Delete my account &amp; data</button>
-            </form>"""
+            <table border="1" cellpadding="6">
+              <tr><th>Course</th><th>Date</th><th>Time</th><th>Location</th><th>Status</th><th>Actions</th></tr>
+              {rows}
+            </table>
+            <div class="submit-row">
+              <form method="post" action="/my/logout" style="display:inline">
+                <button type="submit">Log out</button>
+              </form>
+              <form method="post" action="/my/delete-account" style="display:inline" id="delete-account-form"
+                onsubmit="return confirm('Delete your account and all related data? This will cancel any booking you still have!');">
+                <button type="submit" class="confirm-dialog-btn" data-dialog="delete-account-dialog">Delete my account &amp; data</button>
+              </form>
+            </div>
+            <dialog id="delete-account-dialog" class="card">
+              <p><b>Are you sure?</b></p>
+              <p>Delete your account and all related data? This will cancel any booking you still have!</p>
+              <div class="submit-row">
+                <button type="submit" form="delete-account-form">Yes, delete everything</button>
+                <button type="button" class="dialog-close-btn" data-dialog="delete-account-dialog">Never mind</button>
+              </div>
+            </dialog>
+            <script>
+            (function() {{
+              document.querySelectorAll(".confirm-dialog-btn").forEach(function(btn) {{
+                var dlg = document.getElementById(btn.dataset.dialog);
+                // No <dialog>/showModal support (old browser) or JS
+                // somehow only half-loaded: leave the button/form alone --
+                // for Cancel that's a plain immediate submit (as before
+                // this feature existed), for Delete that's the native
+                // onsubmit="confirm(...)" already on the form, still a
+                // real (if plainer) confirmation either way.
+                if (!dlg || typeof dlg.showModal !== "function") return;
+                // The dialog now handles confirmation -- clear any
+                // onsubmit="confirm(...)" on the form so the guest isn't
+                // asked twice (once by the dialog, once natively) when the
+                // dialog's own submit button actually submits it.
+                if (btn.form) btn.form.onsubmit = null;
+                btn.addEventListener("click", function(ev) {{
+                  ev.preventDefault();
+                  dlg.showModal();
+                }});
+              }});
+              document.querySelectorAll(".dialog-close-btn").forEach(function(btn) {{
+                btn.addEventListener("click", function() {{
+                  var dlg = document.getElementById(btn.dataset.dialog);
+                  if (dlg) dlg.close();
+                }});
+              }});
+            }})();
+            </script>"""
             return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
 
         error = None
@@ -799,19 +934,33 @@ class App:
                     continue  # no longer pending (already handled, e.g. a stale duplicate link)
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
                 self._send_booking_result_email(user, course, reg.occurrence_date, updated.status, new_cancel_token)
-                confirmed_lines.append(f"{course.title} on {reg.occurrence_date} ({updated.status})")
+                # Status suffix only for the non-obvious outcome (waitlisted)
+                # -- "did succeed" below already says what confirmed means,
+                # no need to repeat it on every line too.
+                status_suffix = "" if updated.status == STATUS_CONFIRMED else f" -- {updated.status}"
+                confirmed_lines.append(
+                    f"{course.title} on {reg.occurrence_date} at {course.time_range_label()} "
+                    f"({course.location}){status_suffix}"
+                )
 
             sid = _new_session({"kind": "guest", "user_id": user.user_id})
             self.store.touch_login(user.user_id)
-            summary = (
-                "<ul>" + "".join(f"<li>{esc(line)}</li>" for line in confirmed_lines) + "</ul>"
-                if confirmed_lines else ""
+            if confirmed_lines:
+                plural = "s" if len(confirmed_lines) != 1 else ""
+                summary = (
+                    f"<p>Your course booking{plural} did succeed for:</p><ul>"
+                    + "".join(f"<li>{esc(line)}</li>" for line in confirmed_lines) + "</ul>"
+                )
+            else:
+                summary = ""
+            body = (
+                "<p>Your password is set and your account is now active.</p>"
+                f"{summary}<p><a href=\"/my\">View my bookings</a></p>"
             )
-            body = f"<p>Your password is set.</p>{summary}<p><a href=\"/my\">View my bookings</a></p>"
             return (
                 "200 OK",
                 [("Content-Type", "text/html; charset=utf-8"), ("Set-Cookie", _session_cookie_header(sid))],
-                page("Account confirmed!", body),
+                page("Account & booking confirmed!", body),
             )
 
         return "200 OK", [("Content-Type", "text/html")], page(
@@ -824,9 +973,29 @@ class App:
             return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
         reg = self.store.find_by_id(registration_id)
         if reg and reg.user_id == session["user_id"]:
-            self.store.cancel(registration_id, canceled_by="guest")
+            form = self._read_form(environ)
+            message = sanitize_csv_field(form.get("message", "").strip())
+            self.store.cancel(registration_id, canceled_by="guest", host_message=message)
             self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
+            # Same admin-notification pattern as guest_cancel() (the other
+            # guest-initiated cancel path, from the email link) -- this one
+            # just had no admin notification at all before, an existing gap
+            # closed here while already touching this code for the reason field.
+            course = self.settings.course(reg.course_shortname)
+            if course:
+                send_mail(
+                    self.settings, self.settings.admin_email,
+                    f"Cancellation: {course.title} on {reg.occurrence_date}",
+                    "Canceled by guest via their bookings page."
+                    + (f"\n\nReason: {message}" if message else ""),
+                )
         return "302 Found", [("Location", "/my")], ""
+
+    def my_logout(self, method: str, environ):
+        session = _get_session(environ)
+        if session and session.get("kind") == "guest":
+            SESSIONS.pop(session["_sid"], None)
+        return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))], ""
 
     def my_delete_account(self, method: str, environ):
         session = _get_session(environ)
@@ -888,8 +1057,14 @@ class App:
         for r in regs:
             user = self.store.find_user_by_id(r.user_id)
             times = self.store.times_registered(r.user_id) if user else 0
+            # course_shortname is the CSV's own internal key -- show the
+            # human title here too (same reasoning as the guest "My
+            # bookings" table), falling back to the shortname only if the
+            # course was since removed from settings.toml.
+            course = self.settings.course(r.course_shortname)
+            title = course.title if course else r.course_shortname
             rows.append(
-                f"<tr><td>{esc(r.status)}</td><td>{esc(r.course_shortname)}</td>"
+                f"<tr><td>{esc(r.status)}</td><td>{esc(title)}</td>"
                 f"<td>{esc(r.occurrence_date)}</td><td>{esc(user.name if user else '(erased)')}</td>"
                 f"<td>{esc(user.email if user else '(erased)')}</td><td>{esc(r.registered_at)}</td>"
                 f"<td>{times}</td>"
