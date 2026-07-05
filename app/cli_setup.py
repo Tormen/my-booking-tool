@@ -70,6 +70,7 @@ def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli
         "group": cli_checks.check_group_membership(),
         "systemd": cli_checks.check_systemd(),
         "selinux": cli_checks.check_selinux(),
+        "nginx_locations": cli_checks.check_nginx_locations(),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
     }
@@ -99,10 +100,13 @@ def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[s
     print_fn(f"   courses: {_course_summary(raw)}")
     print_fn(f"   {_privacy_summary(raw)}")
 
-    print_fn("\n4. Add the nginx snippet, then reload nginx:")
-    print_fn("     /usr/share/my-booking-tool/my-booking.conf.example")
-    print_fn("     sudo nginx -t && sudo systemctl reload nginx")
-    print_fn("   (not checked automatically -- this edits your existing vhost)")
+    print_fn("\n4. nginx location blocks (checked live via `nginx -T`):")
+    show(report["nginx_locations"])
+    if any(level != "ok" and label.startswith("nginx location ")
+           for label, level, _ in report["nginx_locations"]):
+        print_fn("   Add any missing block(s) from /usr/share/my-booking-tool/my-booking.conf.example")
+        print_fn("   to your existing vhost (not edited automatically -- see README.md \"Installing\"),")
+        print_fn("   then: sudo nginx -t && sudo systemctl reload nginx")
 
     print_fn("\n5. my-booking group membership:")
     show(report["group"])
@@ -203,13 +207,23 @@ def interactive_setup(
     print_fn(f"   courses: {_course_summary(raw)}")
     print_fn(f"   {_privacy_summary(raw)}")
 
-    # 4. nginx -- can't safely automate edits to an existing hand-maintained vhost
+    # 4. nginx -- checked live via `nginx -T` (the fully merged config, not
+    # a guessed single vhost file); never edited automatically -- rewriting
+    # a stranger's hand-maintained nginx config would be worse than asking.
     print_fn("\n-- 4. nginx --")
-    print_fn("Add the location blocks from")
-    print_fn("  /usr/share/my-booking-tool/my-booking.conf.example")
-    print_fn("to your existing vhost (not automated -- this would mean")
-    print_fn("guessing at and editing your hand-maintained nginx config).")
-    if prompt("Already done -- run `nginx -t && systemctl reload nginx` now?"):
+    nginx_checks = cli_checks.check_nginx_locations()
+    missing_locations = [
+        label for label, level, _ in nginx_checks
+        if level != "ok" and label.startswith("nginx location ")
+    ]
+    for label, level, detail in nginx_checks:
+        print_fn(f"[{level}] {label}: {detail}")
+    if missing_locations:
+        print_fn("Add the missing location block(s) above from")
+        print_fn("  /usr/share/my-booking-tool/my-booking.conf.example")
+        print_fn("to your existing vhost (not automated -- this would mean")
+        print_fn("guessing at and editing your hand-maintained nginx config).")
+    if prompt("Run `nginx -t && systemctl reload nginx` now?"):
         run(["nginx", "-t"])
         run(["systemctl", "reload", "nginx"])
 

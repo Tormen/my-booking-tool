@@ -106,6 +106,44 @@ def check_selinux() -> list[Check]:
              f"{out or 'unknown'} -- sudo setsebool -P httpd_can_network_connect on")]
 
 
+# The location paths this app needs -- see nginx/my-booking.conf(.example).
+# Kept as a plain tuple, not derived from the .example file itself, so this
+# check has no dependency on that file's exact on-disk location/format at
+# runtime (it only needs to know what to look FOR, not read the example).
+_REQUIRED_NGINX_LOCATIONS = ("/book/", "/cancel/", "/my", "/admin")
+
+
+def check_nginx_locations() -> list[Check]:
+    """Checks whether each `location` block this app needs is already
+    present in the LIVE, fully-merged nginx config (`nginx -T`, which
+    resolves every `include` -- nginx.conf, conf.d/*, sites-enabled/*,
+    snippets, etc. -- not just one guessed vhost file, so this can't miss a
+    location block just because it lives in a different file than expected).
+    Read-only: this never edits nginx config itself -- guessing at and
+    rewriting a stranger's hand-maintained vhost would be worse than asking
+    (see setup -i's own comment on this)."""
+    if not shutil.which("nginx"):
+        return [("nginx", "warn", "nginx not found -- skipping (not on the target server?)")]
+    result = subprocess.run(["nginx", "-T"], capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown error"
+        return [("nginx -T", "warn", f"failed to read the live config ({detail}) -- check manually with sudo nginx -T")]
+    merged = result.stdout
+    checks: list[Check] = []
+    for path in _REQUIRED_NGINX_LOCATIONS:
+        # Matches e.g. "location /book/ {" or "location = /my {" -- allows
+        # an optional match modifier (=, ~, ~*, ^~) between "location" and
+        # the path, same as nginx itself accepts.
+        pattern = re.compile(rf"^\s*location\s+(?:[=~^]+\*?\s+)?{re.escape(path)}\s*\{{", re.MULTILINE)
+        if pattern.search(merged):
+            checks.append((f"nginx location {path}", "ok", "found in the live config"))
+        else:
+            checks.append((f"nginx location {path}", "warn",
+                            "not found in the live config -- add it from "
+                            "/usr/share/my-booking-tool/my-booking.conf.example"))
+    return checks
+
+
 def check_rpmnew(paths: list[str]) -> list[Check]:
     """settings.toml and the installed site/privacy.html.tmpl are both
     %config(noreplace) in the RPM (see packaging/*.spec) -- rpm never
@@ -154,6 +192,18 @@ def check_group_membership() -> list[Check]:
 # warning; rpm -V still catches anything unexpected elsewhere.
 _KNOWN_CONFIG_MARKERS = ("c",)
 
+# rpm -V's 9-char flag string, position by position: S=size M=mode 5=MD5
+# sum D=device L=readlink U=user G=group T=mtime P=capabilities. Only
+# S/5/L/D indicate the file's actual DATA (or type) changed -- everything
+# else is metadata. %post's `chown -R my-booking:my-booking /etc/my-booking`
+# (see packaging/my-booking-tool.spec) deliberately changes ownership away
+# from whatever the RPM recorded at build time, so a U/G(/M/T)-only diff on
+# a file under /etc/my-booking is the package's OWN intended behavior, not
+# tampering -- flagging it as "modified since install" was a false
+# positive (hit in practice 2026-07-05 on settings.toml.example). "missing"
+# (the file doesn't exist at all) is always worth flagging regardless.
+_CONTENT_FLAGS = frozenset("S5LD")
+
 
 def check_rpm_verify(package_name: str = "my-booking-tool") -> list[Check]:
     """`rpm -V <package>` compares every file the package owns (size, mode,
@@ -189,10 +239,14 @@ def check_rpm_verify(package_name: str = "my-booking-tool") -> list[Check]:
         marker = parts[1] if len(parts) >= 3 and parts[1] in ("c", "d", "g", "l", "r") else ""
         if marker in _KNOWN_CONFIG_MARKERS:
             continue  # settings.toml / privacy.html.tmpl -- tracked via check_rpmnew() instead
+        if flags != "missing" and not any(f in flags for f in _CONTENT_FLAGS):
+            continue  # ownership/mode/mtime-only -- expected (see _CONTENT_FLAGS above), not tampering
         checks.append((f"modified since install: {path}", "warn", f"rpm -V flags: {flags}"))
     if not checks:
         checks.append(("package integrity (rpm -V)", "ok",
-                        "only your %config files differ (expected -- tracked via .rpmnew checks above)"))
+                        "no unexpected content changes (ownership/mode/mtime-only differences -- "
+                        "e.g. from the package's own postinstall chown -- and %config files, "
+                        "tracked via .rpmnew checks above, are expected and excluded)"))
     return checks
 
 

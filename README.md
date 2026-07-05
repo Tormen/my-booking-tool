@@ -103,7 +103,7 @@ app/                        the application (stdlib-only Python package)
   webapp.py                 wsgiref WSGI app / routes
   serve.py                  entrypoint (python3 -m app.serve)
 
-tests/                      unit tests (138, run with `my-bt test` or unittest)
+tests/                      unit tests (146, run with `my-bt test` or unittest)
 
 scripts/
   my-bt                     thin CLI wrapper -- see "The `my-bt` CLI" below
@@ -444,7 +444,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-138 tests covering slot generation (including DST via `zoneinfo`, and that
+146 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client

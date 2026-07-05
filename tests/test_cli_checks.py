@@ -216,6 +216,77 @@ class CheckSelinuxTest(unittest.TestCase):
         self.assertEqual(checks[0][1], "ok")
 
 
+class CheckNginxLocationsTest(unittest.TestCase):
+    """`nginx -T` dumps the fully-merged live config (every `include` --
+    nginx.conf, conf.d/*, sites-enabled/*, snippets -- resolved), so this
+    check can find a location block regardless of which file it actually
+    lives in -- unlike grepping one guessed vhost file."""
+
+    def test_nginx_missing_is_a_single_warning(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            checks = cli_checks.check_nginx_locations()
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "warn")
+
+    def test_nginx_dash_t_failure_is_reported(self):
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run", return_value=type(
+                 "R", (), {"returncode": 1, "stdout": "", "stderr": "nginx: [emerg] bad config\n"})()):
+            checks = cli_checks.check_nginx_locations()
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("bad config", checks[0][2])
+
+    def test_all_locations_present_are_ok(self):
+        merged = """
+        server {
+            location /book/ { proxy_pass http://127.0.0.1:8811; }
+            location /cancel/ { proxy_pass http://127.0.0.1:8811; }
+            location /my { proxy_pass http://127.0.0.1:8811; }
+            location /admin { proxy_pass http://127.0.0.1:8811; }
+        }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
+            checks = cli_checks.check_nginx_locations()
+        self.assertEqual(len(checks), 4)
+        self.assertTrue(all(level == "ok" for _, level, _ in checks))
+
+    def test_one_missing_location_warns_others_stay_ok(self):
+        merged = """
+        location /book/ { proxy_pass http://127.0.0.1:8811; }
+        location /cancel/ { proxy_pass http://127.0.0.1:8811; }
+        location /admin { proxy_pass http://127.0.0.1:8811; }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
+            checks = cli_checks.check_nginx_locations()
+        levels = _levels(checks)
+        self.assertEqual(levels["nginx location /my"], "warn")
+        self.assertEqual(levels["nginx location /book/"], "ok")
+        self.assertEqual(levels["nginx location /cancel/"], "ok")
+        self.assertEqual(levels["nginx location /admin"], "ok")
+
+    def test_match_modifier_is_still_detected(self):
+        merged = "location = /my { proxy_pass http://127.0.0.1:8811; }\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
+            checks = cli_checks.check_nginx_locations()
+        self.assertEqual(_levels(checks)["nginx location /my"], "ok")
+
+    def test_similar_but_different_path_is_not_a_false_match(self):
+        # "/my-other" must not satisfy the "/my" check.
+        merged = "location /my-other { proxy_pass http://127.0.0.1:8811; }\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
+            checks = cli_checks.check_nginx_locations()
+        self.assertEqual(_levels(checks)["nginx location /my"], "warn")
+
+
 class CheckRpmVerifyTest(unittest.TestCase):
     def test_rpm_not_present_is_ok(self):
         with patch("app.cli_checks.shutil.which", return_value=None):
@@ -271,6 +342,45 @@ class CheckRpmVerifyTest(unittest.TestCase):
             checks = cli_checks.check_rpm_verify()
         self.assertEqual(len(checks), 1)
         self.assertEqual(checks[0][1], "ok")
+
+    def test_ownership_only_change_is_not_flagged(self):
+        # e.g. settings.toml.example after %post's `chown -R
+        # my-booking:my-booking /etc/my-booking` (packaging/my-booking-tool.spec)
+        # -- U/G differ from what the RPM recorded at build time, but
+        # that's the package's OWN intended behavior, not tampering (hit
+        # in practice 2026-07-05 -- see the maintainer's local notes).
+        verify_output = ".....UG..  /etc/my-booking/settings.toml.example\n"
+
+        def run(cmd, capture_output, text):
+            if cmd[1] == "-q":
+                return type("R", (), {"returncode": 0, "stdout": ""})()
+            return type("R", (), {"returncode": 0, "stdout": verify_output})()
+
+        with patch("app.cli_checks.shutil.which", return_value="/usr/bin/rpm"), \
+             patch("app.cli_checks.subprocess.run", side_effect=run):
+            checks = cli_checks.check_rpm_verify()
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "ok")
+
+    def test_content_change_still_flagged_alongside_ownership_only_noise(self):
+        # Ownership-only noise on one file must not hide a real content
+        # change (S/5) on another.
+        verify_output = (
+            ".....UG..  /etc/my-booking/settings.toml.example\n"
+            "S.5....T.  /opt/my-booking/app/webapp.py\n"
+        )
+
+        def run(cmd, capture_output, text):
+            if cmd[1] == "-q":
+                return type("R", (), {"returncode": 0, "stdout": ""})()
+            return type("R", (), {"returncode": 0, "stdout": verify_output})()
+
+        with patch("app.cli_checks.shutil.which", return_value="/usr/bin/rpm"), \
+             patch("app.cli_checks.subprocess.run", side_effect=run):
+            checks = cli_checks.check_rpm_verify()
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("webapp.py", checks[0][0])
 
     def test_missing_file_is_reported(self):
         verify_output = "missing     /opt/my-booking/app/webapp.py\n"
