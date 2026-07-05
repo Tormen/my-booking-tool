@@ -40,7 +40,7 @@ from urllib.parse import parse_qs
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
 from .config import Settings
-from .emailer import send_mail
+from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
 from .security import (
     RateLimiter, hash_secret, hash_token, new_token, sanitize_csv_field,
@@ -470,8 +470,7 @@ class App:
               <label>Your email <span class="req">(required)</span>
                 <input class="big-input" name="email" type="email" required></label>
               <p class="hint">First time booking with this email? We'll send a link to confirm your
-                account and set a password -- your spot is held once you click it, not before.
-                Booked with this email before? You're booked instantly, same as always.</p>
+                account and set a password.</p>
               <label><input type="checkbox" name="agree" required> I acknowledge the
                 <a href="/terms.html" target="_blank">participation terms</a> (voluntary, at my own risk)
                 <span class="req">(required)</span>.</label>
@@ -562,6 +561,9 @@ class App:
             email, password = form.get("email", "").strip(), form.get("password", "").strip()
             if not login_limiter.allow(f"guest:{email.lower()}"):
                 error = "Too many attempts -- try again later."
+                # WARNING (not DEBUG): a real signal the watchdog counts
+                # (see app/watchdog.py) -- masked, never the raw email.
+                log.warning("rate limit blocked: guest login for %s", _masked(email))
             else:
                 user = self.store.find_user_by_email(email)
                 # user.password_hash is empty for a not-yet-confirmed
@@ -595,6 +597,8 @@ class App:
                 user = self.store.find_user_by_email(email)
                 if user:
                     self._send_confirm_email(user)
+            else:
+                log.warning("rate limit blocked: password reset for %s", _masked(email))
             # Same body whether or not login_limiter allowed it, whether or
             # not the email exists -- an attacker probing for registered
             # emails, or trying to spam one inbox with reset emails, learns
@@ -719,6 +723,10 @@ class App:
             # see the maintainer's local notes).
             if not login_limiter.allow(f"admin:{_client_ip(environ)}"):
                 error = "Too many attempts -- try again later."
+                # WARNING, and the IP itself (not personal guest data, and
+                # already visible in nginx's own access log) -- counted by
+                # the watchdog (app/watchdog.py).
+                log.warning("rate limit blocked: admin login from %s", _client_ip(environ))
             elif verify_admin_password(password, self.settings.admin_password_hash):
                 sid = _new_session({"kind": "admin"})
                 return "302 Found", [("Location", "/admin"), ("Set-Cookie", _session_cookie_header(sid))], ""

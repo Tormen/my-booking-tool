@@ -98,6 +98,37 @@ erasure_pepper_file = "/etc/my-booking/secrets/erasure_pepper"
 # right ownership, so no extra setup is needed if you use it as-is.
 # log_file = "/var/lib/my-booking/my-booking.log"
 
+[watchdog]
+# Periodic health check (systemd/my-booking-watchdog.timer, default every
+# 15 min) that emails admin_email once per run if anything below crosses
+# its threshold in the last window_minutes -- silent otherwise. This is a
+# coarse, sitewide heads-up, NOT a replacement for fail2ban or the app's
+# own per-key login rate limiting (both already exist -- see README.md
+# "Logs & debugging" and "Watchdog"). Set enabled = false to disable
+# entirely (the timer still runs but every check becomes a no-op).
+enabled = true
+window_minutes = 15
+# Path to nginx's access log (combined format). Leave commented out (the
+# default) to skip the nginx-burst check entirely.
+# nginx_access_log = "/var/log/nginx/access.log"
+# Alert if one IP makes at least this many requests within the window.
+nginx_request_threshold = 200
+# Alert if one IP's 4xx/5xx share of its own requests is at least this
+# fraction (0.0-1.0), once it's made enough requests to be meaningful.
+nginx_error_rate_threshold = 0.5
+# Alert if at least this many pending, unconfirmed signups (see
+# storage.STATUS_PENDING_CONFIRMATION) were created within the window --
+# the shape a capacity-grab attempt would take.
+pending_signup_threshold = 10
+# Alert if the app's own log shows at least this many rate-limiter
+# rejections (any login/reset key combined) within the window.
+rate_limit_block_threshold = 5
+# Alert if sshd logged at least this many failed-password attempts
+# (any source) within the window -- cruder and sitewide compared to
+# fail2ban's own per-IP ban threshold; an early heads-up, not a
+# substitute for it.
+sshd_failure_threshold = 5
+
 # REPLACE-ME: the [[course]] blocks below are placeholder examples so this
 # file parses and `my-bt`/the app run out of the box -- replace shortname/
 # title/location/weekday/start_time/duration_minutes/capacity/audience/

@@ -128,7 +128,7 @@ def check_systemd() -> list[Check]:
     if not shutil.which("systemctl"):
         return [("systemd", "warn", "systemctl not found -- skipping (not on the target server?)")]
     checks: list[Check] = []
-    for unit in ("my-booking.service", "my-booking-retention.timer"):
+    for unit in ("my-booking.service", "my-booking-retention.timer", "my-booking-watchdog.timer"):
         enabled = subprocess.run(
             ["systemctl", "is-enabled", unit], capture_output=True, text=True
         ).stdout.strip()

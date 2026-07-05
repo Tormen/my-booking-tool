@@ -138,6 +138,52 @@ class Settings:
     # None (the default) means this check/action is skipped entirely.
     static_site_dir: str | None = None
 
+    # --- Watchdog (app/watchdog.py) -- see README.md "Watchdog" and
+    # [watchdog] in settings.toml. A periodic (systemd-timer-driven) health
+    # check, NOT a replacement for fail2ban or fine-grained per-key rate
+    # limiting (both already exist -- see RateLimiter in app/security.py and
+    # README.md "Logs & debugging"). It looks back over the last
+    # watchdog_window_minutes each run and emails admin_email once if
+    # anything crosses a threshold; silent otherwise.
+    watchdog_enabled: bool = True
+    # How far back each run looks. Should match (or be a bit longer than)
+    # the systemd timer's own interval (systemd/my-booking-watchdog.timer),
+    # or a burst could fall in the gap between two runs and never get
+    # counted by either.
+    watchdog_window_minutes: int = 15
+    # Path to nginx's access log (combined format). None (the default)
+    # disables the nginx-burst check entirely -- e.g. if nginx logs
+    # somewhere non-standard, or you'd rather rely on fail2ban alone for
+    # that layer.
+    watchdog_nginx_access_log: str | None = None
+    # Alert if a single IP makes at least this many requests within the
+    # window -- a crude scraping/DoS-ish signal, not a hard limit (nginx
+    # itself isn't told to block anything; this only emails you).
+    watchdog_nginx_request_threshold: int = 200
+    # Alert if a single IP's 4xx/5xx share of its own requests within the
+    # window is at least this fraction (0.0-1.0) -- only evaluated once an
+    # IP has made enough requests to be meaningful (see
+    # _MIN_REQUESTS_FOR_ERROR_RATE in app/watchdog.py), so one stray 404
+    # doesn't trigger anything.
+    watchdog_nginx_error_rate_threshold: float = 0.5
+    # Alert if at least this many pending_confirmation registrations (see
+    # storage.STATUS_PENDING_CONFIRMATION) were created within the window --
+    # a burst of brand-new, unconfirmed signups is the shape a
+    # capacity-grab attempt would take (a real confirmed booking can never
+    # trigger this, only the pending ones).
+    watchdog_pending_signup_threshold: int = 10
+    # Alert if the app's own log shows at least this many rate-limiter
+    # rejections (guest/admin login, password reset -- see
+    # webapp.py::login_limiter) within the window, across all keys
+    # combined -- a spike here means someone is hammering logins broadly,
+    # not just one account.
+    watchdog_rate_limit_block_threshold: int = 5
+    # Alert if sshd logged at least this many failed-password attempts
+    # (any source, any account) within the window -- deliberately a much
+    # cruder, sitewide signal than fail2ban's own per-IP ban threshold --
+    # this is an early heads-up, not a substitute for it.
+    watchdog_sshd_failure_threshold: int = 5
+
     def course(self, shortname: str) -> Course | None:
         for c in self.courses:
             if c.shortname == shortname:
@@ -193,6 +239,7 @@ def load_settings(toml_path: str | Path) -> Settings:
     defaults = raw.get("defaults", {})
     privacy = raw.get("privacy", {})
     logging_cfg = raw.get("logging", {})
+    watchdog = raw.get("watchdog", {})
 
     courses = tuple(
         Course(
@@ -244,4 +291,12 @@ def load_settings(toml_path: str | Path) -> Settings:
         erasure_pepper=bytes.fromhex(_read_secret(privacy["erasure_pepper_file"])),
         courses=courses,
         log_file=(logging_cfg.get("log_file") or None),
+        watchdog_enabled=bool(watchdog.get("enabled", True)),
+        watchdog_window_minutes=int(watchdog.get("window_minutes", 15)),
+        watchdog_nginx_access_log=(watchdog.get("nginx_access_log") or None),
+        watchdog_nginx_request_threshold=int(watchdog.get("nginx_request_threshold", 200)),
+        watchdog_nginx_error_rate_threshold=float(watchdog.get("nginx_error_rate_threshold", 0.5)),
+        watchdog_pending_signup_threshold=int(watchdog.get("pending_signup_threshold", 10)),
+        watchdog_rate_limit_block_threshold=int(watchdog.get("rate_limit_block_threshold", 5)),
+        watchdog_sshd_failure_threshold=int(watchdog.get("sshd_failure_threshold", 5)),
     )

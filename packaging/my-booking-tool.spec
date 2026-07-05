@@ -76,6 +76,8 @@ install -d %{buildroot}%{_unitdir}
 install -m 644 systemd/my-booking.service %{buildroot}%{_unitdir}/
 install -m 644 systemd/my-booking-retention.service %{buildroot}%{_unitdir}/
 install -m 644 systemd/my-booking-retention.timer %{buildroot}%{_unitdir}/
+install -m 644 systemd/my-booking-watchdog.service %{buildroot}%{_unitdir}/
+install -m 644 systemd/my-booking-watchdog.timer %{buildroot}%{_unitdir}/
 
 install -d %{buildroot}/opt/my-booking
 install -m 644 settings.toml %{buildroot}/opt/my-booking/settings.toml
@@ -193,7 +195,7 @@ exit 0
 
 %preun
 if [ "$1" = "0" ]; then
-  systemctl disable --now my-booking.service my-booking-retention.timer 2>/dev/null || true
+  systemctl disable --now my-booking.service my-booking-retention.timer my-booking-watchdog.timer 2>/dev/null || true
 fi
 exit 0
 
@@ -218,6 +220,8 @@ exit 0
 %{_unitdir}/my-booking.service
 %{_unitdir}/my-booking-retention.service
 %{_unitdir}/my-booking-retention.timer
+%{_unitdir}/my-booking-watchdog.service
+%{_unitdir}/my-booking-watchdog.timer
 %license %{_docdir}/%{name}/LICENSE
 %doc %{_docdir}/%{name}/README.md
 %doc %{_docdir}/%{name}/site/index.html

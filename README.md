@@ -114,7 +114,8 @@ scripts/
 packaging/
   my-booking-tool.spec      RPM spec
 
-systemd/                    my-booking.service, my-booking-retention.{service,timer}
+systemd/                    my-booking.service, my-booking-retention.{service,timer},
+                            my-booking-watchdog.{service,timer}
 nginx/                      my-booking.conf -- location blocks for your vhost
 .github/workflows/          CI: runs the test suite on push/PR
 
@@ -210,7 +211,7 @@ full detail, for reference:
    `/usr/share/my-booking-tool/my-booking.conf.example` to your existing
    nginx vhost config, then `nginx -t && systemctl reload nginx`.
 4. `sudo usermod -aG my-booking <your-login>` so `my-bt` works without sudo.
-5. `sudo systemctl enable --now my-booking.service my-booking-retention.timer`
+5. `sudo systemctl enable --now my-booking.service my-booking-retention.timer my-booking-watchdog.timer`
 6. If SELinux is enforcing (default on Fedora -- check `getenforce`):
    `sudo setsebool -P httpd_can_network_connect on`. Without this, nginx
    (which runs as the confined `httpd_t` domain) is blocked from
@@ -307,8 +308,8 @@ something seems off, or after any install/reinstall:
 - The data directory exists and is writable.
 - The configured log file (if any) is writable.
 - Your login is in the `my-booking` group.
-- `my-booking.service` and `my-booking-retention.timer`: enabled and
-  active.
+- `my-booking.service`, `my-booking-retention.timer`, and
+  `my-booking-watchdog.timer`: enabled and active.
 - SELinux: enforcing or not, and if enforcing, whether
   `httpd_can_network_connect` is on (see the SELinux note above).
 - `rpm -V my-booking-tool`: report-only integrity check across every file
@@ -382,6 +383,7 @@ step by step and have `my-bt` perform what it safely can:
 ```
 journalctl -u my-booking.service              # the web app
 journalctl -u my-booking-retention.service    # the nightly retention job
+journalctl -u my-booking-watchdog.service     # the periodic watchdog run (see "Watchdog" below)
 journalctl -u my-booking.service -f           # follow live
 journalctl -u my-booking.service --since "1 hour ago"
 ```
@@ -390,8 +392,9 @@ By default this is quiet -- routine operation isn't logged -- but real
 problems are never silenced: an unhandled exception anywhere in a request
 always logs at ERROR with the full traceback, and a few other
 always-worth-seeing events (the nightly retention summary, a guest
-self-erasing their account via `/my`) log at WARNING. Both levels show up
-with no extra configuration.
+self-erasing their account via `/my`, a rate-limiter rejection on
+login/reset, each watchdog run's outcome) log at WARNING. Both levels show
+up with no extra configuration.
 
 **Verbose mode:** set `MY_BOOKING_DEBUG=1` for full tracing -- every
 request (method + path only, never form data/cookies), every CalDAV call
@@ -455,7 +458,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-220 tests covering slot generation (including DST via `zoneinfo`, and that
+243 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -479,7 +482,11 @@ prompting, running external commands, and the CalDAV connection itself, is
 a fake, so these don't need root/systemd/rpm/a real tty/network), and the
 real-file-vs-generic-.example resolution used by the build/install scripts
 (`test_render_site_script.py` -- explicitly asserts a real file is never
-modified, deleted, or replaced by its `.example` counterpart).
+modified, deleted, or replaced by its `.example` counterpart), and the
+watchdog's four independent checks plus its single-combined-email
+behavior (`test_watchdog.py` -- every check is a pure function over
+already-read lines/rows, so none of it needs a real nginx log file,
+journald, or filesystem).
 
 ## GDPR notes
 
@@ -706,6 +713,44 @@ by the nightly retention job after `pending_confirmation_hours` (default
 48, `[defaults]` in `settings.toml`) -- independent of, and much sooner
 than, `retention_months`/`canceled_retention_months` below, since a
 pending row never held a real booking in the first place.
+
+## Watchdog (`[watchdog]` in `settings.toml`)
+
+A periodic health check (`systemd/my-booking-watchdog.timer`, every 15 min
+by default -- see `my-bt status`/`setup`'s systemd check, which now covers
+this timer alongside the app service and the retention timer) that emails
+`admin_email` once per run if anything below crosses its threshold in the
+last `window_minutes`; completely silent otherwise. This is deliberately a
+coarse, sitewide, periodic signal -- **not** a replacement for either of
+two finer-grained defenses this project already has: the per-key
+`RateLimiter` (see "Logs & debugging" above) already blocks/slows a single
+attacker in real time, and fail2ban (recommended, configured outside this
+repo) already bans a single abusive IP outright. The watchdog only notices
+the aggregate pattern afterwards, as a heads-up.
+
+Four independent signals, each optional:
+
+- **nginx request bursts**: one IP making at least `nginx_request_threshold`
+  requests, or with a 4xx/5xx share of at least `nginx_error_rate_threshold`
+  (only evaluated once that IP has made enough requests to be meaningful),
+  within the window. Disabled entirely unless `nginx_access_log` is set.
+- **Booking-tool abuse**: at least `pending_signup_threshold` brand-new
+  pending_confirmation registrations (see "Account confirmation" above)
+  created within the window -- the shape a capacity-grab attempt against
+  the booking page would take, since a real confirmed booking never
+  produces this signal.
+- **Rate-limiter blocks**: at least `rate_limit_block_threshold`
+  login/reset rejections (any key combined) logged by the app within the
+  window.
+- **sshd failures**: at least `sshd_failure_threshold` failed-password
+  attempts (any source, sitewide) within the window, read via `journalctl
+  -u sshd` -- deliberately cruder than fail2ban's own per-IP ban
+  threshold; an early heads-up, not a substitute for it.
+
+Set `enabled = false` to turn the whole thing off (the timer still runs,
+every check just becomes a no-op). See `settings.toml.example`'s
+`[watchdog]` section for every default value and a short explanation of
+each.
 
 ## Late-booking quorum (`min_notice_hours` / `min_required_participants`)
 

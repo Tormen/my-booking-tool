@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the my-booking-tool watchdog periodically (see [watchdog] in settings.toml)
+
+[Timer]
+# Matches [watchdog].window_minutes' default (15) -- if you change one,
+# change the other, or a burst can land in the gap between two runs and
+# never get counted by either (see app/watchdog.py's module docstring).
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

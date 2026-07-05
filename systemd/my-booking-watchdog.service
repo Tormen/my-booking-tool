@@ -1,0 +1,23 @@
+[Unit]
+Description=my-booking-tool watchdog (one-shot; triggered by the .timer)
+
+[Service]
+Type=oneshot
+User=my-booking
+Group=my-booking
+# Reads /var/log/journal via journalctl (for the sshd failed-password
+# check) -- the my-booking user has no other reason to be in this group.
+SupplementaryGroups=systemd-journal
+ExecStart=/usr/bin/python3 -m app.watchdog --settings /opt/my-booking/settings.toml --data-dir /var/lib/my-booking
+WorkingDirectory=/opt/my-booking
+Environment=PYTHONPATH=/opt/my-booking
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/my-booking /etc/my-booking /var/lib/my-booking
+# Optional -- the leading "-" means "skip silently if this path doesn't
+# exist," since [watchdog].nginx_access_log is itself optional (see
+# settings.toml.example). If your nginx logs somewhere else, add that
+# path here too, or the nginx-burst check will just find nothing to read.
+ReadOnlyPaths=-/var/log/nginx
