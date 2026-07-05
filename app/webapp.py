@@ -63,6 +63,20 @@ SESSION_TTL_SECONDS = 60 * 60 * 4
 
 login_limiter = RateLimiter(max_attempts=5, window_seconds=3600)
 
+# /my/reset is keyed by email (above) to stop one inbox from being bombed
+# with reset/confirm emails -- but that alone doesn't slow down someone
+# trying many DIFFERENT (mostly nonexistent) addresses from one source to
+# probe for registered accounts, since each fresh email string gets its
+# own untouched counter. This second, per-IP limiter (looser: 20/hour,
+# vs. 5/hour per email) closes that gap -- same idea as admin_login's
+# per-IP limiter, just a higher ceiling since a shared IP (office/family)
+# resetting several different real accounts in an hour is plausible here
+# in a way it isn't for repeated admin-password guesses. Both limiters are
+# checked/incremented before find_user_by_email is ever consulted, so
+# which one (if either) blocks a request never depends on whether the
+# submitted email actually has an account -- see my_reset()'s own comment.
+reset_ip_limiter = RateLimiter(max_attempts=20, window_seconds=3600)
+
 # 4 was too low -- NIST SP 800-63B's own minimum recommendation is 8.
 # hashlib.scrypt (see .security) has no upper length limit and no
 # forbidden-character restriction (any Unicode encodes to bytes just
@@ -1033,32 +1047,56 @@ class App:
     def my_reset(self, method: str, environ):
         """Unified "forgot password" + "resend confirmation" flow -- both
         reduce to the same thing (email a link to /my/confirm/<token>), so
-        one form/route covers both instead of two near-duplicates. Always
-        shows the exact same response regardless of whether the email is
-        registered, confirmed, or unknown -- this endpoint must never leak
-        which emails exist in the system."""
+        one form/route covers both instead of two near-duplicates. The
+        SUCCESS response is always the exact same regardless of whether
+        the email is registered, confirmed, or unknown -- this endpoint
+        must never let an attacker probing many different addresses tell
+        which ones exist.
+
+        A rate-limited response, on the other hand, is safe to show
+        distinctly (2026-07-05, prompted by the operator asking why not): both
+        login_limiter (per email) and reset_ip_limiter (per client IP,
+        see its own comment) are checked and incremented BEFORE
+        find_user_by_email is ever consulted, so whether either one
+        blocks a given request never depends on whether the submitted
+        email actually has an account -- it only depends on how many
+        times that exact string, or that IP, has hit this endpoint
+        recently. Showing "please wait" instead of silently pretending to
+        send (the old behavior) is also just more honest to a real guest
+        who's clicked the button more than once while waiting for the
+        email to arrive.
+        """
+        lockout_seconds = 0.0
         if method == "POST":
             form = self._read_form(environ)
             email = form.get("email", "").strip()
-            if login_limiter.allow(f"reset:{email.lower()}"):
+            now = time.time()
+            email_key = f"reset:{email.lower()}"
+            ip_key = f"reset-ip:{_client_ip(environ)}"
+            email_ok = login_limiter.allow(email_key, now=now)
+            ip_ok = reset_ip_limiter.allow(ip_key, now=now)
+            if email_ok and ip_ok:
                 user = self.store.find_user_by_email(email)
                 if user:
                     self._send_confirm_email(user)
-            else:
-                log.warning("rate limit blocked: password reset for %s", _masked(email))
-            # Same body whether or not login_limiter allowed it, whether or
-            # not the email exists -- an attacker probing for registered
-            # emails, or trying to spam one inbox with reset emails, learns
-            # nothing from the response either way.
-            body = (
-                "<p>If that email has an account with us, we've just sent a link to set/reset your password.</p>"
-                '<p><a href="/my">Back to login</a></p>'
+                body = (
+                    "<p>If that email has an account with us, we've just sent a link to set/reset your password.</p>"
+                    '<p><a href="/my">Back to login</a></p>'
+                )
+                return "200 OK", [("Content-Type", "text/html")], page("Check your email", body)
+            log.warning("rate limit blocked: password reset for %s", _masked(email))
+            lockout_seconds = max(
+                0.0 if email_ok else login_limiter.retry_after(email_key, now=now),
+                0.0 if ip_ok else reset_ip_limiter.retry_after(ip_key, now=now),
             )
-            return "200 OK", [("Content-Type", "text/html")], page("Check your email", body)
-        body = """<form method="post" class="card" id="reset-form">
+        reset_label = "Send me a link"
+        err_html = '<p class="err">Too many attempts -- try again later.</p>' if lockout_seconds else ""
+        body = f"""{err_html}<form method="post" class="card" id="reset-form">
           <label>Email <input class="big-input" name="email" type="email" required></label>
-          <div class="submit-row"><button type="submit" id="reset-btn">Send me a link</button></div>
-        </form>""" + _resend_cooldown_script("reset-btn", "Send me a link")
+          <div class="submit-row"><button type="submit" id="reset-btn">{esc(reset_label)}</button></div>
+        </form>""" + _resend_cooldown_script("reset-btn", reset_label)
+        if lockout_seconds:
+            body += _lockout_countdown_script(lockout_seconds, "reset-btn", reset_label)
         return "200 OK", [("Content-Type", "text/html")], page("Forgot your password?", body)
 
     def _set_password_form(self, token: str) -> str:

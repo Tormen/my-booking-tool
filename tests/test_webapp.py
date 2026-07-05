@@ -1,4 +1,5 @@
 import io
+import re
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -431,6 +432,16 @@ class BookingFlowTest(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+        # login_limiter/reset_ip_limiter (app/webapp.py) are module-level
+        # singletons shared across every test in the process. Tests here
+        # don't set an X-Forwarded-For/REMOTE_ADDR, so every my_reset()
+        # POST in this whole file shares one _client_ip() fallback key --
+        # reset it after each test so no test's rate-limit tests (or a
+        # future one added to this class) can spuriously trip depending on
+        # how many other tests already hit this endpoint earlier in the
+        # same run.
+        self.addCleanup(webapp.reset_ip_limiter.reset, "reset-ip:unknown")
+
     def _post(self, fn, args, form: dict):
         body = urlencode(form).encode()
         environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
@@ -631,6 +642,60 @@ class BookingFlowTest(unittest.TestCase):
         self._post(self.app.my_reset, (), {"email": "regular@example.org"})
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertEqual(subjects, ["Reset your example.org password"])
+
+    # -- my_reset: 2026-07-05, visible cooldown -- safe because neither
+    # limiter is ever consulted based on whether the email exists --------
+
+    def test_my_reset_repeated_same_email_shows_cooldown_on_the_form(self):
+        email = "cooldown-target@example.org"
+        self.addCleanup(webapp.login_limiter.reset, f"reset:{email}")
+        for _ in range(5):
+            _status, _headers, body = self._post(self.app.my_reset, (), {"email": email})
+            self.assertIn("Check your email", body)
+        _status, _headers, body = self._post(self.app.my_reset, (), {"email": email})
+        # NOT the (now misleading) "we sent it" page -- the form again,
+        # with the button disabled and counting down, same pattern as the
+        # login lockout (the operator, 2026-07-05: "where there is a cooldown
+        # active, it should be visible on the form with the button").
+        self.assertNotIn("Check your email", body)
+        self.assertIn("Too many attempts", body)
+        self.assertIn('id="reset-btn"', body)
+        self.assertIn("btn.disabled = true;", body)
+
+    def test_my_reset_cooldown_response_identical_for_real_vs_fake_email(self):
+        # The core anti-enumeration property must survive adding a visible
+        # cooldown: both login_limiter and reset_ip_limiter are checked
+        # BEFORE find_user_by_email is ever consulted, so which one blocks
+        # a request never depends on whether the submitted email actually
+        # has an account -- verified here by checking the two cooldown
+        # pages render identically (modulo the countdown number itself).
+        real_user = self.store.upsert_user_for_booking("realaccount@example.org", "Real")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(real_user.user_id, h, s)
+        for email in ("realaccount@example.org", "fakeaccount@example.org"):
+            self.addCleanup(webapp.login_limiter.reset, f"reset:{email}")
+            for _ in range(5):
+                self._post(self.app.my_reset, (), {"email": email})
+        _s1, _h1, body_real = self._post(self.app.my_reset, (), {"email": "realaccount@example.org"})
+        _s2, _h2, body_fake = self._post(self.app.my_reset, (), {"email": "fakeaccount@example.org"})
+        strip_seconds = lambda b: re.sub(r"\(\d+s\)", "(Ns)", b)
+        self.assertEqual(strip_seconds(body_real), strip_seconds(body_fake))
+        self.assertIn("Too many attempts", body_real)
+
+    def test_my_reset_ip_wide_limiter_trips_after_many_different_emails(self):
+        # Defense-in-depth against enumeration: the per-email limiter alone
+        # never slows down someone trying many DIFFERENT (mostly fake)
+        # addresses, since each fresh string gets its own untouched
+        # counter -- this is the gap the operator asked about ("know which client
+        # IP triggered this and have a cooldown by IP").
+        for k in [f"reset:probe{i}@example.org" for i in range(21)]:
+            self.addCleanup(webapp.login_limiter.reset, k)
+        for i in range(20):
+            _status, _headers, body = self._post(self.app.my_reset, (), {"email": f"probe{i}@example.org"})
+            self.assertIn("Check your email", body)
+        _status, _headers, body = self._post(self.app.my_reset, (), {"email": "probe20@example.org"})
+        self.assertIn("Too many attempts", body)
+        self.assertIn('id="reset-btn"', body)
 
     # -- /my password login --------------------------------------------------
 
