@@ -85,60 +85,57 @@ entirely on you (see the disclaimer above).
 ## Layout
 
 ```
-app/                  the application (stdlib-only Python package)
-  config.py             settings.toml + secrets loader
-  storage.py             CSV read/write, locking, right-to-erasure archival
-  slots.py                weekday/time occurrence math + waitlist-aware capacity
-  caldav_client.py         minimal CalDAV client (PROPFIND/REPORT/PUT/DELETE)
+app/                        the application (stdlib-only Python package)
+  config.py                 settings.toml + secrets loader
+  storage.py                CSV read/write, locking, right-to-erasure archival
+  slots.py                  weekday/time occurrence math + waitlist-aware capacity
+  caldav_client.py          minimal CalDAV client (PROPFIND/REPORT/PUT/DELETE)
   calendar_sync.py          keeps one VEVENT per course occurrence in sync
-  ics.py                     minimal iCalendar build/parse
-  emailer.py                  SMTP client
-  security.py                  tokens, PIN/password hashing, erasure hashing, rate limiting
-  erasure.py                    GDPR Art. 17 orchestration
-  retention.py                   GDPR Art. 5(1)(e) purge job (the "cronjob")
-  site_render.py                  renders site/privacy.html from its .tmpl +
-                                   settings.toml -- used at both build time
-                                   (scripts/render-site.py) and run time
-                                   (`my-bt setup -i`, see "Static-site pages")
-  cli_checks.py                    the health-check functions behind `my-bt
-                                    status`/`setup` (secrets, .rpmnew,
-                                    group/systemd/SELinux, rpm -V, static-site
-                                    drift/compliance) -- pure, importable, unit-tested
-  cli_setup.py                      `my-bt setup`/`setup --interactive`'s
-                                     report-building and walkthrough logic,
-                                     with every side effect (prompting,
-                                     reading a secret, running a command,
-                                     checking for root) injectable for tests
-  version.py                        `my-bt --version` (package version + git commit)
-  webapp.py                       wsgiref WSGI app / routes
-  serve.py                         entrypoint (python3 -m app.serve)
-tests/                 unit tests (135 tests, run with `my-bt test` or unittest)
+  ics.py                    minimal iCalendar build/parse
+  emailer.py                SMTP client
+  security.py               tokens/password hashing, erasure hashing, rate limiting
+  erasure.py                GDPR Art. 17 orchestration
+  retention.py              GDPR Art. 5(1)(e) purge job (the "cronjob")
+  site_render.py            renders site/privacy.html -- see "Static-site pages"
+  cli_checks.py             `my-bt status`/`setup` health checks -- pure, unit-tested
+  cli_setup.py              `my-bt setup`/`setup -i` report + walkthrough logic
+  version.py                `my-bt --version` (package version + git commit)
+  webapp.py                 wsgiref WSGI app / routes
+  serve.py                  entrypoint (python3 -m app.serve)
+
+tests/                      unit tests (135, run with `my-bt test` or unittest)
+
 scripts/
-  my-bt                  thin CLI wrapper (argument parsing only -- the actual
-                         status/setup logic lives in app/cli_checks.py +
-                         app/cli_setup.py, see "The `my-bt` CLI" below):
-                         query live+archived data, erase, purge, run tests,
-                         status/setup (guided health-check + post-install steps)
-  install.sh               manual/dev installer (fallback -- see "Installing" below)
+  my-bt                     thin CLI wrapper -- see "The `my-bt` CLI" below
+  install.sh                manual/dev installer (fallback -- see "Installing")
   build-rpm.sh              builds the Fedora RPM (the recommended path)
-  render-site.py             regenerates site/privacy.html from its .tmpl +
-                             settings.toml via app/site_render.py (run by
-                             build-rpm.sh automatically)
+  render-site.py            regenerates site/privacy.html (run by build-rpm.sh)
+
 packaging/
-  my-booking-tool.spec  RPM spec
-systemd/                my-booking.service, my-booking-retention.{service,timer}
-nginx/                  my-booking.conf -- location blocks to add to your existing vhost
-settings.toml.example   generic placeholder settings (tracked) -- see above
-settings.toml           YOUR real settings (gitignored) -- see above
-site/                   static-site pages
-  index.html.example      generic placeholder homepage (tracked)
-  impressum.html.example   generic placeholder legal-notice page (tracked)
+  my-booking-tool.spec      RPM spec
+
+systemd/                    my-booking.service, my-booking-retention.{service,timer}
+nginx/                      my-booking.conf -- location blocks for your vhost
+.github/workflows/          CI: runs the test suite on push/PR
+
+settings.toml.example       generic placeholder settings (tracked)
+settings.toml               YOUR real settings (gitignored -- see above)
+
+site/
+  index.html.example        generic placeholder homepage (tracked)
+  impressum.html.example    generic placeholder legal-notice page (tracked)
   privacy.html.tmpl.example generic placeholder privacy-policy template (tracked)
-  terms.html.example       generic placeholder participation-terms page (tracked)
-  index.html, impressum.html, privacy.html, privacy.html.tmpl, terms.html
-                           YOUR real pages (gitignored) -- see above
-LICENSE                 AGPLv3, full text
+  terms.html.example        generic placeholder participation-terms page (tracked)
+  index.html, impressum.html, privacy.html,
+  privacy.html.tmpl, terms.html           YOUR real pages (gitignored -- see above)
+
+LICENSE                     AGPLv3, full text
 ```
+
+`app/cli_checks.py` and `app/cli_setup.py` inject every side effect (prompting,
+reading a secret, running a command, checking for root) for testing -- see
+`tests/test_cli_setup.py`. `site_render.py` runs at both build time
+(`scripts/render-site.py`) and run time (`my-bt setup -i`).
 
 ## Installing (and reinstalling after a server reinstall)
 

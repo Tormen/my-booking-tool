@@ -110,6 +110,14 @@ echo
 echo "Built RPM:"
 echo "  $BUILT_RPM"
 echo
+echo "Run this ON THIS SAME MACHINE ($(hostname)) -- the path above only"
+echo "exists here. If your Fedora server is a *different* host than the one"
+echo "you just built on, copy the file there first, e.g.:"
+echo "  scp $BUILT_RPM youruser@your-fedora-host:/tmp/"
+echo "then run the dnf install command below on that host instead (against"
+echo "the copied path, and only if that host actually has dnf/is Fedora --"
+echo "this RPM only installs on a Fedora/RHEL-family system)."
+echo
 echo "Install / update with (same command every time -- a rebuild always"
 echo "produces a newer Release, so dnf applies it as an upgrade, restarting"
 echo "the running service automatically):"

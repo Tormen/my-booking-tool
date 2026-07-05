@@ -13,8 +13,8 @@ Release:        %{build_timestamp}%{?dist}
 Summary:        Self-hosted recurring-class booking tool
 
 License:        AGPL-3.0-only
-# REPLACE-ME: point at your own repo/site once you've published one.
-URL:            https://github.com/REPLACE-ME/my-booking-tool
+# REPLACE-ME (forks): point at your own repo/site once you've published one.
+URL:            https://github.com/Tormen/my-booking-tool
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
@@ -227,10 +227,9 @@ exit 0
 %{_datadir}/%{name}/my-booking.conf.example
 
 %changelog
-# REPLACE-ME: this generic template's changelog is intentionally
-# anonymous -- put your own name/email on entries for your own real
+# REPLACE-ME (forks): use your own name/email on entries for your own real
 # builds (this is just packaging metadata, not tracked separately from
 # this file, so it's your call each release, same as git commit
 # authorship).
-* Sat Jul 04 2026 REPLACE-ME <you@example.org> - 1.0.0-1
+* Sat Jul 04 2026 Tormen <tormen@mail.ch> - 1.0.0-1
 - Initial package
