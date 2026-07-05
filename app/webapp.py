@@ -36,6 +36,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from http import cookies
 from urllib.parse import parse_qs, urlparse
@@ -46,11 +47,13 @@ from .config import Settings
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
 from .security import (
-    RateLimiter, hash_secret, hash_token, new_token, sanitize_csv_field,
+    RateLimiter, hash_secret, hash_token, is_erased_email, new_token, sanitize_csv_field,
     tokens_match, verify_admin_password, verify_secret,
 )
 from .slots import build_occurrences
-from .storage import STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store, now_iso
+from .storage import (
+    STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Registration, Store, User, now_iso,
+)
 from .templates import esc, page
 
 log = logging.getLogger("my_booking.webapp")
@@ -229,6 +232,102 @@ def _lockout_countdown_script(seconds: float, button_id: str, label: str) -> str
       tick();
     }})();
     </script>"""
+
+
+# Shared by every page with a confirm-dialog (<dialog class="card">) button:
+# /my's Cancel + Delete-account (see my()), and /admin overview's Cancel
+# (see admin_overview()) -- pulled out into one constant so both can never
+# drift apart the way the booking-confirmed and promoted-from-waitlist
+# emails briefly did earlier the same day (see _booking_details_text()).
+# No per-page interpolation needed (button/dialog pairing is entirely
+# data-attribute driven), so this is a plain string, not an f-string.
+_DIALOG_WIRING_SCRIPT = """<script>
+(function() {
+  document.querySelectorAll(".confirm-dialog-btn").forEach(function(btn) {
+    var dlg = document.getElementById(btn.dataset.dialog);
+    // No <dialog>/showModal support (old browser) or JS somehow only
+    // half-loaded: leave the button/form alone -- for Cancel that's a
+    // plain immediate submit (as before this feature existed), for
+    // Delete that's the native onsubmit="confirm(...)" already on the
+    // form, still a real (if plainer) confirmation either way.
+    if (!dlg || typeof dlg.showModal !== "function") return;
+    // The dialog now handles confirmation -- clear any
+    // onsubmit="confirm(...)" on the form so the guest isn't asked
+    // twice (once by the dialog, once natively) when the dialog's own
+    // submit button actually submits it.
+    if (btn.form) btn.form.onsubmit = null;
+    btn.addEventListener("click", function(ev) {
+      ev.preventDefault();
+      dlg.showModal();
+    });
+  });
+  document.querySelectorAll(".dialog-close-btn").forEach(function(btn) {
+    btn.addEventListener("click", function() {
+      var dlg = document.getElementById(btn.dataset.dialog);
+      if (dlg) dlg.close();
+    });
+  });
+})();
+</script>"""
+
+
+def _sortable_filterable_table_script(table_id: str) -> str:
+    """Client-side filter (substring, across every cell) + click-a-header-
+    to-sort for a <table id="{table_id}"> with a <thead>/<tbody> and a
+    sibling <input type="search" id="{table_id}-filter">. Standing default
+    for every table in the app now (2026-07-05, see SOLUTION-DESIGN.md) --
+    both /my's bookings table and /admin's overview table use this, so a
+    future third table gets the same behavior for free rather than a
+    one-off. Deliberately vanilla JS/no library: these tables are small
+    (one operator's own bookings, or one small deployment's admin view),
+    so a full data-grid dependency would be more weight than the problem
+    needs. Sorting is index-based (numeric-aware, falls back to a
+    locale-aware string compare) -- every row in a given table must have
+    the same number of cells as the header for column indexes to line up
+    (see admin_overview()'s comment on why an erased row's hash goes in
+    the Email cell rather than a colspan, specifically because of this)."""
+    return f"""<script>
+(function() {{
+  var table = document.getElementById({json.dumps(table_id)});
+  if (!table || !table.tHead || !table.tBodies.length) return;
+  var tbody = table.tBodies[0];
+  var headerCells = Array.prototype.slice.call(table.tHead.rows[0].cells);
+  var rows = Array.prototype.slice.call(tbody.rows);
+  headerCells.forEach(function(th, idx) {{
+    th.style.cursor = "pointer";
+    var indicator = th.querySelector(".sort-indicator");
+    th.addEventListener("click", function() {{
+      var dir = th.dataset.dir === "asc" ? "desc" : "asc";
+      headerCells.forEach(function(h) {{
+        h.dataset.dir = "";
+        var i = h.querySelector(".sort-indicator");
+        if (i) i.textContent = "";
+      }});
+      th.dataset.dir = dir;
+      if (indicator) indicator.textContent = dir === "asc" ? " ▲" : " ▼";
+      var sorted = rows.slice().sort(function(a, b) {{
+        var av = a.cells[idx] ? a.cells[idx].textContent.trim() : "";
+        var bv = b.cells[idx] ? b.cells[idx].textContent.trim() : "";
+        var an = parseFloat(av), bn = parseFloat(bv);
+        var bothNumeric = av !== "" && bv !== "" && !isNaN(an) && !isNaN(bn)
+          && /^-?[0-9.]+$/.test(av) && /^-?[0-9.]+$/.test(bv);
+        var cmp = bothNumeric ? (an - bn) : av.localeCompare(bv, undefined, {{sensitivity: "base"}});
+        return dir === "asc" ? cmp : -cmp;
+      }});
+      sorted.forEach(function(r) {{ tbody.appendChild(r); }});
+    }});
+  }});
+  var filterInput = document.getElementById({json.dumps(table_id + "-filter")});
+  if (filterInput) {{
+    filterInput.addEventListener("input", function() {{
+      var q = filterInput.value.trim().toLowerCase();
+      rows.forEach(function(r) {{
+        r.style.display = (!q || r.textContent.toLowerCase().indexOf(q) !== -1) ? "" : "none";
+      }});
+    }});
+  }}
+}})();
+</script>"""
 
 
 _HTML_LI_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.IGNORECASE | re.DOTALL)
@@ -500,6 +599,40 @@ class App:
         description_text = _html_to_text(course.description) if course.description else ""
         return details + (f"\n{description_text}\n" if description_text else "")
 
+    def _send_cancellation_emails(
+        self, course, occ_date: str, user, canceled_by: str, message: str
+    ) -> None:
+        """Every cancellation -- whichever of the three paths triggers it
+        (the guest's one-click link from their booking email, the guest's
+        own /my dialog, or the host's /admin dialog) -- emails BOTH the
+        participant and the admin, always, using the same What/When/Where
+        layout as every other booking email (_booking_details_text()).
+        This is now the standing default for any email about one specific
+        booking (see SOLUTION-DESIGN.md's comment log, 2026-07-05).
+
+        Notifying both sides regardless of who acted isn't just politeness:
+        it's the only way either side would notice a cancellation made on
+        their behalf without their knowledge -- e.g. someone getting into a
+        guest's /my account, or into /admin, and canceling something that
+        isn't theirs to cancel. `canceled_by` is "guest" or "host", same
+        vocabulary as Store.cancel()'s own parameter.
+        """
+        details = self._booking_details_text(course, occ_date)
+        subject = f"Canceled: {course.title} on {occ_date}"
+        reason_block = f"\nMessage: {message}\n" if message else ""
+        if user:
+            participant_who = "You" if canceled_by == "guest" else "The host"
+            send_mail(
+                self.settings, user.email, subject,
+                f"{participant_who} canceled this booking:\n\n{details}\n{reason_block}"
+                f"Manage your bookings any time: {self.settings.base_url}/my\n",
+            )
+        admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
+        send_mail(
+            self.settings, self.settings.admin_email, subject,
+            f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}",
+        )
+
     def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
         """The guest-facing booked/waitlisted email + admin notification --
         shared by the instant-booking path above and by my_confirm()'s
@@ -751,16 +884,24 @@ class App:
             return "404 Not Found", [("Content-Type", "text/html")], page("Not found", "<p>This link is invalid or already used.</p>")
         course = self.settings.course(reg.course_shortname)
         if method == "POST":
-            self.store.cancel(reg.registration_id, canceled_by="guest")
+            form = self._read_form(environ)
+            message = sanitize_csv_field(form.get("message", "").strip())
+            self.store.cancel(reg.registration_id, canceled_by="guest", host_message=message)
             self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
-            send_mail(
-                self.settings, self.settings.admin_email,
-                f"Cancellation: {course.title} on {reg.occurrence_date}",
-                "Canceled by guest via their email link.",
-            )
+            if course:
+                user = self.store.find_user_by_id(reg.user_id)
+                # Both sides notified, same as every other cancellation path
+                # (see _send_cancellation_emails) -- this guest already knows
+                # they just did this, but the email is still their own copy
+                # of "here's what got canceled and when", same as the other
+                # two paths get.
+                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Your booking has been canceled.</p>")
         body = f"""<p>Cancel your booking for <b>{esc(course.title)}</b> on {esc(reg.occurrence_date)}?</p>
-        <form method="post"><button type="submit">Yes, cancel it</button></form>"""
+        <form method="post" class="card">
+          <label>Optional reason <textarea name="message" rows="2" class="big-input"></textarea></label>
+          <div class="submit-row"><button type="submit">Yes, cancel it</button></div>
+        </form>"""
         return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
 
     # -- /my (guest self-service) --------------------------------------------
@@ -783,7 +924,13 @@ class App:
                 time_range = course.time_range_label() if course else ""
                 location = course.location if course else ""
                 cancel_id = f"cancel-{esc(r.registration_id)}"
-                disabled = r.status != STATUS_CONFIRMED
+                # Confirmed or waitlisted are the only cancelable states --
+                # this used to only allow CONFIRMED, which silently made it
+                # impossible to leave the waitlist from this page (the
+                # emailed cancel link and /admin could always do both;
+                # caught 2026-07-05 while touching this code for the
+                # cancel-dialog/both-sides-notification consistency pass).
+                disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED)
                 # A <dialog> (real pop-up) asking for an optional reason,
                 # opened by intercepting the Cancel button's click in JS
                 # below -- progressive enhancement: without JS (or on a
@@ -813,10 +960,21 @@ class App:
                 )
 
             rows = "".join(_row(r) for r in regs)
+            table_id = "my-bookings-table"
             body = f"""
-            <table border="1" cellpadding="6">
-              <tr><th>Course</th><th>Date</th><th>Time</th><th>Location</th><th>Status</th><th>Actions</th></tr>
-              {rows}
+            <div class="table-tools">
+              <input type="search" id="{table_id}-filter" class="big-input" placeholder="Filter bookings...">
+            </div>
+            <table id="{table_id}" border="1" cellpadding="6">
+              <thead><tr>
+                <th>Course<span class="sort-indicator"></span></th>
+                <th>Date<span class="sort-indicator"></span></th>
+                <th>Time<span class="sort-indicator"></span></th>
+                <th>Location<span class="sort-indicator"></span></th>
+                <th>Status<span class="sort-indicator"></span></th>
+                <th>Actions<span class="sort-indicator"></span></th>
+              </tr></thead>
+              <tbody>{rows}</tbody>
             </table>
             <div class="submit-row">
               <form method="post" action="/my/logout" style="display:inline">
@@ -834,36 +992,7 @@ class App:
                 <button type="submit" form="delete-account-form">Yes, delete everything</button>
                 <button type="button" class="dialog-close-btn" data-dialog="delete-account-dialog">Never mind</button>
               </div>
-            </dialog>
-            <script>
-            (function() {{
-              document.querySelectorAll(".confirm-dialog-btn").forEach(function(btn) {{
-                var dlg = document.getElementById(btn.dataset.dialog);
-                // No <dialog>/showModal support (old browser) or JS
-                // somehow only half-loaded: leave the button/form alone --
-                // for Cancel that's a plain immediate submit (as before
-                // this feature existed), for Delete that's the native
-                // onsubmit="confirm(...)" already on the form, still a
-                // real (if plainer) confirmation either way.
-                if (!dlg || typeof dlg.showModal !== "function") return;
-                // The dialog now handles confirmation -- clear any
-                // onsubmit="confirm(...)" on the form so the guest isn't
-                // asked twice (once by the dialog, once natively) when the
-                // dialog's own submit button actually submits it.
-                if (btn.form) btn.form.onsubmit = null;
-                btn.addEventListener("click", function(ev) {{
-                  ev.preventDefault();
-                  dlg.showModal();
-                }});
-              }});
-              document.querySelectorAll(".dialog-close-btn").forEach(function(btn) {{
-                btn.addEventListener("click", function() {{
-                  var dlg = document.getElementById(btn.dataset.dialog);
-                  if (dlg) dlg.close();
-                }});
-              }});
-            }})();
-            </script>"""
+            </dialog>""" + _sortable_filterable_table_script(table_id) + _DIALOG_WIRING_SCRIPT
             return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
 
         error = None
@@ -1037,18 +1166,14 @@ class App:
             message = sanitize_csv_field(form.get("message", "").strip())
             self.store.cancel(registration_id, canceled_by="guest", host_message=message)
             self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
-            # Same admin-notification pattern as guest_cancel() (the other
-            # guest-initiated cancel path, from the email link) -- this one
-            # just had no admin notification at all before, an existing gap
-            # closed here while already touching this code for the reason field.
             course = self.settings.course(reg.course_shortname)
             if course:
-                send_mail(
-                    self.settings, self.settings.admin_email,
-                    f"Cancellation: {course.title} on {reg.occurrence_date}",
-                    "Canceled by guest via their bookings page."
-                    + (f"\n\nReason: {message}" if message else ""),
-                )
+                user = self.store.find_user_by_id(session["user_id"])
+                # Both sides notified, always -- see _send_cancellation_emails
+                # (standing default now, SOLUTION-DESIGN.md). This is what
+                # lets the real account owner notice a cancellation made by
+                # someone who got into their /my session but isn't them.
+                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
         return "302 Found", [("Location", "/my")], ""
 
     def my_logout(self, method: str, environ):
@@ -1116,32 +1241,100 @@ class App:
             return "302 Found", [("Location", "/admin/login")], ""
         show_past = "past=1" in environ.get("QUERY_STRING", "")
         today = datetime.now(timezone.utc).date()
-        regs = self.store.all_registrations()
-        if not show_past:
-            regs = [r for r in regs if date.fromisoformat(r.occurrence_date) >= today]
+        # scope="all" (not all_registrations()/find_user_by_id(), which are
+        # live-only) so an erased guest's past registrations still show up
+        # here instead of silently vanishing -- their user row moved to the
+        # archive with a hashed email (Store.erase_user), and so did every
+        # one of their registration rows, regardless of status. See
+        # security.hash_email_for_erasure/is_erased_email.
+        all_regs = [Registration(**r) for r in self.store.read_registrations(scope="all")]
+        users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
+        # "Times booked" has always counted every registration ever made by
+        # this user_id, live or since-canceled -- computed here from the
+        # same all-scope set rather than Store.times_registered() (which
+        # only reads the live CSV), so an erased user's historical count
+        # doesn't drop to 0 just because their rows moved to the archive.
+        times_by_user = Counter(r.user_id for r in all_regs)
+        regs = all_regs if show_past else [r for r in all_regs if date.fromisoformat(r.occurrence_date) >= today]
         regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname))
         rows = []
         for r in regs:
-            user = self.store.find_user_by_id(r.user_id)
-            times = self.store.times_registered(r.user_id) if user else 0
+            user = users_by_id.get(r.user_id)
+            erased = user is not None and is_erased_email(user.email)
             # course_shortname is the CSV's own internal key -- show the
             # human title here too (same reasoning as the guest "My
             # bookings" table), falling back to the shortname only if the
             # course was since removed from settings.toml.
             course = self.settings.course(r.course_shortname)
             title = course.title if course else r.course_shortname
+            if erased:
+                # The hash (Store.erase_user's replacement for the real
+                # email, e.g. "erased:<64 hex chars>") is long -- ~70
+                # characters. A colspan across Name+Email would fit it more
+                # comfortably, but it would also give that one row fewer
+                # <td> cells than every other row, which breaks the
+                # sortable table script's index-based column lookup
+                # (_sortable_filterable_table_script) for that row. Putting
+                # it in the Email cell alone (wrapped via .hash-cell) keeps
+                # every row's cell count identical -- correctness over the
+                # extra width.
+                name_cell = f"<td>{esc(user.name)}</td>"  # "[erased]", set by Store.erase_user
+                email_cell = f'<td class="hash-cell">{esc(user.email)}</td>'
+            elif user:
+                name_cell = f"<td>{esc(user.name)}</td>"
+                email_cell = f"<td>{esc(user.email)}</td>"
+            else:
+                name_cell = "<td>(unknown)</td>"
+                email_cell = "<td>(unknown)</td>"
+            times = times_by_user.get(r.user_id, 0)
+            if user and not erased:
+                cancel_id = f"admin-cancel-{esc(r.registration_id)}"
+                disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED)
+                actions = (
+                    f'<form method="post" action="/admin/cancel/{esc(r.registration_id)}" id="{cancel_id}-form">'
+                    f'<button type="submit" class="confirm-dialog-btn" data-dialog="{cancel_id}-dialog" '
+                    f'{"disabled" if disabled else ""}>Cancel</button>'
+                    "</form>"
+                    f'<dialog id="{cancel_id}-dialog" class="card">'
+                    f"<p><b>Are you sure?</b></p>"
+                    f"<p>Cancel <b>{esc(user.name)}</b>'s booking for <b>{esc(title)}</b> "
+                    f"on {esc(r.occurrence_date)}? They'll be notified by email.</p>"
+                    f'<label>Optional message to them <textarea name="message" rows="2" class="big-input" '
+                    f'form="{cancel_id}-form"></textarea></label>'
+                    '<div class="submit-row">'
+                    f'<button type="submit" form="{cancel_id}-form">Confirm cancellation</button> '
+                    f'<button type="button" class="dialog-close-btn" data-dialog="{cancel_id}-dialog">Never mind</button>'
+                    "</div></dialog>"
+                )
+            else:
+                # Archived (erased) or otherwise unresolvable registrations
+                # aren't actionable here -- find_by_id() only reads the live
+                # CSV, so admin_cancel() couldn't find one of these anyway.
+                actions = ""
             rows.append(
                 f"<tr><td>{esc(r.status)}</td><td>{esc(title)}</td>"
-                f"<td>{esc(r.occurrence_date)}</td><td>{esc(user.name if user else '(erased)')}</td>"
-                f"<td>{esc(user.email if user else '(erased)')}</td><td>{esc(r.registered_at)}</td>"
-                f"<td>{times}</td>"
-                f'<td><a href="/admin/cancel/{esc(r.registration_id)}">cancel</a></td></tr>'
+                f"<td>{esc(r.occurrence_date)}</td>{name_cell}{email_cell}"
+                f"<td>{esc(r.registered_at)}</td><td>{times}</td>"
+                f"<td>{actions}</td></tr>"
             )
         toggle = '<a href="/admin">today + future only</a>' if show_past else '<a href="/admin?past=1">include past</a>'
+        table_id = "admin-overview-table"
         body = f"""<p>{toggle}</p>
-        <table border="1" cellpadding="6">
-        <tr><th>Status</th><th>Course</th><th>Date</th><th>Name</th><th>Email</th><th>Registered</th><th>Times booked</th><th>Actions</th></tr>
-        {''.join(rows)}</table>"""
+        <div class="table-tools">
+          <input type="search" id="{table_id}-filter" class="big-input" placeholder="Filter...">
+        </div>
+        <table id="{table_id}" border="1" cellpadding="6">
+        <thead><tr>
+          <th>Status<span class="sort-indicator"></span></th>
+          <th>Course<span class="sort-indicator"></span></th>
+          <th>Date<span class="sort-indicator"></span></th>
+          <th>Name<span class="sort-indicator"></span></th>
+          <th>Email<span class="sort-indicator"></span></th>
+          <th>Registered<span class="sort-indicator"></span></th>
+          <th>Times booked<span class="sort-indicator"></span></th>
+          <th>Actions<span class="sort-indicator"></span></th>
+        </tr></thead>
+        <tbody>{''.join(rows)}</tbody></table>""" + _sortable_filterable_table_script(table_id) + _DIALOG_WIRING_SCRIPT
         return "200 OK", [("Content-Type", "text/html")], page("Admin overview", body)
 
     def admin_cancel(self, method: str, registration_id: str, environ):
@@ -1158,19 +1351,19 @@ class App:
             message = sanitize_csv_field(form.get("message", "").strip())
             self.store.cancel(registration_id, canceled_by="host", host_message=message)
             self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
-            if user:
-                send_mail(
-                    self.settings, user.email, f"Canceled: {course.title} on {reg.occurrence_date}",
-                    f"Your booking for {course.title} on {reg.occurrence_date} was canceled by the host."
-                    + (f"\n\nMessage: {message}" if message else ""),
-                )
+            if course:
+                # Both sides notified, always -- see _send_cancellation_emails
+                # (standing default now, SOLUTION-DESIGN.md). The admin's own
+                # copy is what surfaces an unexpected cancellation if someone
+                # other than you got into /admin and did this.
+                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
         body = f"""
         <p>About to cancel <b>{esc(user.name if user else '(erased)')}</b>
         ({esc(user.email if user else '(erased)')}) for
         <b>{esc(course.title)}</b> on {esc(reg.occurrence_date)}.</p>
-        <form method="post">
-          <label>Optional message to them <textarea name="message" rows="3" cols="40"></textarea></label>
-          <button type="submit">Cancel this booking</button>
+        <form method="post" class="card">
+          <label>Optional message to them <textarea name="message" rows="3" class="big-input"></textarea></label>
+          <div class="submit-row"><button type="submit">Cancel this booking</button></div>
         </form>"""
         return "200 OK", [("Content-Type", "text/html")], page("Cancel registration", body)

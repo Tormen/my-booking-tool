@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 from app import webapp
 from app.caldav_client import CalDAVClient, Response
+from app.erasure import erase_user_by_email
 from app.security import hash_secret
 from app.slots import Occurrence, build_occurrences
 from app.storage import (
@@ -707,6 +708,33 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Confirm cancellation", body)
         self.assertIn("Never mind", body)
 
+    def test_my_bookings_table_has_filter_and_sort_wired_up(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn('<table id="my-bookings-table"', body)
+        self.assertIn("<thead><tr>", body)
+        self.assertIn('<input type="search" id="my-bookings-table-filter"', body)
+        self.assertIn('getElementById("my-bookings-table")', body)
+
+    def test_my_bookings_cancel_button_enabled_for_waitlisted_row_too(self):
+        # 2026-07-05 fix: the Cancel button used to be disabled for
+        # anything but STATUS_CONFIRMED, which made it impossible to leave
+        # the waitlist from this page (the emailed cancel link and /admin
+        # could always do both) -- see the comment on `disabled` in my().
+        for i in range(2):
+            u = self.store.upsert_user_for_booking(f"waiter{i}@example.org", f"Waiter{i}")
+            h, s = hash_secret("hunter22")
+            self.store.set_password(u.user_id, h, s)
+        self._book("waiter0@example.org", name="Waiter0")  # capacity=1, fills it
+        self._book("waiter1@example.org", name="Waiter1")  # waitlisted
+        user1, environ1 = self._login_as_guest("waiter1@example.org")
+        _status, _headers, body = self.app.my("GET", environ1)
+        reg = self.store.registrations_for_user(user1.user_id)[0]
+        self.assertEqual(reg.status, STATUS_WAITLISTED)
+        cancel_id = f"cancel-{reg.registration_id}"
+        self.assertIn(f'data-dialog="{cancel_id}-dialog" >Cancel', body)  # not "disabled>Cancel"
+
     def test_my_bookings_delete_account_dialog_has_exact_requested_wording(self):
         _user, environ = self._login_as_guest("regular@example.org")
         _status, _headers, body = self.app.my("GET", environ)
@@ -738,7 +766,11 @@ class BookingFlowTest(unittest.TestCase):
         set_cookie = dict(headers)["Set-Cookie"]
         self.assertIn("Max-Age=0", set_cookie)
 
-    def test_my_cancel_captures_optional_reason_and_notifies_admin(self):
+    def test_my_cancel_captures_optional_reason_and_notifies_both_sides(self):
+        # 2026-07-05: both the participant AND the admin get notified of
+        # every cancellation now, regardless of who triggered it -- see
+        # _send_cancellation_emails(). This is what would surface someone
+        # canceling a booking from inside a /my session that isn't theirs.
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
@@ -746,22 +778,60 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": "can't make it"}, environ)
         reloaded = self.store.find_by_id(reg.registration_id)
         self.assertEqual(reloaded.status, STATUS_CANCELED_BY_GUEST)
-        admin_mail = next(b for _, s, b in self.sent_emails if s.startswith("Cancellation:"))
-        self.assertIn("Reason: can't make it", admin_mail)
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("regular@example.org", to_addrs)
+        self.assertIn("admin@example.org", to_addrs)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
+        self.assertIn("You canceled this booking:", participant_mail)
+        self.assertIn("Message: can't make it", participant_mail)
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Canceled:"))
+        self.assertIn("Regular <regular@example.org> canceled this booking:", admin_mail)
+        self.assertIn("Message: can't make it", admin_mail)
+        self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
 
-    def test_my_cancel_without_reason_omits_reason_line(self):
+    def test_my_cancel_without_reason_omits_message_line(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
         self.sent_emails.clear()
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
-        admin_mail = next(b for _, s, b in self.sent_emails if s.startswith("Cancellation:"))
-        self.assertNotIn("Reason:", admin_mail)
+        admin_mail = next(b for _, s, b in self.sent_emails if s.startswith("Canceled:"))
+        self.assertNotIn("Message:", admin_mail)
 
     def _post_with_session(self, fn, args, form: dict, environ: dict):
         body = urlencode(form).encode()
         full_environ = {**environ, "CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
         return fn("POST", *args, full_environ)
+
+    # -- /cancel/<token>: the guest's one-click link from their own email --
+
+    def test_guest_cancel_via_email_link_notifies_both_sides_with_reason(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        confirmed_body = next(b for _, s2, b in self.sent_emails if s2.startswith("Booking confirmed:"))
+        token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
+        self.sent_emails.clear()
+        self._post(self.app.guest_cancel, (token,), {"message": "car trouble"})
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("regular@example.org", to_addrs)
+        self.assertIn("admin@example.org", to_addrs)
+        participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
+        self.assertIn("You canceled this booking:", participant_mail)
+        self.assertIn("Message: car trouble", participant_mail)
+        admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
+        self.assertIn("Regular <regular@example.org> canceled this booking:", admin_mail)
+
+    def test_guest_cancel_confirm_page_has_optional_reason_field(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        confirmed_body = next(b for _, s2, b in self.sent_emails if s2.startswith("Booking confirmed:"))
+        token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
+        _status, _headers, body = self.app.guest_cancel("GET", token, {})
+        self.assertIn('<textarea name="message"', body)
 
     # -- /admin overview: same shortname-leak audit as /my's table ----------
 
@@ -773,6 +843,89 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self.app.admin_overview("GET", environ)
         self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
         self.assertNotIn("yoga-class-1", body)
+
+    def test_admin_overview_has_filter_and_sort_wired_to_the_table(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('<table id="admin-overview-table"', body)
+        self.assertIn('<thead><tr>', body)
+        self.assertIn('<input type="search" id="admin-overview-table-filter"', body)
+        self.assertIn('getElementById("admin-overview-table")', body)
+
+    def test_admin_overview_shows_erased_users_past_registration_with_hash(self):
+        # 2026-07-05: erasure moves the user row AND every one of their
+        # registration rows to the archive (Store.erase_user) -- the old
+        # all_registrations()/find_user_by_id() (live-only) queries used
+        # here meant an erased guest's history just vanished from this
+        # page. Now uses scope="all" so it still shows up, with the
+        # archived hash instead of the real name/email.
+        user, environ = self._login_as_guest("erased-guest@example.org")
+        self._book("erased-guest@example.org", name="ErasedGuest")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        erase_user_by_email(self.store, self.settings, "erased-guest@example.org", today=date.fromisoformat(self.occ_date))
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn("[erased]", body)
+        self.assertIn('class="hash-cell"', body)
+        self.assertIn("erased:", body)
+        self.assertNotIn("erased-guest@example.org", body)
+        # Erased/archived rows aren't actionable (admin_cancel can't find
+        # an archived registration_id via find_by_id) -- no Cancel button.
+        row_start = body.index("[erased]")
+        row_html = body[row_start:row_start + 400]
+        self.assertNotIn("confirm-dialog-btn", row_html)
+
+    def test_admin_overview_times_booked_counts_archived_registrations_too(self):
+        user, environ = self._login_as_guest("erased-guest2@example.org")
+        self._book("erased-guest2@example.org", name="ErasedGuest2")
+        erase_user_by_email(self.store, self.settings, "erased-guest2@example.org", today=date.fromisoformat(self.occ_date))
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        # times-booked column should show 1, not 0, for the erased row
+        row_start = body.index("[erased]")
+        row_html = body[row_start:row_start + 400]
+        self.assertIn("<td>1</td>", row_html)
+
+    def test_admin_overview_cancel_button_opens_dialog_with_reason_field(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        cancel_id = f"admin-cancel-{reg.registration_id}"
+        self.assertIn(f'<dialog id="{cancel_id}-dialog" class="card">', body)
+        self.assertIn("Are you sure?", body)
+        self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{cancel_id}-form">', body)
+        self.assertIn("Confirm cancellation", body)
+
+    # -- /admin/cancel: host-initiated, must also notify both sides --------
+
+    def test_admin_cancel_notifies_both_sides_with_message(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        self.sent_emails.clear()
+        self._post_with_session(
+            self.app.admin_cancel, (reg.registration_id,), {"message": "course canceled this week"}, admin_environ
+        )
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, "canceled_by_host")
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("regular@example.org", to_addrs)
+        self.assertIn("admin@example.org", to_addrs)
+        participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
+        self.assertIn("The host canceled this booking:", participant_mail)
+        self.assertIn("Message: course canceled this week", participant_mail)
+        admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
+        self.assertIn("You canceled this booking:", admin_mail)
 
 
 class AdminLoginRateLimitTest(unittest.TestCase):
