@@ -34,12 +34,13 @@ Provides:       user(my-booking) = 1
 Provides:       group(my-booking) = 1
 
 %description
-Self-hosted replacement for the group-booking pages previously provided by
-a third-party scheduler: recurring course scheduling from a single settings
-file, mailbox.org CalDAV integration (conflict-checking + one calendar event
-per course occurrence), guest self-service with cancel links, an admin
-overview, and GDPR-oriented data retention/erasure. Also installs the
-`my-bt` CLI for querying and managing the CSV data.
+Self-hosted booking tool for a small set of recurring classes/sessions:
+recurring course scheduling from a single settings file, CalDAV
+integration for calendar sync (works with any CalDAV provider,
+conflict-checking + one calendar event per course occurrence), guest
+self-service with cancel links, an admin overview, and GDPR-oriented data
+retention/erasure. Also installs the `my-bt` CLI for querying and
+managing the CSV data.
 
 See /usr/share/doc/%{name}/README.md after installing.
 

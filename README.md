@@ -112,7 +112,7 @@ app/                  the application (stdlib-only Python package)
   version.py                        `my-bt --version` (package version + git commit)
   webapp.py                       wsgiref WSGI app / routes
   serve.py                         entrypoint (python3 -m app.serve)
-tests/                 unit tests (131 tests, run with `my-bt test` or unittest)
+tests/                 unit tests (135 tests, run with `my-bt test` or unittest)
 scripts/
   my-bt                  thin CLI wrapper (argument parsing only -- the actual
                          status/setup logic lives in app/cli_checks.py +
@@ -447,7 +447,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-131 tests covering slot generation (including DST via `zoneinfo`, and that
+135 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -456,10 +456,13 @@ erasure/archival, retention-purge boundaries, ICS build/parse/line-folding,
 token/PIN hashing, rate limiting, the spots-left display A/B-test knob
 (never fakes "FULL", never drops below "1 spot(s) left" while still
 bookable-as-confirmed), `site/privacy.html` rendering (`test_site_render.py`),
-and the `my-bt status`/`setup` health checks and interactive walkthrough
+the `my-bt status`/`setup` health checks and interactive walkthrough
 (`test_cli_checks.py`, `test_cli_setup.py` -- every side effect, including
 prompting and running external commands, is a fake, so these don't need
-root/systemd/rpm/a real tty).
+root/systemd/rpm/a real tty), and the real-file-vs-generic-.example
+resolution used by the build/install scripts (`test_render_site_script.py`
+-- explicitly asserts a real file is never modified, deleted, or replaced
+by its `.example` counterpart).
 
 ## GDPR notes
 

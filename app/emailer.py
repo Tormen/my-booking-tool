@@ -1,4 +1,6 @@
-"""SMTP sender via mailbox.org. Stdlib smtplib only."""
+"""SMTP sender -- works with any SMTP provider configured in settings.toml
+(host/port/username/password), e.g. mailbox.org, Gmail, etc. Stdlib
+smtplib only."""
 from __future__ import annotations
 
 import logging
