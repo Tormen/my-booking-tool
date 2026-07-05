@@ -455,13 +455,20 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-191 tests covering slot generation (including DST via `zoneinfo`, and that
+220 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
 (mocked transport, no network) and multi-calendar conflict-checking,
-erasure/archival, retention-purge boundaries, ICS build/parse/line-folding,
-token/PIN hashing, rate limiting, the spots-left display A/B-test knob
+erasure/archival, retention-purge boundaries (including the separate
+`pending_confirmation_hours` purge rule for abandoned signups), ICS
+build/parse/line-folding, token/password hashing, rate limiting, the
+account-confirmation flow end-to-end (`BookingFlowTest` in
+`test_webapp.py`: instant booking for a known email, pending-then-confirm
+for a new one, capacity re-checked fresh at confirm time, `/my/reset`
+returning an identical response whether or not the email exists, and a
+regression test that booking never overwrites an existing account's
+password), the spots-left display A/B-test knob
 (never fakes "FULL", never drops below "1 spot(s) left" while still
 bookable-as-confirmed), `site/privacy.html` rendering (`test_site_render.py`),
 the `my-bt status`/`setup` health checks and interactive walkthrough,
@@ -627,11 +634,11 @@ date and, on its own line, the spots-left text -- laid out in an even
 grid so buttons of different widths still line up. A "Selected date: ..."
 box below the buttons repeats the chosen date as plain text. Name and
 email use a larger input (`.big-input` in `app/templates.py`) since real
-addresses/names can be long. Every required field is marked
-`(required)`, including the 6-digit PIN and the participation-terms
-checkbox; a hint notes the PIN is never emailed to you (it's only needed
-to log into `/my` later -- cancelling any single booking always works via
-the link in its confirmation email, PIN or not).
+addresses/names can be long. Every required field is marked `(required)`:
+name, email, and the participation-terms checkbox -- there is no
+password/PIN field here at all (see "Account confirmation" below); a hint
+explains that a brand-new email will need to confirm its address by
+email before the booking is finally held.
 
 The submit button is progressively enhanced: it starts enabled (the
 `required`/`pattern` attributes alone already block an invalid submit
@@ -649,6 +656,56 @@ it with your own text) and `description` (rendered as **raw HTML**, not
 escaped, so bold/italic/underline, links, and bullet lists all work --
 safe because this is your own settings.toml content, not guest input, the
 same trust boundary as the hand-authored `site/*.html` pages).
+
+## Account confirmation (`/my`, `/my/reset`, `/my/confirm/<token>`)
+
+The booking page only ever asks for name + email -- there is no
+password/PIN field to fill in, and, crucially, **booking never changes an
+existing account's password.** Older versions let anyone "take over" a
+guest's `/my` login just by resubmitting their email with an
+attacker-chosen PIN (`Store.upsert_user` used to overwrite `pin_hash`
+unconditionally on every booking); `Store.upsert_user_for_booking` now
+only ever touches `name`, never password fields, for an email that
+already has an account.
+
+What happens on submit depends on whether the email is already known:
+
+- **Known, confirmed email:** books instantly, exactly as before --
+  confirmed or waitlisted per the normal capacity rules, calendar synced
+  right away.
+- **Brand-new email:** the booking is created with an internal
+  `pending_confirmation` status. A pending row **holds no real capacity**
+  (it's excluded from `count_confirmed`, waitlist promotion, and calendar
+  sync -- see `app/storage.py::STATUS_PENDING_CONFIRMATION`) and does not
+  sync to the calendar, so nobody can grab every open spot on a course
+  just by submitting a pile of made-up email addresses. The guest gets an
+  email with a confirmation link instead of a "you're booked" email.
+
+Clicking the confirmation link (`/my/confirm/<token>`) lets the guest set
+a password (the page suggests "e.g. a 6-digit code" only as an example,
+not an enforced format) for their `/my` login. Setting it both confirms
+the account and **promotes every one of that email's pending
+registrations**, re-checking capacity *fresh at that moment* -- an
+occurrence that filled up while the guest hadn't yet confirmed their
+address correctly lands the promoted booking on the waitlist instead of
+overbooking. Each promoted registration gets its own confirmation email
+and its own cancel link (generated at promotion time, not at the original
+pending-booking time).
+
+`/my` itself asks for email + password (relabeled from "PIN"), and links
+to `/my/reset` for both "forgot your password" and "resend my
+confirmation email" -- the same flow handles both, since both cases
+reduce to "prove you own this inbox via a one-time link, then set a
+password." `/my/reset` always returns the same response regardless of
+whether the submitted email exists, to avoid leaking which addresses have
+an account; it's rate-limited the same way as login (see "Logs &
+debugging" for the shared `RateLimiter`).
+
+Abandoned pending signups (a confirmation link never clicked) are purged
+by the nightly retention job after `pending_confirmation_hours` (default
+48, `[defaults]` in `settings.toml`) -- independent of, and much sooner
+than, `retention_months`/`canceled_retention_months` below, since a
+pending row never held a real booking in the first place.
 
 ## Late-booking quorum (`min_notice_hours` / `min_required_participants`)
 

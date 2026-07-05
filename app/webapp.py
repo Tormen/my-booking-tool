@@ -1,13 +1,26 @@
 """wsgiref-based web app -- no framework dependency. Routes:
 
-  GET/POST /book/<shortname>        guest booking form
+  GET/POST /book/<shortname>        guest booking form (name+email only)
   GET/POST /cancel/<token>          guest self-cancel (link from email)
-  GET/POST /my                      guest login (email+PIN) / bookings list
+  GET/POST /my                      guest login (email+password) / bookings list
+  GET/POST /my/confirm/<token>      set password -- first-time account confirmation
+                                     AND password reset both land here (same token
+                                     mechanism, see storage.User.confirm_token_hash)
+  GET/POST /my/reset                request a confirm/reset link by email (always
+                                     the same response either way -- doesn't reveal
+                                     whether an email is registered)
   POST     /my/cancel/<reg_id>      guest cancels one of their own bookings
   POST     /my/delete-account       guest erases their own account (Art. 17)
   GET/POST /admin/login             admin login
   GET      /admin                   admin overview (today+future by default)
   GET/POST /admin/cancel/<reg_id>   host cancels a registration, optional message
+
+A booking under an email with no confirmed account yet doesn't hold a real
+spot or sync to the calendar until the guest clicks the confirmation link --
+see storage.STATUS_PENDING_CONFIRMATION and book()/my_confirm() below. This
+closes an old hole where the booking form could silently overwrite ANY
+existing account's login credential just by resubmitting that email (see
+the maintainer's local notes for the incident this was designed against).
 
 Sessions are server-side (in-memory dict: session_id -> {..., "expires":ts}),
 referenced by a random cookie -- nothing sensitive is stored client-side.
@@ -34,7 +47,7 @@ from .security import (
     tokens_match, verify_admin_password, verify_secret,
 )
 from .slots import build_occurrences
-from .storage import STATUS_CONFIRMED, STATUS_WAITLISTED, Store
+from .storage import STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store, now_iso
 from .templates import esc, page
 
 log = logging.getLogger("my_booking.webapp")
@@ -184,6 +197,10 @@ class App:
             return self.guest_cancel(method, m.group(1), environ)
         if path == "/my":
             return self.my(method, environ)
+        if path == "/my/reset":
+            return self.my_reset(method, environ)
+        if m := re.fullmatch(r"/my/confirm/([A-Za-z0-9_-]+)", path):
+            return self.my_confirm(method, m.group(1), environ)
         if m := re.fullmatch(r"/my/cancel/([0-9a-fA-F-]+)", path):
             return self.my_cancel(method, m.group(1), environ)
         if path == "/my/delete-account":
@@ -228,59 +245,113 @@ class App:
             occ = {o.date.isoformat(): o for o in occurrences}.get(occ_date)
             if occ is None:
                 return self._book_page(course, occurrences, error="That slot is no longer available.")
-            email, name, pin = form.get("email", "").strip(), form.get("name", "").strip(), form.get("pin", "").strip()
-            if not email or "@" not in email or not name or not re.fullmatch(r"\d{6}", pin):
-                return self._book_page(course, occurrences, error="Please fill in name, a valid email, and a 6-digit code.")
+            email, name = form.get("email", "").strip(), form.get("name", "").strip()
+            if not email or "@" not in email or not name:
+                return self._book_page(course, occurrences, error="Please fill in your name and a valid email.")
 
             rejection = self._late_booking_rejection(occ, now)
             if rejection:
                 return self._book_page(course, occurrences, error=rejection)
 
-            pin_hash, pin_salt = hash_secret(pin)
-            user = self.store.upsert_user(email, name, pin_hash, pin_salt)
-            # Capacity is (re)checked and the row inserted atomically, inside
-            # one locked read-modify-write cycle (see
-            # Store.add_registration_checking_capacity) -- capacity shown in
-            # the form is just a hint at page-load time; two people could
-            # otherwise both pass a separate "is it full?" check for the
-            # last spot and both land as confirmed.
-            token = new_token()
-            reg = self.store.add_registration_checking_capacity(
-                shortname, occ_date, user.user_id, hash_token(token), course.capacity
-            )
-            status = reg.status
-            self._sync(shortname, date.fromisoformat(occ_date))
+            # No password is ever collected here -- upsert_user_for_booking
+            # only ever touches `name`, leaving any existing account's
+            # password_hash (confirmed or still empty) completely alone.
+            # This is what closes the old hole where re-submitting someone
+            # else's email with a chosen PIN silently took over their
+            # account: nothing reachable from this form can change another
+            # email's credential anymore.
+            user = self.store.upsert_user_for_booking(email, name)
 
-            cancel_url = f"{self.settings.base_url}/cancel/{token}"
-            if status == STATUS_WAITLISTED:
-                send_mail(
-                    self.settings, email, f"Waitlisted: {course.title} on {occ_date}",
-                    f"{course.title} on {occ_date} at {course.start_time} is full. You've been added "
-                    "to the waitlist and will be confirmed automatically by email if a spot opens up.\n\n"
-                    f"Leave the waitlist any time: {cancel_url}\n",
+            if user.password_hash:
+                # Already-confirmed account: book instantly, exactly as
+                # before. Capacity is (re)checked and the row inserted
+                # atomically, inside one locked read-modify-write cycle
+                # (see Store.add_registration_checking_capacity) --
+                # capacity shown in the form is just a hint at page-load
+                # time; two people could otherwise both pass a separate
+                # "is it full?" check for the last spot and both land as
+                # confirmed.
+                token = new_token()
+                reg = self.store.add_registration_checking_capacity(
+                    shortname, occ_date, user.user_id, hash_token(token), course.capacity
                 )
-            else:
-                send_mail(
-                    self.settings, email, f"Booking confirmed: {course.title} on {occ_date}",
-                    f"Your spot for {course.title} on {occ_date} at {course.start_time} is confirmed.\n\n"
-                    f"Cancel any time: {cancel_url}\n",
+                self._sync(shortname, date.fromisoformat(occ_date))
+                self._send_booking_result_email(user, course, occ_date, reg.status, token)
+                msg = (
+                    f"You're on the waitlist for <b>{esc(course.title)}</b> on {esc(occ_date)}."
+                    if reg.status == STATUS_WAITLISTED
+                    else f"You're booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
                 )
-            send_mail(
-                self.settings, self.settings.admin_email,
-                f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
-                f"{name} <{email}> {'joined the waitlist for' if status == STATUS_WAITLISTED else 'booked'} "
-                f"{shortname} on {occ_date}.",
+                return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
+                    "Booked!", f"<p>{msg} Check your email for confirmation and a cancel link.</p>"
+                )
+
+            # Brand-new or still-unconfirmed email: deliberately does NOT
+            # hold a real spot or touch the calendar yet -- see
+            # storage.STATUS_PENDING_CONFIRMATION's docstring. Re-sending
+            # the confirmation email on every such attempt (rather than
+            # trying to detect "they already have one pending") is
+            # deliberate: simpler, and it's exactly what a "resend" should
+            # do anyway.
+            self.store.add_registration(
+                shortname, occ_date, user.user_id, "", status=STATUS_PENDING_CONFIRMATION
             )
-            msg = (
-                f"You're on the waitlist for <b>{esc(course.title)}</b> on {esc(occ_date)}."
-                if status == STATUS_WAITLISTED
-                else f"You're booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
+            self._send_confirm_email(user)
+            body = (
+                f"<p>Almost there -- we've emailed <b>{esc(email)}</b> a link to confirm your account. "
+                f"Your spot for <b>{esc(course.title)}</b> on {esc(occ_date)} is held only once you "
+                "click it and set a password, not before.</p>"
+                '<p>Didn\'t get it? <a href="/my/reset">Resend the confirmation email</a>.</p>'
             )
-            return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
-                "Booked!", f"<p>{msg} Check your email for confirmation and a cancel link.</p>"
-            )
+            return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Almost there", body)
 
         return self._book_page(course, occurrences)
+
+    def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
+        """The guest-facing booked/waitlisted email + admin notification --
+        shared by the instant-booking path above and by my_confirm()'s
+        promotion of a newly-confirmed account's pending registrations, so
+        the two paths can never drift out of sync in wording."""
+        cancel_url = f"{self.settings.base_url}/cancel/{cancel_token}"
+        if status == STATUS_WAITLISTED:
+            send_mail(
+                self.settings, user.email, f"Waitlisted: {course.title} on {occ_date}",
+                f"{course.title} on {occ_date} at {course.start_time} is full. You've been added "
+                "to the waitlist and will be confirmed automatically by email if a spot opens up.\n\n"
+                f"Leave the waitlist any time: {cancel_url}\n",
+            )
+        else:
+            send_mail(
+                self.settings, user.email, f"Booking confirmed: {course.title} on {occ_date}",
+                f"Your spot for {course.title} on {occ_date} at {course.start_time} is confirmed.\n\n"
+                f"Cancel any time: {cancel_url}\n",
+            )
+        send_mail(
+            self.settings, self.settings.admin_email,
+            f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
+            f"{user.name} <{user.email}> {'joined the waitlist for' if status == STATUS_WAITLISTED else 'booked'} "
+            f"{course.shortname} on {occ_date}.",
+        )
+
+    def _send_confirm_email(self, user) -> None:
+        """(Re)generates a confirm-or-reset token and emails the "set your
+        password" link -- called from a booking under a not-yet-confirmed
+        email, and from /my/reset's unified resend/forgot-password flow.
+        Regenerating unconditionally on every call is deliberate: simpler
+        than trying to detect/reuse an already-outstanding token, and it
+        invalidates any earlier link, which is exactly the right behavior
+        for a "resend" anyway."""
+        token = new_token()
+        self.store.set_confirm_token(user.user_id, hash_token(token), now_iso())
+        confirm_url = f"{self.settings.base_url}/my/confirm/{token}"
+        first_time = not user.password_hash
+        subject = "Confirm your account" if first_time else "Reset your password"
+        verb = "confirm your account and set a password" if first_time else "set a new password"
+        send_mail(
+            self.settings, user.email, subject,
+            f"Click below to {verb}:\n\n{confirm_url}\n\n"
+            "If you didn't request this, you can safely ignore this email.",
+        )
 
     def _late_booking_rejection(self, occ, now: datetime) -> str | None:
         """None if `occ` can be booked normally right now; otherwise a
@@ -398,9 +469,9 @@ class App:
                 <input class="big-input" name="name" required></label>
               <label>Your email <span class="req">(required)</span>
                 <input class="big-input" name="email" type="email" required></label>
-              <label>Pick a 6-digit code (to manage this booking later) <span class="req">(required)</span>
-                <input name="pin" pattern="\\d{{6}}" maxlength="6" required></label>
-              <p class="hint">You'll need this code later to cancel or look up your booking -- it's not emailed to you.</p>
+              <p class="hint">First time booking with this email? We'll send a link to confirm your
+                account and set a password -- your spot is held once you click it, not before.
+                Booked with this email before? You're booked instantly, same as always.</p>
               <label><input type="checkbox" name="agree" required> I acknowledge the
                 <a href="/terms.html" target="_blank">participation terms</a> (voluntary, at my own risk)
                 <span class="req">(required)</span>.</label>
@@ -421,7 +492,6 @@ class App:
               var submitBtn = document.getElementById("book-submit");
               var nameEl = form.querySelector('[name="name"]');
               var emailEl = form.querySelector('[name="email"]');
-              var pinEl = form.querySelector('[name="pin"]');
               var agreeEl = form.querySelector('[name="agree"]');
 
               function currentRadio() {{
@@ -433,12 +503,11 @@ class App:
                 var r = currentRadio();
                 if (r && selText) selText.textContent = r.dataset.date;
                 if (r && submitBtn) submitBtn.textContent = r.dataset.full === "1" ? "Join waitlist" : bookLabel;
-                var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 &&
-                  /^\\d{{6}}$/.test(pinEl.value) && agreeEl.checked;
+                var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 && agreeEl.checked;
                 if (submitBtn) submitBtn.disabled = !ok;
               }}
               for (var i = 0; i < radios.length; i++) {{ radios[i].addEventListener("change", refresh); }}
-              [nameEl, emailEl, pinEl, agreeEl].forEach(function(el) {{
+              [nameEl, emailEl, agreeEl].forEach(function(el) {{
                 el.addEventListener("input", refresh);
                 el.addEventListener("change", refresh);
               }});
@@ -490,23 +559,125 @@ class App:
         error = None
         if method == "POST":
             form = self._read_form(environ)
-            email, pin = form.get("email", "").strip(), form.get("pin", "").strip()
+            email, password = form.get("email", "").strip(), form.get("password", "").strip()
             if not login_limiter.allow(f"guest:{email.lower()}"):
                 error = "Too many attempts -- try again later."
             else:
                 user = self.store.find_user_by_email(email)
-                if user and verify_secret(pin, user.pin_hash, user.pin_salt):
+                # user.password_hash is empty for a not-yet-confirmed
+                # account -- bail out before verify_secret rather than
+                # feeding it an empty hash/salt.
+                if user and user.password_hash and verify_secret(password, user.password_hash, user.password_salt):
                     sid = _new_session({"kind": "guest", "user_id": user.user_id})
                     self.store.touch_login(user.user_id)
                     return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header(sid))], ""
-                error = "Email/code didn't match."
+                error = "Email/password didn't match."
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
         body = f"""{err_html}<form method="post" class="card">
           <label>Email <input name="email" type="email" required></label>
-          <label>6-digit code <input name="pin" pattern="\\d{{6}}" maxlength="6" required></label>
+          <label>Password <input name="password" type="password" required></label>
           <button type="submit">View my bookings</button>
-        </form>"""
+        </form>
+        <p><a href="/my/reset">Forgot your password, or still need to confirm your account?</a></p>"""
         return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
+
+    def my_reset(self, method: str, environ):
+        """Unified "forgot password" + "resend confirmation" flow -- both
+        reduce to the same thing (email a link to /my/confirm/<token>), so
+        one form/route covers both instead of two near-duplicates. Always
+        shows the exact same response regardless of whether the email is
+        registered, confirmed, or unknown -- this endpoint must never leak
+        which emails exist in the system."""
+        if method == "POST":
+            form = self._read_form(environ)
+            email = form.get("email", "").strip()
+            if login_limiter.allow(f"reset:{email.lower()}"):
+                user = self.store.find_user_by_email(email)
+                if user:
+                    self._send_confirm_email(user)
+            # Same body whether or not login_limiter allowed it, whether or
+            # not the email exists -- an attacker probing for registered
+            # emails, or trying to spam one inbox with reset emails, learns
+            # nothing from the response either way.
+            body = "<p>If that email has an account with us, we've just sent a link to set/reset your password.</p>"
+            return "200 OK", [("Content-Type", "text/html")], page("Check your email", body)
+        body = """<form method="post" class="card">
+          <label>Email <input name="email" type="email" required></label>
+          <button type="submit">Send me a link</button>
+        </form>"""
+        return "200 OK", [("Content-Type", "text/html")], page("Forgot your password?", body)
+
+    def _set_password_form(self, token: str) -> str:
+        return f"""<form method="post" class="card">
+          <label>New password <span class="req">(required)</span>
+            <input class="big-input" name="password" type="password" minlength="4" required></label>
+          <button type="submit">Set password</button>
+        </form>"""
+
+    def my_confirm(self, method: str, token: str, environ):
+        """Landing page for BOTH the first-time account-confirmation link
+        and a later password-reset link -- see storage.User.confirm_token_hash.
+        Setting a password here also promotes every STATUS_PENDING_CONFIRMATION
+        registration for this user, re-checking capacity fresh at this exact
+        moment (it may have filled up while the account sat unconfirmed) --
+        see Store.confirm_pending_registration."""
+        user = self.store.find_user_by_confirm_token_hash(hash_token(token))
+        if user is None:
+            body = ('<p>This link is invalid or has already been used. '
+                    '<a href="/my/reset">Request a new one</a>.</p>')
+            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+
+        pending = [
+            r for r in self.store.registrations_for_user(user.user_id)
+            if r.status == STATUS_PENDING_CONFIRMATION
+        ]
+        pending_note = (
+            f"<p>You have {len(pending)} pending booking(s) that will be confirmed "
+            "once you set your password.</p>" if pending else ""
+        )
+
+        if method == "POST":
+            form = self._read_form(environ)
+            password = form.get("password", "").strip()
+            if len(password) < 4:
+                err = '<p class="err">Please choose a password at least 4 characters long.</p>'
+                return "200 OK", [("Content-Type", "text/html")], page(
+                    "Set your password", err + pending_note + self._set_password_form(token)
+                )
+            pw_hash, pw_salt = hash_secret(password)
+            self.store.set_password(user.user_id, pw_hash, pw_salt)
+
+            confirmed_lines = []
+            for reg in pending:
+                course = self.settings.course(reg.course_shortname)
+                if course is None:
+                    continue  # course removed from settings.toml since booking -- nothing to promote into
+                new_cancel_token = new_token()
+                updated = self.store.confirm_pending_registration(
+                    reg.registration_id, course.capacity, hash_token(new_cancel_token)
+                )
+                if updated is None:
+                    continue  # no longer pending (already handled, e.g. a stale duplicate link)
+                self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
+                self._send_booking_result_email(user, course, reg.occurrence_date, updated.status, new_cancel_token)
+                confirmed_lines.append(f"{course.title} on {reg.occurrence_date} ({updated.status})")
+
+            sid = _new_session({"kind": "guest", "user_id": user.user_id})
+            self.store.touch_login(user.user_id)
+            summary = (
+                "<ul>" + "".join(f"<li>{esc(line)}</li>" for line in confirmed_lines) + "</ul>"
+                if confirmed_lines else ""
+            )
+            body = f"<p>Your password is set.</p>{summary}<p><a href=\"/my\">View my bookings</a></p>"
+            return (
+                "200 OK",
+                [("Content-Type", "text/html; charset=utf-8"), ("Set-Cookie", _session_cookie_header(sid))],
+                page("Account confirmed!", body),
+            )
+
+        return "200 OK", [("Content-Type", "text/html")], page(
+            "Set your password", pending_note + self._set_password_form(token)
+        )
 
     def my_cancel(self, method: str, registration_id: str, environ):
         session = _get_session(environ)

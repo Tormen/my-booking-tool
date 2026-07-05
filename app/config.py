@@ -117,6 +117,17 @@ class Settings:
     # submitting the form actually does.
     book_button_label: str = "Book"
 
+    # A booking made under a not-yet-confirmed email (see
+    # storage.STATUS_PENDING_CONFIRMATION and app/webapp.py::book) doesn't
+    # hold a real spot or sync to the calendar until the guest clicks the
+    # emailed confirmation link. If they never do, the retention job purges
+    # that pending registration (and it stops counting toward anything)
+    # once it's older than this many hours -- keeps an abandoned or bogus
+    # signup from lingering indefinitely. Independent of retention_months/
+    # canceled_retention_months below, which are much longer and apply to
+    # real (confirmed/waitlisted/canceled) bookings.
+    pending_confirmation_hours: int = 48
+
     # Optional: absolute path to the LIVE, web-served copy of site/ (the
     # separate checkout/host location -- see README.md "Static-site
     # pages"), e.g. "/var/www/example.org". If set, `my-bt status` compares
@@ -227,6 +238,7 @@ def load_settings(toml_path: str | Path) -> Settings:
         spots_left_offset=int(defaults.get("spots_left_offset", 0)),
         min_required_participants=int(defaults.get("min_required_participants", 1)),
         book_button_label=defaults.get("book_button_label", "Book"),
+        pending_confirmation_hours=int(defaults.get("pending_confirmation_hours", 48)),
         retention_months=int(privacy.get("retention_months", 24)),
         canceled_retention_months=int(privacy.get("canceled_retention_months", 6)),
         erasure_pepper=bytes.fromhex(_read_secret(privacy["erasure_pepper_file"])),

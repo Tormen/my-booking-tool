@@ -63,6 +63,12 @@ book_button_label = "Book"
 # shown while there's real room shifts; a truly-full occurrence always
 # says so, since that's what "join waitlist" in the email will actually do.
 spots_left_offset = 0
+# A brand-new email's first booking is held as PENDING (no real capacity,
+# no calendar sync) until the guest clicks the confirmation link emailed to
+# them and sets a password -- see README's "Account confirmation" section.
+# A pending row abandoned longer than this many HOURS is purged by the
+# retention job (app/retention.py), independent of retention_months below.
+pending_confirmation_hours = 48
 
 [privacy]
 # GDPR storage-limitation (Art. 5(1)(e)): how long a registration row is kept

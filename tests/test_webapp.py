@@ -2,11 +2,14 @@ import io
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
+from urllib.parse import urlencode
 
 from app import webapp
 from app.caldav_client import CalDAVClient, Response
-from app.slots import Occurrence
-from app.storage import Store
+from app.security import hash_secret
+from app.slots import Occurrence, build_occurrences
+from app.storage import STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store
 from app.webapp import App
 
 from .helpers import make_course, make_settings
@@ -345,6 +348,215 @@ class PolicyNoteTest(unittest.TestCase):
         note = app._policy_note()
         self.assertIn("3", note)
         self.assertIn("2h", note)
+
+
+class BookingFlowTest(unittest.TestCase):
+    """End-to-end coverage of book()'s two branches (already-confirmed
+    account vs. not-yet-confirmed email) plus my_confirm/my_reset/my()'s
+    password login -- this is the core of the 2026-07-05 account-
+    confirmation rework: closes the old hijack hole (booking form could
+    silently overwrite ANY existing account's login credential just by
+    resubmitting that email) and defers capacity/calendar-sync until the
+    guest actually confirms. CalDAV sync itself is mocked to a no-op --
+    already covered by ConflictCheckerTest/calendar_sync's own tests; what's
+    new here is the STATUS_PENDING_CONFIRMATION gating and the token flow."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        course = make_course(shortname="yoga-class-1", weekday="wed", capacity=1)
+        # conflict_calendars must match what FakeTransport's PROPFIND lists
+        # below ("Calendar", "Yoga-Bookings") -- same setup as ConflictCheckerTest.
+        self.settings = make_settings(courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        self.app = App(self.settings, self.store)
+        self.transport = FakeTransport()
+        self.app.caldav = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=self.transport,
+        )
+        self.app._sync = lambda *a, **kw: None  # calendar mechanics covered elsewhere
+
+        self.sent_emails: list[tuple[str, str, str]] = []
+        occs = build_occurrences(
+            course, self.settings, datetime.now(timezone.utc),
+            lambda sn, d: 0, lambda start, end: False,
+        )
+        self.occ_date = occs[0].date.isoformat()
+
+        patcher = patch(
+            "app.webapp.send_mail",
+            side_effect=lambda settings, to, subject, body: self.sent_emails.append((to, subject, body)),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _post(self, fn, args, form: dict):
+        body = urlencode(form).encode()
+        environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+        return fn("POST", *args, environ)
+
+    def _book(self, email: str, name: str = "Alice", occ_date: str | None = None, agree: str = "on"):
+        form = {"occurrence_date": occ_date or self.occ_date, "name": name, "email": email, "agree": agree}
+        return self._post(self.app.book, ("yoga-class-1",), form)
+
+    def _confirm_token_from_last_email(self) -> str:
+        _, _, body = self.sent_emails[-1]
+        return body.split("/my/confirm/")[1].split("\n")[0].strip()
+
+    # -- new/unconfirmed email: pending, no capacity/calendar impact ------
+
+    def test_new_email_books_pending_and_holds_no_capacity(self):
+        _status, _headers, body = self._book("newguest@example.org")
+        self.assertIn("Almost there", body)
+        user = self.store.find_user_by_email("newguest@example.org")
+        regs = self.store.registrations_for_user(user.user_id)
+        self.assertEqual(len(regs), 1)
+        self.assertEqual(regs[0].status, STATUS_PENDING_CONFIRMATION)
+        self.assertEqual(self.store.count_confirmed("yoga-class-1", self.occ_date), 0)
+
+    def test_new_email_gets_only_a_confirm_email_not_a_booking_email(self):
+        self._book("newguest@example.org")
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertEqual(subjects, ["Confirm your account"])
+
+    def test_returning_unconfirmed_email_adds_another_pending_and_resends(self):
+        self._book("newguest@example.org", occ_date=self.occ_date)
+        self._book("newguest@example.org", name="Alice Again", occ_date=self.occ_date)
+        user = self.store.find_user_by_email("newguest@example.org")
+        self.assertEqual(len(self.store.registrations_for_user(user.user_id)), 2)
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertEqual(subjects, ["Confirm your account", "Confirm your account"])
+
+    # -- the account-hijack fix --------------------------------------------
+
+    def test_booking_never_changes_an_existing_accounts_password(self):
+        user = self.store.upsert_user_for_booking("victim@example.org", "Victim")
+        h, s = hash_secret("realpassword")
+        self.store.set_password(user.user_id, h, s)
+        self._book("victim@example.org", name="Attacker-supplied name")
+        reloaded = self.store.find_user_by_email("victim@example.org")
+        self.assertEqual(reloaded.password_hash, h)
+        self.assertEqual(reloaded.password_salt, s)
+        # name IS updated (that's fine/intended -- only the credential is protected)
+        self.assertEqual(reloaded.name, "Attacker-supplied name")
+
+    # -- already-confirmed account: instant booking, as before -------------
+
+    def test_confirmed_account_books_instantly(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter2")
+        self.store.set_password(user.user_id, h, s)
+        _status, _headers, body = self._book("regular@example.org", name="Regular")
+        self.assertIn("Booked!", body)
+        self.assertEqual(self.store.count_confirmed("yoga-class-1", self.occ_date), 1)
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertIn("Booking confirmed: Dynamic Ashtanga Vinyasa Yoga on " + self.occ_date, subjects)
+
+    def test_confirmed_account_waitlisted_when_full(self):
+        for i in range(2):
+            user = self.store.upsert_user_for_booking(f"guest{i}@example.org", f"Guest{i}")
+            h, s = hash_secret("hunter2")
+            self.store.set_password(user.user_id, h, s)
+        self._book("guest0@example.org", name="Guest0")  # capacity=1, fills it
+        _status, _headers, body = self._book("guest1@example.org", name="Guest1")
+        self.assertIn("waitlist", body)
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertTrue(any(s.startswith("Waitlisted:") for s in subjects))
+
+    # -- my_confirm: sets password, promotes pending ------------------------
+
+    def test_my_confirm_invalid_token_shows_error(self):
+        _status, _headers, body = self._post(self.app.my_confirm, ("bogus-token",), {"password": "hunter2"})
+        self.assertIn("invalid", body.lower())
+
+    def test_my_confirm_sets_password_and_promotes_pending_booking(self):
+        self._book("newguest@example.org")
+        token = self._confirm_token_from_last_email()
+        _status, headers, body = self._post(self.app.my_confirm, (token,), {"password": "hunter2"})
+        self.assertIn("Account confirmed", body)
+        self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
+        user = self.store.find_user_by_email("newguest@example.org")
+        self.assertNotEqual(user.password_hash, "")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.assertEqual(reg.status, STATUS_CONFIRMED)
+        self.assertEqual(self.store.count_confirmed("yoga-class-1", self.occ_date), 1)
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertIn("Booking confirmed: Dynamic Ashtanga Vinyasa Yoga on " + self.occ_date, subjects)
+
+    def test_my_confirm_recheck_capacity_lands_on_waitlist_if_filled_meanwhile(self):
+        # capacity=1: someone else confirms and fills the only spot WHILE
+        # the first guest's account is still unconfirmed.
+        self._book("newguest@example.org")
+        other = self.store.upsert_user_for_booking("other@example.org", "Other")
+        h, s = hash_secret("hunter2")
+        self.store.set_password(other.user_id, h, s)
+        self._book("other@example.org", name="Other")  # instantly confirmed, fills capacity=1
+
+        # other's booking was instant (no confirm email) -- the newguest's
+        # confirm link is still the FIRST email ever sent in this test.
+        token = self.sent_emails[0][2].split("/my/confirm/")[1].split("\n")[0].strip()
+        self._post(self.app.my_confirm, (token,), {"password": "hunter2"})
+        user = self.store.find_user_by_email("newguest@example.org")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.assertEqual(reg.status, STATUS_WAITLISTED)
+
+    def test_my_confirm_rejects_a_too_short_password(self):
+        self._book("newguest@example.org")
+        token = self._confirm_token_from_last_email()
+        _status, _headers, body = self._post(self.app.my_confirm, (token,), {"password": "ab"})
+        self.assertIn("at least 4 characters", body)
+        user = self.store.find_user_by_email("newguest@example.org")
+        self.assertEqual(user.password_hash, "")
+
+    # -- my_reset: unified resend/forgot-password, never leaks existence ---
+
+    def test_my_reset_same_response_whether_or_not_email_exists(self):
+        _s1, _h1, body_known = self._post(self.app.my_reset, (), {"email": "newguest@example.org"})
+        _s2, _h2, body_unknown = self._post(self.app.my_reset, (), {"email": "nobody@example.org"})
+        self.assertEqual(body_known, body_unknown)
+
+    def test_my_reset_emails_unconfirmed_account_a_confirm_link(self):
+        self._book("newguest@example.org")
+        self.sent_emails.clear()
+        self._post(self.app.my_reset, (), {"email": "newguest@example.org"})
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertEqual(subjects, ["Confirm your account"])
+
+    def test_my_reset_emails_confirmed_account_a_reset_link(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter2")
+        self.store.set_password(user.user_id, h, s)
+        self._post(self.app.my_reset, (), {"email": "regular@example.org"})
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertEqual(subjects, ["Reset your password"])
+
+    # -- /my password login --------------------------------------------------
+
+    def test_my_login_succeeds_with_correct_password(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter2")
+        self.store.set_password(user.user_id, h, s)
+        _status, headers, _body = self._post(self.app.my, (), {"email": "regular@example.org", "password": "hunter2"})
+        self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
+
+    def test_my_login_fails_with_wrong_password(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter2")
+        self.store.set_password(user.user_id, h, s)
+        _status, headers, body = self._post(self.app.my, (), {"email": "regular@example.org", "password": "wrong"})
+        self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))
+        self.assertIn("Email/password", body)
+        self.assertIn("match", body)
+
+    def test_my_login_fails_for_a_still_unconfirmed_account(self):
+        self._book("newguest@example.org")
+        _status, headers, body = self._post(
+            self.app.my, (), {"email": "newguest@example.org", "password": "anything"}
+        )
+        self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))
+        self.assertIn("Email/password", body)
+        self.assertIn("match", body)
 
 
 class AdminLoginRateLimitTest(unittest.TestCase):

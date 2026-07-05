@@ -19,7 +19,7 @@ class ErasureFlowTest(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_erase_cancels_future_bookings_and_archives(self):
-        u = self.store.upsert_user("guest@example.com", "Guest", "h", "s")
+        u = self.store.upsert_user_for_booking("guest@example.com", "Guest")
         future_confirmed = self.store.add_registration(
             "c", "2099-01-01", u.user_id, hash_token(new_token())
         )
@@ -45,8 +45,8 @@ class ErasureFlowTest(unittest.TestCase):
         )
 
     def test_different_users_get_different_erasure_hashes(self):
-        self.store.upsert_user("one@example.com", "One", "h", "s")
-        self.store.upsert_user("two@example.com", "Two", "h", "s")
+        self.store.upsert_user_for_booking("one@example.com", "One")
+        self.store.upsert_user_for_booking("two@example.com", "Two")
         erase_user_by_email(self.store, self.settings, "one@example.com", today=date(2027, 1, 1))
         erase_user_by_email(self.store, self.settings, "two@example.com", today=date(2027, 1, 1))
         emails = {u["email"] for u in self.store.read_users(scope="archived")}

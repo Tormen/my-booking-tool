@@ -7,12 +7,19 @@ window:
   - canceled rows specifically: purged sooner, `canceled_retention_months`
     after cancellation (default 6), since a canceled booking has little
     ongoing value once the dispute window has passed.
-A row is purged as soon as EITHER rule applies. Runs from a systemd timer
-(the modern equivalent of cron) -- see systemd/my-booking-retention.timer.
+  - pending_confirmation rows (see storage.STATUS_PENDING_CONFIRMATION):
+    purged `pending_confirmation_hours` (default 48 -- see settings.toml
+    [defaults]) after registered_at, independent of the two rules above --
+    an abandoned or bogus signup that never confirmed its account never
+    held a real spot anyway, so there's no reason to let it linger for
+    months like a real booking.
+A row is purged as soon as the applicable rule applies. Runs from a systemd
+timer (the modern equivalent of cron) -- see systemd/my-booking-retention.timer.
 This module has no side effects beyond rewriting registrations.csv; it never
-touches users.csv (email/PIN rows are cheap to keep and are needed to
+touches users.csv (email/password rows are cheap to keep and are needed to
 recognize returning guests -- revisit if you want a separate user-retention
-policy later).
+policy later; an unconfirmed user row left behind by an expired pending
+registration is just an inert, password-less row, same as any other).
 """
 from __future__ import annotations
 
@@ -20,7 +27,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 
 from .config import Settings
-from .storage import Store, Registration
+from .storage import STATUS_PENDING_CONFIRMATION, Store, Registration
 
 log = logging.getLogger("my_booking.retention")
 
@@ -39,7 +46,15 @@ def _occurrence_date(reg: Registration) -> date:
     return date.fromisoformat(reg.occurrence_date)
 
 
-def should_purge(reg: Registration, today: date, settings: Settings) -> bool:
+def should_purge(reg: Registration, today: date, settings: Settings, now: datetime | None = None) -> bool:
+    if reg.status == STATUS_PENDING_CONFIRMATION:
+        # Hour-granularity, unrelated to the month-based rules below --
+        # `now` defaults to midnight UTC of `today` when not given
+        # explicitly (fine for this job's actual once-a-night granularity;
+        # tests wanting hour precision can pass `now` directly).
+        moment = now if now is not None else datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+        registered = datetime.fromisoformat(reg.registered_at)
+        return moment - registered >= timedelta(hours=settings.pending_confirmation_hours)
     occ_date = _occurrence_date(reg)
     if occ_date <= _months_ago(today, settings.retention_months):
         return True
@@ -50,10 +65,12 @@ def should_purge(reg: Registration, today: date, settings: Settings) -> bool:
     return False
 
 
-def run_purge(store: Store, settings: Settings, today: date | None = None) -> int:
+def run_purge(
+    store: Store, settings: Settings, today: date | None = None, now: datetime | None = None
+) -> int:
     today = today or datetime.now(timezone.utc).date()
     all_regs = store.all_registrations()
-    keep = [r for r in all_regs if not should_purge(r, today, settings)]
+    keep = [r for r in all_regs if not should_purge(r, today, settings, now=now)]
     purged = len(all_regs) - len(keep)
     if purged:
         store.replace_all_registrations(keep)

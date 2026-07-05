@@ -21,7 +21,10 @@ from typing import Iterable
 
 from .security import sanitize_csv_field
 
-USER_FIELDS = ["user_id", "email", "name", "pin_hash", "pin_salt", "created_at", "last_login_at"]
+USER_FIELDS = [
+    "user_id", "email", "name", "password_hash", "password_salt",
+    "confirm_token_hash", "confirm_token_created_at", "created_at", "last_login_at",
+]
 REG_FIELDS = [
     "registration_id", "course_shortname", "occurrence_date", "user_id", "status",
     "registered_at", "guest_cancel_token_hash", "canceled_at", "canceled_by", "host_message",
@@ -31,6 +34,14 @@ STATUS_CONFIRMED = "confirmed"
 STATUS_WAITLISTED = "waitlisted"
 STATUS_CANCELED_BY_GUEST = "canceled_by_guest"
 STATUS_CANCELED_BY_HOST = "canceled_by_host"
+# A booking made under an email that hasn't confirmed account ownership yet
+# (see app/webapp.py::book) -- deliberately excluded from every
+# capacity/waitlist/calendar-sync code path below (none of them match this
+# status), so an unconfirmed signup can never hold a real spot or occupy the
+# calendar. Promoted to CONFIRMED/WAITLISTED (re-checking capacity fresh at
+# that moment) only once the guest clicks the emailed confirmation link --
+# see Store.confirm_pending_registration.
+STATUS_PENDING_CONFIRMATION = "pending_confirmation"
 
 
 def now_iso() -> str:
@@ -42,9 +53,20 @@ class User:
     user_id: str
     email: str
     name: str
-    pin_hash: str
-    pin_salt: str
-    created_at: str
+    # Empty password_hash/salt means this account has never been confirmed
+    # (no password set yet) -- there is no separate boolean flag, since
+    # "has a password" and "confirmed their email" happen in the exact same
+    # step (see app/webapp.py's /my/confirm/<token> handler).
+    password_hash: str
+    password_salt: str
+    # Hash of a pending confirm-or-reset token (see security.hash_token),
+    # blank when none is outstanding. Reused for BOTH the very first
+    # account confirmation and a later "forgot password" reset -- both
+    # reduce to "prove you own this inbox via a one-time link, then set a
+    # password" (see app/webapp.py's unified /my/reset).
+    confirm_token_hash: str = ""
+    confirm_token_created_at: str = ""
+    created_at: str = ""
     last_login_at: str = ""
 
 
@@ -153,27 +175,67 @@ class Store:
                     return User(**row)
         return None
 
-    def upsert_user(self, email: str, name: str, pin_hash: str, pin_salt: str) -> User:
+    def upsert_user_for_booking(self, email: str, name: str) -> User:
+        """Called from the booking form, which no longer collects a
+        password at all -- this only ever touches `name`. An existing
+        user's password_hash/salt (confirmed or still empty/unconfirmed)
+        is left completely alone; a brand-new email gets a fresh row with
+        both blank (unconfirmed) until they go through /my/confirm/<token>.
+        This is also what closes the old account-hijack hole: nothing
+        reachable from the booking form can ever change another email's
+        password."""
         email_norm = email.strip().lower()
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             for row in rows:
                 if row["email"].strip().lower() == email_norm:
                     row["name"] = name
-                    row["pin_hash"] = pin_hash
-                    row["pin_salt"] = pin_salt
                     write(rows)
                     return User(**row)
             user = User(
                 user_id=str(uuid.uuid4()),
                 email=email_norm,
                 name=name,
-                pin_hash=pin_hash,
-                pin_salt=pin_salt,
+                password_hash="",
+                password_salt="",
                 created_at=now_iso(),
             )
             rows.append(asdict(user))
             write(rows)
             return user
+
+    def set_confirm_token(self, user_id: str, token_hash: str, created_at: str) -> None:
+        """Stores a pending confirm-or-reset token for this user -- see
+        User.confirm_token_hash's docstring for why the same field covers
+        both the first-ever confirmation and a later password reset."""
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    row["confirm_token_hash"] = token_hash
+                    row["confirm_token_created_at"] = created_at
+                    write(rows)
+                    return
+
+    def find_user_by_confirm_token_hash(self, token_hash: str) -> User | None:
+        if not token_hash:
+            return None  # never match on a blank hash (no user has "" stored as a real token)
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, _write):
+            for row in rows:
+                if row["confirm_token_hash"] and row["confirm_token_hash"] == token_hash:
+                    return User(**row)
+        return None
+
+    def set_password(self, user_id: str, password_hash: str, password_salt: str) -> None:
+        """Sets the account's real login password and consumes (clears) any
+        pending confirm/reset token -- a used link can't be replayed."""
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    row["password_hash"] = password_hash
+                    row["password_salt"] = password_salt
+                    row["confirm_token_hash"] = ""
+                    row["confirm_token_created_at"] = ""
+                    write(rows)
+                    return
 
     def touch_login(self, user_id: str) -> None:
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
@@ -258,6 +320,41 @@ class Store:
             rows.append(asdict(reg))
             write(rows)
             return reg
+
+    def confirm_pending_registration(
+        self, registration_id: str, capacity: int, cancel_token_hash: str
+    ) -> Registration | None:
+        """Promotes ONE STATUS_PENDING_CONFIRMATION row to confirmed-or-
+        waitlisted, re-checking capacity NOW (it may have filled up while
+        this guest's account was still unconfirmed) in the same single
+        locked read-modify-write cycle as add_registration_checking_capacity
+        -- just updating an existing row instead of inserting one. Also
+        sets a FRESH cancel_token_hash: the plaintext token handed out at
+        pending-creation time was never persisted (only hashes ever are),
+        so the caller generates a new one and emails it as part of the
+        booked/waitlisted email this triggers, same as a normal booking.
+        Returns None if the row isn't pending anymore (e.g. this
+        confirmation link was already used, or the booking was canceled
+        in the meantime) -- the caller should simply skip it, not treat
+        that as an error."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            target = None
+            for row in rows:
+                if row["registration_id"] == registration_id and row["status"] == STATUS_PENDING_CONFIRMATION:
+                    target = row
+                    break
+            if target is None:
+                return None
+            confirmed = sum(
+                1 for r in rows
+                if r["course_shortname"] == target["course_shortname"]
+                and r["occurrence_date"] == target["occurrence_date"]
+                and r["status"] == STATUS_CONFIRMED
+            )
+            target["status"] = STATUS_WAITLISTED if confirmed >= capacity else STATUS_CONFIRMED
+            target["guest_cancel_token_hash"] = cancel_token_hash
+            write(rows)
+            return Registration(**target)
 
     def registrations_for_occurrence(
         self, course_shortname: str, occurrence_date: str
