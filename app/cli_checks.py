@@ -218,16 +218,22 @@ def check_static_site_drift(raw: dict, template_path: str | Path) -> list[Check]
 
     deployed_path = Path(static_site_dir) / site_render.OUTPUT_NAME
     if not deployed_path.exists():
+        # State only -- no "run `my-bt setup -i`" instruction here: this
+        # same message is shown both by `my-bt status` (which already ends
+        # its report with that instruction once, generically) and inside
+        # `my-bt setup -i` itself, where telling the user to run the very
+        # command they're already running is just confusing (see
+        # the maintainer's local notes).
         return [(f"static site ({deployed_path})", "warn",
-                  "not deployed yet -- run `my-bt setup -i` to generate it, "
-                  "then copy site/*.html as usual (see README.md)")]
+                  "not deployed yet -- once generated, copy site/*.html to "
+                  "your live host as usual (see README.md)")]
     actual = deployed_path.read_text(encoding="utf-8", errors="replace")
     if actual == expected:
         return [(f"static site ({deployed_path})", "ok", "matches current settings.toml")]
     return [(
         f"static site ({deployed_path})", "warn",
         "doesn't match current settings.toml (retention numbers or wording "
-        "changed since it was last generated) -- run `my-bt setup -i` to regenerate"
+        "changed since it was last generated)"
     )]
 
 

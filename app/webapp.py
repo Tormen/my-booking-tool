@@ -45,6 +45,23 @@ SESSION_TTL_SECONDS = 60 * 60 * 4
 login_limiter = RateLimiter(max_attempts=5, window_seconds=3600)
 
 
+def _client_ip(environ: dict) -> str:
+    """Best-effort real client IP, for per-source rate limiting -- NOT for
+    anything security-critical beyond that (trivially spoofable if this app
+    were ever reachable other than through its own reverse proxy). Trusts
+    X-Forwarded-For because this app only ever listens on 127.0.0.1,
+    reached exclusively via nginx (see nginx/my-booking.conf's
+    proxy_set_header X-Forwarded-For), which sets/appends it on every
+    request; falls back to REMOTE_ADDR for direct use without nginx in
+    front (e.g. local dev). Takes the left-most entry -- the original
+    client -- in case of a longer proxy chain in front of nginx.
+    """
+    forwarded = environ.get("HTTP_X_FORWARDED_FOR", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return environ.get("REMOTE_ADDR", "unknown")
+
+
 def _new_session(data: dict) -> str:
     sid = new_token()
     SESSIONS[sid] = {**data, "expires": time.time() + SESSION_TTL_SECONDS}
@@ -452,7 +469,12 @@ class App:
         if method == "POST":
             form = self._read_form(environ)
             password = form.get("password", "")
-            if not login_limiter.allow("admin"):
+            # Keyed by client IP, not a single global "admin" bucket --
+            # otherwise anyone, unauthenticated, could lock the real admin
+            # out of /admin/login for up to an hour with 5 wrong guesses
+            # from any IP (a self-inflicted DoS the old global key allowed;
+            # see the maintainer's local notes).
+            if not login_limiter.allow(f"admin:{_client_ip(environ)}"):
                 error = "Too many attempts -- try again later."
             elif verify_admin_password(password, self.settings.admin_password_hash):
                 sid = _new_session({"kind": "admin"})

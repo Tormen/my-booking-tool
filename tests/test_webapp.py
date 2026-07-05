@@ -1,7 +1,9 @@
+import io
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 
+from app import webapp
 from app.caldav_client import CalDAVClient, Response
 from app.slots import Occurrence
 from app.storage import Store
@@ -262,6 +264,64 @@ class PolicyNoteTest(unittest.TestCase):
         note = app._policy_note()
         self.assertIn("3", note)
         self.assertIn("2h", note)
+
+
+class AdminLoginRateLimitTest(unittest.TestCase):
+    """Regression coverage for the 2026-07-05 fix: login_limiter used to be
+    keyed by a single global "admin" string, so anyone, unauthenticated,
+    could lock the real admin out of /admin/login for up to an hour with 5
+    wrong guesses from any IP. It's now keyed per client IP (via
+    webapp._client_ip(), which trusts X-Forwarded-For -- see
+    nginx/my-booking.conf) -- see the maintainer's local notes."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.app = App(make_settings(), self.store)
+        # login_limiter (app/webapp.py) is a module-level singleton shared
+        # across every test in the process -- reset just the keys this
+        # class touches, both before and after, so this test can't leak
+        # state into (or be polluted by) any other test.
+        self._keys = [f"admin:203.0.113.{i}" for i in range(1, 5)]
+        for k in self._keys:
+            webapp.login_limiter.reset(k)
+        self.addCleanup(lambda: [webapp.login_limiter.reset(k) for k in self._keys])
+
+    def _post(self, password: str, *, forwarded_for: str | None = None, remote_addr: str | None = None):
+        body = f"password={password}".encode()
+        environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+        if forwarded_for is not None:
+            environ["HTTP_X_FORWARDED_FOR"] = forwarded_for
+        if remote_addr is not None:
+            environ["REMOTE_ADDR"] = remote_addr
+        _status, _headers, resp_body = self.app.admin_login("POST", environ)
+        return resp_body
+
+    def test_five_failures_from_one_ip_then_that_ip_is_locked(self):
+        ip = "203.0.113.1"
+        for _ in range(5):
+            self.assertIn("Wrong password", self._post("wrong", forwarded_for=ip))
+        self.assertIn("Too many attempts", self._post("wrong", forwarded_for=ip))
+
+    def test_a_different_ip_is_unaffected_by_another_ips_lockout(self):
+        attacker_ip, admin_ip = "203.0.113.2", "203.0.113.3"
+        for _ in range(5):
+            self._post("wrong", forwarded_for=attacker_ip)
+        self.assertIn("Too many attempts", self._post("wrong", forwarded_for=attacker_ip))
+        # The real admin, from a different IP, must NOT be locked out just
+        # because someone else exhausted their own budget.
+        body = self._post("wrong", forwarded_for=admin_ip)
+        self.assertIn("Wrong password", body)
+        self.assertNotIn("Too many attempts", body)
+
+    def test_falls_back_to_remote_addr_without_x_forwarded_for(self):
+        # No nginx in front (e.g. local dev) -- must not crash, and must
+        # still rate-limit using REMOTE_ADDR.
+        ip = "203.0.113.4"
+        for _ in range(5):
+            self.assertIn("Wrong password", self._post("wrong", remote_addr=ip))
+        self.assertIn("Too many attempts", self._post("wrong", remote_addr=ip))
 
 
 if __name__ == "__main__":
