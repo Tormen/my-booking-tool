@@ -260,7 +260,10 @@ def cmd_status(args) -> None:
     a package-wide `rpm -V` integrity check), secrets (existence,
     permissions, and -- for admin_password_hash / erasure_pepper --
     whether the content looks right), the data dir, the configured log
-    file (if any), my-booking group membership, systemd units, SELinux,
+    file (if any), my-booking group membership, systemd units, whether
+    settings.toml has been edited since the service last (re)started
+    (it's only read once at startup -- an edit made after that isn't
+    live yet, even though the file itself is already correct), SELinux,
     and (if [site].static_site_dir is configured) whether the live
     deployed privacy.html still matches this settings.toml, plus whether
     any of the live site/*.html pages still contain a leftover REPLACE-ME
@@ -324,6 +327,7 @@ def cmd_status(args) -> None:
     # -- my-booking group membership, systemd, SELinux, package integrity -------
     checks.extend(cli_checks.check_group_membership())
     checks.extend(cli_checks.check_systemd())
+    checks.extend(cli_checks.check_settings_fresh(args.settings))
     checks.extend(cli_checks.check_selinux())
     checks.extend(cli_checks.check_rpm_verify())
 

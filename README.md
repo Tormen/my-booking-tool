@@ -310,6 +310,11 @@ something seems off, or after any install/reinstall:
 - Your login is in the `my-booking` group.
 - `my-booking.service`, `my-booking-retention.timer`, and
   `my-booking-watchdog.timer`: enabled and active.
+- Whether `settings.toml` has been edited more recently than
+  `my-booking.service` last (re)started -- it's only read once, at
+  startup, so an edit made after that isn't live yet even though the file
+  on disk is already correct (a stale-in-memory config, not a bug --
+  `setup -i` offers to restart the service for you).
 - SELinux: enforcing or not, and if enforcing, whether
   `httpd_can_network_connect` is on (see the SELinux note above).
 - `rpm -V my-booking-tool`: report-only integrity check across every file

@@ -217,13 +217,17 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
                                 ("my-booking-retention.timer", "ok", "enabled, active")]),
             patch("app.cli_checks.check_selinux",
                   return_value=[("SELinux httpd_can_network_connect", "fail", "off")]),
+            patch("app.cli_checks.check_settings_fresh",
+                  return_value=[("my-booking.service freshness", "warn",
+                                  "settings.toml was edited after my-booking.service last (re)started -- "
+                                  "those edits aren't live yet: sudo systemctl restart my-booking.service")]),
         ]
         for p in self._patches:
             p.start()
             self.addCleanup(p.stop)
 
     def test_non_root_is_never_asked_about_privileged_steps(self):
-        # As non-root, none of the three warn/fail checks above should
+        # As non-root, none of the four warn/fail checks above should
         # trigger a prompt -- only an informational "needs root" note.
         # (The step-4 nginx prompt still fires -- it's unconditional --
         # so it needs an answer here, but that's not what this test is
@@ -237,15 +241,18 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
         self.assertEqual(prompt.asked_matching("usermod"), [])
         self.assertEqual(prompt.asked_matching("Enable+start"), [])
         self.assertEqual(prompt.asked_matching("setsebool"), [])
+        self.assertEqual(prompt.asked_matching("Restart my-booking.service"), [])
 
     def test_root_is_asked_once_per_actionable_item(self):
-        # group (warn) + my-booking.service (warn) + SELinux (fail) = 3
-        # actionable items; the retention timer is already "ok" and isn't
-        # asked about at all. nginx (step 4) is a 4th, unrelated prompt.
+        # group (warn) + my-booking.service enable (warn) + SELinux (fail)
+        # + settings.toml freshness (warn) = 4 actionable items; the
+        # retention timer is already "ok" and isn't asked about at all.
+        # nginx (step 4) is a 5th, unrelated prompt.
         prompt = FakePrompts({
             "usermod": True,
             "Enable+start": True,
             "setsebool": True,
+            "Restart my-booking.service": True,
         })
         calls: list[list[str]] = []
         cli_setup.interactive_setup(
@@ -256,15 +263,18 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
         self.assertEqual(len(prompt.asked_matching("usermod")), 1)
         self.assertEqual(len(prompt.asked_matching("Enable+start")), 1)
         self.assertEqual(len(prompt.asked_matching("setsebool")), 1)
+        self.assertEqual(len(prompt.asked_matching("Restart my-booking.service")), 1)
         self.assertTrue(any(c[0] == "usermod" for c in calls))
         self.assertTrue(any(c == ["systemctl", "enable", "--now", "my-booking.service"] for c in calls))
         self.assertTrue(any(c[0] == "setsebool" for c in calls))
+        self.assertTrue(any(c == ["systemctl", "restart", "my-booking.service"] for c in calls))
 
     def test_declining_root_prompts_runs_nothing(self):
         prompt = FakePrompts({
             "usermod": False,
             "Enable+start": False,
             "setsebool": False,
+            "Restart my-booking.service": False,
         })
         calls: list[list[str]] = []
         cli_setup.interactive_setup(

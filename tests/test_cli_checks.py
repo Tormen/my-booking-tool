@@ -1,3 +1,4 @@
+import os
 import stat
 import tempfile
 import unittest
@@ -171,6 +172,86 @@ class CheckSystemdTest(unittest.TestCase):
             checks = cli_checks.check_systemd()
         self.assertEqual(len(checks), 1)
         self.assertEqual(checks[0][1], "warn")
+
+
+class CheckSettingsFreshTest(unittest.TestCase):
+    """settings.toml is only read once, at app/serve.py startup -- see
+    check_settings_fresh()'s docstring for the real-world incident this
+    caught (an edited course description not showing up because the
+    service was never restarted). `_run_side_effect` distinguishes the
+    three different subprocess.run() calls this exercises (`systemctl
+    is-active`, `systemctl show ... --value`, `date -d ... +%s`) by cmd
+    shape, the same pattern CheckSystemdTest above uses for its two."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.settings_path = str(Path(self._tmp.name) / "settings.toml")
+        Path(self.settings_path).write_text("# test\n", encoding="utf-8")
+
+    def _run_side_effect(self, active: str, active_enter_ts: str, epoch: str):
+        def _run(cmd, capture_output, text, timeout=None, check=None):
+            if cmd[:2] == ["systemctl", "is-active"]:
+                out = active
+            elif cmd[:2] == ["systemctl", "show"]:
+                out = active_enter_ts
+            elif cmd[0] == "date":
+                out = epoch
+            else:
+                out = ""
+            return type("R", (), {"stdout": out})()
+        return _run
+
+    def _which(self, name):
+        return f"/usr/bin/{name}" if name in ("systemctl", "date") else None
+
+    def test_systemctl_missing_is_silent(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            checks = cli_checks.check_settings_fresh(self.settings_path)
+        self.assertEqual(checks, [])
+
+    def test_missing_settings_file_is_silent(self):
+        with patch("app.cli_checks.shutil.which", side_effect=self._which):
+            checks = cli_checks.check_settings_fresh(str(Path(self._tmp.name) / "nope.toml"))
+        self.assertEqual(checks, [])
+
+    def test_service_not_active_is_silent(self):
+        with patch("app.cli_checks.shutil.which", side_effect=self._which), \
+             patch("app.cli_checks.subprocess.run", side_effect=self._run_side_effect("inactive", "", "")):
+            checks = cli_checks.check_settings_fresh(self.settings_path)
+        self.assertEqual(checks, [])
+
+    def test_cant_determine_start_time_warns(self):
+        with patch("app.cli_checks.shutil.which", side_effect=self._which), \
+             patch("app.cli_checks.subprocess.run", side_effect=self._run_side_effect("active", "n/a", "")):
+            checks = cli_checks.check_settings_fresh(self.settings_path)
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("can't determine", checks[0][2])
+
+    def test_edited_after_start_warns_with_restart_command(self):
+        # Service "started" at epoch 1000; settings.toml's mtime is set
+        # comfortably after that.
+        os.utime(self.settings_path, (2000, 2000))
+        with patch("app.cli_checks.shutil.which", side_effect=self._which), \
+             patch("app.cli_checks.subprocess.run",
+                   side_effect=self._run_side_effect("active", "Sat 2026-07-04 08:00:00 UTC", "1000")):
+            checks = cli_checks.check_settings_fresh(self.settings_path)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("sudo systemctl restart my-booking.service", detail)
+
+    def test_unchanged_since_start_is_ok(self):
+        # settings.toml's mtime is set well BEFORE the service's start
+        # epoch -- i.e. no edit happened after the service came up.
+        os.utime(self.settings_path, (1000, 1000))
+        with patch("app.cli_checks.shutil.which", side_effect=self._which), \
+             patch("app.cli_checks.subprocess.run",
+                   side_effect=self._run_side_effect("active", "Sat 2026-07-04 08:00:00 UTC", "2000")):
+            checks = cli_checks.check_settings_fresh(self.settings_path)
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "ok")
 
 
 class CheckWatchdogNginxAccessTest(unittest.TestCase):

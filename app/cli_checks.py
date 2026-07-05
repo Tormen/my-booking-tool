@@ -144,6 +144,67 @@ def check_systemd() -> list[Check]:
     return checks
 
 
+def _service_active_since(unit: str) -> float | None:
+    """Epoch seconds `unit` last transitioned to active, or None if that
+    can't be determined (not on a systemd host, no GNU `date`, unit never
+    started, etc.) -- best-effort, same as every other live-system check
+    here. `systemctl show --value` gives a human timestamp string (e.g.
+    "Sat 2026-07-05 10:00:00 CEST"), not an epoch, and there's no portable
+    systemctl flag for epoch directly -- shelling out to `date -d` to parse
+    it is simpler and more correct than reimplementing systemd's timestamp
+    format ourselves (same "ask the system" reasoning as _my_booking_can_read)."""
+    if not shutil.which("systemctl") or not shutil.which("date"):
+        return None
+    try:
+        raw_ts = subprocess.run(
+            ["systemctl", "show", unit, "--property=ActiveEnterTimestamp", "--value"],
+            capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not raw_ts or raw_ts in ("n/a", "0"):
+        return None  # never (yet) entered the active state
+    try:
+        epoch_str = subprocess.run(
+            ["date", "-d", raw_ts, "+%s"], capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip()
+        return float(epoch_str) if epoch_str else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def check_settings_fresh(settings_path: str, unit: str = "my-booking.service") -> list[Check]:
+    """settings.toml is read exactly once, at app/serve.py's startup -- see
+    that module's main(). There's no file-watching or SIGHUP-triggered
+    reload, so an edit made *after* `unit` last (re)started is correct on
+    disk but not live yet. Hit in practice 2026-07-05: the operator edited a
+    course description on the server, the file was correct, but the
+    booking page kept showing the old text because my-booking.service
+    hadn't been restarted -- nothing flagged this, so it looked like a
+    bug rather than a pending restart. Silent (returns []) if `unit`
+    isn't currently active: check_systemd() already reports that, and
+    "stale relative to a service that isn't even running" isn't a
+    meaningful thing to also say here."""
+    if not shutil.which("systemctl"):
+        return []
+    p = Path(settings_path)
+    if not p.exists():
+        return []  # a missing settings.toml is already reported elsewhere
+    is_active = subprocess.run(
+        ["systemctl", "is-active", unit], capture_output=True, text=True, timeout=5, check=False,
+    ).stdout.strip()
+    if is_active != "active":
+        return []
+    since = _service_active_since(unit)
+    if since is None:
+        return [(f"{unit} freshness", "warn", "can't determine when it last (re)started -- skipping")]
+    if p.stat().st_mtime > since:
+        return [(f"{unit} freshness", "warn",
+                  f"settings.toml was edited after {unit} last (re)started -- those edits aren't "
+                  f"live yet: sudo systemctl restart {unit}")]
+    return [(f"{unit} freshness", "ok", "settings.toml unchanged since last (re)start")]
+
+
 def check_selinux() -> list[Check]:
     if not shutil.which("getenforce"):
         return [("SELinux", "ok", "not present on this system")]

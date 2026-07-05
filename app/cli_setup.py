@@ -96,6 +96,7 @@ def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli
         "rpmnew": cli_checks.check_rpmnew(config_paths),
         "group": cli_checks.check_group_membership(),
         "systemd": cli_checks.check_systemd(),
+        "settings_fresh": cli_checks.check_settings_fresh(settings_path),
         "selinux": cli_checks.check_selinux(),
         "nginx_locations": cli_checks.check_nginx_locations(),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
@@ -145,6 +146,7 @@ def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[s
 
     print_fn("\n6. Service + retention timer:")
     show(report["systemd"])
+    show(report["settings_fresh"])
 
     print_fn("\n7. SELinux:")
     show(report["selinux"])
@@ -300,6 +302,20 @@ def interactive_setup(
                 run(["systemctl", "enable", "--now", unit])
             elif not is_root():
                 print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+
+    # settings.toml can be edited on disk without the running service ever
+    # noticing (see check_settings_fresh()'s docstring) -- flag it right
+    # here, next to the service's own status, and offer the one-line fix.
+    for label, level, detail in cli_checks.check_settings_fresh(settings_path):
+        if level == "ok":
+            print_fn(f"[ok] {label}: {detail}")
+        else:
+            print_fn(f"{label}: {detail}")
+            if "aren't live yet" in detail:
+                if is_root() and prompt("Restart my-booking.service now?"):
+                    run(["systemctl", "restart", "my-booking.service"])
+                elif not is_root():
+                    print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
 
     # 7. SELinux
     print_fn("\n-- 7. SELinux --")
