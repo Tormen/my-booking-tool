@@ -455,7 +455,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-181 tests covering slot generation (including DST via `zoneinfo`, and that
+191 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -599,8 +599,9 @@ ideally at the same time as each course's booking link starts pointing at
 
 ## Spots-left display (`[defaults]` in `settings.toml`)
 
-`show_spots_left` (default `true`) toggles the "N spot(s) left" / "FULL,
-join waitlist" text on the booking page on or off entirely.
+`show_spots_left` (default `true`) toggles the "N spots left" / "FULL,
+join waitlist" text on the booking page on or off entirely (correctly
+singular as "1 spot left").
 
 `spots_left_offset` (default `0`) shifts the *displayed* number, for
 A/B-testing whether perceived scarcity changes booking behaviour --
@@ -615,9 +616,39 @@ negative shows more. This is deliberately display-only
 - An occurrence that's genuinely full always says "FULL, join waitlist,"
   regardless of the offset -- what that promises in the confirmation email
   has to stay true. Only the number shown while there's real room left is
-  adjustable, and it's floored at "1 spot(s) left" (never "0" while a
+  adjustable, and it's floored at "1 spot left" (never "0" while a
   booking from there would in fact still be confirmed) and capped at the
   course's real capacity.
+
+## Booking page layout (`/book/<shortname>`)
+
+Dates are shown as clickable buttons (not a dropdown), each showing the
+date and, on its own line, the spots-left text -- laid out in an even
+grid so buttons of different widths still line up. A "Selected date: ..."
+box below the buttons repeats the chosen date as plain text. Name and
+email use a larger input (`.big-input` in `app/templates.py`) since real
+addresses/names can be long. Every required field is marked
+`(required)`, including the 6-digit PIN and the participation-terms
+checkbox; a hint notes the PIN is never emailed to you (it's only needed
+to log into `/my` later -- cancelling any single booking always works via
+the link in its confirmation email, PIN or not).
+
+The submit button is progressively enhanced: it starts enabled (the
+`required`/`pattern` attributes alone already block an invalid submit
+with no JS at all), and with JS enabled it also disables itself until
+every required field validates, and its label switches between
+`[defaults].book_button_label` (default `"Book"`) and `"Join waitlist"`
+depending on the selected date's availability -- the waitlist label is
+never configurable, since it has to stay literally true to what
+submitting the form does.
+
+Two more `[[course]]` fields control the page header:
+`subtitle` (optional plain text -- omit it to auto-show
+"<Weekday>s -- <location>", set it to `""` to show nothing, or override
+it with your own text) and `description` (rendered as **raw HTML**, not
+escaped, so bold/italic/underline, links, and bullet lists all work --
+safe because this is your own settings.toml content, not guest input, the
+same trust boundary as the hand-authored `site/*.html` pages).
 
 ## Late-booking quorum (`min_notice_hours` / `min_required_participants`)
 

@@ -9,7 +9,7 @@ from app.slots import Occurrence
 from app.storage import Store
 from app.webapp import App
 
-from .helpers import make_settings
+from .helpers import make_course, make_settings
 
 PROPFIND_BODY = """<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:">
@@ -147,7 +147,7 @@ class SpotsLeftDisplayTest(unittest.TestCase):
 
     def test_default_offset_shows_the_real_number(self):
         app = self._app()
-        self.assertEqual(app._spots_left_text(self._occ(2, capacity=10)), "8 spot(s) left")
+        self.assertEqual(app._spots_left_text(self._occ(2, capacity=10)), "8 spots left")
 
     def test_default_offset_shows_full_when_actually_full(self):
         app = self._app()
@@ -156,11 +156,11 @@ class SpotsLeftDisplayTest(unittest.TestCase):
     def test_positive_offset_reduces_shown_number(self):
         app = self._app(spots_left_offset=3)
         # real spots_left = 8, offset 3 -> shown 5
-        self.assertEqual(app._spots_left_text(self._occ(2, capacity=10)), "5 spot(s) left")
+        self.assertEqual(app._spots_left_text(self._occ(2, capacity=10)), "5 spots left")
 
     def test_offset_never_shows_below_one_when_not_actually_full(self):
         app = self._app(spots_left_offset=50)
-        self.assertEqual(app._spots_left_text(self._occ(2, capacity=10)), "1 spot(s) left")
+        self.assertEqual(app._spots_left_text(self._occ(2, capacity=10)), "1 spot left")
 
     def test_offset_never_overrides_a_genuinely_full_occurrence(self):
         # A large *negative* offset would otherwise inflate the number --
@@ -170,12 +170,93 @@ class SpotsLeftDisplayTest(unittest.TestCase):
 
     def test_negative_offset_is_clamped_to_capacity(self):
         app = self._app(spots_left_offset=-100)
-        self.assertEqual(app._spots_left_text(self._occ(9, capacity=10)), "10 spot(s) left")
+        self.assertEqual(app._spots_left_text(self._occ(9, capacity=10)), "10 spots left")
+
+    def test_singular_spot_when_exactly_one_left(self):
+        app = self._app()
+        self.assertEqual(app._spots_left_text(self._occ(9, capacity=10)), "1 spot left")
 
     def test_show_spots_left_false_hides_the_text_entirely(self):
         app = self._app(show_spots_left=False)
         self.assertEqual(app._spots_left_text(self._occ(2, capacity=10)), "")
         self.assertEqual(app._spots_left_text(self._occ(10, capacity=10)), "")
+
+
+class BookPageTest(unittest.TestCase):
+    """`_book_page`'s subtitle/description/button-label behaviour. Full
+    HTML structure isn't asserted line-by-line (that's what the rendered
+    mockup is for) -- these lock in the actual content-selection logic:
+    what shows up, what doesn't, and what's escaped vs. left as raw HTML."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def _app(self, **overrides) -> App:
+        return App(make_settings(**overrides), self.store)
+
+    def _occ(self, d=date(2026, 7, 11), spots_taken=1, capacity=10) -> Occurrence:
+        start = datetime(2026, 7, 11, 10, 0, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 11, 11, 15, tzinfo=timezone.utc)
+        return Occurrence("trier-sat-yoga", d, start, end, spots_taken, capacity)
+
+    def test_subtitle_defaults_to_weekday_and_location(self):
+        app = self._app()
+        course = make_course(weekday="sat", location="Trier")
+        _, _, html = app._book_page(course, [self._occ()])
+        self.assertIn('<p class="subtitle">Saturdays -- Trier</p>', html)
+
+    def test_subtitle_empty_string_suppresses_it(self):
+        app = self._app()
+        course = make_course(subtitle="")
+        _, _, html = app._book_page(course, [self._occ()])
+        self.assertNotIn('class="subtitle"', html)
+
+    def test_subtitle_custom_override_is_escaped_plain_text(self):
+        app = self._app()
+        course = make_course(subtitle="Wednesdays <b>only</b>")
+        _, _, html = app._book_page(course, [self._occ()])
+        self.assertIn('<p class="subtitle">Wednesdays &lt;b&gt;only&lt;/b&gt;</p>', html)
+
+    def test_description_is_rendered_as_raw_html_not_escaped(self):
+        app = self._app()
+        course = make_course(description="<b>Rich</b> <i>text</i>")
+        _, _, html = app._book_page(course, [self._occ()])
+        self.assertIn('<div class="description"><b>Rich</b> <i>text</i></div>', html)
+
+    def test_no_description_omits_the_box_entirely(self):
+        app = self._app()
+        course = make_course(description="")
+        _, _, html = app._book_page(course, [self._occ()])
+        self.assertNotIn('class="description"', html)
+
+    def test_book_button_label_defaults_to_book(self):
+        app = self._app()
+        course = make_course()
+        _, _, html = app._book_page(course, [self._occ(spots_taken=1, capacity=10)])
+        self.assertIn(">Book</button>", html)
+        self.assertIn('data-book-label="Book"', html)
+
+    def test_book_button_label_is_configurable(self):
+        app = self._app(book_button_label="Reserve my spot")
+        course = make_course()
+        _, _, html = app._book_page(course, [self._occ(spots_taken=1, capacity=10)])
+        self.assertIn(">Reserve my spot</button>", html)
+        self.assertIn('data-book-label="Reserve my spot"', html)
+
+    def test_full_occurrence_always_says_join_waitlist_regardless_of_label(self):
+        app = self._app(book_button_label="Reserve my spot")
+        course = make_course()
+        _, _, html = app._book_page(course, [self._occ(spots_taken=10, capacity=10)])
+        self.assertIn(">Join waitlist</button>", html)
+
+    def test_spots_left_text_is_split_onto_its_own_span(self):
+        app = self._app()
+        course = make_course()
+        _, _, html = app._book_page(course, [self._occ(spots_taken=1, capacity=10)])
+        self.assertIn('<span class="d-date">2026-07-11</span>', html)
+        self.assertIn('<span class="d-spots">9 spots left</span>', html)
 
 
 class LateBookingQuorumTest(unittest.TestCase):

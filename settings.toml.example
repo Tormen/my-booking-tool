@@ -48,6 +48,11 @@ min_notice_hours = 2
 min_required_participants = 1
 # Show "N spot(s) left" / "FULL, join waitlist" on the booking page at all.
 show_spots_left = true
+# Text on the booking page's submit button for a bookable (not full)
+# occurrence -- always "Join waitlist" instead for a full one, regardless
+# of this setting, since that label has to stay literally true to what
+# submitting the form actually does.
+book_button_label = "Book"
 # Displayed-only offset for A/B-testing whether perceived scarcity changes
 # booking behaviour. Positive = show fewer spots than really available
 # (more urgency), negative = show more, 0 = show the real number. This
@@ -94,7 +99,13 @@ erasure_pepper_file = "/etc/my-booking/secrets/erasure_pepper"
 # URL-safe (used directly in /book/<shortname>) and unique across courses.
 # audience is "private" or "public" (display-only, no access control
 # difference); language is a free-text tag your own templates/copy can key
-# off of if you support more than one.
+# off of if you support more than one. description is rendered as RAW HTML
+# on the booking page (not escaped) -- rich text (bold/italic/underline,
+# links, bullet lists) is fine here, since this is your own text, not
+# guest input. subtitle is optional plain text shown under the title on
+# the booking page: omit it entirely to auto-show "<Weekday>s -- <location>"
+# (as below), set it to "" to show no subtitle at all, or set it to any
+# other string to override the auto-derived one.
 [[course]]
 shortname   = "example-monday-class"
 title       = "Example Class"
@@ -106,6 +117,7 @@ capacity    = 12
 audience    = "public"
 language    = "en"
 description = "Example weekly class. Replace this with your own description."
+# subtitle  = "Mondays -- Example Community Center"
 
 [[course]]
 shortname  = "example-thursday-class"

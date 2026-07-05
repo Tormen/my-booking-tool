@@ -19,6 +19,26 @@ body{{font-family:sans-serif;max-width:640px;margin:2em auto;padding:0 1em;color
 a{{color:#196B24}} .err{{color:#b00020}} .note{{color:#555;font-size:.9em}} .card{{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}}
 input,button,textarea{{font-size:1em;padding:.4em;margin:.2em 0}} button{{cursor:pointer}}
 label{{display:block;margin-top:.6em}}
+.subtitle{{color:#444;margin:-.4em 0 1em;font-size:1.2em;font-weight:500}}
+.req{{color:#b00020}}
+.hint{{color:#555;font-size:.85em;margin:.1em 0 0}}
+.big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em}}
+.dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5em;margin:.4em 0}}
+.date-btn{{position:relative;display:block}}
+.date-btn input{{position:absolute;opacity:0;width:1px;height:1px}}
+.date-btn span{{display:block}}
+.date-btn > span{{padding:.5em .8em;border:1px solid #ccc;border-radius:6px;cursor:pointer;text-align:center;line-height:1.3}}
+.date-btn .d-date{{font-size:.95em}}
+.date-btn .d-spots{{font-size:.85em;color:#666;margin-top:.1em}}
+.date-btn input:checked + span{{background:#196B24;color:#fff;border-color:#196B24}}
+.date-btn input:checked + span .d-spots{{color:#dff0e2}}
+.date-btn input:focus-visible + span{{outline:2px solid #196B24;outline-offset:1px}}
+.selected-box{{background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.7em 1em;margin:.8em 0}}
+.description{{background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;padding:1em 1.2em;margin:.8em 0}}
+.description ul,.description ol{{margin:.4em 0;padding-left:1.4em}}
+.description p:first-child{{margin-top:0}} .description p:last-child{{margin-bottom:0}}
+.submit-row{{margin-top:1.4em}}
+button:disabled{{opacity:.5;cursor:not-allowed}}
 </style></head><body>
 <h1>{esc(title)}</h1>
 {body}

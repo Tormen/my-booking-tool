@@ -310,11 +310,11 @@ class App:
         )
 
     def _spots_left_text(self, o) -> str:
-        """Text shown after the date in the booking dropdown -- e.g.
-        "3 spot(s) left" or "FULL, join waitlist". `spots_left_offset`
-        (settings.toml [defaults], default 0) can shift the *displayed*
-        number for A/B-testing whether perceived scarcity changes booking
-        behaviour -- deliberately display-only:
+        """Text shown next to the date on the booking page -- e.g.
+        "3 spots left"/"1 spot left" or "FULL, join waitlist".
+        `spots_left_offset` (settings.toml [defaults], default 0) can shift
+        the *displayed* number for A/B-testing whether perceived scarcity
+        changes booking behaviour -- deliberately display-only:
 
         - The real confirmed-vs-waitlisted decision always uses the true
           count (Store.add_registration_checking_capacity), completely
@@ -324,7 +324,7 @@ class App:
           or not -- what "join waitlist" promises has to stay true, since
           that's exactly what happens if someone submits the form. Only
           the number shown while there's real room left is adjustable
-          (floored at 1, so it's never "0 spot(s) left" while a booking
+          (floored at 1, so it's never "0 spots left" while a booking
           from here would in fact be confirmed, not waitlisted).
         """
         if not self.settings.show_spots_left:
@@ -333,7 +333,8 @@ class App:
             return "FULL, join waitlist"
         shown = o.spots_left - self.settings.spots_left_offset
         shown = max(1, min(shown, o.capacity))
-        return f"{shown} spot(s) left"
+        unit = "spot" if shown == 1 else "spots"
+        return f"{shown} {unit} left"
 
     def _policy_note(self) -> str:
         """Short note on the booking page about the late-booking quorum
@@ -350,29 +351,100 @@ class App:
         )
 
     def _book_page(self, course, occurrences, error: str | None = None):
+        # course.subtitle is optional: unset (None, the default -- key
+        # omitted in settings.toml) auto-derives "<Weekday>s -- <location>";
+        # set to "" explicitly suppresses the subtitle entirely; any other
+        # string overrides the auto-derived one. Always plain text (esc()'d)
+        # -- unlike `description` below, this isn't meant to hold rich HTML.
+        subtitle_text = course.subtitle if course.subtitle is not None else f"{course.weekday_label()}s -- {course.location}"
+        subtitle = f'<p class="subtitle">{esc(subtitle_text)}</p>' if subtitle_text else ""
+        # course.description is operator-authored (settings.toml, edited by
+        # whoever runs this install), not guest-submitted -- unlike every
+        # other value on this page it's deliberately rendered as raw HTML,
+        # not passed through esc(), so it can hold rich text (bold/italic/
+        # underline, links, bullet lists -- see settings.toml.example).
+        # Same trust boundary as the hand-authored site/*.html pages
+        # elsewhere in this project: whoever can edit settings.toml already
+        # has full control of the server, so this isn't a new privilege
+        # boundary, just a place raw HTML is intentionally allowed through.
+        desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
         if not occurrences:
-            body = "<p>No upcoming slots -- if a date isn't listed, that session isn't happening.</p>"
+            body = subtitle + desc_html + "<p>No upcoming slots -- if a date isn't listed, that session isn't happening.</p>"
         else:
-            options = "".join(
-                f'<option value="{esc(o.date.isoformat())}">{esc(o.date.isoformat())}'
-                + (f" -- {esc(text)}" if (text := self._spots_left_text(o)) else "")
-                + "</option>"
-                for o in occurrences
+            date_buttons = "".join(
+                '<label class="date-btn">'
+                f'<input type="radio" name="occurrence_date" value="{esc(o.date.isoformat())}" '
+                f'data-date="{esc(o.date.isoformat())}" data-full="{"1" if o.is_full else "0"}"'
+                + (" checked" if i == 0 else "")
+                + '><span><span class="d-date">' + esc(o.date.isoformat()) + "</span>"
+                + (f'<span class="d-spots">{esc(text)}</span>' if (text := self._spots_left_text(o)) else "")
+                + "</span></label>"
+                for i, o in enumerate(occurrences)
             )
+            first_label = "Join waitlist" if occurrences[0].is_full else self.settings.book_button_label
             note_html = f'<p class="note">{esc(note)}</p>' if (note := self._policy_note()) else ""
             err_html = f'<p class="err">{esc(error)}</p>' if error else ""
             body = f"""
+            {subtitle}
+            {desc_html}
             {note_html}
             {err_html}
-            <form method="post" class="card">
-              <label>Date <select name="occurrence_date">{options}</select></label>
-              <label>Your name <input name="name" required></label>
-              <label>Your email <input name="email" type="email" required></label>
-              <label>Pick a 6-digit code (to manage this booking later) <input name="pin" pattern="\\d{{6}}" maxlength="6" required></label>
-              <label><input type="checkbox" name="agree"> I acknowledge the
-                <a href="/terms.html" target="_blank">participation terms</a> (voluntary, at my own risk).</label>
-              <button type="submit">Book / join waitlist</button>
-            </form>"""
+            <form method="post" class="card" id="book-form" data-book-label="{esc(self.settings.book_button_label)}">
+              <label>Date
+                <div class="dates" role="radiogroup" aria-label="Date">{date_buttons}</div>
+              </label>
+              <div class="selected-box">Selected date: <strong id="selected-date-text">{esc(occurrences[0].date.isoformat())}</strong></div>
+              <label>Your name <span class="req">(required)</span>
+                <input class="big-input" name="name" required></label>
+              <label>Your email <span class="req">(required)</span>
+                <input class="big-input" name="email" type="email" required></label>
+              <label>Pick a 6-digit code (to manage this booking later) <span class="req">(required)</span>
+                <input name="pin" pattern="\\d{{6}}" maxlength="6" required></label>
+              <p class="hint">You'll need this code later to cancel or look up your booking -- it's not emailed to you.</p>
+              <label><input type="checkbox" name="agree" required> I acknowledge the
+                <a href="/terms.html" target="_blank">participation terms</a> (voluntary, at my own risk)
+                <span class="req">(required)</span>.</label>
+              <div class="submit-row">
+                <button type="submit" id="book-submit">{esc(first_label)}</button>
+              </div>
+            </form>
+            <script>
+            (function() {{
+              // Progressive enhancement only: the button starts enabled and
+              // the required/pattern attributes above already block an
+              // invalid submit without any JS at all -- this just adds a
+              // nicer disabled state + live date/label switching on top for
+              // guests with JS enabled.
+              var form = document.getElementById("book-form");
+              var radios = form.querySelectorAll('input[name="occurrence_date"]');
+              var selText = document.getElementById("selected-date-text");
+              var submitBtn = document.getElementById("book-submit");
+              var nameEl = form.querySelector('[name="name"]');
+              var emailEl = form.querySelector('[name="email"]');
+              var pinEl = form.querySelector('[name="pin"]');
+              var agreeEl = form.querySelector('[name="agree"]');
+
+              function currentRadio() {{
+                for (var i = 0; i < radios.length; i++) {{ if (radios[i].checked) return radios[i]; }}
+                return null;
+              }}
+              var bookLabel = form.dataset.bookLabel || "Book";
+              function refresh() {{
+                var r = currentRadio();
+                if (r && selText) selText.textContent = r.dataset.date;
+                if (r && submitBtn) submitBtn.textContent = r.dataset.full === "1" ? "Join waitlist" : bookLabel;
+                var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 &&
+                  /^\\d{{6}}$/.test(pinEl.value) && agreeEl.checked;
+                if (submitBtn) submitBtn.disabled = !ok;
+              }}
+              for (var i = 0; i < radios.length; i++) {{ radios[i].addEventListener("change", refresh); }}
+              [nameEl, emailEl, pinEl, agreeEl].forEach(function(el) {{
+                el.addEventListener("input", refresh);
+                el.addEventListener("change", refresh);
+              }});
+              refresh();
+            }})();
+            </script>"""
         return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(course.title, body)
 
     # -- /cancel/<token> (guest, from email) ---------------------------------
@@ -409,7 +481,7 @@ class App:
                 for r in regs
             )
             body = f"""
-            <table border="1" cellpadding="6"><tr><th>Course</th><th>Date</th><th>Status</th><th></th></tr>{rows}</table>
+            <table border="1" cellpadding="6"><tr><th>Course</th><th>Date</th><th>Status</th><th>Actions</th></tr>{rows}</table>
             <form method="post" action="/my/delete-account" onsubmit="return confirm('Delete your account and all booking history? This cancels any future bookings too.');">
               <button type="submit">Delete my account &amp; data</button>
             </form>"""
@@ -512,7 +584,7 @@ class App:
         toggle = '<a href="/admin">today + future only</a>' if show_past else '<a href="/admin?past=1">include past</a>'
         body = f"""<p>{toggle}</p>
         <table border="1" cellpadding="6">
-        <tr><th>Status</th><th>Course</th><th>Date</th><th>Name</th><th>Email</th><th>Registered</th><th>Times booked</th><th></th></tr>
+        <tr><th>Status</th><th>Course</th><th>Date</th><th>Name</th><th>Email</th><th>Registered</th><th>Times booked</th><th>Actions</th></tr>
         {''.join(rows)}</table>"""
         return "200 OK", [("Content-Type", "text/html")], page("Admin overview", body)
 

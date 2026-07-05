@@ -27,11 +27,29 @@ class Course:
     audience: str = "private"  # "private" | "public"
     language: str = "en"
     description: str = ""
+    # Optional override for the booking page's subtitle line (rendered as
+    # plain text, not rich HTML like `description` -- see
+    # app/webapp.py::_book_page). None (the default -- key omitted in
+    # settings.toml) means auto-derive "<Weekday>s -- <location>" from
+    # weekday/location below. Set to "" explicitly to show no subtitle at
+    # all, or to any other string to override the auto-derived one.
+    subtitle: str | None = None
 
     WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    WEEKDAY_LABELS = {
+        "mon": "Monday", "tue": "Tuesday", "wed": "Wednesday", "thu": "Thursday",
+        "fri": "Friday", "sat": "Saturday", "sun": "Sunday",
+    }
 
     def weekday_index(self) -> int:
         return self.WEEKDAYS.index(self.weekday.lower())
+
+    def weekday_label(self) -> str:
+        """Full weekday name for display (e.g. "sat" -> "Saturday") -- used
+        on the booking page so guests see e.g. "Saturdays -- Trier" instead
+        of just the bare course title, without hardcoding any one
+        deployment's actual day/location into the generic template."""
+        return self.WEEKDAY_LABELS.get(self.weekday.lower(), self.weekday.title())
 
     def start_hm(self) -> tuple[int, int]:
         h, m = self.start_time.split(":")
@@ -91,6 +109,13 @@ class Settings:
     # app/webapp.py::book. Default 1 = never blocks anyone: a single
     # confirmed booking always satisfies it on its own.
     min_required_participants: int = 1
+
+    # Text on the booking page's submit button for a bookable (not full)
+    # occurrence -- see app/webapp.py::_book_page. Always overridden to
+    # "Join waitlist" for a full occurrence regardless of this setting,
+    # since that's the one label that has to stay literally true to what
+    # submitting the form actually does.
+    book_button_label: str = "Book"
 
     # Optional: absolute path to the LIVE, web-served copy of site/ (the
     # separate checkout/host location -- see README.md "Static-site
@@ -170,6 +195,7 @@ def load_settings(toml_path: str | Path) -> Settings:
             audience=c.get("audience", "private"),
             language=c.get("language", "en"),
             description=c.get("description", ""),
+            subtitle=c.get("subtitle"),
         )
         for c in raw.get("course", [])
     )
@@ -200,6 +226,7 @@ def load_settings(toml_path: str | Path) -> Settings:
         show_spots_left=bool(defaults.get("show_spots_left", True)),
         spots_left_offset=int(defaults.get("spots_left_offset", 0)),
         min_required_participants=int(defaults.get("min_required_participants", 1)),
+        book_button_label=defaults.get("book_button_label", "Book"),
         retention_months=int(privacy.get("retention_months", 24)),
         canceled_retention_months=int(privacy.get("canceled_retention_months", 6)),
         erasure_pepper=bytes.fromhex(_read_secret(privacy["erasure_pepper_file"])),
