@@ -300,10 +300,16 @@ def interactive_setup(
                 print_fn(f"[fail] could not write {out_path}: {exc}")
 
         # index.html/impressum.html/terms.html: hand-authored, so never
-        # auto-copied silently -- but actively OFFER to copy each one your
-        # checkout has a real (or .example) source for, instead of just
-        # reporting "differs" and leaving you to find/run the cp yourself.
+        # auto-copied silently -- but actively OFFER to act on each one
+        # your checkout has a real (or .example) source for, instead of
+        # just reporting a problem and leaving you to fix it yourself.
         # Staying silent here was the actual bug (see the maintainer's local notes).
+        # Two different offers depending on the situation: if nothing's
+        # deployed yet, there's nothing to lose by a straight copy; but if
+        # BOTH sides already have real content that differs, blindly
+        # overwriting either one could throw content away -- open vimdiff
+        # instead (same reasoning/pattern as the .rpmnew merge above) and
+        # let you reconcile and save by hand.
         for label, level, detail in cli_checks.check_static_pages_deployed(raw, home):
             print_fn(f"[{level}] {label}: {detail}")
         for name in cli_checks._STATIC_PAGES_TO_DEPLOY:
@@ -311,12 +317,20 @@ def interactive_setup(
             if source is None:
                 continue  # nothing in the checkout to offer copying from
             deployed = Path(static_site_dir) / name
-            if prompt(f"Copy {source} to {deployed} now?"):
-                try:
-                    deployed.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-                    print_fn(f"[ok] wrote {deployed}")
-                except OSError as exc:
-                    print_fn(f"[fail] could not write {deployed}: {exc}")
+            if not deployed.exists():
+                if prompt(f"Copy {source} to {deployed} now?"):
+                    try:
+                        deployed.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                        print_fn(f"[ok] wrote {deployed}")
+                    except OSError as exc:
+                        print_fn(f"[fail] could not write {deployed}: {exc}")
+                continue
+            same = deployed.read_text(encoding="utf-8", errors="replace") == \
+                source.read_text(encoding="utf-8", errors="replace")
+            if same:
+                continue  # already in sync -- already reported "[ok]" above
+            if prompt(f"Open vimdiff {deployed} {source} now?"):
+                run(["vimdiff", str(deployed), str(source)])
 
         # Reachability from nginx's actual root -- a per-file symlink, never
         # a static_site_dir rewrite (see check_static_pages_reachable()'s

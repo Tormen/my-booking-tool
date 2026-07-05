@@ -313,31 +313,42 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         )
         self.assertFalse((self.static_dir / site_render.OUTPUT_NAME).exists())
 
-    def test_accepting_copy_deploys_a_stale_hand_authored_page(self):
+    def test_accepting_opens_vimdiff_for_a_stale_hand_authored_page(self):
         # Regression coverage for 2026-07-05: an index.html footer edit sat
         # in the checkout for weeks, never deployed, and nothing offered to
-        # fix it. Now `setup -i` should actively offer the copy.
+        # fix it. Now `setup -i` actively offers to reconcile it -- via
+        # vimdiff (not a blind copy) since BOTH sides have real content
+        # here, and either could be the one worth keeping.
         (self.home / "site" / "index.html").write_text("new content with footer")
         (self.static_dir / "index.html").write_text("old stale content")
         raw = _raw(site={"static_site_dir": str(self.static_dir)})
-        prompt = FakePrompts({"Copy": True})
+        prompt = FakePrompts({"vimdiff": True})
+        calls: list[list[str]] = []
         cli_setup.interactive_setup(
             raw, self.settings_path, str(self.home),
-            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            prompt=prompt, run=calls.append, is_root=lambda: False,
             print_fn=lambda *_: None,
         )
-        self.assertEqual((self.static_dir / "index.html").read_text(), "new content with footer")
+        self.assertTrue(any(
+            c[0] == "vimdiff" and str(self.static_dir / "index.html") in c and str(self.home / "site" / "index.html") in c
+            for c in calls
+        ))
+        # my-bt never writes the file itself here -- vimdiff (a real
+        # editor session) is what would actually reconcile/save it.
+        self.assertEqual((self.static_dir / "index.html").read_text(), "old stale content")
 
-    def test_declining_copy_leaves_the_stale_page_alone(self):
+    def test_declining_vimdiff_leaves_the_stale_page_alone(self):
         (self.home / "site" / "index.html").write_text("new content")
         (self.static_dir / "index.html").write_text("old content")
         raw = _raw(site={"static_site_dir": str(self.static_dir)})
-        prompt = FakePrompts({"Copy": False})
+        prompt = FakePrompts({"vimdiff": False})
+        calls: list[list[str]] = []
         cli_setup.interactive_setup(
             raw, self.settings_path, str(self.home),
-            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            prompt=prompt, run=calls.append, is_root=lambda: False,
             print_fn=lambda *_: None,
         )
+        self.assertEqual(calls, [])
         self.assertEqual((self.static_dir / "index.html").read_text(), "old content")
 
     def test_accepting_copy_deploys_a_never_deployed_page(self):

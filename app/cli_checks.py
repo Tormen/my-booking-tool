@@ -296,7 +296,9 @@ def check_static_pages_deployed(raw: dict, home: str) -> list[Check]:
             checks.append((f"static site content ({deployed})", "ok", "matches your checkout"))
         else:
             checks.append((f"static site content ({deployed})", "warn",
-                            f"differs from your checkout's {source} -- copy it over if that's the newer version"))
+                            f"differs from your checkout's {source} -- vimdiff {deployed} {source} "
+                            "to compare/merge (both sides may have real content, unlike privacy.html "
+                            "-- see the maintainer's local notes)"))
     return checks
 
 
