@@ -317,6 +317,9 @@ something seems off, or after any install/reinstall:
   flags any other packaged file (systemd units, app code, ...) that's
   been hand-modified since install, so drift there doesn't go unnoticed
   either. Doesn't block anything; it's a heads-up, not an enforcement.
+- If `[watchdog].nginx_access_log` is set: whether the `my-booking` user
+  can actually read it (see "Watchdog" above -- `setup -i` offers a
+  `setfacl` fix).
 - If `[site].static_site_dir` is set: whether the live `privacy.html` at
   that path actually matches what current `settings.toml` values would
   render (see "Static-site pages" below) -- catches a `retention_months`
@@ -458,7 +461,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-243 tests covering slot generation (including DST via `zoneinfo`, and that
+255 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -486,7 +489,10 @@ modified, deleted, or replaced by its `.example` counterpart), and the
 watchdog's four independent checks plus its single-combined-email
 behavior (`test_watchdog.py` -- every check is a pure function over
 already-read lines/rows, so none of it needs a real nginx log file,
-journald, or filesystem).
+journald, or filesystem), and the nginx-log-readable check plus its
+interactive `setfacl` offer (`CheckWatchdogNginxAccessTest` in
+`test_cli_checks.py`, `InteractiveSetupWatchdogTest` in
+`test_cli_setup.py`).
 
 ## GDPR notes
 
@@ -751,6 +757,16 @@ Set `enabled = false` to turn the whole thing off (the timer still runs,
 every check just becomes a no-op). See `settings.toml.example`'s
 `[watchdog]` section for every default value and a short explanation of
 each.
+
+**nginx log read access:** `my-bt status`/`setup` now check whether the
+`my-booking` user can actually read `nginx_access_log`, once it's set --
+`ReadOnlyPaths=-/var/log/nginx` in the watchdog's own systemd unit only
+grants a sandboxing exception, it does nothing about the file's actual
+owner/group/mode, which is nginx's/the distro's call. Fedora's nginx
+package typically leaves `/var/log/nginx` unreadable to another
+unprivileged user by default. `my-bt setup --interactive` offers to fix
+this for you (as root) via `setfacl`, including a default ACL so the fix
+survives nginx's own log rotation -- needs the `acl` package installed.
 
 ## Late-booking quorum (`min_notice_hours` / `min_required_participants`)
 

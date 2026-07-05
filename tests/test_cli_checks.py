@@ -173,6 +173,80 @@ class CheckSystemdTest(unittest.TestCase):
         self.assertEqual(checks[0][1], "warn")
 
 
+class CheckWatchdogNginxAccessTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        # A uid/gid that will never match this test process's real
+        # owner/group -- forces the check onto the world-permission branch,
+        # which is exactly what we control directly with chmod below.
+        self._fake_pw = type("PW", (), {"pw_uid": 999999, "pw_gid": 999999})()
+
+    def test_not_configured_is_a_noop(self):
+        self.assertEqual(cli_checks.check_watchdog_nginx_access({}), [])
+
+    def test_my_booking_user_missing_warns(self):
+        with patch("pwd.getpwnam", side_effect=KeyError("no such user")):
+            checks = cli_checks.check_watchdog_nginx_access(
+                {"watchdog": {"nginx_access_log": str(self.dir / "access.log")}}
+            )
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("doesn't exist yet", checks[0][2])
+
+    def test_missing_file_warns(self):
+        with patch("pwd.getpwnam", return_value=self._fake_pw), \
+             patch("grp.getgrall", return_value=[]):
+            checks = cli_checks.check_watchdog_nginx_access(
+                {"watchdog": {"nginx_access_log": str(self.dir / "does-not-exist.log")}}
+            )
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("doesn't exist", checks[0][2])
+
+    def test_world_readable_file_and_dir_is_ok(self):
+        log = self.dir / "access.log"
+        log.write_text("test\n")
+        self.dir.chmod(0o755)
+        log.chmod(0o644)
+        with patch("pwd.getpwnam", return_value=self._fake_pw), \
+             patch("grp.getgrall", return_value=[]):
+            checks = cli_checks.check_watchdog_nginx_access(
+                {"watchdog": {"nginx_access_log": str(log)}}
+            )
+        self.assertEqual(checks[0][1], "ok")
+
+    def test_unreadable_file_warns_with_setfacl_command(self):
+        log = self.dir / "access.log"
+        log.write_text("test\n")
+        self.dir.chmod(0o700)  # no group/world traversal
+        log.chmod(0o600)       # no group/world read
+        with patch("pwd.getpwnam", return_value=self._fake_pw), \
+             patch("grp.getgrall", return_value=[]):
+            checks = cli_checks.check_watchdog_nginx_access(
+                {"watchdog": {"nginx_access_log": str(log)}}
+            )
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("setfacl", detail)
+
+    def test_group_membership_grants_read(self):
+        # Owner mismatch (fake uid), but my-booking's gid matches the
+        # file's group, and the group has read/traverse -- should be ok
+        # without relying on world permissions at all.
+        log = self.dir / "access.log"
+        log.write_text("test\n")
+        real_gid = log.stat().st_gid
+        self.dir.chmod(0o750)
+        log.chmod(0o640)
+        fake_pw = type("PW", (), {"pw_uid": 999999, "pw_gid": real_gid})()
+        with patch("pwd.getpwnam", return_value=fake_pw), \
+             patch("grp.getgrall", return_value=[]):
+            checks = cli_checks.check_watchdog_nginx_access(
+                {"watchdog": {"nginx_access_log": str(log)}}
+            )
+        self.assertEqual(checks[0][1], "ok")
+
+
 class CheckSelinuxTest(unittest.TestCase):
     def test_not_present_is_ok(self):
         with patch("app.cli_checks.shutil.which", return_value=None):

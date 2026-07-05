@@ -487,5 +487,99 @@ class InteractiveSetupCaldavTest(unittest.TestCase):
         self.assertEqual(prompt.asked_matching("CalDAV"), [])
 
 
+class InteractiveSetupWatchdogTest(unittest.TestCase):
+    """Step 10 -- unlike step 9 (CalDAV), there IS a safe auto-fix here
+    (setfacl), so this DOES prompt/act, mirroring the SELinux/group-
+    membership pattern. check_watchdog_nginx_access's own permission-bit
+    logic is covered by tests/test_cli_checks.py::CheckWatchdogNginxAccessTest
+    -- mocked wholesale here, same as the CalDAV test above."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+        self.log_path = self.home / "access.log"
+        self.log_path.write_text("test\n")
+
+    def _raw_with_log(self):
+        return _raw(watchdog={"nginx_access_log": str(self.log_path)})
+
+    @patch("app.cli_checks.check_watchdog_nginx_access", return_value=[])
+    def test_not_configured_shows_skip_and_never_prompts(self, _mock):
+        lines: list[str] = []
+        prompt = FakePrompts()
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lines.append,
+        )
+        self.assertTrue(any("skip" in ln and "nginx_access_log" in ln for ln in lines))
+        self.assertEqual(prompt.asked_matching("setfacl"), [])
+
+    @patch("app.cli_checks.check_watchdog_nginx_access",
+           return_value=[("watchdog: nginx_access_log (x)", "ok", "my-booking can read it")])
+    def test_already_ok_never_prompts(self, _mock):
+        prompt = FakePrompts()
+        cli_setup.interactive_setup(
+            self._raw_with_log(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("setfacl"), [])
+
+    @patch("app.cli_checks.check_watchdog_nginx_access",
+           return_value=[("watchdog: nginx_access_log (x)", "warn", "my-booking can't read this yet -- sudo setfacl ...")])
+    def test_non_root_shows_needs_root_and_never_prompts(self, _mock):
+        prompt = FakePrompts()
+        cli_setup.interactive_setup(
+            self._raw_with_log(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("setfacl"), [])
+
+    @patch("app.cli_checks.check_watchdog_nginx_access",
+           return_value=[("watchdog: nginx_access_log (x)", "warn", "my-booking can't read this yet -- sudo setfacl ...")])
+    def test_root_accepting_prompt_runs_both_setfacl_commands(self, _mock):
+        prompt = FakePrompts({"setfacl": True})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            self._raw_with_log(), self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: True,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(len(prompt.asked_matching("setfacl")), 1)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(c[0] == "setfacl" for c in calls))
+        self.assertTrue(any("-d" in c for c in calls))
+
+    @patch("app.cli_checks.check_watchdog_nginx_access",
+           return_value=[("watchdog: nginx_access_log (x)", "warn", "my-booking can't read this yet -- sudo setfacl ...")])
+    def test_declining_prompt_runs_nothing(self, _mock):
+        prompt = FakePrompts({"setfacl": False})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            self._raw_with_log(), self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: True,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(calls, [])
+
+    @patch("app.cli_checks.check_watchdog_nginx_access",
+           return_value=[("watchdog: nginx_access_log access", "warn", "user 'my-booking' doesn't exist yet -- install the package first")])
+    def test_missing_my_booking_user_never_prompts_even_as_root(self, _mock):
+        prompt = FakePrompts({"setfacl": True})
+        cli_setup.interactive_setup(
+            _raw(watchdog={"nginx_access_log": str(self.log_path)}), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("setfacl"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

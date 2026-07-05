@@ -518,6 +518,72 @@ _UNSUBSTITUTED_PLACEHOLDER = re.compile(r"\$\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 _SITE_PAGES = ("index.html", "impressum.html", "terms.html", "privacy.html")
 
 
+def _posix_can_read(path: Path, uid: int, gids: set[int]) -> bool:
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    mode = st.st_mode
+    return (
+        (st.st_uid == uid and bool(mode & stat.S_IRUSR))
+        or (st.st_gid in gids and bool(mode & stat.S_IRGRP))
+        or bool(mode & stat.S_IROTH)
+    )
+
+
+def _posix_can_traverse(path: Path, uid: int, gids: set[int]) -> bool:
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    mode = st.st_mode
+    return (
+        (st.st_uid == uid and bool(mode & stat.S_IXUSR))
+        or (st.st_gid in gids and bool(mode & stat.S_IXGRP))
+        or bool(mode & stat.S_IXOTH)
+    )
+
+
+def check_watchdog_nginx_access(raw: dict) -> list[Check]:
+    """If [watchdog].nginx_access_log is set, checks whether the my-booking
+    user can actually read it -- the watchdog service's own
+    ReadOnlyPaths=-/var/log/nginx (see systemd/my-booking-watchdog.service)
+    only grants a systemd sandboxing EXCEPTION for that path; it does
+    nothing about the underlying file's owner/group/mode, which is
+    nginx's/the distro's call, not this app's. Fedora's nginx package
+    typically leaves /var/log/nginx root:root, not readable by another
+    unprivileged user by default -- this is the concrete gap the operator hit in
+    practice 2026-07-05 setting the watchdog up for real. A no-op ([]) if
+    nginx_access_log isn't configured at all -- see check_secrets() for
+    the same "not configured yet" convention."""
+    log_path_str = raw.get("watchdog", {}).get("nginx_access_log")
+    if not log_path_str:
+        return []
+    log_path = Path(log_path_str)
+    import grp
+    import pwd
+    try:
+        my_booking = pwd.getpwnam("my-booking")
+    except KeyError:
+        return [("watchdog: nginx_access_log access", "warn",
+                  "user 'my-booking' doesn't exist yet -- install the package first")]
+    uid = my_booking.pw_uid
+    gids = {my_booking.pw_gid} | {g.gr_gid for g in grp.getgrall() if "my-booking" in g.gr_mem}
+    if not log_path.exists():
+        return [(f"watchdog: nginx_access_log ({log_path})", "warn",
+                  "configured but doesn't exist -- check [watchdog].nginx_access_log")]
+    if _posix_can_traverse(log_path.parent, uid, gids) and _posix_can_read(log_path, uid, gids):
+        return [(f"watchdog: nginx_access_log ({log_path})", "ok", "my-booking can read it")]
+    return [(
+        f"watchdog: nginx_access_log ({log_path})", "warn",
+        f"my-booking can't read this yet (nginx's own file permissions, not this app's) -- "
+        f"sudo setfacl -R -m u:my-booking:rX {log_path.parent} && "
+        f"sudo setfacl -d -m u:my-booking:rX {log_path.parent} "
+        "(the -d default ACL keeps new files readable after nginx's own log rotation; "
+        "needs the 'acl' package for setfacl)"
+    )]
+
+
 def check_static_site_compliance(raw: dict) -> list[Check]:
     """If `[site].static_site_dir` is configured, checks the LIVE deployed
     site/*.html pages for signs the generic `.example` placeholder (see

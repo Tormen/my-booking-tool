@@ -76,6 +76,7 @@ def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
         "static_pages_reachable": cli_checks.check_static_pages_reachable(raw),
         "caldav_calendars": cli_checks.check_caldav_calendars(raw),
+        "watchdog_nginx_access": cli_checks.check_watchdog_nginx_access(raw),
     }
 
 
@@ -137,6 +138,13 @@ def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[s
         show(caldav_checks)
     else:
         print_fn("   [SKIP] caldav_url/username/password not fully configured yet -- not checked")
+
+    print_fn("\n10. Watchdog (nginx_access_log readable by my-booking, if configured):")
+    watchdog_checks = report["watchdog_nginx_access"]
+    if watchdog_checks:
+        show(watchdog_checks)
+    else:
+        print_fn("   [SKIP] [watchdog].nginx_access_log not configured -- not checked")
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 
@@ -392,5 +400,30 @@ def interactive_setup(
             print_fn(f"Fix by editing {settings_path}'s [calendar].booking_calendar / ")
             print_fn("conflict_calendars to match a real calendar name on your CalDAV server")
             print_fn("(every /book/<shortname> page 500s until this matches).")
+
+    # 10. watchdog nginx log access -- an ACL fix, not a config-file edit,
+    # so (unlike the CalDAV step above) there IS a safe, always-correct
+    # auto-fix here: grant the my-booking user read access via setfacl,
+    # same reasoning/pattern as the SELinux/nginx-reload offers above.
+    print_fn("\n-- 10. Watchdog (nginx_access_log readable by my-booking) --")
+    watchdog_checks = cli_checks.check_watchdog_nginx_access(raw)
+    if not watchdog_checks:
+        print_fn("[skip] [watchdog].nginx_access_log not configured -- not checked")
+    else:
+        for label, level, detail in watchdog_checks:
+            if level == "ok":
+                print_fn(f"[ok] {label}: {detail}")
+                continue
+            print_fn(f"{label}: {detail}")
+            if "user 'my-booking' doesn't exist" in detail:
+                continue  # nothing to fix here yet -- install the package first
+            log_path = Path(raw["watchdog"]["nginx_access_log"])
+            if not log_path.exists():
+                continue  # bad path -- fix settings.toml by hand, nothing to setfacl
+            if not is_root():
+                print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+            elif prompt(f"Run setfacl to grant my-booking read access under {log_path.parent} now?"):
+                run(["setfacl", "-R", "-m", "u:my-booking:rX", str(log_path.parent)])
+                run(["setfacl", "-d", "-m", "u:my-booking:rX", str(log_path.parent)])
 
     print_fn("\nDone. Re-run `my-bt status` any time to re-check everything.")
