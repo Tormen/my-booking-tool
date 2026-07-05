@@ -140,9 +140,10 @@ sshd_failure_threshold = 5
 # on the booking page (not escaped) -- rich text (bold/italic/underline,
 # links, bullet lists) is fine here, since this is your own text, not
 # guest input. subtitle is optional plain text shown under the title on
-# the booking page: omit it entirely to auto-show "<Weekday>s -- <location>"
-# (as below), set it to "" to show no subtitle at all, or set it to any
-# other string to override the auto-derived one.
+# the booking page: omit it entirely to auto-show "<Weekday>s <from>h<mm> -
+# <till>h<mm> -- <location>" (e.g. "Saturdays 10h45 - 12h45 -- Ayur Yoga
+# Center Trier Nord", as below), set it to "" to show no subtitle at all,
+# or set it to any other string to override the auto-derived one.
 [[course]]
 shortname   = "example-monday-class"
 title       = "Example Class"

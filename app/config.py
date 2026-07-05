@@ -30,9 +30,11 @@ class Course:
     # Optional override for the booking page's subtitle line (rendered as
     # plain text, not rich HTML like `description` -- see
     # app/webapp.py::_book_page). None (the default -- key omitted in
-    # settings.toml) means auto-derive "<Weekday>s -- <location>" from
-    # weekday/location below. Set to "" explicitly to show no subtitle at
-    # all, or to any other string to override the auto-derived one.
+    # settings.toml) means auto-derive "<Weekday>s <start>h<mm> - <end>h<mm>
+    # -- <location>" (e.g. "Saturdays 10h45 - 12h45 -- Ayur Yoga Center
+    # Trier Nord") from weekday/start_time/duration_minutes/location below
+    # -- see time_range_label(). Set to "" explicitly to show no subtitle
+    # at all, or to any other string to override the auto-derived one.
     subtitle: str | None = None
 
     WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -46,14 +48,36 @@ class Course:
 
     def weekday_label(self) -> str:
         """Full weekday name for display (e.g. "sat" -> "Saturday") -- used
-        on the booking page so guests see e.g. "Saturdays -- Trier" instead
-        of just the bare course title, without hardcoding any one
-        deployment's actual day/location into the generic template."""
+        on the booking page so guests see e.g. "Saturdays 10h45 - 12h45 --
+        Trier" instead of just the bare course title, without hardcoding
+        any one deployment's actual day/time/location into the generic
+        template."""
         return self.WEEKDAY_LABELS.get(self.weekday.lower(), self.weekday.title())
 
     def start_hm(self) -> tuple[int, int]:
         h, m = self.start_time.split(":")
         return int(h), int(m)
+
+    def end_hm(self) -> tuple[int, int]:
+        """start_time + duration_minutes, wrapped to a 24h clock -- a
+        session is never assumed to cross midnight in display terms (the
+        format is purely for the subtitle line, not scheduling math)."""
+        h, m = self.start_hm()
+        total = h * 60 + m + self.duration_minutes
+        return (total // 60) % 24, total % 60
+
+    @staticmethod
+    def _fmt_hm(h: int, m: int) -> str:
+        # European "10h45" style, not "10:45" -- matches how times are
+        # actually written/spoken in the venues this template targets.
+        # Minutes always shown (zero-padded), even on the hour ("10h00"),
+        # so from/till always line up visually in the rendered subtitle.
+        return f"{h}h{m:02d}"
+
+    def time_range_label(self) -> str:
+        """e.g. "10h45 - 12h45" -- used by app/webapp.py to auto-derive the
+        booking page's subtitle line when Course.subtitle isn't set."""
+        return f"{self._fmt_hm(*self.start_hm())} - {self._fmt_hm(*self.end_hm())}"
 
 
 @dataclass(frozen=True)

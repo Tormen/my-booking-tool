@@ -423,11 +423,16 @@ class App:
 
     def _book_page(self, course, occurrences, error: str | None = None):
         # course.subtitle is optional: unset (None, the default -- key
-        # omitted in settings.toml) auto-derives "<Weekday>s -- <location>";
-        # set to "" explicitly suppresses the subtitle entirely; any other
-        # string overrides the auto-derived one. Always plain text (esc()'d)
-        # -- unlike `description` below, this isn't meant to hold rich HTML.
-        subtitle_text = course.subtitle if course.subtitle is not None else f"{course.weekday_label()}s -- {course.location}"
+        # omitted in settings.toml) auto-derives "<Weekday>s <from>h<mm> -
+        # <till>h<mm> -- <location>" (e.g. "Saturdays 10h45 - 12h45 --
+        # Ayur Yoga Center Trier Nord"); set to "" explicitly suppresses
+        # the subtitle entirely; any other string overrides the
+        # auto-derived one. Always plain text (esc()'d) -- unlike
+        # `description` below, this isn't meant to hold rich HTML.
+        subtitle_text = (
+            course.subtitle if course.subtitle is not None
+            else f"{course.weekday_label()}s {course.time_range_label()} -- {course.location}"
+        )
         subtitle = f'<p class="subtitle">{esc(subtitle_text)}</p>' if subtitle_text else ""
         # course.description is operator-authored (settings.toml, edited by
         # whoever runs this install), not guest-submitted -- unlike every

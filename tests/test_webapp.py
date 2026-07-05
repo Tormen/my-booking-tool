@@ -204,11 +204,17 @@ class BookPageTest(unittest.TestCase):
         end = datetime(2026, 7, 11, 11, 15, tzinfo=timezone.utc)
         return Occurrence("trier-sat-yoga", d, start, end, spots_taken, capacity)
 
-    def test_subtitle_defaults_to_weekday_and_location(self):
+    def test_subtitle_defaults_to_weekday_time_range_and_location(self):
         app = self._app()
-        course = make_course(weekday="sat", location="Trier")
+        course = make_course(weekday="sat", location="Trier")  # start_time=17:15, duration=100 (helpers.py defaults)
         _, _, html = app._book_page(course, [self._occ()])
-        self.assertIn('<p class="subtitle">Saturdays -- Trier</p>', html)
+        self.assertIn('<p class="subtitle">Saturdays 17h15 - 18h55 -- Trier</p>', html)
+
+    def test_subtitle_default_pads_on_the_hour_minutes(self):
+        app = self._app()
+        course = make_course(weekday="mon", location="Gym", start_time="9:00", duration_minutes=60)
+        _, _, html = app._book_page(course, [self._occ()])
+        self.assertIn('<p class="subtitle">Mondays 9h00 - 10h00 -- Gym</p>', html)
 
     def test_subtitle_empty_string_suppresses_it(self):
         app = self._app()
