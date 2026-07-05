@@ -30,6 +30,7 @@ silent surprise later.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -56,6 +57,13 @@ SESSIONS: dict[str, dict] = {}
 SESSION_TTL_SECONDS = 60 * 60 * 4
 
 login_limiter = RateLimiter(max_attempts=5, window_seconds=3600)
+
+# 4 was too low -- NIST SP 800-63B's own minimum recommendation is 8.
+# hashlib.scrypt (see .security) has no upper length limit and no
+# forbidden-character restriction (any Unicode encodes to bytes just
+# fine), so this floor is the only real constraint worth surfacing to
+# the guest on the set-password form.
+MIN_PASSWORD_LENGTH = 8
 
 
 def _client_ip(environ: dict) -> str:
@@ -99,6 +107,91 @@ def _session_cookie_header(sid: str, clear: bool = False) -> str:
     if clear:
         parts.append("Max-Age=0")
     return "; ".join(parts)
+
+
+# Client-side-only cooldown layered on top of the real server-side limit
+# (login_limiter, 5/hour -- see my_reset()) -- this is just about not
+# letting a guest spam-click "resend"/"send me a link" and wonder why
+# nothing happens faster. A plain in-memory JS variable wouldn't survive
+# a page reload/navigation, so localStorage is the natural fit; one
+# shared key across every page that can trigger /my/reset (the "Almost
+# there" resend button and /my/reset's own form) means bouncing between
+# them doesn't reset the cooldown. Progressive enhancement in both
+# variants below: the control starts enabled and (for the navigating
+# variant) still works with JS disabled, same principle as _book_page's
+# own inline script.
+_RESEND_COOLDOWN_SECONDS = 60
+_RESEND_COOLDOWN_KEY = "mb_resend_until"
+
+
+def _resend_cooldown_script(button_id: str, label: str) -> str:
+    """For a form that's MEANT to navigate on submit (/my/reset's own
+    "Send me a link" form) -- just disables the button with a live
+    countdown if a cooldown from an earlier submit (on this page or the
+    "Almost there" page) is still running when the page loads."""
+    return f"""<script>
+    (function() {{
+      var btn = document.getElementById({json.dumps(button_id)});
+      if (!btn) return;
+      var label = {json.dumps(label)};
+      function tick() {{
+        var until = parseInt(localStorage.getItem({json.dumps(_RESEND_COOLDOWN_KEY)}) || "0", 10);
+        var left = Math.ceil((until - Date.now()) / 1000);
+        if (left > 0) {{
+          btn.disabled = true;
+          btn.textContent = label + " (" + left + "s)";
+          setTimeout(tick, 250);
+        }} else {{
+          btn.disabled = false;
+          btn.textContent = label;
+        }}
+      }}
+      tick();
+    }})();
+    </script>"""
+
+
+def _resend_cooldown_inline_script(form_id: str, button_id: str, status_id: str, label: str) -> str:
+    """For the "Almost there" page's resend button specifically: submits
+    via fetch() instead of a real form navigation, so clicking it does
+    NOT take the guest to /my/reset's own page (confusing right after a
+    booking -- that page is branded "Forgot your password?", which this
+    guest never had one to forget). Falls back to a real (navigating)
+    form submit if fetch isn't available/JS is disabled -- landing on
+    /my/reset in that case is a worse experience than no JS at all, but
+    still gets the email sent, which matters more."""
+    return f"""<script>
+    (function() {{
+      var form = document.getElementById({json.dumps(form_id)});
+      var btn = document.getElementById({json.dumps(button_id)});
+      var status = document.getElementById({json.dumps(status_id)});
+      if (!form || !btn) return;
+      var label = {json.dumps(label)};
+      function tick() {{
+        var until = parseInt(localStorage.getItem({json.dumps(_RESEND_COOLDOWN_KEY)}) || "0", 10);
+        var left = Math.ceil((until - Date.now()) / 1000);
+        if (left > 0) {{
+          btn.disabled = true;
+          btn.textContent = label + " (" + left + "s)";
+          setTimeout(tick, 250);
+        }} else {{
+          btn.disabled = false;
+          btn.textContent = label;
+        }}
+      }}
+      form.addEventListener("submit", function(ev) {{
+        if (!window.fetch) return;  // no fetch: let the real submit go through
+        ev.preventDefault();
+        localStorage.setItem({json.dumps(_RESEND_COOLDOWN_KEY)}, String(Date.now() + {_RESEND_COOLDOWN_SECONDS} * 1000));
+        tick();
+        if (status) status.textContent = " Sending...";
+        fetch(form.action, {{method: "POST", body: new URLSearchParams(new FormData(form))}})
+          .then(function() {{ if (status) status.textContent = " Sent -- check your email."; }})
+          .catch(function() {{ if (status) status.textContent = " Couldn't send -- try again."; }});
+      }});
+      tick();
+    }})();
+    </script>"""
 
 
 class App:
@@ -297,11 +390,17 @@ class App:
                 shortname, occ_date, user.user_id, "", status=STATUS_PENDING_CONFIRMATION
             )
             self._send_confirm_email(user)
+            resend_label = "Resend the confirmation email"
             body = (
                 f"<p>Almost there -- we've emailed <b>{esc(email)}</b> a link to confirm your account.</p>"
                 f"<p>Your spot for <b>{esc(course.title)}</b> on {esc(occ_date)} will only be reserved "
                 "for you,<br>once you click the link in the email and set a password.</p>"
-                '<p>Didn\'t get it? <a href="/my/reset">Resend the confirmation email</a>.</p>'
+                '<div class="hint">Didn\'t get it? '
+                '<form method="post" action="/my/reset" id="resend-form" style="display:inline">'
+                f'<input type="hidden" name="email" value="{esc(email)}">'
+                f'<button type="submit" id="resend-btn" class="link-button">{esc(resend_label)}</button>'
+                '</form><span id="resend-status"></span>.</div>'
+                + _resend_cooldown_inline_script("resend-form", "resend-btn", "resend-status", resend_label)
             )
             return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Almost there", body)
 
@@ -600,9 +699,9 @@ class App:
                 error = "Email/password didn't match."
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
         body = f"""{err_html}<form method="post" class="card">
-          <label>Email <input name="email" type="email" required></label>
-          <label>Password <input name="password" type="password" required></label>
-          <button type="submit">View my bookings</button>
+          <label>Email <input class="big-input" name="email" type="email" required></label>
+          <label>Password <input class="big-input" name="password" type="password" required></label>
+          <div class="submit-row"><button type="submit">View my bookings</button></div>
         </form>
         <p><a href="/my/reset">Forgot your password, or still need to confirm your account?</a></p>"""
         return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
@@ -627,19 +726,26 @@ class App:
             # not the email exists -- an attacker probing for registered
             # emails, or trying to spam one inbox with reset emails, learns
             # nothing from the response either way.
-            body = "<p>If that email has an account with us, we've just sent a link to set/reset your password.</p>"
+            body = (
+                "<p>If that email has an account with us, we've just sent a link to set/reset your password.</p>"
+                '<p><a href="/my">Back to login</a></p>'
+            )
             return "200 OK", [("Content-Type", "text/html")], page("Check your email", body)
-        body = """<form method="post" class="card">
-          <label>Email <input name="email" type="email" required></label>
-          <button type="submit">Send me a link</button>
-        </form>"""
+        body = """<form method="post" class="card" id="reset-form">
+          <label>Email <input class="big-input" name="email" type="email" required></label>
+          <div class="submit-row"><button type="submit" id="reset-btn">Send me a link</button></div>
+        </form>""" + _resend_cooldown_script("reset-btn", "Send me a link")
         return "200 OK", [("Content-Type", "text/html")], page("Forgot your password?", body)
 
     def _set_password_form(self, token: str) -> str:
         return f"""<form method="post" class="card">
           <label>New password <span class="req">(required)</span>
-            <input class="big-input" name="password" type="password" minlength="4" required></label>
-          <button type="submit">Set password</button>
+            <input class="big-input" name="password" type="password"
+              minlength="{MIN_PASSWORD_LENGTH}" required></label>
+          <p class="hint">At least {MIN_PASSWORD_LENGTH} characters. Any letters, numbers, or
+            symbols are allowed, and there's no upper limit -- just avoid leading/trailing
+            spaces, which are trimmed off.</p>
+          <div class="submit-row"><button type="submit">Set password</button></div>
         </form>"""
 
     def my_confirm(self, method: str, token: str, environ):
@@ -663,14 +769,19 @@ class App:
             f"<p>You have {len(pending)} pending booking(s) that will be confirmed "
             "once you set your password.</p>" if pending else ""
         )
+        # Shown so the guest can confirm this link/page is actually theirs
+        # before typing a password -- not deliberately hidden before, just
+        # missing (the token in the URL gives no visual confirmation of
+        # whose account it is).
+        email_note = f"<p>Setting a password for <b>{esc(user.email)}</b>.</p>"
 
         if method == "POST":
             form = self._read_form(environ)
             password = form.get("password", "").strip()
-            if len(password) < 4:
-                err = '<p class="err">Please choose a password at least 4 characters long.</p>'
+            if len(password) < MIN_PASSWORD_LENGTH:
+                err = f'<p class="err">Please choose a password at least {MIN_PASSWORD_LENGTH} characters long.</p>'
                 return "200 OK", [("Content-Type", "text/html")], page(
-                    "Set your password", err + pending_note + self._set_password_form(token)
+                    "Set your password", err + email_note + pending_note + self._set_password_form(token)
                 )
             pw_hash, pw_salt = hash_secret(password)
             self.store.set_password(user.user_id, pw_hash, pw_salt)
@@ -704,7 +815,7 @@ class App:
             )
 
         return "200 OK", [("Content-Type", "text/html")], page(
-            "Set your password", pending_note + self._set_password_form(token)
+            "Set your password", email_note + pending_note + self._set_password_form(token)
         )
 
     def my_cancel(self, method: str, registration_id: str, environ):
@@ -758,8 +869,8 @@ class App:
                 error = "Wrong password."
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
         body = f"""{err_html}<form method="post" class="card">
-          <label>Admin password <input name="password" type="password" required></label>
-          <button type="submit">Log in</button>
+          <label>Admin password <input class="big-input" name="password" type="password" required></label>
+          <div class="submit-row"><button type="submit">Log in</button></div>
         </form>"""
         return "200 OK", [("Content-Type", "text/html")], page("Admin login", body)
 

@@ -426,6 +426,20 @@ class BookingFlowTest(unittest.TestCase):
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertEqual(subjects, ["Confirm your example.org account"])
 
+    def test_almost_there_resend_does_not_ask_for_email_again(self):
+        # The guest just typed their email into the booking form -- the
+        # resend control must carry it along as a hidden field, not send
+        # them to a bare "type your email" form again (confusing, and
+        # exactly what "should not ask you for your email address" means).
+        _status, _headers, body = self._book("newguest@example.org")
+        self.assertIn('name="email" value="newguest@example.org"', body)
+        self.assertNotIn('<input class="big-input" name="email"', body)
+        # And it must NOT be a plain link to /my/reset's own page (that
+        # page is branded "Forgot your password?", confusing right after
+        # a fresh booking) -- it's a same-page form/button instead.
+        self.assertNotIn('<a href="/my/reset">', body)
+        self.assertIn('action="/my/reset"', body)
+
     def test_returning_unconfirmed_email_adds_another_pending_and_resends(self):
         self._book("newguest@example.org", occ_date=self.occ_date)
         self._book("newguest@example.org", name="Alice Again", occ_date=self.occ_date)
@@ -451,7 +465,7 @@ class BookingFlowTest(unittest.TestCase):
 
     def test_confirmed_account_books_instantly(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
-        h, s = hash_secret("hunter2")
+        h, s = hash_secret("hunter22")
         self.store.set_password(user.user_id, h, s)
         _status, _headers, body = self._book("regular@example.org", name="Regular")
         self.assertIn("Booked!", body)
@@ -462,7 +476,7 @@ class BookingFlowTest(unittest.TestCase):
     def test_confirmed_account_waitlisted_when_full(self):
         for i in range(2):
             user = self.store.upsert_user_for_booking(f"guest{i}@example.org", f"Guest{i}")
-            h, s = hash_secret("hunter2")
+            h, s = hash_secret("hunter22")
             self.store.set_password(user.user_id, h, s)
         self._book("guest0@example.org", name="Guest0")  # capacity=1, fills it
         _status, _headers, body = self._book("guest1@example.org", name="Guest1")
@@ -473,13 +487,22 @@ class BookingFlowTest(unittest.TestCase):
     # -- my_confirm: sets password, promotes pending ------------------------
 
     def test_my_confirm_invalid_token_shows_error(self):
-        _status, _headers, body = self._post(self.app.my_confirm, ("bogus-token",), {"password": "hunter2"})
+        _status, _headers, body = self._post(self.app.my_confirm, ("bogus-token",), {"password": "hunter22"})
         self.assertIn("invalid", body.lower())
+
+    def test_my_confirm_shows_which_account_the_link_belongs_to(self):
+        # The token in the URL gives no visual confirmation of whose
+        # account it is -- show the email so the guest can double-check
+        # this is actually theirs before typing a password.
+        self._book("newguest@example.org")
+        token = self._confirm_token_from_last_email()
+        _status, _headers, body = self.app.my_confirm("GET", token, {})
+        self.assertIn("newguest@example.org", body)
 
     def test_my_confirm_sets_password_and_promotes_pending_booking(self):
         self._book("newguest@example.org")
         token = self._confirm_token_from_last_email()
-        _status, headers, body = self._post(self.app.my_confirm, (token,), {"password": "hunter2"})
+        _status, headers, body = self._post(self.app.my_confirm, (token,), {"password": "hunter22"})
         self.assertIn("Account confirmed", body)
         self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
         user = self.store.find_user_by_email("newguest@example.org")
@@ -495,14 +518,14 @@ class BookingFlowTest(unittest.TestCase):
         # the first guest's account is still unconfirmed.
         self._book("newguest@example.org")
         other = self.store.upsert_user_for_booking("other@example.org", "Other")
-        h, s = hash_secret("hunter2")
+        h, s = hash_secret("hunter22")
         self.store.set_password(other.user_id, h, s)
         self._book("other@example.org", name="Other")  # instantly confirmed, fills capacity=1
 
         # other's booking was instant (no confirm email) -- the newguest's
         # confirm link is still the FIRST email ever sent in this test.
         token = self.sent_emails[0][2].split("/my/confirm/")[1].split("\n")[0].strip()
-        self._post(self.app.my_confirm, (token,), {"password": "hunter2"})
+        self._post(self.app.my_confirm, (token,), {"password": "hunter22"})
         user = self.store.find_user_by_email("newguest@example.org")
         reg = self.store.registrations_for_user(user.user_id)[0]
         self.assertEqual(reg.status, STATUS_WAITLISTED)
@@ -511,7 +534,7 @@ class BookingFlowTest(unittest.TestCase):
         self._book("newguest@example.org")
         token = self._confirm_token_from_last_email()
         _status, _headers, body = self._post(self.app.my_confirm, (token,), {"password": "ab"})
-        self.assertIn("at least 4 characters", body)
+        self.assertIn("at least 8 characters", body)
         user = self.store.find_user_by_email("newguest@example.org")
         self.assertEqual(user.password_hash, "")
 
@@ -522,6 +545,10 @@ class BookingFlowTest(unittest.TestCase):
         _s2, _h2, body_unknown = self._post(self.app.my_reset, (), {"email": "nobody@example.org"})
         self.assertEqual(body_known, body_unknown)
 
+    def test_my_reset_confirmation_page_links_back_to_login(self):
+        _status, _headers, body = self._post(self.app.my_reset, (), {"email": "newguest@example.org"})
+        self.assertIn('<a href="/my">Back to login</a>', body)
+
     def test_my_reset_emails_unconfirmed_account_a_confirm_link(self):
         self._book("newguest@example.org")
         self.sent_emails.clear()
@@ -531,7 +558,7 @@ class BookingFlowTest(unittest.TestCase):
 
     def test_my_reset_emails_confirmed_account_a_reset_link(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
-        h, s = hash_secret("hunter2")
+        h, s = hash_secret("hunter22")
         self.store.set_password(user.user_id, h, s)
         self._post(self.app.my_reset, (), {"email": "regular@example.org"})
         subjects = [s for _, s, _ in self.sent_emails]
@@ -541,14 +568,14 @@ class BookingFlowTest(unittest.TestCase):
 
     def test_my_login_succeeds_with_correct_password(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
-        h, s = hash_secret("hunter2")
+        h, s = hash_secret("hunter22")
         self.store.set_password(user.user_id, h, s)
-        _status, headers, _body = self._post(self.app.my, (), {"email": "regular@example.org", "password": "hunter2"})
+        _status, headers, _body = self._post(self.app.my, (), {"email": "regular@example.org", "password": "hunter22"})
         self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
 
     def test_my_login_fails_with_wrong_password(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
-        h, s = hash_secret("hunter2")
+        h, s = hash_secret("hunter22")
         self.store.set_password(user.user_id, h, s)
         _status, headers, body = self._post(self.app.my, (), {"email": "regular@example.org", "password": "wrong"})
         self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))

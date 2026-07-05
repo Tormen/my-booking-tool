@@ -39,6 +39,8 @@ label{{display:block;margin-top:.6em}}
 .description p:first-child{{margin-top:0}} .description p:last-child{{margin-bottom:0}}
 .submit-row{{margin-top:1.4em}}
 button:disabled{{opacity:.5;cursor:not-allowed}}
+.link-button{{background:none;border:none;padding:0;margin:0;color:#196B24;text-decoration:underline;font:inherit;cursor:pointer}}
+.link-button:disabled{{color:#888;text-decoration:none;opacity:1}}
 </style></head><body>
 <h1>{esc(title)}</h1>
 {body}
