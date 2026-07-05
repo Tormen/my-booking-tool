@@ -279,7 +279,8 @@ def interactive_setup(
     else:
         t = tmpl_path(home)
         out_path = Path(static_site_dir) / site_render.OUTPUT_NAME
-        for label, level, detail in cli_checks.check_static_site_drift(raw, t):
+        drift_checks = cli_checks.check_static_site_drift(raw, t)
+        for label, level, detail in drift_checks:
             print_fn(f"[{level}] {label}: {detail}")
         # Compliance (leftover REPLACE-ME/${...} placeholders) is
         # informational only here -- it's about YOUR wording, which this
@@ -288,7 +289,15 @@ def interactive_setup(
         for label, level, detail in cli_checks.check_static_site_compliance(raw):
             if level != "ok":
                 print_fn(f"[{level}] {label}: {detail}")
-        if prompt(f"(Re)generate {out_path} from current settings.toml now?"):
+        # Only ask if there's actually something to regenerate -- unlike
+        # nginx's reload prompt (which stays unconditional because
+        # `nginx -T` reflects disk, not what the running process has
+        # loaded), this check re-renders from the CURRENT settings.toml
+        # and template and compares those exact bytes against what's
+        # deployed: "matches" here means regenerating would write the
+        # identical bytes again, so asking anyway was pure noise.
+        needs_regen = any(level != "ok" for _, level, _ in drift_checks)
+        if needs_regen and prompt(f"(Re)generate {out_path} from current settings.toml now?"):
             privacy = raw.get("privacy", {})
             try:
                 site_render.write_privacy_html(

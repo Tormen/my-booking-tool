@@ -313,6 +313,28 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         )
         self.assertFalse((self.static_dir / site_render.OUTPUT_NAME).exists())
 
+    def test_not_prompted_when_already_matching(self):
+        # Regression coverage: unlike nginx's reload prompt (which stays
+        # unconditional -- see feedback), regenerating privacy.html is a
+        # pure re-render of the CURRENT settings.toml/template, so if it
+        # already matches, asking again is pure noise -- must not prompt.
+        raw = _raw(site={"static_site_dir": str(self.static_dir)})
+        privacy = raw["privacy"]
+        out = self.static_dir / site_render.OUTPUT_NAME
+        site_render.write_privacy_html(
+            self.home / "site" / "privacy.html.tmpl",
+            privacy["retention_months"], privacy["canceled_retention_months"], out,
+        )
+        prompt = FakePrompts({}, default=True)  # would write again if (wrongly) asked+accepted
+        before = out.read_text()
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("Re)generate"), [])
+        self.assertEqual(out.read_text(), before)
+
     def test_accepting_opens_vimdiff_for_a_stale_hand_authored_page(self):
         # Regression coverage for 2026-07-05: an index.html footer edit sat
         # in the checkout for weeks, never deployed, and nothing offered to
