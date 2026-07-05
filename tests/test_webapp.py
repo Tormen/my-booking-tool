@@ -531,6 +531,24 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Manage your bookings any time: https://example.org/my", email_body)
         self.assertIn("Leave the waitlist directly: https://example.org/cancel/", email_body)
 
+    def test_promoted_from_waitlist_email_matches_the_same_layout(self):
+        # Regression coverage for the 2026-07-05 consistency fix: this
+        # email used to stay on the old one-line "at {start_time}" format
+        # after _send_booking_result_email() got the richer What/When/Where
+        # layout -- see _booking_details_text().
+        guest0, environ0 = self._login_as_guest("guest0@example.org", "Guest0")
+        self._book("guest0@example.org", name="Guest0")  # capacity=1, fills it
+        self._login_as_guest("guest1@example.org", "Guest1")
+        self._book("guest1@example.org", name="Guest1")  # waitlisted
+        reg0 = self.store.registrations_for_user(guest0.user_id)[0]
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_cancel, (reg0.registration_id,), {"message": ""}, environ0)
+        email_body = next(b for _, s, b in self.sent_emails if s.startswith("You're in!"))
+        self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", email_body)
+        self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", email_body)
+        self.assertIn("Where: Example Community Gym, Room 1", email_body)
+        self.assertIn("Manage or cancel this booking any time: https://example.org/my", email_body)
+
     # -- my_confirm: sets password, promotes pending ------------------------
 
     def test_my_confirm_invalid_token_shows_error(self):

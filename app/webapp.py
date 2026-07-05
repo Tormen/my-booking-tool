@@ -276,11 +276,22 @@ class App:
         if promoted:
             user = self.store.find_user_by_id(promoted.user_id)
             if user:
+                # Same What/When/Where(+description) layout as
+                # _send_booking_result_email() -- see _booking_details_text()
+                # -- this used to be a plain one-liner with only start_time,
+                # which drifted out of sync the moment that method got the
+                # richer layout (caught in the 2026-07-05 consistency
+                # review). No fresh cancel link here: the original waitlist-
+                # join token's plaintext isn't recoverable from its stored
+                # hash, and regenerating one would need a DB write for a
+                # link the operator didn't specifically ask for -- /my already
+                # lists this booking with its own Cancel button now that
+                # every guest has an account, so that's the invite instead.
                 send_mail(
-                    self.settings, user.email,
-                    f"You're in! {course.title} on {occurrence_date_str}",
-                    f"A spot opened up for {course.title} on {occurrence_date_str} at "
-                    f"{course.start_time}, and you were next on the waitlist -- you're now confirmed.\n",
+                    self.settings, user.email, f"You're in! {course.title} on {occurrence_date_str}",
+                    "A spot opened up and you were next on the waitlist -- you're now confirmed:\n\n"
+                    + self._booking_details_text(course, occurrence_date_str)
+                    + f"\nManage or cancel this booking any time: {self.settings.base_url}/my\n",
                 )
         self._sync(course_shortname, date.fromisoformat(occurrence_date_str))
 
@@ -435,37 +446,45 @@ class App:
 
         return self._book_page(course, occurrences)
 
+    def _booking_details_text(self, course, occ_date: str) -> str:
+        """Shared What/When/Where(+description) block (the operator's requested
+        layout, 2026-07-05) for every guest email that tells them about one
+        specific confirmed/waitlisted spot -- used by both
+        _send_booking_result_email() below and _cancel_and_promote()'s
+        promoted-from-waitlist email, so the two can never drift apart the
+        way they did before this was pulled out (the promotion email was
+        still on the old one-line format after this one got the new
+        layout). Description is repeated in full via _html_to_text(), since
+        send_mail is plain-text only -- so a guest never has to go back to
+        the booking page to see what they signed up for."""
+        details = (
+            f"\U0001F4CC What: {course.title}\n"
+            f"\U0001F550 When: {occ_date} {course.time_range_label()}\n"
+            f"\U0001F4CD Where: {course.location}\n"
+        )
+        description_text = _html_to_text(course.description) if course.description else ""
+        return details + (f"\n{description_text}\n" if description_text else "")
+
     def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
         """The guest-facing booked/waitlisted email + admin notification --
         shared by the instant-booking path above and by my_confirm()'s
         promotion of a newly-confirmed account's pending registrations, so
         the two paths can never drift out of sync in wording.
 
-        Body is a fixed What/When/Where block (the operator's requested layout,
-        2026-07-05) followed by the course's own rich description repeated
-        in full -- via _html_to_text(), since send_mail is plain-text only
-        -- so a guest never has to go back to the booking page to see what
-        they signed up for. Every guest now gets an account (see
-        my_confirm()), so this also invites them to /my rather than only
-        handing them a one-shot cancel link.
+        Every guest now gets an account (see my_confirm()), so this also
+        invites them to /my rather than only handing them a one-shot
+        cancel link.
         """
         cancel_url = f"{self.settings.base_url}/cancel/{cancel_token}"
         my_url = f"{self.settings.base_url}/my"
-        when = f"{occ_date} {course.time_range_label()}"
-        details = (
-            f"\U0001F4CC What: {course.title}\n"
-            f"\U0001F550 When: {when}\n"
-            f"\U0001F4CD Where: {course.location}\n"
-        )
-        description_text = _html_to_text(course.description) if course.description else ""
+        details = self._booking_details_text(course, occ_date)
         if status == STATUS_WAITLISTED:
             send_mail(
                 self.settings, user.email, f"Waitlisted: {course.title} on {occ_date}",
                 "You're on the waitlist -- full for now, but you'll be confirmed automatically "
                 "by email if a spot opens up:\n\n"
                 f"{details}\n"
-                + (f"{description_text}\n\n" if description_text else "\n")
-                + f"Manage your bookings any time: {my_url}\n"
+                f"Manage your bookings any time: {my_url}\n"
                 f"Leave the waitlist directly: {cancel_url}\n",
             )
         else:
@@ -473,8 +492,7 @@ class App:
                 self.settings, user.email, f"Booking confirmed: {course.title} on {occ_date}",
                 "Your spot is confirmed:\n\n"
                 f"{details}\n"
-                + (f"{description_text}\n\n" if description_text else "\n")
-                + f"Manage your bookings any time: {my_url}\n"
+                f"Manage your bookings any time: {my_url}\n"
                 f"Cancel this booking directly: {cancel_url}\n",
             )
         send_mail(
