@@ -1,0 +1,46 @@
+# -- your real, personal config -- never tracked, never overwritten --------
+# Generic placeholders ship as the *.example versions (tracked); your real,
+# filled-in versions keep their normal filenames on disk and are simply
+# invisible to git. Nothing in this project (my-bt, the RPM, build/install
+# scripts) ever deletes or overwrites these -- see README.md and
+# the maintainer's local notes for the full reasoning.
+/settings.toml
+/site/index.html
+/site/impressum.html
+/site/privacy.html
+/site/privacy.html.tmpl
+/site/terms.html
+
+# Early drafts of the same real legal content above, kept locally for
+# history but not meant for the public template repo.
+/legal-notice-suggestion.html
+/privacy-policy-suggestion.html
+/terms-suggestion.html
+
+# Full design-rationale doc: written for/about this specific deployment
+# (real server, real accounts, real legal analysis) -- personal reference,
+# not a generic template like README.md.
+/SOLUTION-DESIGN.md
+
+# Personal, non-shared dev notes. Deliberately matched by extension
+# (*.local.md), not by the literal filename, so this file never has to be
+# named in a file that itself gets published.
+*.local.md
+
+# -- runtime/local state -----------------------------------------------------
+/data/
+/secrets/
+__pycache__/
+*.pyc
+*.pyo
+
+# -- local build output -------------------------------------------------------
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# -- editor/OS cruft -----------------------------------------------------------
+.DS_Store
+*.swp

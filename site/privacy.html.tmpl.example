@@ -1,0 +1,82 @@
+<html>
+
+<head>
+<meta http-equiv=Content-Type content="text/html; charset=utf-8">
+<title>Privacy Policy - REPLACE-ME-YOUR-SITE-NAME</title>
+<style>
+ body { max-width: 760px; margin: 2em auto; padding: 0 1em; font-family: sans-serif; }
+ .MyTitle { font-weight:bold; font-size:14pt; margin-top:1em; }
+ a { color:#196B24; text-decoration:none; }
+ a:hover { color:#FFC000; text-decoration:underline; }
+</style>
+</head>
+
+<body>
+
+<!--
+THIS FILE IS THE EDITABLE SOURCE (a `.tmpl`, not itself a served page) --
+a generic starting point. Copy it to site/privacy.html.tmpl (untracked,
+never overwritten by an upgrade -- see README.md "Static-site pages") and
+replace every REPLACE-ME marker with your own real controller/contact/
+processor details before publishing.
+
+The retention_months / canceled_retention_months placeholders below are
+filled in automatically by app/site_render.py from settings.toml's
+[privacy] values, so this legal page's retention numbers can never
+silently drift from the actual, enforced config -- leave those two
+placeholders exactly as they are, only edit the surrounding wording.
+-->
+
+<p class=MyTitle>Privacy Policy</p>
+
+<p><b>Controller:</b> REPLACE-ME-YOUR-NAME-OR-ORGANIZATION, contact
+<a href="mailto:REPLACE-ME@example.org">REPLACE-ME@example.org</a>.</p>
+
+<p><b>What is collected:</b> when you book a session, your name and
+email address are used to confirm your spot, contact you about that
+specific session, and let you cancel it. If you use the self-service
+booking tool you also choose a 6-digit code to manage your own bookings;
+only a salted hash of it is stored, never the code itself. REPLACE-ME:
+describe here whether any other information is collected (e.g. health
+disclosures) -- this template assumes none.</p>
+
+<p><b>Why (legal basis):</b> your consent, given when booking, and where
+relevant the need to fulfil the booking you asked for (Art. 6(1)(a)/(b)
+GDPR). REPLACE-ME: confirm this matches your actual setup.</p>
+
+<p><b>Who else sees it (processors):</b> REPLACE-ME: list every
+third-party service that processes registrant data on your behalf (email
+provider, calendar provider, hosting provider, ...) and whether each has
+a signed data-processing agreement with you.</p>
+
+<p><b>How long it's kept:</b> booking records are kept for up to
+${retention_months} months after the session date (${canceled_retention_months} months if canceled), then
+automatically deleted. You can delete your own account and booking
+history at any time from the booking tool's "my bookings" page, or by
+emailing <a href="mailto:REPLACE-ME@example.org">REPLACE-ME@example.org</a>
+-- your email address is then irreversibly hashed and cannot be linked
+back to you.</p>
+
+<p><b>Cookies:</b> no advertising or tracking cookies. Only a
+strictly-necessary session cookie is used while you're logged into the
+booking or "my bookings" page, which doesn't require consent under EU
+ePrivacy rules. REPLACE-ME: confirm this matches your actual setup if
+you've added anything else to the site.</p>
+
+<p><b>Your rights:</b> access, correction, deletion, restriction,
+objection, and data portability regarding your own data, plus the right
+to complain to your local data protection authority. Contact
+<a href="mailto:REPLACE-ME@example.org">REPLACE-ME@example.org</a> for
+any of these.</p>
+
+<p><i>REPLACE-ME: this template is a starting point, not legal advice --
+see README.md's disclaimer. Confirm with your own legal/compliance
+judgement (or counsel, if the stakes warrant it) that this page actually
+describes what your deployment does before publishing it.</i></p>
+
+<p>&nbsp;</p>
+
+<p><a href="/index.html">&larr; Back to home</a></p>
+
+</body>
+</html>

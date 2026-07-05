@@ -1,0 +1,35 @@
+<!-- MANAGED BY YOU, NOT my-bt -- this is a generic starting-point homepage,
+     not generated. Copy to site/index.html (untracked -- see README.md
+     "Static-site pages"), replace every REPLACE-ME marker, and update the
+     course list below to match your own settings.toml [[course]] entries
+     (shortname must match exactly -- that's what /book/<shortname>
+     resolves to). -->
+<html>
+<head>
+<meta http-equiv=Content-Type content="text/html; charset=utf-8">
+<title>REPLACE-ME-YOUR-SITE-NAME</title>
+<style>
+ body { max-width: 760px; margin: 2em auto; padding: 0 1em; font-family: sans-serif; }
+ footer { margin-top: 3em; font-size: 0.85em; color: #666; }
+</style>
+</head>
+<body>
+
+<h1>REPLACE-ME-YOUR-SITE-NAME</h1>
+
+<p>REPLACE-ME: a short description of what you offer and who it's for.</p>
+
+<h2>Upcoming sessions</h2>
+<ul>
+  <li><a href="/book/example-monday-class">Example Class -- Monday 18:00: book your place here.</a></li>
+  <li><a href="/book/example-thursday-class">Example Class (Advanced) -- Thursday 19:00: book your place here.</a></li>
+</ul>
+
+<footer>
+<a href="/terms.html">Terms</a> &nbsp;|&nbsp;
+<a href="/privacy.html">Privacy policy</a> &nbsp;|&nbsp;
+<a href="/impressum.html">Impressum / Legal notice</a>
+</footer>
+
+</body>
+</html>

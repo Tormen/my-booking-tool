@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the my-booking GDPR retention purge nightly (the "cronjob")
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target

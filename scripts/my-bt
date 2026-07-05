@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""my-bt (my-booking-tool) -- CLI for querying and managing my-booking-tool's
+CSV data (live + archived), running the retention purge on demand, erasing a
+user's data manually (GDPR Art. 17), and running the test suite.
+
+Installed at /opt/my-booking/bin/my-bt, symlinked from /usr/local/bin/my-bt
+so it's on PATH (see packaging/my-booking-tool.spec). Add your login to the
+`my-booking` group (`sudo usermod -aG my-booking <you>`) so you can read
+the data files without sudo.
+
+Run `my-bt --help` or `my-bt <command> --help` for full option lists.
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import getpass
+import json
+import os
+import sys
+from datetime import date, datetime, timezone
+from pathlib import Path
+
+HOME = os.environ.get("MY_BOOKING_HOME", "/opt/my-booking")
+sys.path.insert(0, HOME)
+
+try:
+    from app import config as app_config
+    from app import erasure as app_erasure
+    from app import retention as app_retention
+    from app import security as app_security
+    from app import version as app_version
+    from app.logutil import configure_logging
+    from app.storage import Store
+except ImportError as exc:  # pragma: no cover
+    print(f"error: could not import the app package from {HOME} ({exc}).", file=sys.stderr)
+    print("Set MY_BOOKING_HOME if it's installed somewhere else.", file=sys.stderr)
+    sys.exit(1)
+
+DEFAULT_SETTINGS = os.environ.get("MY_BOOKING_SETTINGS", f"{HOME}/settings.toml")
+DEFAULT_DATA_DIR = os.environ.get("MY_BOOKING_DATA", "/var/lib/my-booking")
+
+
+def _store(args) -> Store:
+    return Store(args.data_dir)
+
+
+def _print_rows(rows: list[dict], fmt: str) -> None:
+    if not rows:
+        print("(no matching rows)")
+        return
+    if fmt == "json":
+        print(json.dumps(rows, indent=2))
+        return
+    if fmt == "csv":
+        writer = csv.DictWriter(sys.stdout, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+        return
+    # table
+    cols = list(rows[0].keys())
+    widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+    header = "  ".join(c.ljust(widths[c]) for c in cols)
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
+
+
+def _in_range(value: str, start: str | None, end: str | None) -> bool:
+    if start and value < start:
+        return False
+    if end and value > end:
+        return False
+    return True
+
+
+class _Tee:
+    """Duplicates writes to the original stream and a log file. Used by
+    -L/--log: install this on sys.stdout/sys.stderr *before* calling
+    configure_logging(), so logging's own StreamHandler (which reads
+    sys.stderr at construction time) picks up the Tee too -- one
+    mechanism covers both plain print() output and log records, instead
+    of needing a separate logging.FileHandler as well."""
+
+    def __init__(self, stream, fh):
+        self._stream = stream
+        self._fh = fh
+
+    def write(self, data):
+        self._stream.write(data)
+        self._fh.write(data)
+        self._fh.flush()
+
+    def flush(self):
+        self._stream.flush()
+        self._fh.flush()
+
+
+# -- subcommands --------------------------------------------------------------
+
+def cmd_list(args) -> None:
+    """`my-bt list` -- query registrations across live/archived/all."""
+    store = _store(args)
+    rows = store.read_registrations(scope=args.scope)
+
+    if args.year:
+        args.from_ = args.from_ or f"{args.year}-01-01"
+        args.to = args.to or f"{args.year}-12-31"
+    if args.course:
+        rows = [r for r in rows if r["course_shortname"] == args.course]
+    if args.status:
+        rows = [r for r in rows if r["status"] == args.status]
+    if args.user_id:
+        rows = [r for r in rows if r["user_id"] == args.user_id]
+    if args.from_ or args.to:
+        rows = [r for r in rows if _in_range(r["occurrence_date"], args.from_, args.to)]
+    if args.email:
+        users = {u["user_id"]: u for u in store.read_users(scope="all")}
+        needle = args.email.strip().lower()
+        rows = [
+            r for r in rows
+            if needle in users.get(r["user_id"], {}).get("email", "").lower()
+        ]
+
+    rows.sort(key=lambda r: (r["occurrence_date"], r["course_shortname"]))
+    _print_rows(rows, args.format)
+
+
+def cmd_users(args) -> None:
+    """`my-bt users` -- list guest accounts across live/archived/all."""
+    store = _store(args)
+    rows = store.read_users(scope=args.scope)
+    if args.email:
+        needle = args.email.strip().lower()
+        rows = [r for r in rows if needle in r["email"].lower()]
+    rows = [{k: v for k, v in r.items() if k not in ("pin_hash", "pin_salt")} for r in rows]
+    _print_rows(rows, args.format)
+
+
+def cmd_show(args) -> None:
+    """`my-bt show <registration_id>` -- full detail on one registration."""
+    store = _store(args)
+    for scope in ("live", "archived"):
+        for r in store.read_registrations(scope=scope):
+            if r["registration_id"] == args.registration_id:
+                r = {**r, "_scope": scope}
+                _print_rows([r], args.format)
+                return
+    print("not found", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_stats(args) -> None:
+    """`my-bt stats` -- quick counts per course/status."""
+    store = _store(args)
+    rows = store.read_registrations(scope=args.scope)
+    if args.year:
+        rows = [r for r in rows if r["occurrence_date"].startswith(str(args.year))]
+    counts: dict[tuple[str, str], int] = {}
+    for r in rows:
+        key = (r["course_shortname"], r["status"])
+        counts[key] = counts.get(key, 0) + 1
+    out = [{"course": c, "status": s, "count": n} for (c, s), n in sorted(counts.items())]
+    _print_rows(out, args.format)
+
+
+def cmd_hash_password(args) -> None:
+    """`my-bt hash-password` -- prompts for the admin login password (hidden
+    input -- never typed into a command line, so it never ends up in shell
+    history or `ps`) and prints the hash to put in
+    /etc/my-booking/secrets/admin_password_hash. That file must contain
+    this HASH, never the plain password -- `my-bt status` specifically
+    checks for and flags that exact mistake."""
+    pw1 = getpass.getpass("Admin password: ")
+    pw2 = getpass.getpass("Confirm: ")
+    if not pw1:
+        print("error: empty password, nothing generated", file=sys.stderr)
+        sys.exit(1)
+    if pw1 != pw2:
+        print("error: passwords didn't match, nothing generated", file=sys.stderr)
+        sys.exit(1)
+    print(app_security.hash_admin_password(pw1))
+
+
+def cmd_erase(args) -> None:
+    """`my-bt erase --email ...` -- manual right-to-erasure (Art. 17).
+    Cancels any future confirmed/waitlisted bookings for this email and
+    moves their user + registration rows into data/archived/*.csv with the
+    email irreversibly hashed. This does NOT re-sync the calendar for
+    affected occurrences -- run the app's normal cancel flow (or restart the
+    service, which re-syncs lazily) if you need the calendar updated
+    immediately; this CLI intentionally has no network/CalDAV dependency."""
+    if not args.yes:
+        confirm = input(f"Erase all data for {args.email}? Type 'yes' to confirm: ")
+        if confirm.strip().lower() != "yes":
+            print("aborted")
+            return
+    settings = app_config.load_settings(args.settings)
+    store = _store(args)
+    ok = app_erasure.erase_user_by_email(store, settings, args.email, today=date.today())
+    print("erased" if ok else "no such user (nothing to erase)")
+
+
+def cmd_purge_retention(args) -> None:
+    """`my-bt purge-retention` -- manually run the same purge the systemd
+    timer runs nightly (see systemd/my-booking-retention.timer)."""
+    settings = app_config.load_settings(args.settings)
+    store = _store(args)
+    if args.dry_run:
+        today = date.today()
+        would_purge = sum(
+            1 for r in store.all_registrations()
+            if app_retention.should_purge(r, today, settings)
+        )
+        print(f"would purge {would_purge} row(s) (dry run, nothing changed)")
+        return
+    purged = app_retention.run_purge(store, settings)
+    print(f"purged {purged} row(s)")
+
+
+def cmd_test(args) -> None:
+    """`my-bt test` -- run the project's unit test suite (python3 -m unittest)."""
+    import subprocess
+
+    repo_root = args.repo_root or os.path.dirname(HOME.rstrip("/"))
+    # HOME is normally /opt/my-booking with no tests/ alongside it in a
+    # from-package install; --repo-root lets you point at a checkout that
+    # does have tests/ (e.g. before building the RPM).
+    candidates = [args.repo_root] if args.repo_root else [HOME, os.getcwd()]
+    for candidate in candidates:
+        if candidate and os.path.isdir(os.path.join(candidate, "tests")):
+            print(f"running tests from {candidate}")
+            result = subprocess.run(
+                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"],
+                cwd=candidate,
+            )
+            sys.exit(result.returncode)
+    print("no tests/ directory found -- pass --repo-root /path/to/checkout", file=sys.stderr)
+    sys.exit(1)
+
+
+# -- status / setup --------------------------------------------------------------
+# The actual check/report/interactive-walkthrough logic lives in
+# app/cli_checks.py + app/cli_setup.py -- deliberately NOT here, so it's
+# importable and unit-tested by tests/ (this script has no .py extension
+# and lives outside app/, so unittest can't reach it directly). Add a new
+# check there, once, rather than growing this file -- separate copies of
+# this kind of thing have drifted and caused real bugs in this project
+# before (see git history for how that used to go wrong).
+
+def cmd_status(args) -> None:
+    """`my-bt status` -- health check of the install: settings.toml (plus
+    any pending settings.toml.rpmnew / privacy.html.tmpl.rpmnew merge and
+    a package-wide `rpm -V` integrity check), secrets (existence,
+    permissions, and -- for admin_password_hash / erasure_pepper --
+    whether the content looks right), the data dir, the configured log
+    file (if any), my-booking group membership, systemd units, SELinux,
+    and (if [site].static_site_dir is configured) whether the live
+    deployed privacy.html still matches this settings.toml, plus whether
+    any of the live site/*.html pages still contain a leftover REPLACE-ME
+    or unsubstituted ${...} placeholder (i.e. the generic template got
+    published without being customized -- see
+    app/cli_checks.py::check_static_site_compliance). Deliberately no
+    network/CalDAV check here, same reasoning as `erase` -- this CLI has
+    no CalDAV dependency by design, so it still works to diagnose things
+    even if the CalDAV/SMTP provider itself is unreachable."""
+    from app import cli_checks, cli_setup
+
+    checks: list[cli_checks.Check] = []
+
+    # -- settings.toml -------------------------------------------------------
+    raw = None
+    try:
+        raw = app_config.load_raw_toml(args.settings)
+    except Exception as exc:  # noqa: BLE001 - report, don't abort the rest
+        checks.append((f"settings.toml ({args.settings})", "fail", f"failed to parse: {exc}"))
+    if raw is None and not checks:
+        checks.append((f"settings.toml ({args.settings})", "fail", "file does not exist"))
+    elif raw is not None:
+        checks.append((f"settings.toml ({args.settings})", "ok", "parses OK"))
+        courses = raw.get("course", [])
+        if courses:
+            checks.append((f"{len(courses)} course(s) configured", "ok",
+                            ", ".join(c.get("shortname", "?") for c in courses)))
+        else:
+            checks.append(("courses configured", "warn", "no [[course]] blocks found"))
+        tmpl = cli_setup.tmpl_path(HOME)
+        checks.extend(cli_checks.check_rpmnew([args.settings, str(tmpl)]))
+        checks.extend(cli_checks.check_static_site_drift(raw, tmpl))
+        checks.extend(cli_checks.check_static_site_compliance(raw))
+
+    # -- secrets --------------------------------------------------------------
+    if raw:
+        checks.extend(cli_checks.check_secrets(raw))
+
+    # -- data dir ---------------------------------------------------------------
+    data_dir = Path(args.data_dir)
+    if not data_dir.exists():
+        checks.append((f"data dir ({data_dir})", "warn", "does not exist yet -- created on first booking/run"))
+    elif not os.access(data_dir, os.W_OK):
+        checks.append((f"data dir ({data_dir})", "fail", "not writable by the current user"))
+    else:
+        checks.append((f"data dir ({data_dir})", "ok", "exists and writable"))
+
+    # -- configured log file, if any ---------------------------------------------
+    log_file = app_config.peek_log_file(args.settings) if raw else None
+    if log_file:
+        lp = Path(log_file)
+        if lp.exists() and not os.access(lp, os.W_OK):
+            checks.append((f"log file ({log_file})", "fail", "exists but not writable by the current user"))
+        elif not lp.exists() and not os.access(lp.parent, os.W_OK):
+            checks.append((f"log file ({log_file})", "warn",
+                "doesn't exist yet and its directory isn't writable by you -- "
+                "start the service once (it creates it), or create it yourself"))
+        else:
+            checks.append((f"log file ({log_file})", "ok", "configured and writable"))
+
+    # -- my-booking group membership, systemd, SELinux, package integrity -------
+    checks.extend(cli_checks.check_group_membership())
+    checks.extend(cli_checks.check_systemd())
+    checks.extend(cli_checks.check_selinux())
+    checks.extend(cli_checks.check_rpm_verify())
+
+    # -- report -------------------------------------------------------------------
+    icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
+    for label, level, detail in checks:
+        line = f"[{icon[level]}] {label}"
+        if detail:
+            line += f" -- {detail}"
+        print(line)
+
+    fails = sum(1 for _, level, _ in checks if level == "fail")
+    warns = sum(1 for _, level, _ in checks if level == "warn")
+    print()
+    if fails:
+        print(f"{fails} problem(s), {warns} warning(s) -- fix the FAIL item(s) above, "
+              "then re-run `my-bt status`.")
+        sys.exit(1)
+    elif warns:
+        print(f"{warns} warning(s), no hard failures -- worth a look above.")
+    else:
+        print("all checks passed.")
+
+
+def cmd_setup(args) -> None:
+    """`my-bt setup` -- shows the guided post-install steps (secrets,
+    pending .rpmnew merges, settings review, nginx, group membership,
+    systemd, SELinux, static site), computed fresh from the current
+    install state each time -- the single source of truth for this,
+    instead of the RPM %post / scripts/install.sh each keeping their own
+    separate copy of the text (which drifted before and caused real bugs).
+    Already-satisfied steps are shown as done, not
+    just always the full static list. Pass --interactive/-i to be walked
+    through them one at a time and have my-bt perform what it safely can
+    (most of it needs root, including regenerating the live static
+    privacy page if [site].static_site_dir is configured)."""
+    from app import cli_setup
+
+    raw = app_config.load_raw_toml(args.settings)
+    if raw is None:
+        print(f"error: {args.settings} not found -- install the package first", file=sys.stderr)
+        sys.exit(1)
+    if args.interactive:
+        cli_setup.interactive_setup(raw, args.settings, HOME)
+    else:
+        cli_setup.print_report(raw, args.settings, HOME)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="my-bt", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help=f"default: {DEFAULT_DATA_DIR}")
+    p.add_argument("--settings", default=DEFAULT_SETTINGS, help=f"default: {DEFAULT_SETTINGS}")
+    # action="version" is argparse's own special-case: it prints and exits
+    # immediately, before the "a subcommand is required" check below would
+    # otherwise fire -- so `my-bt --version` works with no subcommand,
+    # exactly like `my-bt --help` does.
+    p.add_argument(
+        "--version", action="version",
+        version=app_version.version_string(HOME),
+        help="show the package version and the git commit it was built from, then exit",
+    )
+    p.add_argument(
+        "-D", "--debug", action="store_true",
+        help="verbose tracing + full tracebacks on error, just for this run "
+             "(same effect as MY_BOOKING_DEBUG=1, see README.md 'Logs & debugging')",
+    )
+    p.add_argument(
+        "-L", "--log", action="store_true",
+        help="also append this run's output to settings.toml's [logging].log_file "
+             "(configure that first -- see README.md 'Logs & debugging')",
+    )
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def scope_args(sp):
+        g = sp.add_mutually_exclusive_group()
+        g.add_argument("--live", dest="scope", action="store_const", const="live")
+        g.add_argument("--archive", "--archived", dest="scope", action="store_const", const="archived")
+        sp.set_defaults(scope="all")
+
+    def format_arg(sp):
+        sp.add_argument("--format", choices=["table", "csv", "json"], default="table")
+
+    sp = sub.add_parser("list", help="query registrations (live + archived by default)")
+    scope_args(sp)
+    format_arg(sp)
+    sp.add_argument("--course", help="filter by course shortname")
+    sp.add_argument("--status", choices=["confirmed", "waitlisted", "canceled_by_guest", "canceled_by_host"])
+    sp.add_argument("--email", help="filter by (partial, case-insensitive) guest email")
+    sp.add_argument("--user-id")
+    sp.add_argument("--year", type=int, help="shorthand for --from YYYY-01-01 --to YYYY-12-31")
+    sp.add_argument("--from", dest="from_", help="occurrence_date >= YYYY-MM-DD")
+    sp.add_argument("--to", help="occurrence_date <= YYYY-MM-DD")
+    sp.set_defaults(func=cmd_list)
+
+    sp = sub.add_parser("users", help="list guest accounts (live + archived by default)")
+    scope_args(sp)
+    format_arg(sp)
+    sp.add_argument("--email", help="filter by (partial, case-insensitive) email")
+    sp.set_defaults(func=cmd_users)
+
+    sp = sub.add_parser("show", help="show one registration by id")
+    format_arg(sp)
+    sp.add_argument("registration_id")
+    sp.set_defaults(func=cmd_show)
+
+    sp = sub.add_parser("stats", help="counts per course/status")
+    scope_args(sp)
+    format_arg(sp)
+    sp.add_argument("--year", type=int)
+    sp.set_defaults(func=cmd_stats)
+
+    sp = sub.add_parser("hash-password", help="generate admin_password_hash (prompts, hidden input)")
+    sp.set_defaults(func=cmd_hash_password)
+
+    sp = sub.add_parser("erase", help="manually erase a guest's data (GDPR Art. 17)")
+    sp.add_argument("--email", required=True)
+    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    sp.set_defaults(func=cmd_erase)
+
+    sp = sub.add_parser("purge-retention", help="run the retention purge job now")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.set_defaults(func=cmd_purge_retention)
+
+    sp = sub.add_parser("test", help="run the unit test suite")
+    sp.add_argument("--repo-root", help="checkout containing tests/ (default: auto-detect)")
+    sp.set_defaults(func=cmd_test)
+
+    sp = sub.add_parser("status", help="health check: settings, secrets, systemd, SELinux")
+    sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("setup", help="show (or --interactive: be walked through) post-install setup steps")
+    sp.add_argument(
+        "-i", "--interactive", action="store_true",
+        help="actually walk through each step and perform what's safely automatable "
+             "(most of it needs root)",
+    )
+    sp.set_defaults(func=cmd_setup)
+
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    # -D/--debug is just a per-invocation way to set MY_BOOKING_DEBUG=1
+    # without needing to remember the env var (or touch the running
+    # service's config) -- same single verbosity switch either way, see
+    # app/logutil.py and README.md "Logs & debugging".
+    if args.debug:
+        os.environ["MY_BOOKING_DEBUG"] = "1"
+
+    log_fh = None
+    orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    if args.log:
+        log_path = app_config.peek_log_file(args.settings)
+        if not log_path:
+            print("--log: no [logging].log_file configured in settings.toml -- "
+                  "add one first, e.g.:", file=sys.stderr)
+            print("  [logging]", file=sys.stderr)
+            print('  log_file = "/var/lib/my-booking/my-booking.log"', file=sys.stderr)
+        else:
+            try:
+                log_fh = open(log_path, "a", encoding="utf-8")
+                # Tee installed *before* configure_logging() below, so its
+                # StreamHandler (which reads sys.stderr at construction
+                # time) picks up the Tee too -- covers print() output and
+                # logging output with the one mechanism. See _Tee's
+                # docstring.
+                sys.stdout = _Tee(orig_stdout, log_fh)
+                sys.stderr = _Tee(orig_stderr, log_fh)
+                print(f"=== my-bt {' '.join(sys.argv[1:])} "
+                      f"@ {datetime.now(timezone.utc).isoformat()} ===")
+            except OSError as exc:
+                print(f"--log: could not open {log_path!r} ({exc}); "
+                      "continuing without it", file=sys.stderr)
+                log_fh = None
+
+    debug = configure_logging()
+    try:
+        args.func(args)
+    except Exception as exc:
+        if debug:
+            raise
+        print(f"error: {exc}", file=sys.stderr)
+        print("(re-run with --debug for the full traceback)", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        # Restore the real streams *before* closing the file -- otherwise
+        # Python's own shutdown-time flush of sys.stdout/stderr writes to
+        # the Tee after log_fh is closed, raising "I/O operation on closed
+        # file" from an unraisable-exception hook (harmless but alarming
+        # noise on every --log run; seen in practice while testing this).
+        sys.stdout, sys.stderr = orig_stdout, orig_stderr
+        if log_fh:
+            log_fh.close()
+
+
+if __name__ == "__main__":
+    main()

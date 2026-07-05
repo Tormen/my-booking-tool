@@ -1,0 +1,120 @@
+[site]
+timezone    = "Europe/Berlin"
+admin_email = "admin@example.org"
+base_url    = "https://example.org"
+# Where the LIVE static site (site/*.html from this repo, copied over by
+# hand -- see README.md "Static-site pages") actually lives, so `my-bt
+# status` can detect a stale privacy.html (retention numbers out of sync
+# with this file) and `my-bt setup -i` can regenerate it directly there.
+# Comment out / remove to skip that check entirely.
+static_site_dir = "/var/www/example.org"
+
+[calendar]
+caldav_url            = "https://dav.example.org/"
+caldav_username       = "calendar@example.org"
+caldav_password_file  = "/etc/my-booking/secrets/caldav_password"
+booking_calendar      = "Bookings"
+conflict_calendars    = ["Calendar", "Bookings"]
+
+[smtp]
+host          = "smtp.example.org"
+port          = 465
+username      = "calendar@example.org"
+password_file = "/etc/my-booking/secrets/smtp_password"
+from_address  = "admin@example.org"
+
+[admin]
+password_hash_file = "/etc/my-booking/secrets/admin_password_hash"
+
+[defaults]
+# How many upcoming occurrences to offer on the booking page at once.
+show_next_slots  = 4
+# ...but never look further ahead than this many days, even if that means
+# offering fewer than show_next_slots occurrences. Whichever limit is hit
+# first wins (see app/slots.py::build_occurrences).
+show_next_days   = 42
+# Occurrences stay visible and bookable right up until they start -- this
+# no longer hides anything. Instead it gates a LATE booking (made within
+# this many hours of start): allowed normally if min_required_participants
+# is already met, or if this booking is the one that reaches it; rejected
+# with a short explanation only if quorum still wouldn't be met (see
+# app/webapp.py::book). Has no effect at all while min_required_participants
+# is 1 (the default) -- a single booking always meets that on its own.
+min_notice_hours = 2
+# Minimum CONFIRMED bookings needed for a course to run -- see
+# min_notice_hours above for how the two combine on a LATE booking. Default
+# 1 = never blocks anyone. Raise this only if a course genuinely shouldn't
+# run below a certain group size.
+min_required_participants = 1
+# Show "N spot(s) left" / "FULL, join waitlist" on the booking page at all.
+show_spots_left = true
+# Displayed-only offset for A/B-testing whether perceived scarcity changes
+# booking behaviour. Positive = show fewer spots than really available
+# (more urgency), negative = show more, 0 = show the real number. This
+# NEVER affects actual capacity/waitlist decisions -- those always use the
+# true confirmed count (see app/webapp.py::_spots_left_text and
+# app/storage.py::add_registration_checking_capacity). Also never makes an
+# occurrence claim "FULL" when it genuinely isn't -- only the number
+# shown while there's real room shifts; a truly-full occurrence always
+# says so, since that's what "join waitlist" in the email will actually do.
+spots_left_offset = 0
+
+[privacy]
+# GDPR storage-limitation (Art. 5(1)(e)): how long a registration row is kept
+# after its course occurrence date before the retention job purges it.
+# 24 months is a reasonable starting point (long enough to resolve disputes /
+# show attendance history, short enough to stay defensible as "no longer
+# than necessary"). Change freely; there is no legally mandated number --
+# but see README.md's disclaimer: you are responsible for confirming
+# whatever number you pick is appropriate for your own situation.
+retention_months = 24
+# Canceled registrations are less useful to keep around; purge them sooner.
+canceled_retention_months = 6
+# Secret HMAC key used to hash a guest's email address when they exercise
+# their right to erasure (Art. 17). Generated once by scripts/install.sh
+# (`openssl rand -hex 32`); rotating it means previously-erased emails can no
+# longer be recognized as "the same erased person" if they ever come up again.
+erasure_pepper_file = "/etc/my-booking/secrets/erasure_pepper"
+
+[logging]
+# Optional. If set, the web service, the retention job, and `my-bt -L`/
+# `--log` all append their logs to this one file, in addition to
+# stdout/journal -- handy as a single place to `tail -f` or attach when
+# reporting a problem (see README.md "Logs & debugging"). Uncomment to
+# enable; leave commented out (the default) for stdout/journal only.
+# Must be writable by the my-booking user/group -- the default path below
+# is inside /var/lib/my-booking, which the RPM already creates with the
+# right ownership, so no extra setup is needed if you use it as-is.
+# log_file = "/var/lib/my-booking/my-booking.log"
+
+# REPLACE-ME: the [[course]] blocks below are placeholder examples so this
+# file parses and `my-bt`/the app run out of the box -- replace shortname/
+# title/location/weekday/start_time/duration_minutes/capacity/audience/
+# language/description with your own recurring classes. shortname must be
+# URL-safe (used directly in /book/<shortname>) and unique across courses.
+# audience is "private" or "public" (display-only, no access control
+# difference); language is a free-text tag your own templates/copy can key
+# off of if you support more than one.
+[[course]]
+shortname   = "example-monday-class"
+title       = "Example Class"
+location    = "Example Community Center, Room 1"
+weekday     = "mon"
+start_time  = "18:00"
+duration_minutes = 60
+capacity    = 12
+audience    = "public"
+language    = "en"
+description = "Example weekly class. Replace this with your own description."
+
+[[course]]
+shortname  = "example-thursday-class"
+title      = "Example Class (Advanced)"
+location   = "Example Community Center, Room 2"
+weekday    = "thu"
+start_time = "19:00"
+duration_minutes = 90
+capacity   = 10
+audience   = "public"
+language   = "en"
+description = "Second example course, showing a course with different capacity/timing."

@@ -1,0 +1,28 @@
+<!-- Generic starting point, not generated. Copy to site/impressum.html
+     (untracked) and replace every REPLACE-ME marker with your own real
+     legal-notice details before publishing. Whether you need this page,
+     and what it must contain, depends on your own jurisdiction -- see
+     README.md's disclaimer: this is not legal advice. -->
+<html>
+<head>
+<meta http-equiv=Content-Type content="text/html; charset=utf-8">
+<title>Impressum / Legal Notice - REPLACE-ME-YOUR-SITE-NAME</title>
+<style>body { max-width: 760px; margin: 2em auto; padding: 0 1em; font-family: sans-serif; }</style>
+</head>
+<body>
+
+<h1>Impressum / Legal Notice</h1>
+
+<p>REPLACE-ME-YOUR-NAME-OR-ORGANIZATION<br>
+REPLACE-ME-YOUR-ADDRESS<br>
+Contact: <a href="mailto:REPLACE-ME@example.org">REPLACE-ME@example.org</a></p>
+
+<p><i>REPLACE-ME: confirm with your own jurisdiction's requirements (e.g.
+Germany's Impressumspflicht, France's mentions légales, or your local
+equivalent) what this page must actually contain -- this template is only
+a placeholder shape, not a compliant example.</i></p>
+
+<p><a href="/index.html">&larr; Back to home</a></p>
+
+</body>
+</html>

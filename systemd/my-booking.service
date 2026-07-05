@@ -1,0 +1,27 @@
+[Unit]
+Description=my-booking-tool (WSGI app on 127.0.0.1:8811)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=my-booking
+Group=my-booking
+ExecStart=/usr/bin/python3 -m app.serve --settings /opt/my-booking/settings.toml --data-dir /var/lib/my-booking
+WorkingDirectory=/opt/my-booking
+Environment=PYTHONPATH=/opt/my-booking
+Restart=on-failure
+RestartSec=5
+
+# sandboxing -- this process only needs to read its own code/config/secrets
+# and read-write its data directory, and talk to your CalDAV/SMTP provider
+# over HTTPS.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/my-booking
+ReadOnlyPaths=/opt/my-booking /etc/my-booking
+
+[Install]
+WantedBy=multi-user.target

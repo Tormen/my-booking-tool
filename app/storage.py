@@ -1,0 +1,419 @@
+"""CSV-backed storage for users and registrations.
+
+Design choices:
+- Whole-file lock (fcntl.flock) around read-modify-write cycles: this app is
+  small/low-traffic, so simplicity beats row-level locking.
+- Atomic write: write to a temp file in the same directory, then os.replace()
+  -- never leaves a torn/partial CSV on crash or concurrent read.
+- CSV injection guard applied to every field on write (see security.py).
+"""
+from __future__ import annotations
+
+import csv
+import fcntl
+import os
+import tempfile
+import uuid
+from dataclasses import dataclass, asdict, fields
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable
+
+from .security import sanitize_csv_field
+
+USER_FIELDS = ["user_id", "email", "name", "pin_hash", "pin_salt", "created_at", "last_login_at"]
+REG_FIELDS = [
+    "registration_id", "course_shortname", "occurrence_date", "user_id", "status",
+    "registered_at", "guest_cancel_token_hash", "canceled_at", "canceled_by", "host_message",
+]
+
+STATUS_CONFIRMED = "confirmed"
+STATUS_WAITLISTED = "waitlisted"
+STATUS_CANCELED_BY_GUEST = "canceled_by_guest"
+STATUS_CANCELED_BY_HOST = "canceled_by_host"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+@dataclass
+class User:
+    user_id: str
+    email: str
+    name: str
+    pin_hash: str
+    pin_salt: str
+    created_at: str
+    last_login_at: str = ""
+
+
+@dataclass
+class Registration:
+    registration_id: str
+    course_shortname: str
+    occurrence_date: str  # ISO date, e.g. "2026-07-08"
+    user_id: str
+    status: str
+    registered_at: str
+    guest_cancel_token_hash: str
+    canceled_at: str = ""
+    canceled_by: str = ""
+    host_message: str = ""
+
+
+class _LockedCsv:
+    """Context manager: opens `path` for locked read-modify-write, creating it
+    with a header if missing. Yields (rows: list[dict], write(rows)) where
+    write() only takes effect if called before the `with` block exits."""
+
+    def __init__(self, path: Path, fieldnames: list[str]):
+        self.path = path
+        self.fieldnames = fieldnames
+        self._fh = None
+        self._to_write: list[dict] | None = None
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            self.path.touch()
+            os.chmod(self.path, 0o600)
+        self._fh = open(self.path, "r+", newline="", encoding="utf-8")
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        self._fh.seek(0)
+        reader = csv.DictReader(self._fh)
+        rows = list(reader)
+        return rows, self._set_rows_to_write
+
+    def _set_rows_to_write(self, rows: list[dict]) -> None:
+        self._to_write = rows
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None and self._to_write is not None:
+                self._atomic_write(self._to_write)
+        finally:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            self._fh.close()
+        return False
+
+    def _atomic_write(self, rows: list[dict]) -> None:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(self.path.parent), prefix=self.path.name + ".", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", newline="", encoding="utf-8") as tmp:
+                writer = csv.DictWriter(tmp, fieldnames=self.fieldnames)
+                writer.writeheader()
+                for row in rows:
+                    clean = {k: sanitize_csv_field(str(row.get(k, ""))) for k in self.fieldnames}
+                    writer.writerow(clean)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, self.path)
+        except BaseException:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+            raise
+
+
+def _read_csv_plain(path: Path, fieldnames: list[str]) -> list[dict]:
+    """Read-only, unlocked (reporting/CLI use) -- creates nothing, returns []
+    if the file doesn't exist yet."""
+    if not path.exists():
+        return []
+    with open(path, "r", newline="", encoding="utf-8") as fh:
+        return list(csv.DictReader(fh))
+
+
+class Store:
+    def __init__(self, data_dir: str | Path, archive_dir: str | Path | None = None):
+        self.data_dir = Path(data_dir)
+        self.users_path = self.data_dir / "users.csv"
+        self.registrations_path = self.data_dir / "registrations.csv"
+        self.archive_dir = Path(archive_dir) if archive_dir else self.data_dir / "archived"
+        self.archived_users_path = self.archive_dir / "users.csv"
+        self.archived_registrations_path = self.archive_dir / "registrations.csv"
+
+    # -- users ---------------------------------------------------------------
+
+    def find_user_by_email(self, email: str) -> User | None:
+        email = email.strip().lower()
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, _write):
+            for row in rows:
+                if row["email"].strip().lower() == email:
+                    return User(**row)
+        return None
+
+    def find_user_by_id(self, user_id: str) -> User | None:
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, _write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    return User(**row)
+        return None
+
+    def upsert_user(self, email: str, name: str, pin_hash: str, pin_salt: str) -> User:
+        email_norm = email.strip().lower()
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["email"].strip().lower() == email_norm:
+                    row["name"] = name
+                    row["pin_hash"] = pin_hash
+                    row["pin_salt"] = pin_salt
+                    write(rows)
+                    return User(**row)
+            user = User(
+                user_id=str(uuid.uuid4()),
+                email=email_norm,
+                name=name,
+                pin_hash=pin_hash,
+                pin_salt=pin_salt,
+                created_at=now_iso(),
+            )
+            rows.append(asdict(user))
+            write(rows)
+            return user
+
+    def touch_login(self, user_id: str) -> None:
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            changed = False
+            for row in rows:
+                if row["user_id"] == user_id:
+                    row["last_login_at"] = now_iso()
+                    changed = True
+            if changed:
+                write(rows)
+
+    # -- registrations ---------------------------------------------------------
+
+    def count_confirmed(self, course_shortname: str, occurrence_date: str) -> int:
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+            return sum(
+                1 for r in rows
+                if r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+                and r["status"] == STATUS_CONFIRMED
+            )
+
+    def times_registered(self, user_id: str) -> int:
+        """Total confirmed-or-was-confirmed bookings by this user, ever --
+        used for the admin "how often have they registered" column. Computed
+        on read, not stored, so it can never drift out of sync."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+            return sum(1 for r in rows if r["user_id"] == user_id)
+
+    def add_registration(
+        self,
+        course_shortname: str,
+        occurrence_date: str,
+        user_id: str,
+        cancel_token_hash: str,
+        status: str = STATUS_CONFIRMED,
+    ) -> Registration:
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            reg = Registration(
+                registration_id=str(uuid.uuid4()),
+                course_shortname=course_shortname,
+                occurrence_date=occurrence_date,
+                user_id=user_id,
+                status=status,
+                registered_at=now_iso(),
+                guest_cancel_token_hash=cancel_token_hash,
+            )
+            rows.append(asdict(reg))
+            write(rows)
+            return reg
+
+    def add_registration_checking_capacity(
+        self,
+        course_shortname: str,
+        occurrence_date: str,
+        user_id: str,
+        cancel_token_hash: str,
+        capacity: int,
+    ) -> Registration:
+        """Same as add_registration, but decides confirmed-vs-waitlisted and
+        inserts the row in a single locked read-modify-write cycle -- unlike
+        calling count_confirmed() then add_registration() as two separate
+        operations, this closes the race where two people booking the last
+        spot at the same moment could both land as confirmed past capacity."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            confirmed = sum(
+                1 for r in rows
+                if r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+                and r["status"] == STATUS_CONFIRMED
+            )
+            status = STATUS_WAITLISTED if confirmed >= capacity else STATUS_CONFIRMED
+            reg = Registration(
+                registration_id=str(uuid.uuid4()),
+                course_shortname=course_shortname,
+                occurrence_date=occurrence_date,
+                user_id=user_id,
+                status=status,
+                registered_at=now_iso(),
+                guest_cancel_token_hash=cancel_token_hash,
+            )
+            rows.append(asdict(reg))
+            write(rows)
+            return reg
+
+    def registrations_for_occurrence(
+        self, course_shortname: str, occurrence_date: str
+    ) -> list[Registration]:
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+            return [
+                Registration(**r) for r in rows
+                if r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+            ]
+
+    def registrations_for_user(self, user_id: str) -> list[Registration]:
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+            return [Registration(**r) for r in rows if r["user_id"] == user_id]
+
+    def find_by_guest_token_hash(self, token_hash: str) -> Registration | None:
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+            for r in rows:
+                if r["guest_cancel_token_hash"] == token_hash and r["status"] in (
+                    STATUS_CONFIRMED, STATUS_WAITLISTED,
+                ):
+                    return Registration(**r)
+        return None
+
+    def find_by_id(self, registration_id: str) -> Registration | None:
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+            for r in rows:
+                if r["registration_id"] == registration_id:
+                    return Registration(**r)
+        return None
+
+    def cancel(self, registration_id: str, canceled_by: str, host_message: str = "") -> bool:
+        """canceled_by is 'guest' or 'host'. Works on confirmed OR waitlisted
+        rows (leaving the waitlist is just a cancel). Idempotent: canceling
+        an already canceled registration is a no-op returning False."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            changed = False
+            for row in rows:
+                if row["registration_id"] == registration_id and row["status"] in (
+                    STATUS_CONFIRMED, STATUS_WAITLISTED,
+                ):
+                    row["status"] = (
+                        STATUS_CANCELED_BY_GUEST if canceled_by == "guest" else STATUS_CANCELED_BY_HOST
+                    )
+                    row["canceled_at"] = now_iso()
+                    row["canceled_by"] = canceled_by
+                    row["host_message"] = host_message
+                    changed = True
+            if changed:
+                write(rows)
+            return changed
+
+    def all_registrations(self) -> list[Registration]:
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+            return [Registration(**r) for r in rows]
+
+    def replace_all_registrations(self, registrations: Iterable[Registration]) -> None:
+        """Used by the retention job to rewrite the file after purging rows."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (_rows, write):
+            write([asdict(r) for r in registrations])
+
+    # -- waitlist -------------------------------------------------------------
+
+    def promote_next_waitlisted(
+        self, course_shortname: str, occurrence_date: str, capacity: int
+    ) -> Registration | None:
+        """Call this after any cancellation. If there's a free confirmed
+        spot (confirmed count < capacity -- NOT assumed, checked here),
+        promotes the longest-waiting waitlisted registration for this
+        occurrence to confirmed, FIFO by registered_at. Returns the promoted
+        Registration, or None if nobody was waiting or there's no free spot
+        (e.g. the cancellation was itself a waitlisted person leaving)."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            confirmed = sum(
+                1 for r in rows
+                if r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+                and r["status"] == STATUS_CONFIRMED
+            )
+            if confirmed >= capacity:
+                return None
+            waitlisted = [
+                r for r in rows
+                if r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+                and r["status"] == STATUS_WAITLISTED
+            ]
+            if not waitlisted:
+                return None
+            waitlisted.sort(key=lambda r: r["registered_at"])
+            candidate = waitlisted[0]
+            candidate["status"] = STATUS_CONFIRMED
+            write(rows)
+            return Registration(**candidate)
+
+    # -- right to erasure (Art. 17 GDPR) -------------------------------------
+    #
+    # "Erasing" a user does not shred their booking history outright: it moves
+    # their user row + every one of their registration rows out of the live
+    # CSVs and into data/archived/*.csv, with the email replaced by a keyed
+    # HMAC hash (see security.hash_email_for_erasure) and the name redacted.
+    # Because the hash is keyed with a secret pepper that lives only in
+    # secrets/erasure_pepper (never in the archive itself), it cannot be
+    # reversed by guessing/dictionary-attacking email addresses the way a
+    # bare sha256(email) could -- this is what makes it a defensible
+    # pseudonymization rather than security theatre. Registration rows (which
+    # never held name/email to begin with, only user_id) move as-is.
+
+    def erase_user(self, user_id: str, hashed_email: str) -> bool:
+        """Returns False if the user_id doesn't exist (already erased/never existed)."""
+        archived_user_row = None
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            keep = []
+            for row in rows:
+                if row["user_id"] == user_id:
+                    archived_user_row = dict(row)
+                    archived_user_row["email"] = hashed_email
+                    archived_user_row["name"] = "[erased]"
+                else:
+                    keep.append(row)
+            if archived_user_row is None:
+                return False
+            write(keep)
+
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            keep, moving = [], []
+            for row in rows:
+                (moving if row["user_id"] == user_id else keep).append(row)
+            write(keep)
+
+        with _LockedCsv(self.archived_users_path, USER_FIELDS) as (rows, write):
+            rows.append(archived_user_row)
+            write(rows)
+
+        if moving:
+            with _LockedCsv(self.archived_registrations_path, REG_FIELDS) as (rows, write):
+                rows.extend(moving)
+                write(rows)
+        return True
+
+    # -- reporting: live + archived, for the my-bt CLI -----------------------
+
+    def read_users(self, scope: str = "all") -> list[dict]:
+        """scope: 'live' | 'archived' | 'all'."""
+        out = []
+        if scope in ("live", "all"):
+            out += _read_csv_plain(self.users_path, USER_FIELDS)
+        if scope in ("archived", "all"):
+            out += _read_csv_plain(self.archived_users_path, USER_FIELDS)
+        return out
+
+    def read_registrations(self, scope: str = "all") -> list[dict]:
+        """scope: 'live' | 'archived' | 'all'."""
+        out = []
+        if scope in ("live", "all"):
+            out += _read_csv_plain(self.registrations_path, REG_FIELDS)
+        if scope in ("archived", "all"):
+            out += _read_csv_plain(self.archived_registrations_path, REG_FIELDS)
+        return out
