@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 
 
 def debug_enabled() -> bool:
@@ -51,6 +52,19 @@ def configure_logging(log_file: str | None = None) -> bool:
         if debug
         else "%(asctime)s %(levelname)s %(message)s"
     )
+    formatter = logging.Formatter(fmt)
+    # UTC, not whatever the server's system timezone happens to be --
+    # every other timestamp in this app is UTC (storage.now_iso(),
+    # watchdog.py's own datetime.now(timezone.utc) calls), and
+    # app/watchdog.py::_parse_app_log_timestamp() parses this exact
+    # "asctime" format and labels it UTC directly. logging.Formatter
+    # defaults to the LOCAL system time for %(asctime)s, which was only
+    # "correct by accident" as long as the server's OS timezone happened
+    # to be UTC -- caught 2026-07-05 when changing the server's system
+    # timezone came up (see the maintainer's local notes): without this, the
+    # watchdog's rate-limit-block window would silently skew by the
+    # server's UTC offset the moment the OS clock isn't UTC.
+    formatter.converter = time.gmtime
     handlers: list[logging.Handler] = [logging.StreamHandler()]
     if log_file:
         try:
@@ -58,8 +72,13 @@ def configure_logging(log_file: str | None = None) -> bool:
         except OSError as exc:
             print(f"my-booking-tool: could not open log_file {log_file!r} ({exc}); "
                   "continuing without it", file=sys.stderr)
+    for h in handlers:
+        h.setFormatter(formatter)
     # force=True: safe to call configure_logging() more than once in the
     # same process (e.g. a caller that re-resolves log_file after loading
-    # settings) without ending up with duplicated handlers.
-    logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
+    # settings) without ending up with duplicated handlers. format= is
+    # deliberately NOT passed here -- each handler already carries its own
+    # (UTC-converting) formatter, and passing format= too would just be
+    # redundant/ignored by basicConfig for handlers that already have one.
+    logging.basicConfig(level=level, handlers=handlers, force=True)
     return debug
