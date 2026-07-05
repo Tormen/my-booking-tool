@@ -675,5 +675,85 @@ class CheckStaticSiteComplianceTest(unittest.TestCase):
         self.assertTrue(any(level == "warn" for level in levels.values()))
 
 
+class CheckCaldavCalendarsTest(unittest.TestCase):
+    """CalDAVClient itself is exercised in tests/test_caldav.py -- these
+    tests are about check_caldav_calendars()'s own logic (config
+    gating, error handling, want/found diffing), so CalDAVClient is
+    mocked wholesale rather than driven through a fake transport."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.password_file = Path(self._tmp.name) / "caldav_password"
+        self.password_file.write_text("hunter2", encoding="utf-8")
+
+    def _raw(self, **overrides) -> dict:
+        cal = {
+            "caldav_url": "https://dav.mailbox.org/caldav/",
+            "caldav_username": "calendar@example.org",
+            "caldav_password_file": str(self.password_file),
+            "booking_calendar": "Yoga-Bookings",
+            "conflict_calendars": ["Calendar", "Yoga-Bookings"],
+        }
+        cal.update(overrides)
+        return {"calendar": cal}
+
+    def test_not_configured_is_a_noop(self):
+        self.assertEqual(cli_checks.check_caldav_calendars({"calendar": {}}), [])
+
+    def test_partially_configured_is_a_noop(self):
+        raw = self._raw(caldav_username=None)
+        self.assertEqual(cli_checks.check_caldav_calendars(raw), [])
+
+    def test_missing_password_file_is_a_noop(self):
+        # check_secrets() already reports a missing secret file -- this
+        # check shouldn't also complain about it a second way.
+        raw = self._raw(caldav_password_file=str(self.password_file) + ".missing")
+        self.assertEqual(cli_checks.check_caldav_calendars(raw), [])
+
+    @patch("app.cli_checks.CalDAVClient")
+    def test_connection_or_auth_failure_is_one_warn(self, mock_cls):
+        mock_cls.return_value.list_calendars.side_effect = RuntimeError(
+            "PROPFIND https://dav.mailbox.org/caldav/ -> HTTP 401"
+        )
+        checks = cli_checks.check_caldav_calendars(self._raw())
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("401", detail)
+
+    @patch("app.cli_checks.CalDAVClient")
+    def test_calendars_found_are_ok(self, mock_cls):
+        mock_cls.return_value.list_calendars.return_value = {
+            "Calendar": "/caldav/Y2FsOi8vMC8zMQ/",
+            "Yoga-Bookings": "/caldav/somewhere/",
+        }
+        checks = cli_checks.check_caldav_calendars(self._raw())
+        levels = _levels(checks)
+        self.assertEqual(levels["CalDAV calendar 'Calendar'"], "ok")
+        self.assertEqual(levels["CalDAV calendar 'Yoga-Bookings'"], "ok")
+
+    @patch("app.cli_checks.CalDAVClient")
+    def test_calendar_not_found_fails_with_the_real_list(self, mock_cls):
+        # The exact failure mode hit in production 2026-07-05: the
+        # configured base URL only ever resolved "WebDAV Root" -- the
+        # detail message should surface what was actually found so this
+        # is diagnosable without a separate curl/journalctl trip.
+        mock_cls.return_value.list_calendars.return_value = {"WebDAV Root": "/"}
+        checks = cli_checks.check_caldav_calendars(self._raw())
+        levels = _levels(checks)
+        self.assertEqual(levels["CalDAV calendar 'Calendar'"], "fail")
+        self.assertEqual(levels["CalDAV calendar 'Yoga-Bookings'"], "fail")
+        details = {label: detail for label, _, detail in checks}
+        self.assertIn("WebDAV Root", details["CalDAV calendar 'Calendar'"])
+
+    @patch("app.cli_checks.CalDAVClient")
+    def test_booking_and_conflict_overlap_is_deduped(self, mock_cls):
+        mock_cls.return_value.list_calendars.return_value = {"Calendar": "/x"}
+        raw = self._raw(booking_calendar="Calendar", conflict_calendars=["Calendar"])
+        checks = cli_checks.check_caldav_calendars(raw)
+        self.assertEqual(len(checks), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

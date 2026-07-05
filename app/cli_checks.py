@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from . import site_render
+from .caldav_client import CalDAVClient, HttpTransport
 
 Check = tuple[str, str, str]  # (label, "ok"|"warn"|"fail", detail)
 
@@ -67,6 +68,59 @@ def check_secrets(raw: dict) -> list[Check]:
                         "not 32 bytes of hex -- expected `openssl rand -hex 32` output"))
             except ValueError:
                 checks.append((f"secret: {name}", "fail", "not valid hex -- expected `openssl rand -hex 32` output"))
+    return checks
+
+
+# Timeout kept short (unlike CalDAVClient's own 15s production default) so
+# `my-bt status`/`setup` stay responsive if the CalDAV server is slow or
+# unreachable -- this is a health check, not a real booking request.
+_CALDAV_CHECK_TIMEOUT = 5.0
+
+
+def check_caldav_calendars(raw: dict) -> list[Check]:
+    """Live PROPFIND against the configured CalDAV server, verifying
+    `[calendar].booking_calendar` and every `[calendar].conflict_calendars`
+    name actually exists there right now. Catches the exact failure mode
+    hit in practice 2026-07-05: a calendar got renamed/reset on the
+    provider's side (mailbox.org), so settings.toml pointed at names that
+    no longer existed -- every single `/book/<shortname>` page 500'd with
+    a CalDAVError, and nothing caught it ahead of time (`status` only
+    checked local files/services, never actually asked the CalDAV server
+    what it has). A no-op if caldav_url/username/the password secret
+    aren't all configured yet -- check_secrets() already covers that.
+    Best-effort: any connection/auth/parsing failure is reported as one
+    warn rather than raised, since a transient network hiccup shouldn't
+    make `status` itself fail."""
+    cal = raw.get("calendar", {})
+    caldav_url = cal.get("caldav_url")
+    username = cal.get("caldav_username")
+    password_file = cal.get("caldav_password_file")
+    if not caldav_url or not username or not password_file:
+        return []
+    password_path = Path(password_file)
+    if not password_path.exists():
+        return []  # check_secrets() already reports this
+    try:
+        password = password_path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return []
+    transport = HttpTransport(username, password, timeout=_CALDAV_CHECK_TIMEOUT)
+    try:
+        calendars = CalDAVClient(caldav_url, username, password, transport=transport).list_calendars()
+    except Exception as exc:  # noqa: BLE001 -- network/auth/XML-parse failure, report don't crash
+        return [("CalDAV calendars", "warn", f"couldn't reach/list calendars at {caldav_url}: {exc}")]
+    wanted = {cal.get("booking_calendar")} | set(cal.get("conflict_calendars") or ())
+    wanted.discard(None)
+    checks: list[Check] = []
+    for name in sorted(wanted):
+        if name in calendars:
+            checks.append((f"CalDAV calendar '{name}'", "ok", "found"))
+        else:
+            checks.append((f"CalDAV calendar '{name}'", "fail",
+                            f"not found among {sorted(calendars)} -- update settings.toml "
+                            "[calendar].booking_calendar/conflict_calendars, or recreate/rename "
+                            "it with your CalDAV provider (every booking page 500s until this "
+                            "is fixed)"))
     return checks
 
 

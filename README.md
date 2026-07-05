@@ -332,10 +332,11 @@ provider itself is unreachable.
 
 ### `my-bt setup` / `my-bt setup --interactive`
 
-The same checks `status` runs, reorganized as an 8-step guided post-install
+The same checks `status` runs, reorganized as a 9-step guided post-install
 list (secrets, `.rpmnew` merge, a `settings.toml` values summary, nginx,
-group membership, systemd, SELinux, the static site) -- this is the single
-source of truth for those steps now; `%post` and `scripts/install.sh` just
+group membership, systemd, SELinux, the static site, live CalDAV calendar
+names) -- this is the single source of truth for those steps now; `%post`
+and `scripts/install.sh` just
 point here instead of each keeping their own copy of the text (which used
 to drift out of sync). The logic itself lives in `app/cli_checks.py` (the
 check functions) and `app/cli_setup.py` (report-printing and the
@@ -363,6 +364,16 @@ step by step and have `my-bt` perform what it safely can:
   (re)generate `privacy.html` there from the current `settings.toml`
   values right away -- no rebuild/reinstall needed. See "Static-site
   pages" below.
+- CalDAV calendars: if `[calendar].caldav_url`/`caldav_username`/the
+  password secret are all configured, does a live PROPFIND against your
+  CalDAV server and reports whether `booking_calendar` and every
+  `conflict_calendars` name actually exists there right now -- catches a
+  calendar that was renamed, reset, or never created on the provider's
+  side, which otherwise 500s every single `/book/<shortname>` page with
+  no earlier warning. Informational only (there's no safe guess at which
+  real calendar you meant), and -- unlike every other step above -- this
+  one does reach out over the network, so it's skipped entirely if the
+  CalDAV secret isn't set up yet.
 
 ## Logs & debugging
 
@@ -444,7 +455,7 @@ my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-170 tests covering slot generation (including DST via `zoneinfo`, and that
+181 tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -453,13 +464,15 @@ erasure/archival, retention-purge boundaries, ICS build/parse/line-folding,
 token/PIN hashing, rate limiting, the spots-left display A/B-test knob
 (never fakes "FULL", never drops below "1 spot(s) left" while still
 bookable-as-confirmed), `site/privacy.html` rendering (`test_site_render.py`),
-the `my-bt status`/`setup` health checks and interactive walkthrough
+the `my-bt status`/`setup` health checks and interactive walkthrough,
+including a live CalDAV PROPFIND check that `booking_calendar`/
+`conflict_calendars` actually exist on the configured server right now
 (`test_cli_checks.py`, `test_cli_setup.py` -- every side effect, including
-prompting and running external commands, is a fake, so these don't need
-root/systemd/rpm/a real tty), and the real-file-vs-generic-.example
-resolution used by the build/install scripts (`test_render_site_script.py`
--- explicitly asserts a real file is never modified, deleted, or replaced
-by its `.example` counterpart).
+prompting, running external commands, and the CalDAV connection itself, is
+a fake, so these don't need root/systemd/rpm/a real tty/network), and the
+real-file-vs-generic-.example resolution used by the build/install scripts
+(`test_render_site_script.py` -- explicitly asserts a real file is never
+modified, deleted, or replaced by its `.example` counterpart).
 
 ## GDPR notes
 

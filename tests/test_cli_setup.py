@@ -61,12 +61,17 @@ class PrintReportTest(unittest.TestCase):
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
-    def test_prints_all_eight_numbered_steps(self):
+    def test_prints_all_nine_numbered_steps(self):
         lines: list[str] = []
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         text = "\n".join(lines)
-        for n in range(1, 9):
+        for n in range(1, 10):
             self.assertIn(f"{n}.", text)
+
+    def test_caldav_not_configured_shows_skip(self):
+        lines: list[str] = []
+        cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("SKIP" in ln and "caldav_url" in ln for ln in lines))
 
     def test_reports_missing_secret(self):
         lines: list[str] = []
@@ -426,6 +431,60 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
             )
         self.assertEqual(prompt.asked_matching("Symlink"), [])
         self.assertFalse((nginx_root / "privacy.html").exists())
+
+
+class InteractiveSetupCaldavTest(unittest.TestCase):
+    """Step 9 is informational only -- there's no safe auto-fix for a
+    calendar-name mismatch, so unlike every other step here it never
+    calls `prompt` at all, just surfaces check_caldav_calendars()'s
+    findings (mocked wholesale -- its own logic is covered by
+    tests/test_cli_checks.py::CheckCaldavCalendarsTest)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+
+    def _run(self, raw):
+        lines: list[str] = []
+        prompt = FakePrompts()
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lines.append,
+        )
+        return lines, prompt
+
+    def test_not_configured_shows_skip_and_never_prompts(self):
+        lines, prompt = self._run(_raw())
+        self.assertTrue(any("skip" in ln and "caldav_url" in ln for ln in lines))
+        self.assertEqual(prompt.asked_matching("CalDAV"), [])
+
+    @patch("app.cli_checks.CalDAVClient")
+    def test_calendar_not_found_reports_fail_and_fix_hint(self, mock_cls):
+        mock_cls.return_value.list_calendars.return_value = {"WebDAV Root": "/"}
+        raw = _raw(calendar={
+            "caldav_url": "https://dav.mailbox.org/caldav/",
+            "caldav_username": "calendar@example.org",
+            "caldav_password_file": None,
+            "booking_calendar": "Yoga-Bookings",
+            "conflict_calendars": ["Calendar"],
+        })
+        # password file check happens first in check_caldav_calendars --
+        # give it a real (empty-ok) file so the CalDAVClient mock is reached.
+        pw = self.home / "caldav_password"
+        pw.write_text("hunter2")
+        raw["calendar"]["caldav_password_file"] = str(pw)
+        lines, prompt = self._run(raw)
+        text = "\n".join(lines)
+        self.assertIn("fail", text)
+        self.assertIn("WebDAV Root", text)
+        self.assertIn("settings.toml", text)
+        self.assertEqual(prompt.asked_matching("CalDAV"), [])
 
 
 if __name__ == "__main__":

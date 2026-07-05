@@ -75,6 +75,7 @@ def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
         "static_pages_reachable": cli_checks.check_static_pages_reachable(raw),
+        "caldav_calendars": cli_checks.check_caldav_calendars(raw),
     }
 
 
@@ -129,6 +130,13 @@ def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[s
     else:
         print_fn("   [SKIP] [site].static_site_dir not configured -- not checked")
     print_fn("   Swap each course's booking link to /book/<shortname> if you haven't.")
+
+    print_fn("\n9. CalDAV calendars (booking_calendar/conflict_calendars, checked live):")
+    caldav_checks = report["caldav_calendars"]
+    if caldav_checks:
+        show(caldav_checks)
+    else:
+        print_fn("   [SKIP] caldav_url/username/password not fully configured yet -- not checked")
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 
@@ -365,5 +373,24 @@ def interactive_setup(
                     print_fn(f"[ok] symlinked {link_path} -> {target}")
                 except OSError as exc:
                     print_fn(f"[fail] could not symlink {link_path}: {exc}")
+
+    # 9. CalDAV calendars -- live PROPFIND, informational only. There's no
+    # safe auto-fix for a naming mismatch (this tool has no way to know
+    # which real calendar on your CalDAV server you *meant*), so unlike
+    # the other steps this one never prompts/acts -- it just surfaces
+    # exactly what check_caldav_calendars() found, the same as
+    # print_report()'s step 9, so `status`/`setup`/`setup -i` never drift
+    # out of sync with each other about this.
+    print_fn("\n-- 9. CalDAV calendars (booking_calendar/conflict_calendars, checked live) --")
+    caldav_checks = cli_checks.check_caldav_calendars(raw)
+    if not caldav_checks:
+        print_fn("[skip] caldav_url/username/password not fully configured yet -- not checked")
+    else:
+        for label, level, detail in caldav_checks:
+            print_fn(f"[{level}] {label}: {detail}")
+        if any(level != "ok" for _, level, _ in caldav_checks):
+            print_fn(f"Fix by editing {settings_path}'s [calendar].booking_calendar / ")
+            print_fn("conflict_calendars to match a real calendar name on your CalDAV server")
+            print_fn("(every /book/<shortname> page 500s until this matches).")
 
     print_fn("\nDone. Re-run `my-bt status` any time to re-check everything.")
