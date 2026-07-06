@@ -845,8 +845,12 @@ if one guest (or the leader) cancels later, it only frees their own spot;
 everyone else in the party is untouched. `/admin`'s overview table has a
 Party column showing "+N guest(s)" on the leader's row and
 "guest of `<leader>`" on each guest's row, so it's always clear who booked
-together and who was a guest. The calendar invite intentionally does NOT
-show this (or anyone's name) -- it never has, for any registrant.
+together and who was a guest. The calendar invite (2026-07-06) shows the
+same thing: a "Participants:" table (status, name, email, self/guest,
+registered-at, cancel link) for active/waitlisted registrants, and a
+separate "Canceled:" table (same columns, canceled-at + who canceled
+instead) for anyone who dropped out -- see `app/calendar_sync.py`'s
+`sync_occurrence()` docstring for the exact line format.
 
 Two more `[[course]]` fields control the page header:
 `subtitle` (optional plain text -- omit it to auto-show

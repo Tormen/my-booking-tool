@@ -19,8 +19,29 @@ from .caldav_client import CalDAVClient
 from .config import Course, Settings
 from .ics import VEvent
 from .storage import (
-    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED, Store,
+    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED,
+    Registration, Store, User,
 )
+
+
+def _self_or_guest(r: Registration, users_by_id: dict[str, User]) -> str:
+    """"self" for whoever filled out the booking form, "guest of <name>" for
+    everyone they brought along -- same invited_by_user_id convention as
+    admin_overview's Party column (see Registration's own docstring)."""
+    if r.invited_by_user_id:
+        leader = users_by_id.get(r.invited_by_user_id)
+        return f"guest of {leader.name if leader else '(unknown)'}"
+    return "self"
+
+
+def _name_email(r: Registration, users_by_id: dict[str, User]) -> tuple[str, str]:
+    user = users_by_id.get(r.user_id)
+    if user is None:
+        # Shouldn't normally happen (every registration_id points at a real
+        # or archived user row), but a calendar invite is exactly the wrong
+        # place to raise over it -- show a placeholder instead.
+        return "(unknown)", "(unknown)"
+    return user.name, user.email
 
 
 def _uid_parts(settings: Settings) -> tuple[str, str]:
@@ -55,11 +76,14 @@ def sync_occurrence(
 
     The invite lists THREE groups: active (confirmed), waiting
     (waitlisted), and canceled (STATUS_CANCELED_BY_GUEST or
-    STATUS_CANCELED_BY_HOST) -- each line shows the same identifying info
-    (registration status/position + a cancel link) plus the timestamp of
-    that registrant's LAST action: registered_at for an active/waiting row
-    (their last action was registering -- they haven't canceled), or
-    canceled_at (plus who canceled it, canceled_by) for a canceled row.
+    STATUS_CANCELED_BY_HOST). Each line is a table row: status/position,
+    Name, Email, Self/Guest (whether they booked themselves or came along
+    as someone else's guest -- see _self_or_guest), the timestamp of that
+    registrant's LAST action (registered_at for active/waiting, canceled_at
+    + canceled_by for canceled), and a cancel link (2026-07-06: added the
+    Name/Email/Self-Guest columns so the operator can see WHO is on his calendar
+    without cross-referencing the CSV -- previously the invite only showed
+    counts and cancel links, no identities at all).
     Canceled registrants are never dropped from the invite -- they stay
     visible, separately labeled, so the host can see who left and when
     without needing to cross-reference the CSV. Only when there are ZERO
@@ -100,22 +124,36 @@ def sync_occurrence(
     start = datetime(occurrence_date.year, occurrence_date.month, occurrence_date.day, h, m, tzinfo=tz)
     end = start + timedelta(minutes=course.duration_minutes)
 
+    # One lookup covering everyone on this occurrence, live or archived (an
+    # erased registrant can still be a CANCELED row here) -- read_users(
+    # scope="all") so a since-erased participant still resolves to their
+    # (now "[erased]"/hashed) row instead of "(unknown)".
+    users_by_id = {u["user_id"]: User(**u) for u in store.read_users(scope="all")}
+
     lines = [f"{course.title} -- {len(active)}/{course.capacity} registered"]
     if waiting:
         lines.append(f"{len(waiting)} on waitlist")
     if canceled:
         lines.append(f"{len(canceled)} canceled")
-    lines.append("")
-    for r in active:
-        lines.append(
-            f"- {r.status} | registered {r.registered_at} | "
-            f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
-        )
-    for r in waiting:
-        lines.append(
-            f"- waitlisted #{waiting.index(r) + 1} | registered {r.registered_at} | "
-            f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
-        )
+
+    if active or waiting:
+        lines.append("")
+        lines.append("Participants:")
+        lines.append("Status | Name | Email | Self/Guest | Registered | Cancel")
+        for r in active:
+            name, email = _name_email(r, users_by_id)
+            lines.append(
+                f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
+                f"registered {r.registered_at} | "
+                f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
+            )
+        for r in waiting:
+            name, email = _name_email(r, users_by_id)
+            lines.append(
+                f"- waitlisted #{waiting.index(r) + 1} | {name} | {email} | "
+                f"{_self_or_guest(r, users_by_id)} | registered {r.registered_at} | "
+                f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
+            )
     if canceled:
         # Separate group, listed last -- kept OUT of the active/waiting
         # counts/lines above (this is display-only context on who left and
@@ -125,9 +163,12 @@ def sync_occurrence(
         # context, same vocabulary as Store.cancel()'s own parameter.
         lines.append("")
         lines.append("Canceled:")
+        lines.append("Status | Name | Email | Self/Guest | Canceled | Cancel")
         for r in canceled:
+            name, email = _name_email(r, users_by_id)
             lines.append(
-                f"- {r.status} | canceled {r.canceled_at} by {r.canceled_by} | "
+                f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
+                f"canceled {r.canceled_at} by {r.canceled_by} | "
                 f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
             )
     summary = f"{course.title} ({len(active)}/{course.capacity}"

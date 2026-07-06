@@ -1,7 +1,7 @@
 """Direct tests of calendar_sync.sync_occurrence's invite body -- the
-active/waiting/canceled participant groups, their timestamps, and the
-zero-active removal condition. See calendar_sync.py's own docstring for
-what's being tested here."""
+active/waiting/canceled participant tables (status, name, email,
+self/guest, timestamp), and the zero-active removal condition. See
+calendar_sync.py's own docstring for what's being tested here."""
 import tempfile
 import unittest
 from datetime import date
@@ -80,9 +80,9 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
             self.store.cancel(reg.registration_id, canceled_by=canceled_by)
         return reg.registration_id
 
-    # -- active/waiting: unchanged line format, registered_at shown --------
+    # -- active/waiting: table with name/email/self-guest/registered_at ----
 
-    def test_active_and_waiting_lines_show_registered_at_unchanged(self):
+    def test_active_and_waiting_lines_show_name_email_self_and_registered_at(self):
         self.store.upsert_user_for_booking("alice@example.org", "Alice")
         reg = self.store.add_registration(
             "yoga-class-1", self.occ_date.isoformat(),
@@ -100,8 +100,27 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
 
         reloaded = self.store.find_by_id(reg.registration_id)
         reloaded_wl = self.store.find_by_id(wl.registration_id)
-        self.assertIn(f"- confirmed | registered {reloaded.registered_at} |", unfolded)
-        self.assertIn(f"- waitlisted #1 | registered {reloaded_wl.registered_at} |", unfolded)
+        self.assertIn("Participants:", unfolded)
+        self.assertIn(
+            f"- confirmed | Alice | alice@example.org | self | registered {reloaded.registered_at} |",
+            unfolded,
+        )
+        self.assertIn(
+            f"- waitlisted #1 | Bob | bob@example.org | self | registered {reloaded_wl.registered_at} |",
+            unfolded,
+        )
+
+    def test_guest_row_shows_guest_of_leader_instead_of_self(self):
+        leader = self.store.upsert_user_for_booking("leader@example.org", "Leader")
+        guest = self.store.upsert_user_for_booking("guest@example.org", "Guest Person")
+        self.store.add_party_registrations_checking_capacity(
+            "yoga-class-1", self.occ_date.isoformat(),
+            [(leader.user_id, "tok-hash-1"), (guest.user_id, "tok-hash-2")], capacity=2,
+        )
+        transport = self._sync()
+        unfolded = [b for m, _u, b, _h in transport.calls if m == "PUT"][0].replace("\r\n ", "")
+        self.assertIn("| Leader | leader@example.org | self |", unfolded)
+        self.assertIn("| Guest Person | guest@example.org | guest of Leader |", unfolded)
 
     # -- new: canceled group ------------------------------------------------
 
@@ -120,14 +139,15 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         canceled_reg = self.store.find_by_id(canceled_id)
         self.assertTrue(canceled_reg.canceled_at)  # sanity: a timestamp was actually recorded
         self.assertIn("Canceled:", unfolded)
+        self.assertIn("| Left | left@example.org | self |", unfolded)
         self.assertIn(f"canceled {canceled_reg.canceled_at} by guest", unfolded)
-        # Not double-counted as active: exactly one "- confirmed | registered"
-        # line before the Canceled: section (the "stays" guest) -- the
-        # canceled guest's line lives only in the Canceled: section, tagged
+        # Not double-counted as active: exactly one "- confirmed |" line
+        # before the Canceled: section (the "stays" guest) -- the canceled
+        # guest's line lives only in the Canceled: section, tagged
         # "canceled_by_guest", never as a second "confirmed" line.
         active_section = unfolded.split("Canceled:")[0]
         self.assertIn("Yoga -- 1/2 registered", active_section)
-        self.assertEqual(active_section.count("- confirmed | registered"), 1)
+        self.assertEqual(active_section.count("- confirmed |"), 1)
         self.assertNotIn("canceled_by_guest", active_section)
 
     def test_canceled_by_host_shown_distinctly_from_canceled_by_guest(self):
@@ -136,8 +156,8 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         self._add("host-left@example.org", STATUS_CONFIRMED, cancel=True, canceled_by="host")
         transport = self._sync()
         unfolded = [b for m, _u, b, _h in transport.calls if m == "PUT"][0].replace("\r\n ", "")
-        self.assertIn("canceled_by_guest | canceled", unfolded)
-        self.assertIn("canceled_by_host | canceled", unfolded)
+        self.assertIn("- canceled_by_guest |", unfolded)
+        self.assertIn("- canceled_by_host |", unfolded)
         self.assertIn("by guest", unfolded)
         self.assertIn("by host", unfolded)
         self.assertIn("2 canceled", unfolded)
