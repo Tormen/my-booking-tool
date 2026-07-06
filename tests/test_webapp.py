@@ -425,12 +425,16 @@ class BookingFlowTest(unittest.TestCase):
         )
         self.occ_date = occs[0].date.isoformat()
 
-        patcher = patch(
-            "app.webapp.send_mail",
-            side_effect=lambda settings, to, subject, body: self.sent_emails.append((to, subject, body)),
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        recorder = lambda settings, to, subject, body: self.sent_emails.append((to, subject, body))
+        # Cancellation emails are composed in app.cancellation (factored
+        # out of App on 2026-07-06 so `my-bt cancel` can reuse them) and
+        # call their own imported send_mail reference there -- patching
+        # app.webapp.send_mail alone wouldn't touch that call site, same as
+        # app.watchdog.send_mail needs its own patch in test_watchdog.py.
+        for target in ("app.webapp.send_mail", "app.cancellation.send_mail"):
+            patcher = patch(target, side_effect=recorder)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
         # login_limiter/reset_ip_limiter (app/webapp.py) are module-level
         # singletons shared across every test in the process. Tests here

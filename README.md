@@ -256,6 +256,8 @@ my-bt list --archive                    # only the archived (erased) CSV
 my-bt list --year 2026 --course example-monday-class
 my-bt list --status waitlisted --email guest@example.com
 my-bt list --format json   # or --format csv
+my-bt list --upcoming                   # today + future only (same cutoff as /admin's default view)
+my-bt list --past                       # strictly before today only (--upcoming/--past are mutually exclusive)
 
 my-bt users [--email ...] [--live|--archive]
 my-bt show <registration_id>
@@ -270,6 +272,10 @@ my-bt erase --email guest@example.com --yes    # scripted/non-interactive
 my-bt history --email guest@example.com        # read-only: live + pre-erasure history
 my-bt merge --email guest@example.com          # asks for confirmation
 my-bt merge --email guest@example.com --yes    # scripted/non-interactive
+
+my-bt cancel --registration-id <id>                          # asks for confirmation
+my-bt cancel --registration-id <id> --yes                    # scripted/non-interactive
+my-bt cancel --registration-id <id> -m "course canceled"     # optional message in the cancellation emails
 
 my-bt purge-retention [--dry-run]       # same purge the nightly timer runs
 my-bt test [--repo-root /path/to/checkout]      # runs the unit test suite
@@ -309,6 +315,16 @@ unchanged) and removes them from the archive. It never touches the
 archived user row itself -- that old identity's name stays `[erased]` and
 email stays the hash, forever; only the registrations (which never held
 name/email, just a user_id) move.
+
+`my-bt cancel --registration-id ...` is the CLI equivalent of the web
+admin's cancel button (`/admin` -> Cancel): same status transition (->
+`canceled_by_host`), same optional message, and it sends the exact same
+cancellation emails to both the guest and `admin_email` -- there's no
+separate email logic to drift out of sync. Unlike the web admin path it
+does NOT promote the next waitlisted person or re-sync the calendar (no
+CalDAV dependency here by design, same reasoning as `my-bt erase`) -- use
+the web admin, or restart `my-booking.service` (which re-syncs lazily), if
+the calendar needs to reflect this immediately.
 
 ### `my-bt status`
 

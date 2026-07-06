@@ -31,7 +31,6 @@ silent surprise later.
 """
 from __future__ import annotations
 
-import html
 import json
 import logging
 import re
@@ -43,6 +42,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
+from .cancellation import booking_details_text, html_to_text, send_cancellation_emails
 from .config import Settings
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
@@ -344,29 +344,11 @@ def _sortable_filterable_table_script(table_id: str) -> str:
 </script>"""
 
 
-_HTML_LI_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.IGNORECASE | re.DOTALL)
-_HTML_A_RE = re.compile(r'<a\b[^>]*?href="([^"]*)"[^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
-_HTML_BLOCK_RE = re.compile(r"</?(p|div|ul|ol|br)\b[^>]*>", re.IGNORECASE)
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _html_to_text(markup: str) -> str:
-    """Best-effort HTML -> plain text for course.description (operator-
-    authored rich text -- see app/config.py's docstring on that field) when
-    it needs to go into a plain-text email: app/emailer.py's send_mail only
-    ever calls msg.set_content(body), there's no HTML alternative part. This
-    is NOT a general HTML sanitizer/renderer -- it only handles the tags a
-    course description realistically uses (p/div/ul/ol/li/br/b/i/u/a), which
-    is all settings.toml.example and every real course description in
-    the maintainer's local notes's deployment actually contain.
-    """
-    text = _HTML_A_RE.sub(lambda m: f"{_HTML_TAG_RE.sub('', m.group(2))} ({m.group(1)})", markup)
-    text = _HTML_LI_RE.sub(lambda m: f"- {_HTML_TAG_RE.sub('', m.group(1)).strip()}\n", text)
-    text = _HTML_BLOCK_RE.sub("\n", text)
-    text = _HTML_TAG_RE.sub("", text)
-    text = html.unescape(text)
-    lines = [ln.strip() for ln in text.splitlines()]
-    return "\n".join(ln for ln in lines if ln)
+# Moved to app/cancellation.py (2026-07-06) so `my-bt cancel` (scripts/my-bt)
+# can reuse it without importing the whole App/WSGI machinery -- re-exported
+# under its old name here so nothing that imports webapp._html_to_text
+# (existing tests included) needs to change.
+_html_to_text = html_to_text
 
 
 class App:
@@ -595,57 +577,23 @@ class App:
         return self._book_page(course, occurrences)
 
     def _booking_details_text(self, course, occ_date: str) -> str:
-        """Shared What/When/Where(+description) block (the operator's requested
-        layout, 2026-07-05) for every guest email that tells them about one
-        specific confirmed/waitlisted spot -- used by both
-        _send_booking_result_email() below and _cancel_and_promote()'s
-        promoted-from-waitlist email, so the two can never drift apart the
-        way they did before this was pulled out (the promotion email was
-        still on the old one-line format after this one got the new
-        layout). Description is repeated in full via _html_to_text(), since
-        send_mail is plain-text only -- so a guest never has to go back to
-        the booking page to see what they signed up for."""
-        details = (
-            f"\U0001F4CC What: {course.title}\n"
-            f"\U0001F550 When: {occ_date} {course.time_range_label()}\n"
-            f"\U0001F4CD Where: {course.location}\n"
-        )
-        description_text = _html_to_text(course.description) if course.description else ""
-        return details + (f"\n{description_text}\n" if description_text else "")
+        """Thin wrapper around app.cancellation.booking_details_text (moved
+        there 2026-07-06 so `my-bt cancel`, which has no App instance, can
+        call the exact same logic) -- kept as an App method since every
+        existing call site here already has `self`. See that function's
+        docstring for what/why."""
+        return booking_details_text(course, occ_date)
 
     def _send_cancellation_emails(
         self, course, occ_date: str, user, canceled_by: str, message: str
     ) -> None:
-        """Every cancellation -- whichever of the three paths triggers it
-        (the guest's one-click link from their booking email, the guest's
-        own /my dialog, or the host's /admin dialog) -- emails BOTH the
-        participant and the admin, always, using the same What/When/Where
-        layout as every other booking email (_booking_details_text()).
-        This is now the standing default for any email about one specific
-        booking (see SOLUTION-DESIGN.md's comment log, 2026-07-05).
-
-        Notifying both sides regardless of who acted isn't just politeness:
-        it's the only way either side would notice a cancellation made on
-        their behalf without their knowledge -- e.g. someone getting into a
-        guest's /my account, or into /admin, and canceling something that
-        isn't theirs to cancel. `canceled_by` is "guest" or "host", same
-        vocabulary as Store.cancel()'s own parameter.
-        """
-        details = self._booking_details_text(course, occ_date)
-        subject = f"Canceled: {course.title} on {occ_date}"
-        reason_block = f"\nMessage: {message}\n" if message else ""
-        if user:
-            participant_who = "You" if canceled_by == "guest" else "The host"
-            send_mail(
-                self.settings, user.email, subject,
-                f"{participant_who} canceled this booking:\n\n{details}\n{reason_block}"
-                f"Manage your bookings any time: {self.settings.base_url}/my\n",
-            )
-        admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
-        send_mail(
-            self.settings, self.settings.admin_email, subject,
-            f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}",
-        )
+        """Thin wrapper around app.cancellation.send_cancellation_emails
+        (moved there 2026-07-06 so `my-bt cancel` triggers IDENTICAL emails
+        to the web admin's /admin/cancel, instead of reimplementing this)
+        -- kept as an App method since every existing call site here
+        already has `self.settings`. See that function's docstring for the
+        full rationale (notify-both-sides, etc.)."""
+        send_cancellation_emails(self.settings, course, occ_date, user, canceled_by, message)
 
     def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
         """The guest-facing booked/waitlisted email + admin notification --

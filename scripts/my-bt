@@ -25,7 +25,9 @@ HOME = os.environ.get("MY_BOOKING_HOME", "/opt/my-booking")
 sys.path.insert(0, HOME)
 
 try:
+    from app import cli_cancel as app_cli_cancel
     from app import cli_history as app_cli_history
+    from app import cli_list as app_cli_list
     from app import config as app_config
     from app import erasure as app_erasure
     from app import retention as app_retention
@@ -121,6 +123,7 @@ def cmd_list(args) -> None:
         rows = [r for r in rows if r["user_id"] == args.user_id]
     if args.from_ or args.to:
         rows = [r for r in rows if _in_range(r["occurrence_date"], args.from_, args.to)]
+    rows = app_cli_list.filter_by_date(rows, upcoming=args.upcoming, past=args.past)
     if args.email:
         users = {u["user_id"]: u for u in store.read_users(scope="all")}
         needle = args.email.strip().lower()
@@ -290,6 +293,60 @@ def cmd_merge(args) -> None:
     print(f"merged {result.moved_count} registration(s) into {live_user.user_id}:")
     for r in sorted(result.moved_registrations, key=lambda r: (r["occurrence_date"], r["course_shortname"])):
         print(f"  {r['occurrence_date']}  {r['course_shortname']}  ({r['status']})")
+
+
+def cmd_cancel(args) -> None:
+    """`my-bt cancel --registration-id ... [--message/-m ...]` -- CLI
+    equivalent of the web admin's /admin/cancel/<reg_id> (host-initiated
+    cancel): same identification (registration_id, the natural unique key
+    -- mirrors how admin_cancel() in app/webapp.py finds the registration
+    it's canceling), same status transition (-> canceled_by_host), same
+    optional message stored in host_message, and the SAME cancellation
+    emails to both the participant and admin_email -- see
+    app.cli_cancel.cancel_registration, which calls the exact
+    app.cancellation.send_cancellation_emails function admin_cancel()
+    itself calls, so this can never send something different from what the
+    web admin path sends.
+
+    Does NOT promote the next waitlisted person or re-sync the calendar
+    (no CalDAV dependency here by design, same reasoning as `my-bt erase`)
+    -- use the web admin's /admin/cancel, or restart the service (which
+    re-syncs lazily), if the calendar needs to reflect this immediately."""
+    settings = app_config.load_settings(args.settings)
+    store = _store(args)
+
+    reg = store.find_by_id(args.registration_id)
+    if reg is None:
+        print(f"no registration with id {args.registration_id}")
+        return
+    if reg.status not in ("confirmed", "waitlisted"):
+        print(f"registration {args.registration_id} is not cancelable (status is already {reg.status!r})")
+        return
+
+    if not args.yes:
+        user = store.find_user_by_id(reg.user_id)
+        who = f"{user.name} <{user.email}>" if user else "(unknown guest)"
+        confirm = input(
+            f"Cancel {who}'s {reg.course_shortname} booking on {reg.occurrence_date} "
+            f"(registration {args.registration_id})? Type 'yes' to confirm: "
+        )
+        if confirm.strip().lower() != "yes":
+            print("aborted")
+            return
+
+    result = app_cli_cancel.cancel_registration(store, settings, args.registration_id, message=args.message or "")
+    if not result.ok:
+        print(f"could not cancel {args.registration_id}: {result.reason}")
+        return
+
+    who = f"{result.user_name} <{result.user_email}>" if result.user_email else "(unknown guest)"
+    print(f"canceled registration {result.registration_id}:")
+    print(f"  guest:  {who}")
+    print(f"  course: {result.course_shortname} on {result.occurrence_date}")
+    print(f"  status: {result.status_before} -> canceled_by_host")
+    if result.message:
+        print(f"  message: {result.message}")
+    print(f"  notified: {'yes (both participant and admin emailed)' if result.emailed else 'no (course no longer configured in settings.toml)'}")
 
 
 def cmd_purge_retention(args) -> None:
@@ -505,6 +562,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--year", type=int, help="shorthand for --from YYYY-01-01 --to YYYY-12-31")
     sp.add_argument("--from", dest="from_", help="occurrence_date >= YYYY-MM-DD")
     sp.add_argument("--to", help="occurrence_date <= YYYY-MM-DD")
+    date_filter = sp.add_mutually_exclusive_group()
+    date_filter.add_argument(
+        "--upcoming", action="store_true",
+        help="only today-or-future occurrence_date (same cutoff as /admin's default view)",
+    )
+    date_filter.add_argument(
+        "--past", action="store_true",
+        help="only occurrence_date strictly before today",
+    )
     sp.set_defaults(func=cmd_list)
 
     sp = sub.add_parser("users", help="list guest accounts (live + archived by default)")
@@ -547,6 +613,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--email", required=True)
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_merge)
+
+    sp = sub.add_parser(
+        "cancel",
+        help="cancel one live registration (host-initiated, same as the web admin's cancel)",
+    )
+    sp.add_argument("--registration-id", required=True)
+    sp.add_argument("-m", "--message", help="optional message included in the cancellation emails")
+    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    sp.set_defaults(func=cmd_cancel)
 
     sp = sub.add_parser("purge-retention", help="run the retention purge job now")
     sp.add_argument("--dry-run", action="store_true")
