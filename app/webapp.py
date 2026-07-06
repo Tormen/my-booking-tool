@@ -1307,27 +1307,48 @@ class App:
             form = self._read_form(environ)
             email, password = form.get("email", "").strip(), form.get("password", "").strip()
             now = time.time()
-            key = f"guest:{email.lower()}"
-            if not login_limiter.allow(key, now=now):
-                error = "Too many attempts -- try again later."
-                lockout_seconds = login_limiter.retry_after(key, now=now)
-                # WARNING (not DEBUG): a real signal the watchdog counts
-                # (see app/watchdog.py) -- masked, never the raw email.
-                log.warning("rate limit blocked: guest login for %s", _masked(email))
+            if email.lower() == "admin":
+                # 2026-07-06: "/my should accept email: admin and the admin
+                # password in order to login to /admin space" -- reuses the
+                # exact same rate-limiter KEY as admin_login() (per client
+                # IP, not per-email/per-string) so this can't be used to
+                # dodge that lockout by switching entry points, and so
+                # hammering "admin" here can't lock the real admin out of
+                # /admin/login either -- one shared bucket either way in.
+                key = f"admin:{_client_ip(environ)}"
+                if not login_limiter.allow(key, now=now):
+                    error = "Too many attempts -- try again later."
+                    lockout_seconds = login_limiter.retry_after(key, now=now)
+                    log.warning("rate limit blocked: admin login from %s (via /my)", _client_ip(environ))
+                elif verify_admin_password(password, self.settings.admin_password_hash):
+                    sid = _new_session({"kind": "admin"})
+                    return "302 Found", [("Location", "/admin"), ("Set-Cookie", _session_cookie_header(sid))], ""
+                else:
+                    # Same generic wording as a guest mismatch below --
+                    # never confirms that "admin" is treated specially.
+                    error = "Email/password didn't match."
             else:
-                user = self.store.find_user_by_email(email)
-                # user.password_hash is empty for a not-yet-confirmed
-                # account -- bail out before verify_secret rather than
-                # feeding it an empty hash/salt.
-                if user and user.password_hash and verify_secret(password, user.password_hash, user.password_salt):
-                    sid = _new_session({"kind": "guest", "user_id": user.user_id})
-                    self.store.touch_login(user.user_id)
-                    return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header(sid))], ""
-                error = "Email/password didn't match."
+                key = f"guest:{email.lower()}"
+                if not login_limiter.allow(key, now=now):
+                    error = "Too many attempts -- try again later."
+                    lockout_seconds = login_limiter.retry_after(key, now=now)
+                    # WARNING (not DEBUG): a real signal the watchdog counts
+                    # (see app/watchdog.py) -- masked, never the raw email.
+                    log.warning("rate limit blocked: guest login for %s", _masked(email))
+                else:
+                    user = self.store.find_user_by_email(email)
+                    # user.password_hash is empty for a not-yet-confirmed
+                    # account -- bail out before verify_secret rather than
+                    # feeding it an empty hash/salt.
+                    if user and user.password_hash and verify_secret(password, user.password_hash, user.password_salt):
+                        sid = _new_session({"kind": "guest", "user_id": user.user_id})
+                        self.store.touch_login(user.user_id)
+                        return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header(sid))], ""
+                    error = "Email/password didn't match."
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
         login_label = "View my bookings"
         body = f"""{err_html}<form method="post" class="card">
-          <label>Email <input class="big-input" name="email" type="email" required></label>
+          <label>Email <input class="big-input" name="email" type="text" required></label>
           <label>Password <input class="big-input" name="password" type="password" required></label>
           <div class="submit-row"><button type="submit" id="my-login-btn">{esc(login_label)}</button></div>
         </form>

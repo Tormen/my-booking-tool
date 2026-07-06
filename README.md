@@ -998,6 +998,19 @@ whether the submitted email exists, to avoid leaking which addresses have
 an account; it's rate-limited the same way as login (see "Logs &
 debugging" for the shared `RateLimiter`).
 
+**Admin shortcut (2026-07-06):** entering `admin` as the email on `/my`,
+with the admin password, logs into `/admin` instead -- so the admin
+doesn't need to remember a separate URL. This reuses `/admin/login`'s own
+rate-limit bucket (keyed by client IP, not by email), not the per-email
+guest one, so it can't be used to sidestep -- or worsen -- either
+lockout: hammering "admin" via `/my` from one IP trips the exact same
+lockout `/admin/login` itself would from that IP, and vice versa. A wrong
+password for "admin" shows the same generic "Email/password didn't
+match." a real guest mismatch gets, never "Wrong password" -- nothing
+about the response reveals that "admin" is treated specially.
+`/admin/login` itself is unchanged and still works exactly as before;
+this is purely an additional way in through `/my`.
+
 Once logged in, `/my` (2026-07-06) shows bookings in two separate tables:
 **Upcoming** (all of them, soonest first) and **Past** (capped at the 3
 most recent, so someone who's been coming for years doesn't get a

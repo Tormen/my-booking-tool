@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from app import webapp
 from app.caldav_client import CalDAVClient, Response
 from app.erasure import erase_user_by_email
-from app.security import hash_secret
+from app.security import hash_admin_password, hash_secret
 from app.slots import Occurrence, build_occurrences
 from app.storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store,
@@ -1322,6 +1322,102 @@ class AdminLoginRateLimitTest(unittest.TestCase):
         self.assertIn('id="admin-login-btn"', body)
         self.assertIn("btn.disabled = true;", body)
         self.assertIn("Log in", body)
+
+
+class MyLoginAsAdminTest(unittest.TestCase):
+    """2026-07-06: "/my should accept email: admin and the admin password
+    in order to login to the /admin space." -- /my's login form gains this
+    as an extra accepted credential pair, reusing admin_login()'s own
+    rate-limiter bucket (per client IP) rather than the guest one, so this
+    can't be used to dodge -- or worsen -- either lockout."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.admin_password = "correct horse battery staple"
+        self.settings = make_settings(admin_password_hash=hash_admin_password(self.admin_password))
+        self.app = App(self.settings, self.store)
+        self._keys = [f"admin:203.0.113.{i}" for i in range(20, 30)] + ["admin:unknown"]
+        for k in self._keys:
+            webapp.login_limiter.reset(k)
+        self.addCleanup(lambda: [webapp.login_limiter.reset(k) for k in self._keys])
+
+    def _post(self, email: str, password: str, *, forwarded_for: str | None = None):
+        form = {"email": email, "password": password}
+        body = urlencode(form).encode()
+        environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+        if forwarded_for is not None:
+            environ["HTTP_X_FORWARDED_FOR"] = forwarded_for
+        return self.app.my("POST", environ)
+
+    def test_admin_email_with_correct_admin_password_logs_into_admin(self):
+        status, headers, _body = self._post("admin", self.admin_password, forwarded_for="203.0.113.20")
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin")
+        self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
+        sid = next(h[1] for h in headers if h[0] == "Set-Cookie").split("session=")[1].split(";")[0]
+        self.assertEqual(webapp.SESSIONS[sid]["kind"], "admin")
+
+    def test_admin_email_case_insensitive(self):
+        status, _headers, _body = self._post("Admin", self.admin_password, forwarded_for="203.0.113.21")
+        self.assertEqual(status, "302 Found")
+
+    def test_admin_email_with_wrong_password_shows_generic_mismatch_error(self):
+        _status, _headers, body = self._post("admin", "wrong password", forwarded_for="203.0.113.22")
+        self.assertIn("Email/password didn&#x27;t match.", body)
+        # Never confirm "admin" is special -- same wording a real guest
+        # mismatch gets, not admin_login()'s own "Wrong password."
+        self.assertNotIn("Wrong password", body)
+
+    def test_no_admin_session_created_on_wrong_password(self):
+        # webapp.SESSIONS is a shared module-level dict that other tests in
+        # this same process may have already populated -- only check for a
+        # NEW session created by this specific call, not global state.
+        before = set(webapp.SESSIONS.keys())
+        self._post("admin", "wrong password", forwarded_for="203.0.113.23")
+        self.assertEqual(set(webapp.SESSIONS.keys()), before)
+
+    def test_shares_admin_logins_rate_limit_bucket_not_the_guest_one(self):
+        # Same IP hammering "admin" via /my must trip the exact same
+        # per-IP bucket admin_login() itself uses -- proven by exhausting
+        # it here and then confirming admin_login() is ALSO locked out.
+        ip = "203.0.113.24"
+        for _ in range(5):
+            self._post("admin", "wrong password", forwarded_for=ip)
+        _status, _headers, body = self._post("admin", "wrong password", forwarded_for=ip)
+        self.assertIn("Too many attempts", body)
+
+        admin_login_body = f"password=wrong".encode()
+        environ = {
+            "CONTENT_LENGTH": str(len(admin_login_body)), "wsgi.input": io.BytesIO(admin_login_body),
+            "HTTP_X_FORWARDED_FOR": ip,
+        }
+        _status, _headers, admin_body = self.app.admin_login("POST", environ)
+        self.assertIn("Too many attempts", admin_body)
+
+    def test_lockout_here_does_not_affect_a_different_ip(self):
+        attacker_ip, admin_ip = "203.0.113.25", "203.0.113.26"
+        for _ in range(5):
+            self._post("admin", "wrong password", forwarded_for=attacker_ip)
+        self._post("admin", "wrong password", forwarded_for=attacker_ip)  # now locked
+        # The real admin, from a different IP, is unaffected.
+        status, _headers, _body = self._post("admin", self.admin_password, forwarded_for=admin_ip)
+        self.assertEqual(status, "302 Found")
+
+    def test_guest_login_still_works_unaffected(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter2222")
+        self.store.set_password(user.user_id, h, s)
+        status, headers, _body = self._post("regular@example.org", "hunter2222", forwarded_for="203.0.113.27")
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my")
+
+    def test_email_field_is_plain_text_input_not_type_email(self):
+        # type="email" would block the browser from ever submitting the
+        # literal string "admin" (no "@") client-side.
+        _status, _headers, body = self.app.my("GET", {})
+        self.assertIn('name="email" type="text"', body)
 
 
 if __name__ == "__main__":
