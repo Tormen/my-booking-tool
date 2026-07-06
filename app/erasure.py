@@ -16,7 +16,7 @@ import logging
 from datetime import date, datetime, timezone
 
 from .config import Settings
-from .security import hash_email_for_erasure
+from .security import hash_email_for_erasure, is_erased_email
 from .storage import STATUS_CONFIRMED, STATUS_WAITLISTED, Store
 
 log = logging.getLogger("my_booking.erasure")
@@ -52,3 +52,24 @@ def erase_user_by_email(
         # never the email itself.
         log.warning("erased user %s (email hashed, moved to archive)", user.user_id)
     return ok
+
+
+def find_archived_user_ids_for_email(store: Store, settings: Settings, email: str) -> list[str]:
+    """Hashes `email` the same way erase_user_by_email did at erasure time
+    (security.hash_email_for_erasure, keyed with settings.erasure_pepper),
+    then returns every archived user_id whose stored (hashed) email matches
+    -- i.e. every past identity this same guest was erased under. Normally
+    at most one, but a guest could in principle be erased more than once
+    under the same email over time (book again, get erased again, ...), so
+    this always returns a list rather than assuming a single match.
+
+    This is the exact lookup app/webapp.py's admin_overview() does inline
+    for its display-only "N (incl. M pre-erasure)" merge -- factored out
+    here so `my-bt history`/`my-bt merge` (app/cli_history.py) compute the
+    same thing the same way, rather than re-deriving the hash logic a
+    second time somewhere else."""
+    hashed = hash_email_for_erasure(email, settings.erasure_pepper)
+    return [
+        u["user_id"] for u in store.read_users(scope="archived")
+        if is_erased_email(u["email"]) and u["email"] == hashed
+    ]

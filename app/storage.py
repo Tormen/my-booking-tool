@@ -495,6 +495,46 @@ class Store:
                 write(rows)
         return True
 
+    def merge_archived_registrations(self, archived_user_ids: list[str], into_user_id: str) -> int:
+        """Explicit, admin-invoked history merge -- NOT part of erase_user's
+        own archival, and NOT any kind of un-erasure. Moves every
+        registration row currently archived under one of `archived_user_ids`
+        into the LIVE registrations CSV, rewriting its `user_id` to
+        `into_user_id` (the live account the admin is re-attaching this
+        history to). `registration_id` is preserved unchanged, same as
+        erase_user() preserves it across the live/archived boundary.
+
+        What this does NOT touch:
+          - The archived user row(s) themselves (data/archived/users.csv):
+            name stays "[erased]", email stays the hashed value, forever.
+            This function never reads or writes archived_users_path.
+          - Any registration NOT belonging to one of archived_user_ids.
+          - Capacity/waitlist for the occurrences involved -- these rows
+            were already force-canceled (see erase_user_by_email) before
+            being archived, so a moved-back row is never CONFIRMED/
+            WAITLISTED and can never double-book a live slot. Anything that
+            somehow isn't canceled is left that way rather than silently
+            changed here (this method reattaches history, it doesn't
+            re-evaluate booking state).
+
+        Returns the number of registration rows moved (0 if none matched --
+        the caller should treat that as "nothing to merge", not an error)."""
+        with _LockedCsv(self.archived_registrations_path, REG_FIELDS) as (rows, write):
+            keep, moving = [], []
+            for row in rows:
+                (moving if row["user_id"] in archived_user_ids else keep).append(row)
+            if not moving:
+                return 0
+            write(keep)
+
+        for row in moving:
+            row["user_id"] = into_user_id
+
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            rows.extend(moving)
+            write(rows)
+        return len(moving)
+
     # -- reporting: live + archived, for the my-bt CLI -----------------------
 
     def read_users(self, scope: str = "all") -> list[dict]:

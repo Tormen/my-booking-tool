@@ -225,6 +225,92 @@ class ErasureTest(StoreTestBase):
         self.assertEqual(len(self.store.read_registrations(scope="all")), 1)
 
 
+class MergeArchivedRegistrationsTest(StoreTestBase):
+    """Store.merge_archived_registrations -- the explicit, admin-invoked
+    history merge (`my-bt merge`), distinct from erase_user's own archival."""
+
+    def test_moves_registrations_from_archive_to_live(self):
+        old = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        reg = self.store.add_registration("c", "2026-01-01", old.user_id, hash_token(new_token()))
+        self.store.erase_user(old.user_id, "erased:x")
+
+        new = self.store.upsert_user_for_booking("guest@example.com", "Guest")  # re-books, fresh user_id
+        self.assertNotEqual(old.user_id, new.user_id)
+
+        moved = self.store.merge_archived_registrations([old.user_id], new.user_id)
+        self.assertEqual(moved, 1)
+
+        live_regs = self.store.registrations_for_user(new.user_id)
+        self.assertEqual(len(live_regs), 1)
+        self.assertEqual(live_regs[0].registration_id, reg.registration_id)  # id preserved
+        self.assertEqual(self.store.read_registrations(scope="archived"), [])
+
+    def test_user_id_is_rewritten_to_the_live_user(self):
+        old = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.add_registration("c", "2026-01-01", old.user_id, hash_token(new_token()))
+        self.store.erase_user(old.user_id, "erased:x")
+        new = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+
+        self.store.merge_archived_registrations([old.user_id], new.user_id)
+
+        moved_row = self.store.read_registrations(scope="live")[0]
+        self.assertEqual(moved_row["user_id"], new.user_id)
+
+    def test_archived_user_row_is_untouched(self):
+        old = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.add_registration("c", "2026-01-01", old.user_id, hash_token(new_token()))
+        self.store.erase_user(old.user_id, "erased:x")
+        new = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+
+        self.store.merge_archived_registrations([old.user_id], new.user_id)
+
+        archived_users = self.store.read_users(scope="archived")
+        self.assertEqual(len(archived_users), 1)
+        self.assertEqual(archived_users[0]["user_id"], old.user_id)
+        self.assertEqual(archived_users[0]["email"], "erased:x")
+        self.assertEqual(archived_users[0]["name"], "[erased]")
+
+    def test_multiple_archived_user_ids_all_move(self):
+        old1 = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.add_registration("c", "2026-01-01", old1.user_id, hash_token(new_token()))
+        self.store.erase_user(old1.user_id, "erased:x")
+
+        old2 = self.store.upsert_user_for_booking("guest@example.com", "Guest")  # re-booked, erased again
+        self.store.add_registration("c", "2026-02-01", old2.user_id, hash_token(new_token()))
+        self.store.erase_user(old2.user_id, "erased:x")  # same hash both times (same email)
+
+        new = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+
+        moved = self.store.merge_archived_registrations([old1.user_id, old2.user_id], new.user_id)
+        self.assertEqual(moved, 2)
+        live_dates = {r.occurrence_date for r in self.store.registrations_for_user(new.user_id)}
+        self.assertEqual(live_dates, {"2026-01-01", "2026-02-01"})
+        self.assertEqual(self.store.read_registrations(scope="archived"), [])
+
+    def test_no_matching_archived_rows_returns_zero_and_touches_nothing(self):
+        new = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        moved = self.store.merge_archived_registrations(["no-such-user-id"], new.user_id)
+        self.assertEqual(moved, 0)
+        self.assertEqual(self.store.registrations_for_user(new.user_id), [])
+
+    def test_only_matched_user_ids_move_others_stay_archived(self):
+        old1 = self.store.upsert_user_for_booking("one@example.com", "One")
+        self.store.add_registration("c", "2026-01-01", old1.user_id, hash_token(new_token()))
+        self.store.erase_user(old1.user_id, "erased:one")
+
+        old2 = self.store.upsert_user_for_booking("two@example.com", "Two")
+        self.store.add_registration("c", "2026-02-01", old2.user_id, hash_token(new_token()))
+        self.store.erase_user(old2.user_id, "erased:two")
+
+        new = self.store.upsert_user_for_booking("one@example.com", "One")
+        moved = self.store.merge_archived_registrations([old1.user_id], new.user_id)
+        self.assertEqual(moved, 1)
+
+        remaining_archived = self.store.read_registrations(scope="archived")
+        self.assertEqual(len(remaining_archived), 1)
+        self.assertEqual(remaining_archived[0]["user_id"], old2.user_id)
+
+
 class CsvInjectionTest(StoreTestBase):
     def test_dangerous_name_is_escaped_on_disk(self):
         self.store.upsert_user_for_booking("a@b.com", "=cmd|'/c calc'!A1")
