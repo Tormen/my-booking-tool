@@ -57,6 +57,14 @@ th{{user-select:none}}
 .hash-cell{{word-break:break-all;font-family:monospace;font-size:.85em}}
 .course-card{{border:1px solid #ddd;border-radius:8px;padding:1em 1.2em;margin:1em 0}}
 .course-card h2{{margin:0 0 .2em;font-size:1.15em}}
+.tab-radio{{display:none}}
+.tab-panel{{display:none;padding-top:.2em}}
+#my-tab-login:checked ~ #my-panel-login{{display:block}}
+#my-tab-signup:checked ~ #my-panel-signup{{display:block}}
+.tab-labels{{display:flex;border-bottom:1px solid #ddd;margin-top:.6em}}
+.tab-label{{padding:.5em 1.2em;cursor:pointer;color:#555;border-bottom:2px solid transparent;margin-bottom:-1px}}
+#my-tab-login:checked ~ .tab-labels label[for="my-tab-login"],
+#my-tab-signup:checked ~ .tab-labels label[for="my-tab-signup"]{{color:#196B24;border-bottom-color:#196B24;font-weight:bold}}
 </style></head><body>
 {banner}
 <h1>{esc(title)}</h1>

@@ -3,7 +3,8 @@
   GET      /courses                 overview of every configured course, linking to /book/<shortname>
   GET/POST /book/<shortname>        guest booking form (name+email only)
   GET/POST /cancel/<token>          guest self-cancel (link from email)
-  GET/POST /my                      guest login (email+password) / bookings list
+  GET/POST /my                      guest login (email+password, "Login"/"Sign up" tabs) / bookings list
+  POST     /my/signup               "Sign up" tab's target -- create account + email a confirm link
   GET/POST /my/confirm/<token>      set password -- first-time account confirmation
                                      AND password reset both land here (same token
                                      mechanism, see storage.User.confirm_token_hash)
@@ -482,6 +483,8 @@ class App:
             return self.guest_cancel(method, m.group(1), environ)
         if path == "/my":
             return self.my(method, environ)
+        if path == "/my/signup":
+            return self.my_signup(method, environ)
         if path == "/my/reset":
             return self.my_reset(method, environ)
         if m := re.fullmatch(r"/my/confirm/([A-Za-z0-9_-]+)", path):
@@ -1326,7 +1329,7 @@ class App:
                 else:
                     # Same generic wording as a guest mismatch below --
                     # never confirms that "admin" is treated specially.
-                    error = "Email/password didn't match."
+                    error = "Email and/or password did not match."
             else:
                 key = f"guest:{email.lower()}"
                 if not login_limiter.allow(key, now=now):
@@ -1344,17 +1347,110 @@ class App:
                         sid = _new_session({"kind": "guest", "user_id": user.user_id})
                         self.store.touch_login(user.user_id)
                         return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header(sid))], ""
-                    error = "Email/password didn't match."
-        err_html = f'<p class="err">{esc(error)}</p>' if error else ""
-        login_label = "View my bookings"
-        body = f"""{err_html}<form method="post" class="card">
+                    error = "Email and/or password did not match."
+        return self._my_login_page(login_error=error, login_lockout_seconds=lockout_seconds)
+
+    def my_signup(self, method: str, environ):
+        """POST target for /my's "Sign up" tab (2026-07-06, the operator: "let's
+        also have a 'Sign up' possibility"). Creates a brand-new account
+        (with the given name) if this email doesn't have one yet, then
+        ALWAYS sends a confirm-or-reset link and shows the exact same
+        generic success message either way -- entering an email that
+        already has an account behaves exactly like /my/reset's "forgot
+        password" (same rate-limiter KEYS too: reset:<email>/reset-ip:<ip>,
+        deliberately shared with my_reset() since both endpoints end up
+        doing the same thing -- create/confirm an account and email a
+        token -- so they must share one lockout budget or an attacker
+        could dodge one by hitting the other), rather than silently
+        overwriting that existing account's real name with whatever was
+        just typed into this form."""
+        if method != "POST":
+            return "302 Found", [("Location", "/my")], ""
+        form = self._read_form(environ)
+        name, email = form.get("name", "").strip(), form.get("email", "").strip()
+        if not email or "@" not in email or not name:
+            return self._my_login_page(
+                signup_error="Please fill in your name and a valid email.", active_tab="signup"
+            )
+        now = time.time()
+        email_key = f"reset:{email.lower()}"
+        ip_key = f"reset-ip:{_client_ip(environ)}"
+        email_ok = login_limiter.allow(email_key, now=now)
+        ip_ok = reset_ip_limiter.allow(ip_key, now=now)
+        if not (email_ok and ip_ok):
+            log.warning("rate limit blocked: sign up for %s", _masked(email))
+            lockout_seconds = max(
+                0.0 if email_ok else login_limiter.retry_after(email_key, now=now),
+                0.0 if ip_ok else reset_ip_limiter.retry_after(ip_key, now=now),
+            )
+            return self._my_login_page(
+                signup_error="Too many attempts -- try again later.",
+                signup_lockout_seconds=lockout_seconds, active_tab="signup",
+            )
+        existing = self.store.find_user_by_email(email)
+        user = existing if existing else self.store.upsert_user_for_booking(email, name)
+        self._send_confirm_email(user)
+        return self._my_login_page(
+            signup_success="Check your email for a link to finish setting up your account.",
+            active_tab="signup",
+        )
+
+    def _my_login_page(
+        self,
+        *,
+        login_error: str | None = None,
+        login_lockout_seconds: float = 0.0,
+        signup_error: str | None = None,
+        signup_success: str | None = None,
+        signup_lockout_seconds: float = 0.0,
+        active_tab: str = "login",
+    ):
+        """Renders /my's logged-out page: two CSS-only tabs (radio buttons
+        + sibling selectors -- no JS needed to switch between them)
+        labeled "Login" (default) and "Sign up" (2026-07-06). Both my()
+        (GET/POST login) and my_signup() (POST) render through this one
+        function so the two tabs' markup can't drift apart, and so a
+        failed submission re-opens on the SAME tab the guest was using
+        (via active_tab) instead of silently flipping back to Login."""
+        login_checked = "checked" if active_tab == "login" else ""
+        signup_checked = "checked" if active_tab == "signup" else ""
+
+        login_err_html = f'<p class="err">{esc(login_error)}</p>' if login_error else ""
+        login_label = "Login"
+        login_body = f"""{login_err_html}<form method="post" action="/my" class="card">
           <label>Email <input class="big-input" name="email" type="text" required></label>
           <label>Password <input class="big-input" name="password" type="password" required></label>
           <div class="submit-row"><button type="submit" id="my-login-btn">{esc(login_label)}</button></div>
         </form>
         <p><a href="/my/reset">Forgot your password, or still need to confirm your account?</a></p>"""
-        if lockout_seconds:
-            body += _lockout_countdown_script(lockout_seconds, "my-login-btn", login_label)
+        if login_lockout_seconds:
+            login_body += _lockout_countdown_script(login_lockout_seconds, "my-login-btn", login_label)
+
+        if signup_success:
+            signup_body = f'<p class="hint">{esc(signup_success)}</p>'
+        else:
+            signup_err_html = f'<p class="err">{esc(signup_error)}</p>' if signup_error else ""
+            signup_label = "Sign up"
+            signup_body = f"""{signup_err_html}<form method="post" action="/my/signup" class="card">
+              <label>Name <input class="big-input" name="name" type="text" required></label>
+              <label>Email <input class="big-input" name="email" type="email" required></label>
+              <div class="submit-row"><button type="submit" id="my-signup-btn">{esc(signup_label)}</button></div>
+            </form>
+            <p class="hint">We'll email you a link to set your password.</p>"""
+            if signup_lockout_seconds:
+                signup_body += _lockout_countdown_script(signup_lockout_seconds, "my-signup-btn", signup_label)
+
+        body = f"""
+        <div class="tabs">
+          <input type="radio" id="my-tab-login" name="my-tab" class="tab-radio" {login_checked}>
+          <input type="radio" id="my-tab-signup" name="my-tab" class="tab-radio" {signup_checked}>
+          <div class="tab-labels">
+            <label for="my-tab-login" class="tab-label">Login</label>
+            <label for="my-tab-signup" class="tab-label">Sign up</label>
+          </div>
+          <div class="tab-panel" id="my-panel-login">{login_body}</div>
+          <div class="tab-panel" id="my-panel-signup">{signup_body}</div>
+        </div>"""
         return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
 
     def my_reset(self, method: str, environ):

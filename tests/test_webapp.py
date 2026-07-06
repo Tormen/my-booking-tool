@@ -843,6 +843,66 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Too many attempts", body)
         self.assertIn('id="reset-btn"', body)
 
+    # -- my_signup: 2026-07-06, "Sign up" tab on /my -------------------------
+
+    def test_signup_creates_a_brand_new_account_and_emails_a_confirm_link(self):
+        _status, _headers, body = self._post(
+            self.app.my_signup, (), {"name": "New Person", "email": "brandnew@example.org"}
+        )
+        self.assertIn("Check your email", body)
+        user = self.store.find_user_by_email("brandnew@example.org")
+        self.assertIsNotNone(user)
+        self.assertEqual(user.name, "New Person")
+        self.assertEqual(user.password_hash, "")
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertEqual(subjects, ["Confirm your example.org account"])
+
+    def test_signup_existing_account_does_not_overwrite_name(self):
+        user = self.store.upsert_user_for_booking("existing@example.org", "Real Name")
+        self._post(self.app.my_signup, (), {"name": "Some Other Name", "email": "existing@example.org"})
+        reloaded = self.store.find_user_by_email("existing@example.org")
+        self.assertEqual(reloaded.name, "Real Name")
+
+    def test_signup_existing_confirmed_account_gets_a_reset_link_not_a_confirm_one(self):
+        user = self.store.upsert_user_for_booking("confirmed@example.org", "Confirmed")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._post(self.app.my_signup, (), {"name": "Whatever", "email": "confirmed@example.org"})
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertEqual(subjects, ["Reset your example.org password"])
+
+    def test_signup_missing_name_shows_error_and_reopens_signup_tab(self):
+        _status, _headers, body = self._post(self.app.my_signup, (), {"name": "", "email": "x@example.org"})
+        self.assertIn("Please fill in your name and a valid email.", body)
+        self.assertIn('id="my-tab-signup" name="my-tab" class="tab-radio" checked', body)
+        self.assertIsNone(self.store.find_user_by_email("x@example.org"))
+
+    def test_signup_invalid_email_shows_error(self):
+        _status, _headers, body = self._post(self.app.my_signup, (), {"name": "Someone", "email": "not-an-email"})
+        self.assertIn("Please fill in your name and a valid email.", body)
+
+    def test_signup_get_redirects_to_my(self):
+        status, headers, _body = self.app.my_signup("GET", {})
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my")
+
+    def test_signup_shares_rate_limit_bucket_with_my_reset(self):
+        # Both endpoints end up doing the same thing (create/confirm an
+        # account + email a token) -- they must share one lockout budget,
+        # keyed the same as my_reset's own (reset:<email>).
+        email = "shared-bucket@example.org"
+        self.addCleanup(webapp.login_limiter.reset, f"reset:{email}")
+        for _ in range(5):
+            self._post(self.app.my_signup, (), {"name": "X", "email": email})
+        _status, _headers, body = self._post(self.app.my_reset, (), {"email": email})
+        self.assertIn("Too many attempts", body)
+
+    def test_login_tab_open_by_default_on_get(self):
+        _status, _headers, body = self.app.my("GET", {})
+        self.assertIn('id="my-tab-login" name="my-tab" class="tab-radio" checked', body)
+        self.assertIn('id="my-tab-signup" name="my-tab" class="tab-radio" ', body)
+        self.assertNotIn('id="my-tab-signup" name="my-tab" class="tab-radio" checked', body)
+
     # -- /my password login --------------------------------------------------
 
     def test_my_login_succeeds_with_correct_password(self):
@@ -858,8 +918,7 @@ class BookingFlowTest(unittest.TestCase):
         self.store.set_password(user.user_id, h, s)
         _status, headers, body = self._post(self.app.my, (), {"email": "regular@example.org", "password": "wrong"})
         self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))
-        self.assertIn("Email/password", body)
-        self.assertIn("match", body)
+        self.assertIn("Email and/or password did not match.", body)
 
     def test_my_login_fails_for_a_still_unconfirmed_account(self):
         self._book("newguest@example.org")
@@ -867,8 +926,7 @@ class BookingFlowTest(unittest.TestCase):
             self.app.my, (), {"email": "newguest@example.org", "password": "anything"}
         )
         self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))
-        self.assertIn("Email/password", body)
-        self.assertIn("match", body)
+        self.assertIn("Email and/or password did not match.", body)
 
     def test_my_login_lockout_shows_a_disabled_button_with_a_live_countdown(self):
         # Same visible-countdown treatment as admin/login (2026-07-05) --
@@ -884,7 +942,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Too many attempts", body)
         self.assertIn('id="my-login-btn"', body)
         self.assertIn("btn.disabled = true;", body)
-        self.assertIn("View my bookings", body)
+        self.assertIn("Login", body)
 
     # -- /my logged-in bookings table + cancel/delete dialogs (task #43) ----
 
@@ -1365,7 +1423,7 @@ class MyLoginAsAdminTest(unittest.TestCase):
 
     def test_admin_email_with_wrong_password_shows_generic_mismatch_error(self):
         _status, _headers, body = self._post("admin", "wrong password", forwarded_for="203.0.113.22")
-        self.assertIn("Email/password didn&#x27;t match.", body)
+        self.assertIn("Email and/or password did not match.", body)
         # Never confirm "admin" is special -- same wording a real guest
         # mismatch gets, not admin_login()'s own "Wrong password."
         self.assertNotIn("Wrong password", body)

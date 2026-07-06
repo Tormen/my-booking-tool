@@ -989,27 +989,43 @@ overbooking. Each promoted registration gets its own confirmation email
 and its own cancel link (generated at promotion time, not at the original
 pending-booking time).
 
-`/my` itself asks for email + password (relabeled from "PIN"), and links
-to `/my/reset` for both "forgot your password" and "resend my
-confirmation email" -- the same flow handles both, since both cases
-reduce to "prove you own this inbox via a one-time link, then set a
-password." `/my/reset` always returns the same response regardless of
-whether the submitted email exists, to avoid leaking which addresses have
-an account; it's rate-limited the same way as login (see "Logs &
-debugging" for the shared `RateLimiter`).
+`/my` shows two CSS-only tabs (2026-07-06, no JS needed to switch between
+them): **Login** (default) and **Sign up**. Login asks for email +
+password (relabeled from "PIN"), and links to `/my/reset` for both
+"forgot your password" and "resend my confirmation email" -- the same
+flow handles both, since both cases reduce to "prove you own this inbox
+via a one-time link, then set a password." `/my/reset` always returns the
+same response regardless of whether the submitted email exists, to avoid
+leaking which addresses have an account; it's rate-limited the same way
+as login (see "Logs & debugging" for the shared `RateLimiter`). A wrong
+email/password shows "Email and/or password did not match." -- never
+which of the two was wrong.
 
-**Admin shortcut (2026-07-06):** entering `admin` as the email on `/my`,
-with the admin password, logs into `/admin` instead -- so the admin
-doesn't need to remember a separate URL. This reuses `/admin/login`'s own
-rate-limit bucket (keyed by client IP, not by email), not the per-email
-guest one, so it can't be used to sidestep -- or worsen -- either
-lockout: hammering "admin" via `/my` from one IP trips the exact same
-lockout `/admin/login` itself would from that IP, and vice versa. A wrong
-password for "admin" shows the same generic "Email/password didn't
-match." a real guest mismatch gets, never "Wrong password" -- nothing
-about the response reveals that "admin" is treated specially.
-`/admin/login` itself is unchanged and still works exactly as before;
-this is purely an additional way in through `/my`.
+**Sign up** (2026-07-06) asks for name + email and, on submit, always
+shows the same generic "check your email" response: if that email has no
+account yet, one is created (with the given name) and a confirm link is
+sent; if it already has one, its name is left completely untouched and it
+gets a plain reset-or-resend link instead -- functionally identical to
+`/my/reset`'s own "forgot password" for that case, so signing up with an
+email you already have an account under can never clobber your real name
+with whatever you happened to type into the sign-up form. Deliberately
+shares `/my/reset`'s own rate-limiter keys (`reset:<email>`/
+`reset-ip:<ip>`), not separate ones -- both endpoints end up doing the
+same thing (create/confirm an account and email a token), so a lockout on
+one applies to the other too; POST `/my/signup` is the tab's target.
+
+**Admin shortcut (2026-07-06):** entering `admin` as the email on the
+Login tab, with the admin password, logs into `/admin` instead -- so the
+admin doesn't need to remember a separate URL. This reuses
+`/admin/login`'s own rate-limit bucket (keyed by client IP, not by
+email), not the per-email guest one, so it can't be used to sidestep --
+or worsen -- either lockout: hammering "admin" via `/my` from one IP
+trips the exact same lockout `/admin/login` itself would from that IP,
+and vice versa. A wrong password for "admin" shows the same generic
+"Email and/or password did not match." a real guest mismatch gets, never
+"Wrong password" -- nothing about the response reveals that "admin" is
+treated specially. `/admin/login` itself is unchanged and still works
+exactly as before; this is purely an additional way in through `/my`.
 
 Once logged in, `/my` (2026-07-06) shows bookings in two separate tables:
 **Upcoming** (all of them, soonest first) and **Past** (capped at the 3
