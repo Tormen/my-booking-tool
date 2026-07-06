@@ -5,6 +5,7 @@ root, so the whole branching logic (what gets asked, what gets skipped,
 what gets written) is exercised deterministically, the same way this was
 manually smoke-tested via piped stdin during development."""
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,11 +62,11 @@ class PrintReportTest(unittest.TestCase):
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
-    def test_prints_all_nine_numbered_steps(self):
+    def test_prints_all_eleven_numbered_steps(self):
         lines: list[str] = []
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         text = "\n".join(lines)
-        for n in range(1, 10):
+        for n in range(1, 12):
             self.assertIn(f"{n}.", text)
 
     def test_caldav_not_configured_shows_skip(self):
@@ -663,6 +664,79 @@ class InteractiveSetupWatchdogTest(unittest.TestCase):
             )
         self.assertEqual(prompt.asked_matching("Add nginx_access_log"), [])
         self.assertTrue(any("stale" in ln for ln in lines))
+
+
+class InteractiveSetupDataDirGitTest(unittest.TestCase):
+    """Step 11 -- unlike the systemd/SELinux/group-membership offers, this
+    one is never gated behind is_root() (see interactive_setup's own
+    comment on why: it only needs filesystem write access to the data
+    dir). `git init`/`config` are run directly via real subprocess calls
+    (not through the injected `run` fake) so the repo genuinely exists
+    afterward for app.git_snapshot.snapshot() to find -- these tests use a
+    real temp directory and real `git`, the most convincing way to verify
+    this end-to-end (per the project's own testing conventions)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "checkout"
+        (self.home / "site").mkdir(parents=True)
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+        self.data_dir = Path(self._tmp.name) / "data"
+        self.data_dir.mkdir()
+        (self.data_dir / "users.csv").write_text("user_id,email\n1,a@b.com\n")
+
+    def test_declining_leaves_no_git_repo(self):
+        prompt = FakePrompts({"Initialize a git repo": False})
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None, data_dir=str(self.data_dir),
+        )
+        self.assertFalse((self.data_dir / ".git").exists())
+
+    def test_accepting_creates_repo_with_initial_commit(self):
+        prompt = FakePrompts({"Initialize a git repo": True})
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None, data_dir=str(self.data_dir),
+        )
+        self.assertTrue((self.data_dir / ".git").is_dir())
+        self.assertTrue((self.data_dir / ".gitignore").exists())
+        self.assertIn("*.tmp", (self.data_dir / ".gitignore").read_text())
+        log = subprocess.run(
+            ["git", "-C", str(self.data_dir), "log", "--oneline"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(len(log.stdout.strip().splitlines()), 1)
+
+    def test_not_gated_behind_root(self):
+        # Even as non-root, accepting the prompt actually initializes the
+        # repo -- unlike the systemd/SELinux/group steps above, this
+        # doesn't require root and must never print a "needs root" note
+        # or silently skip.
+        prompt = FakePrompts({"Initialize a git repo": True})
+        lines: list[str] = []
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lines.append, data_dir=str(self.data_dir),
+        )
+        self.assertTrue((self.data_dir / ".git").exists())
+        self.assertFalse(any("needs root" in ln and "git repo" in ln for ln in lines))
+
+    def test_already_a_repo_is_never_prompted(self):
+        subprocess.run(["git", "init", str(self.data_dir)], capture_output=True, text=True)
+        prompt = FakePrompts({}, default=True)  # would init again if (wrongly) asked+accepted
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None, data_dir=str(self.data_dir),
+        )
+        self.assertEqual(prompt.asked_matching("Initialize a git repo"), [])
 
 
 class AddNginxAccessLogSettingTest(unittest.TestCase):

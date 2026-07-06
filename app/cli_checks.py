@@ -77,6 +77,24 @@ def check_secrets(raw: dict) -> list[Check]:
 _CALDAV_CHECK_TIMEOUT = 5.0
 
 
+def check_data_dir_git(data_dir: str | Path) -> list[Check]:
+    """Whether `data_dir` (the CSV data directory, users.csv/
+    registrations.csv/data/archived/*) is already protected by its own,
+    separate git repository -- see app/git_snapshot.py, which the hourly
+    systemd timer uses to auto-commit any change. `warn` (not `fail`):
+    this is a defense-in-depth safety net, not a hard requirement for the
+    app to function. A no-op-looking `warn` rather than silence, since
+    the whole point is to catch a fresh/pre-existing install that hasn't
+    opted in yet -- `my-bt setup -i` offers to initialize it right there
+    (git init, a `.gitignore` excluding `*.tmp`, local `user.email`/
+    `user.name`, and an initial commit via app.git_snapshot.snapshot())."""
+    data_dir = Path(data_dir)
+    if not (data_dir / ".git").exists():
+        return [(f"data dir git snapshot ({data_dir})", "warn",
+                  "not yet a git-protected repo -- run `my-bt setup -i` to initialize it")]
+    return [(f"data dir git snapshot ({data_dir})", "ok", "git repo present -- hourly snapshot timer keeps it committed")]
+
+
 def check_caldav_calendars(raw: dict) -> list[Check]:
     """Live PROPFIND against the configured CalDAV server, verifying
     `[calendar].booking_calendar` and every `[calendar].conflict_calendars`
@@ -128,7 +146,10 @@ def check_systemd() -> list[Check]:
     if not shutil.which("systemctl"):
         return [("systemd", "warn", "systemctl not found -- skipping (not on the target server?)")]
     checks: list[Check] = []
-    for unit in ("my-booking.service", "my-booking-retention.timer", "my-booking-watchdog.timer"):
+    for unit in (
+        "my-booking.service", "my-booking-retention.timer",
+        "my-booking-watchdog.timer", "my-booking-git-snapshot.timer",
+    ):
         enabled = subprocess.run(
             ["systemctl", "is-enabled", unit], capture_output=True, text=True
         ).stdout.strip()

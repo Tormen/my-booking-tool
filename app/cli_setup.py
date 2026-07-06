@@ -86,7 +86,7 @@ def _privacy_summary(raw: dict) -> str:
             f"canceled_retention_months={privacy.get('canceled_retention_months', 6)}")
 
 
-def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli_checks.Check]]:
+def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var/lib/my-booking") -> dict[str, list[cli_checks.Check]]:
     """All the check groups `setup` shows, computed once here so the
     printed and interactive modes (and `status`, for the ones it also
     reports) can't drift out of sync with each other."""
@@ -106,11 +106,16 @@ def build_report(raw: dict, settings_path: str, home: str) -> dict[str, list[cli
         "caldav_calendars": cli_checks.check_caldav_calendars(raw),
         "watchdog_nginx_log_config": cli_checks.check_watchdog_nginx_access_log_config(raw),
         "watchdog_nginx_access": cli_checks.check_watchdog_nginx_access(raw),
+        "data_dir_git": cli_checks.check_data_dir_git(data_dir),
     }
 
 
-def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[str], None] = print) -> None:
-    report = build_report(raw, settings_path, home)
+def print_report(
+    raw: dict, settings_path: str, home: str,
+    print_fn: Callable[[str], None] = print,
+    data_dir: str = "/var/lib/my-booking",
+) -> None:
+    report = build_report(raw, settings_path, home, data_dir)
 
     def show(checks: list[cli_checks.Check]) -> None:
         for label, level, detail in checks:
@@ -176,6 +181,9 @@ def print_report(raw: dict, settings_path: str, home: str, print_fn: Callable[[s
     else:
         print_fn("   [SKIP] nginx not detected for this vhost -- not checked")
 
+    print_fn("\n11. Data dir git snapshot (hourly auto-commit safety net):")
+    show(report["data_dir_git"])
+
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 
 
@@ -189,6 +197,7 @@ def interactive_setup(
     run: Callable[[list[str]], None] | None = None,
     is_root: Callable[[], bool] = _default_is_root,
     print_fn: Callable[[str], None] = print,
+    data_dir: str = "/var/lib/my-booking",
 ) -> None:
     if run is None:
         run = lambda cmd: _run_tolerant(cmd, print_fn)  # noqa: E731
@@ -492,5 +501,52 @@ def interactive_setup(
             elif prompt(f"Run setfacl to grant my-booking read access under {log_path.parent} now?"):
                 run(["setfacl", "-R", "-m", "u:my-booking:rX", str(log_path.parent)])
                 run(["setfacl", "-d", "-m", "u:my-booking:rX", str(log_path.parent)])
+
+    # 11. Data dir git snapshot -- unlike the systemd/SELinux offers above,
+    # this deliberately does NOT gate on is_root(): initializing a git repo
+    # only needs filesystem write access to `data_dir`, which a member of
+    # the `my-booking` group already has (see README.md "Installing" step
+    # 4) -- there's no privileged operation involved, so requiring root
+    # here would just be an unnecessary hurdle. `git init`/`config` are run
+    # directly via subprocess here (NOT through the injected `run`
+    # callable) -- unlike vimdiff/systemctl/setsebool/setfacl above, whose
+    # tests only care THAT they were invoked with the right args, this step
+    # needs the repo to genuinely exist on disk afterwards so the
+    # subsequent app.git_snapshot.snapshot() call (which insists on a real
+    # `.git`, see that module's docstring) actually finds one -- a faked,
+    # recording-only `run` in tests would otherwise silently no-op `git
+    # init` and make every test here report "not_a_repo" regardless of
+    # what's being exercised. The actual add+commit is still delegated to
+    # snapshot() itself, so there's exactly one place that owns "how to
+    # stage and commit."
+    print_fn("\n-- 11. Data dir git snapshot --")
+    data_dir_checks = cli_checks.check_data_dir_git(data_dir)
+    for label, level, detail in data_dir_checks:
+        if level == "ok":
+            print_fn(f"[ok] {label}: {detail}")
+            continue
+        print_fn(f"{label}: {detail}")
+        if prompt("Initialize a git repo for the data directory now?"):
+            from . import git_snapshot as app_git_snapshot
+
+            data_dir_path = Path(data_dir)
+            try:
+                data_dir_path.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["git", "init", str(data_dir_path)], capture_output=True, text=True)
+                subprocess.run(
+                    ["git", "-C", str(data_dir_path), "config", "user.email", "my-booking-tool <noreply@localhost>"],
+                    capture_output=True, text=True,
+                )
+                subprocess.run(
+                    ["git", "-C", str(data_dir_path), "config", "user.name", "my-booking-tool"],
+                    capture_output=True, text=True,
+                )
+                gitignore = data_dir_path / ".gitignore"
+                if not gitignore.exists():
+                    gitignore.write_text("*.tmp\n", encoding="utf-8")
+                result = app_git_snapshot.snapshot(data_dir_path)
+                print_fn(f"[ok] initialized git repo at {data_dir_path} ({result.detail})")
+            except OSError as exc:
+                print_fn(f"[fail] could not initialize git repo at {data_dir_path}: {exc}")
 
     print_fn("\nDone. Re-run `my-bt status` any time to re-check everything.")

@@ -31,6 +31,7 @@ try:
     from app import cli_list as app_cli_list
     from app import config as app_config
     from app import erasure as app_erasure
+    from app import git_snapshot as app_git_snapshot
     from app import retention as app_retention
     from app import security as app_security
     from app import version as app_version
@@ -376,6 +377,35 @@ def cmd_purge_retention(args) -> None:
     print(f"purged {purged} row(s)")
 
 
+def cmd_git_snapshot(args) -> None:
+    """`my-bt git-snapshot` -- manually run the same hourly auto-commit
+    the systemd timer runs (see systemd/my-booking-git-snapshot.timer):
+    stages and commits any change under --data-dir's own, separate git
+    repo, or reports if there's nothing to commit / it isn't a git repo
+    yet (run `my-bt setup -i` to initialize one)."""
+    data_dir = Path(args.data_dir)
+    if args.dry_run:
+        if not (data_dir / ".git").exists():
+            print(f"{data_dir} is not yet a git repo -- run `my-bt setup -i` to initialize it")
+            return
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "status", "--porcelain"], cwd=str(data_dir), capture_output=True, text=True
+        )
+        changed = [ln for ln in result.stdout.splitlines() if ln.strip()]
+        if changed:
+            print(f"would commit {len(changed)} changed file(s) (dry run, nothing changed):")
+            for ln in changed:
+                print(f"  {ln}")
+        else:
+            print("nothing changed (dry run, nothing to commit)")
+        return
+
+    result = app_git_snapshot.snapshot(data_dir)
+    print(result.detail)
+
+
 def cmd_test(args) -> None:
     """`my-bt test` -- run the project's unit test suite (python3 -m unittest)."""
     import subprocess
@@ -462,6 +492,7 @@ def cmd_status(args) -> None:
         checks.append((f"data dir ({data_dir})", "fail", "not writable by the current user"))
     else:
         checks.append((f"data dir ({data_dir})", "ok", "exists and writable"))
+    checks.extend(cli_checks.check_data_dir_git(data_dir))
 
     # -- configured log file, if any ---------------------------------------------
     log_file = app_config.peek_log_file(args.settings) if raw else None
@@ -523,9 +554,9 @@ def cmd_setup(args) -> None:
         print(f"error: {args.settings} not found -- install the package first", file=sys.stderr)
         sys.exit(1)
     if args.interactive:
-        cli_setup.interactive_setup(raw, args.settings, HOME)
+        cli_setup.interactive_setup(raw, args.settings, HOME, data_dir=args.data_dir)
     else:
-        cli_setup.print_report(raw, args.settings, HOME)
+        cli_setup.print_report(raw, args.settings, HOME, data_dir=args.data_dir)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -636,6 +667,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("purge-retention", help="run the retention purge job now")
     sp.add_argument("--dry-run", action="store_true")
     sp.set_defaults(func=cmd_purge_retention)
+
+    sp = sub.add_parser("git-snapshot", help="commit any data-dir changes now (same as the hourly timer)")
+    sp.add_argument("--dry-run", action="store_true", help="report what would be committed, without staging/committing")
+    sp.set_defaults(func=cmd_git_snapshot)
 
     sp = sub.add_parser("test", help="run the unit test suite")
     sp.add_argument("--repo-root", help="checkout containing tests/ (default: auto-detect)")

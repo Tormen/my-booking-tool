@@ -1,0 +1,16 @@
+[Unit]
+Description=my-booking data dir git snapshot (one-shot; triggered by the .timer)
+
+[Service]
+Type=oneshot
+User=my-booking
+Group=my-booking
+ExecStart=/usr/bin/python3 -m app.git_snapshot --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking
+WorkingDirectory=/opt/my-booking
+Environment=PYTHONPATH=/opt/my-booking
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/my-booking
+ReadOnlyPaths=/opt/my-booking /etc/my-booking

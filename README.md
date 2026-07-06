@@ -96,6 +96,7 @@ app/                        the application (stdlib-only Python package)
   security.py               tokens/password hashing, erasure hashing, rate limiting
   erasure.py                GDPR Art. 17 orchestration
   retention.py              GDPR Art. 5(1)(e) purge job (the "cronjob")
+  git_snapshot.py           hourly auto-commit of the data dir to its own git repo
   site_render.py            renders site/privacy.html -- see "Static-site pages"
   cli_checks.py             `my-bt status`/`setup` health checks -- pure, unit-tested
   cli_setup.py              `my-bt setup`/`setup -i` report + walkthrough logic
@@ -115,7 +116,8 @@ packaging/
   my-booking-tool.spec      RPM spec
 
 systemd/                    my-booking.service, my-booking-retention.{service,timer},
-                            my-booking-watchdog.{service,timer}
+                            my-booking-watchdog.{service,timer},
+                            my-booking-git-snapshot.{service,timer}
 nginx/                      my-booking.conf -- location blocks for your vhost
 .github/workflows/          CI: runs the test suite on push/PR
 
@@ -211,7 +213,7 @@ full detail, for reference:
    `/usr/share/my-booking-tool/my-booking.conf.example` to your existing
    nginx vhost config, then `nginx -t && systemctl reload nginx`.
 4. `sudo usermod -aG my-booking <your-login>` so `my-bt` works without sudo.
-5. `sudo systemctl enable --now my-booking.service my-booking-retention.timer my-booking-watchdog.timer`
+5. `sudo systemctl enable --now my-booking.service my-booking-retention.timer my-booking-watchdog.timer my-booking-git-snapshot.timer`
 6. If SELinux is enforcing (default on Fedora -- check `getenforce`):
    `sudo setsebool -P httpd_can_network_connect on`. Without this, nginx
    (which runs as the confined `httpd_t` domain) is blocked from
@@ -278,6 +280,7 @@ my-bt cancel --registration-id <id> --yes                    # scripted/non-inte
 my-bt cancel --registration-id <id> -m "course canceled"     # optional message in the cancellation emails
 
 my-bt purge-retention [--dry-run]       # same purge the nightly timer runs
+my-bt git-snapshot [--dry-run]          # commit data-dir changes now (same as the hourly timer)
 my-bt test [--repo-root /path/to/checkout]      # runs the unit test suite
 
 my-bt status                            # health check -- see below
@@ -342,8 +345,9 @@ something seems off, or after any install/reinstall:
 - The data directory exists and is writable.
 - The configured log file (if any) is writable.
 - Your login is in the `my-booking` group.
-- `my-booking.service`, `my-booking-retention.timer`, and
-  `my-booking-watchdog.timer`: enabled and active.
+- `my-booking.service`, `my-booking-retention.timer`,
+  `my-booking-watchdog.timer`, and `my-booking-git-snapshot.timer`:
+  enabled and active.
 - Whether `settings.toml` has been edited more recently than
   `my-booking.service` last (re)started -- it's only read once, at
   startup, so an edit made after that isn't live yet even though the file
@@ -367,6 +371,9 @@ something seems off, or after any install/reinstall:
   live `site/*.html` page still contains a leftover `REPLACE-ME` or
   `${...}` placeholder (i.e. the generic template was published without
   being customized).
+- Whether the data directory (`--data-dir`) is already protected by its
+  own, separate git repository (see "Data dir git snapshot" below) --
+  `setup -i` offers to initialize one.
 
 Each line is `[OK]`/`[WARN]`/`[FAIL]` with a one-line fix where relevant;
 exits non-zero if anything is `[FAIL]`. Deliberately doesn't touch the
@@ -376,10 +383,11 @@ provider itself is unreachable.
 
 ### `my-bt setup` / `my-bt setup --interactive`
 
-The same checks `status` runs, reorganized as a 9-step guided post-install
+The same checks `status` runs, reorganized as an 11-step guided post-install
 list (secrets, `.rpmnew` merge, a `settings.toml` values summary, nginx,
 group membership, systemd, SELinux, the static site, live CalDAV calendar
-names) -- this is the single source of truth for those steps now; `%post`
+names, the watchdog's nginx access log, and the data dir git snapshot) --
+this is the single source of truth for those steps now; `%post`
 and `scripts/install.sh` just
 point here instead of each keeping their own copy of the text (which used
 to drift out of sync). The logic itself lives in `app/cli_checks.py` (the
@@ -418,6 +426,12 @@ step by step and have `my-bt` perform what it safely can:
   real calendar you meant), and -- unlike every other step above -- this
   one does reach out over the network, so it's skipped entirely if the
   CalDAV secret isn't set up yet.
+- Data dir git snapshot: if the data directory isn't a git repo yet,
+  offers to initialize one right there (`git init`, a `.gitignore`
+  excluding `*.tmp`, local `user.email`/`user.name`, and an initial
+  commit) -- not gated behind root, since this only needs filesystem
+  write access to the data directory, which the `my-booking` group
+  already grants. See "Data dir git snapshot" below.
 
 ## Logs & debugging
 
@@ -555,6 +569,34 @@ than necessary" principle it's built around. The nightly systemd timer
 (`my-booking-retention.timer`, 03:30) is the cronjob-equivalent that
 enforces it; `my-bt purge-retention --dry-run` lets you preview what the next
 run would remove.
+
+**Data dir git snapshot** (`systemd/my-booking-git-snapshot.timer`, hourly):
+a separate git repository, rooted at `/var/lib/my-booking/.git` -- entirely
+independent of this project's own git checkout -- that `app/git_snapshot.py`
+commits to automatically, but only when something actually changed (`git
+add -A` then `git diff --cached --quiet` to check; no empty commits). This
+is a cheap, local, commit-per-change safety net on top of whatever off-box
+backup you already run (see "Known simplifications" below -- that's still
+your own job), useful for recovering from an accidental `my-bt erase`, a
+bad manual CSV edit, or a botched migration. `my-bt git-snapshot [--dry-run]`
+runs the same thing on demand; `my-bt setup -i` offers to initialize the
+repo (`git init`, a `.gitignore` excluding `*.tmp`, local `user.email`/
+`user.name`) if it isn't one yet.
+
+**Compliance caveat, stated plainly: git commit history is immutable by
+default.** A snapshot committed *before* a guest's GDPR erasure still
+contains their real name/email in that OLD commit, forever -- erasing the
+live CSVs does nothing to a git history that already recorded them.
+**This tool deliberately does NOT prune, squash, or rewrite that history
+automatically** -- there's no built-in mechanism for it, the same way
+there's no single `retention_months` number this software can pick for
+you. If an immutable local history containing pre-erasure data is a
+problem for your situation, that's a tradeoff only you can resolve: decide
+your own policy for periodically rewriting/pruning this git history (e.g.
+`git filter-repo`/history-rewriting after each erasure, or on a schedule),
+or use a different backup approach entirely if immutable history is a
+dealbreaker. Weigh this against the safety net the snapshot itself
+provides before deciding either way.
 
 **Right to erasure** (Art. 17): a guest can delete their own account from
 `/my`, or you can run `my-bt erase --email ...` on their behalf. Either way:

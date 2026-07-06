@@ -975,6 +975,26 @@ class CheckStaticSiteComplianceTest(unittest.TestCase):
         self.assertTrue(any(level == "warn" for level in levels.values()))
 
 
+class CheckDataDirGitTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = Path(self._tmp.name)
+
+    def test_no_git_dir_warns(self):
+        checks = cli_checks.check_data_dir_git(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("setup -i", detail)
+
+    def test_git_dir_present_is_ok(self):
+        (self.data_dir / ".git").mkdir()
+        checks = cli_checks.check_data_dir_git(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "ok")
+
+
 class CheckCaldavCalendarsTest(unittest.TestCase):
     """CalDAVClient itself is exercised in tests/test_caldav.py -- these
     tests are about check_caldav_calendars()'s own logic (config
