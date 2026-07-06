@@ -47,8 +47,8 @@ from .config import Settings
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
 from .security import (
-    RateLimiter, hash_secret, hash_token, is_erased_email, new_token, sanitize_csv_field,
-    tokens_match, verify_admin_password, verify_secret,
+    RateLimiter, hash_email_for_erasure, hash_secret, hash_token, is_erased_email, new_token,
+    sanitize_csv_field, tokens_match, verify_admin_password, verify_secret,
 )
 from .slots import build_occurrences
 from .storage import (
@@ -1301,6 +1301,17 @@ class App:
         # only reads the live CSV), so an erased user's historical count
         # doesn't drop to 0 just because their rows moved to the archive.
         times_by_user = Counter(r.user_id for r in all_regs)
+        # Map hashed-email -> archived user_ids sharing that hash, so a live
+        # user who re-books under the same email after being erased can have
+        # their pre-erasure history folded into "Times booked" below. This
+        # never touches the archived row itself (still just its own count,
+        # name "[erased]", hashed email) -- see the docstring at the top of
+        # this method's PR description / the maintainer's local notes for why nothing is
+        # restored or merged on disk, only summed for display here.
+        archived_ids_by_hash: dict[str, list[str]] = {}
+        for u in users_by_id.values():
+            if is_erased_email(u.email):
+                archived_ids_by_hash.setdefault(u.email, []).append(u.user_id)
         regs = all_regs if show_past else [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
         regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname))
         rows = []
@@ -1334,6 +1345,19 @@ class App:
                 name_cell = "<td>(unknown)</td>"
                 email_cell = "<td>(unknown)</td>"
             times = times_by_user.get(r.user_id, 0)
+            prior = 0
+            if user and not erased:
+                # Same email, re-booked after a prior erasure: the old
+                # identity's hash (Store.erase_user) still matches
+                # hash_email_for_erasure(this live user's real email), even
+                # though it's a brand-new user_id. Fold that pre-erasure
+                # history into the displayed count -- nothing on disk
+                # changes, this is display-only.
+                hashed = hash_email_for_erasure(user.email, self.settings.erasure_pepper)
+                for prior_uid in archived_ids_by_hash.get(hashed, []):
+                    prior += times_by_user.get(prior_uid, 0)
+                times += prior
+            times_cell = f"{times} (incl. {prior} pre-erasure)" if prior > 0 else str(times)
             if user and not erased:
                 cancel_id = f"admin-cancel-{esc(r.registration_id)}"
                 disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED)
@@ -1361,7 +1385,7 @@ class App:
             rows.append(
                 f"<tr><td>{esc(r.status)}</td><td>{esc(r.course_shortname)}</td>"
                 f"<td>{esc(r.occurrence_date)}</td>{name_cell}{email_cell}"
-                f"<td>{esc(r.registered_at)}</td><td>{times}</td>"
+                f"<td>{esc(r.registered_at)}</td><td>{esc(times_cell)}</td>"
                 f"<td>{actions}</td></tr>"
             )
         toggle = '<a href="/admin">today + future only</a>' if show_past else '<a href="/admin?past=1">include past</a>'

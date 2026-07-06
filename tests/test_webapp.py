@@ -977,6 +977,39 @@ class BookingFlowTest(unittest.TestCase):
         row_html = body[row_start:row_start + 400]
         self.assertIn("<td>1</td>", row_html)
 
+    def test_admin_overview_folds_pre_erasure_count_into_new_live_row_same_email(self):
+        # 2026-07-06: if an erased guest books again with the SAME email,
+        # book() creates a brand-new live user_id (the old email no longer
+        # exists in the live table -- it's now a hash on the archived row).
+        # hash_email_for_erasure(their current real email) still matches
+        # the hash stored on that old archived row, so admin_overview()
+        # should fold the archived count into the live row's "Times
+        # booked" (display-only -- nothing is restored/merged on disk, and
+        # the archived row's own cell stays untouched).
+        email = "comeback-guest@example.org"
+        user, environ = self._login_as_guest(email)
+        self._book(email, name="ComebackGuest")
+        erase_user_by_email(self.store, self.settings, email, today=date.fromisoformat(self.occ_date))
+
+        # Same email books again post-erasure -- brand-new live user_id.
+        self._book(email, name="ComebackGuest")
+
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+
+        # The live row (real email visible) shows the combined total with
+        # an annotation explaining the pre-erasure history.
+        live_row_start = body.index(email)
+        live_row_html = body[max(0, live_row_start - 400):live_row_start + 400]
+        self.assertIn("2 (incl. 1 pre-erasure)", live_row_html)
+
+        # The archived row's own cell is unchanged -- still just "1".
+        archived_row_start = body.index("[erased]")
+        archived_row_html = body[archived_row_start:archived_row_start + 400]
+        self.assertIn("<td>1</td>", archived_row_html)
+        self.assertNotIn("pre-erasure", archived_row_html)
+
     def test_admin_overview_cancel_button_opens_dialog_with_reason_field(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
