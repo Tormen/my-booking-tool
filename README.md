@@ -746,6 +746,34 @@ dynamic, session-aware equivalent ("Logged in as x@example.org...") lives
 on `/courses` and `/book/<shortname>` instead -- see "Course overview
 page" above.
 
+**Variant: overlaying the button onto a boxed/backgrounded layout.** If
+your real homepage wraps its content in its own box (e.g. a fixed-width
+`<div>` with a `background-image`, like a hand-styled or Word-exported
+page might), placing `.top-bar` as a sibling *before* that box -- as
+above -- puts the button at the top of the whole page, not the top of
+your content box, and right-aligns it to the browser window instead of
+the box. To overlay it onto the box instead and align it with the box's
+own right edge: give the box `position: relative`, then absolutely
+position `.top-bar` inside it (as its first child) instead of using flex:
+
+```css
+.your-content-box { /* whatever it already is, plus: */ position: relative; }
+.top-bar { position: absolute; top: 12px; right: 12px; margin: 0; z-index: 1; }
+.login-btn { /* same as above, plus a backdrop so it stays legible over a photo/pattern: */
+             background: rgba(255,255,255,0.85); }
+```
+
+```html
+<div class="your-content-box">
+  <div class="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+  <!-- ... rest of your existing content ... -->
+</div>
+```
+
+The button ends up inside the box's own coordinate space, so `right: 12px`
+means "12px from the box's right edge" (which tracks the box's own
+`max-width`/`margin: auto` centering) rather than the page's.
+
 `site/impressum.html`, `site/privacy.html` and `site/terms.html`:
 - `impressum.html` -- legal notice / responsible-party identification.
   Split into its own page rather than inlined on the homepage, so it's a
