@@ -458,7 +458,11 @@ def cmd_status(args) -> None:
     settings.toml has been edited since the service last (re)started
     (it's only read once at startup -- an edit made after that isn't
     live yet, even though the file itself is already correct), SELinux,
-    and (if [site].static_site_dir is configured) whether the live
+    whether every nginx `location` block this app needs is present in
+    the live config (2026-07-06 -- previously only `setup -i` checked
+    this, so `status` could report "all checks passed" while a route
+    was silently unreachable through nginx), and (if
+    [site].static_site_dir is configured) whether the live
     deployed privacy.html still matches this settings.toml, plus whether
     any of the live site/*.html pages still contain a leftover REPLACE-ME
     or unsubstituted ${...} placeholder (i.e. the generic template got
@@ -525,6 +529,17 @@ def cmd_status(args) -> None:
     checks.extend(cli_checks.check_settings_fresh(args.settings))
     checks.extend(cli_checks.check_selinux())
     checks.extend(cli_checks.check_rpm_verify())
+
+    # -- nginx location blocks ---------------------------------------------------
+    # 2026-07-06 fix: `setup -i` already ran this (via cli_setup.build_report)
+    # and would have caught a missing block (e.g. a brand-new route like
+    # /courses added to the app but never proxied on a real vhost) -- but
+    # plain `status` never called it at all, so it could print "all checks
+    # passed" while a route was silently unreachable through nginx. Local
+    # `nginx -T`, no network dependency, so this fits the same "deliberately
+    # no network/CalDAV check" carve-out in this method's own docstring just
+    # fine -- that carve-out was about CalDAV/SMTP reachability, not this.
+    checks.extend(cli_checks.check_nginx_locations())
 
     # -- report -------------------------------------------------------------------
     icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
