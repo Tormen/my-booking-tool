@@ -173,6 +173,46 @@ class PartyEmailTest(GuestBookingTestBase):
         self.assertIn("Guest One", admin_email)
 
 
+class PartyAccountSetupLinkTest(GuestBookingTestBase):
+    """2026-07-06: "The EMAIL sent out to guests should OPTIONALLY allow
+    them to create an account for them to access their space and set a
+    password!" -- every brand-new party member's booking email should
+    embed a /my/confirm/<token> link inline (not a second, separate
+    email), and an already-confirmed member's email should not."""
+
+    def test_brand_new_leader_and_guest_both_get_an_account_setup_link(self):
+        self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
+        leader_email = next(b for to, _s, b in self.sent_emails if to == "leader@example.org")
+        guest_email = next(b for to, _s, b in self.sent_emails if to == "guest@example.org")
+        self.assertIn("/my/confirm/", leader_email)
+        self.assertIn("/my/confirm/", guest_email)
+        self.assertIn("Optional", leader_email)
+        self.assertIn("Optional", guest_email)
+
+    def test_link_actually_works_to_set_a_password_and_see_the_booking(self):
+        self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
+        guest_email = next(b for to, _s, b in self.sent_emails if to == "guest@example.org")
+        token = guest_email.split("/my/confirm/")[1].split()[0].strip()
+        user = self.store.find_user_by_email("guest@example.org")
+        from app.security import hash_token
+        resolved = self.store.find_user_by_confirm_token_hash(hash_token(token))
+        self.assertEqual(resolved.user_id, user.user_id)
+
+    def test_already_confirmed_member_gets_no_setup_link(self):
+        # leader already has a password set (e.g. booked solo before) --
+        # their guest-booking email should NOT dangle a redundant link.
+        from app.security import hash_secret
+        leader = self.store.upsert_user_for_booking("leader@example.org", "Leader")
+        h, s = hash_secret("hunter2222")
+        self.store.set_password(leader.user_id, h, s)
+        self.sent_emails.clear()
+        self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
+        leader_email = next(b for to, _s, b in self.sent_emails if to == "leader@example.org")
+        guest_email = next(b for to, _s, b in self.sent_emails if to == "guest@example.org")
+        self.assertNotIn("/my/confirm/", leader_email)
+        self.assertIn("/my/confirm/", guest_email)  # guest is still brand new
+
+
 class PartyCancellationTest(GuestBookingTestBase):
     def test_canceling_one_member_does_not_affect_the_other(self):
         self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])

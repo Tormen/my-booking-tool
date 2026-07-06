@@ -616,6 +616,18 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(self.store.count_confirmed("yoga-class-1", self.occ_date), 1)
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertIn("Booking confirmed: Dynamic Ashtanga Vinyasa Yoga on " + self.occ_date, subjects)
+        # 2026-07-06 regression guard: the "Booking confirmed" email fired
+        # right after setting a password must NOT also dangle a redundant
+        # "set up your account" link -- this exercises the exact path
+        # where the in-memory `user` object my_confirm() already had
+        # (fetched before set_password()) could go stale and still show
+        # an empty password_hash to _send_booking_result_guest_email()'s
+        # new account-setup-link check.
+        confirmed_booking_email = next(
+            b for _, s, b in self.sent_emails
+            if s == "Booking confirmed: Dynamic Ashtanga Vinyasa Yoga on " + self.occ_date
+        )
+        self.assertNotIn("/my/confirm/", confirmed_booking_email)
 
     def test_my_confirm_recheck_capacity_lands_on_waitlist_if_filled_meanwhile(self):
         # capacity=1: someone else confirms and fills the only spot WHILE

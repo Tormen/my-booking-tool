@@ -609,10 +609,30 @@ class App:
         _send_party_admin_email()), instead of the admin getting one nearly
         identical email per person. Every guest gets an account (see
         my_confirm()), so this also invites them to /my rather than only
-        handing them a one-shot cancel link."""
+        handing them a one-shot cancel link.
+
+        If this person has no password set yet (2026-07-06: true for every
+        brand-new guest -- see Store.add_party_registrations_checking_capacity's
+        docstring for why guest bookings deliberately skip the usual
+        confirm-by-email gate, so a guest never gets THAT separate email --
+        but also true for a solo party leader who happened to be new too),
+        an OPTIONAL account-setup link is appended inline, reusing
+        _confirm_url() rather than firing _send_confirm_email() as a
+        second email: "OPTIONALLY allow them to create an account for
+        them to access their space and set a password". Clicking it (or
+        not) has no effect on the booking itself -- it's already
+        confirmed/waitlisted regardless, unlike the STATUS_PENDING_CONFIRMATION
+        gate a solo brand-new booking goes through."""
         cancel_url = f"{self.settings.base_url}/cancel/{cancel_token}"
         my_url = f"{self.settings.base_url}/my"
         details = self._booking_details_text(course, occ_date)
+        account_line = ""
+        if not user.password_hash:
+            confirm_url = self._confirm_url(user)
+            account_line = (
+                f"Optional: set up a password to view/manage this from {my_url} anytime: "
+                f"{confirm_url}\n"
+            )
         if status == STATUS_WAITLISTED:
             send_mail(
                 self.settings, user.email, f"Waitlisted: {course.title} on {occ_date}",
@@ -620,7 +640,8 @@ class App:
                 "by email if a spot opens up:\n\n"
                 f"{details}\n"
                 f"Manage your bookings any time: {my_url}\n"
-                f"Leave the waitlist directly: {cancel_url}\n",
+                f"Leave the waitlist directly: {cancel_url}\n"
+                f"{account_line}",
             )
         else:
             send_mail(
@@ -628,7 +649,8 @@ class App:
                 "Your spot is confirmed:\n\n"
                 f"{details}\n"
                 f"Manage your bookings any time: {my_url}\n"
-                f"Cancel this booking directly: {cancel_url}\n",
+                f"Cancel this booking directly: {cancel_url}\n"
+                f"{account_line}",
             )
 
     def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
@@ -767,23 +789,33 @@ class App:
         showing nothing."""
         return urlparse(self.settings.base_url).hostname or self.settings.base_url
 
+    def _confirm_url(self, user) -> str:
+        """(Re)generates a confirm-or-reset token for `user` (see
+        storage.User.confirm_token_hash) and returns the /my/confirm/<token>
+        URL for it -- WITHOUT sending anything. Factored out of
+        _send_confirm_email() (2026-07-06) so a guest-booking email can
+        embed an "optional: set up your account" link inline (see
+        _send_booking_result_guest_email()) instead of firing a second,
+        separate email at someone who's already getting one for the
+        booking itself. Regenerating unconditionally on every call is
+        deliberate: simpler than trying to detect/reuse an already-
+        outstanding token, and it invalidates any earlier link, which is
+        exactly the right behavior for a "resend" anyway."""
+        token = new_token()
+        self.store.set_confirm_token(user.user_id, hash_token(token), now_iso())
+        return f"{self.settings.base_url}/my/confirm/{token}"
+
     def _send_confirm_email(self, user) -> None:
-        """(Re)generates a confirm-or-reset token and emails the "set your
-        password" link -- called from a booking under a not-yet-confirmed
-        email, and from /my/reset's unified resend/forgot-password flow.
-        Regenerating unconditionally on every call is deliberate: simpler
-        than trying to detect/reuse an already-outstanding token, and it
-        invalidates any earlier link, which is exactly the right behavior
-        for a "resend" anyway.
+        """Emails the "set your password" link on its own -- called from a
+        booking under a not-yet-confirmed email, and from /my/reset's
+        unified resend/forgot-password flow.
 
         Names the site in both subject and body (see _site_label()) --
         without it this email is just "Confirm your account" with no
         indication of what account, for what, or from whom, which is
         confusing on its own out of context (caught in practice
         2026-07-05: "explain in the email an account for WHAT ?!")."""
-        token = new_token()
-        self.store.set_confirm_token(user.user_id, hash_token(token), now_iso())
-        confirm_url = f"{self.settings.base_url}/my/confirm/{token}"
+        confirm_url = self._confirm_url(user)
         first_time = not user.password_hash
         site = self._site_label()
         subject = f"Confirm your {site} account" if first_time else f"Reset your {site} password"
@@ -1291,6 +1323,15 @@ class App:
                 )
             pw_hash, pw_salt = hash_secret(password)
             self.store.set_password(user.user_id, pw_hash, pw_salt)
+            # Keep this in-memory `user` object in sync with the store --
+            # it's reused below by _send_booking_result_email() (via
+            # _send_booking_result_guest_email()), which now checks
+            # user.password_hash to decide whether to append an
+            # account-setup link (2026-07-06); without this, that check
+            # would still see the pre-password-set empty value and offer
+            # a redundant "set up your account" link to someone who just
+            # set their password seconds ago.
+            user.password_hash, user.password_salt = pw_hash, pw_salt
 
             confirmed_lines = []
             for reg in pending:

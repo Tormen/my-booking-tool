@@ -832,8 +832,14 @@ there isn't room for all of them) everyone is waitlisted together, never
 split. A brand-new guest's email does NOT have to click a confirmation
 link first (unlike a brand-new solo booker) -- the leader vouches for
 whoever they add, same trust model SimplyMeet.me used; guests still get a
-real account and can later set a password to manage their own booking via
-`/my`. If adding a guest would exceed the session's real remaining
+real account. Their booking email (confirmed or waitlisted) includes an
+OPTIONAL "set up your account" link (2026-07-06) -- the same
+/my/confirm/&lt;token&gt; flow a solo booker's first confirmation email uses --
+so they can set a password and see/manage this booking at `/my` later; the
+booking itself is never gated behind clicking it. Anyone in the party who
+already has a password set (an existing account) gets no such link, so a
+returning guest's email doesn't dangle a redundant offer. If adding a
+guest would exceed the session's real remaining
 capacity, a warning appears live on the form (before you submit) so you
 can remove a guest and get confirmed instantly instead of waitlisting the
 whole group -- this uses the TRUE spots-left count, never the
