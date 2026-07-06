@@ -857,7 +857,7 @@ class App:
             banner=banner,
         )
 
-    def _session_banner_html(self, environ) -> str:
+    def _session_banner_html(self, environ, *, on_my_page: bool = False) -> str:
         """A small "Logged in as x@example.org - Logout" banner for the
         dynamic pages a logged-in guest might reach while browsing/booking
         (2026-07-06: "/my should have a 'new booking' button... but with a
@@ -873,17 +873,25 @@ class App:
         also go back to https://booking.example.org") -- this banner now shows on
         /my too (see my()), so without this, a guest on /my had no
         one-click way back to the homepage other than the separate
-        target="_blank" link my() already has for that."""
+        target="_blank" link my() already has for that.
+
+        `on_my_page=True` (2026-07-09, the operator, screenshot of /my's own
+        banner: "My bookings link on the my bookings page (in top-bar) :(")
+        drops the "My bookings" link -- a link back to the exact page
+        you're already looking at is dead weight, not a shortcut. Only
+        my() passes this; /courses and /book (where "My bookings" is a
+        genuine link elsewhere) leave it at the default."""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
             return ""
         user = self.store.find_user_by_id(session["user_id"])
         if user is None:
             return ""
+        my_bookings_link = "" if on_my_page else '<a href="/my">My bookings</a> &middot; '
         return (
             '<div class="session-banner">'
             f"<span>Logged in as <b>{esc(user.email)}</b></span>"
-            '<span><a href="/my">My bookings</a> &middot; '
+            f'<span>{my_bookings_link}'
             f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a> &middot; '
             '<form method="post" action="/my/logout">'
             '<button type="submit" class="link-button">Log out</button></form></span>'
@@ -1353,7 +1361,7 @@ class App:
             </dialog>""" + _DIALOG_WIRING_SCRIPT
             return (
                 "200 OK", [("Content-Type", "text/html")],
-                page("My bookings", body, banner=self._session_banner_html(environ)),
+                page("My bookings", body, banner=self._session_banner_html(environ, on_my_page=True)),
             )
 
         error = None

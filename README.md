@@ -948,6 +948,13 @@ banner: the homepage never shows "Logged in as ...", only a compact
 "My bookings"/"Log out" swap-in for its plain "Login" button, since it's a
 much smaller/differently-styled corner widget by design.
 
+On `/my` itself the "My bookings" link is dropped from the banner
+(`_session_banner_html(..., on_my_page=True)`, 2026-07-09) -- the operator,
+looking at a screenshot of `/my`'s own banner: "My bookings link on the my
+bookings page (in top-bar) :(". A link back to the exact page you're
+already looking at isn't a shortcut, just clutter -- `/courses` and
+`/book` still show it since it's a genuine link elsewhere from there.
+
 ## Booking page layout (`/book/<shortname>`)
 
 Dates are shown as clickable buttons (not a dropdown), each showing the

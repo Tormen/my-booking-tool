@@ -354,6 +354,10 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn('class="session-banner"', body)
         self.assertIn("regular@example.org", body)
         self.assertIn('action="/my/logout"', body)
+        # Unlike /my's own banner (on_my_page=True), /courses is a
+        # different page from /my, so the "My bookings" link is a genuine
+        # shortcut here and must stay.
+        self.assertIn(">My bookings<", body)
 
     def test_courses_shows_no_banner_when_anonymous(self):
         _status, _headers, body = self.app.courses("GET", {})
@@ -1475,6 +1479,17 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self.app.my("GET", environ)
         self.assertIn('class="session-banner"', body)
         self.assertIn("regular@example.org", body)
+
+    def test_my_pages_own_banner_omits_the_my_bookings_link(self):
+        # 2026-07-09, the operator, screenshot of /my's own banner: "My bookings
+        # link on the my bookings page (in top-bar) :(" -- a link back to
+        # the exact page you're already on is dead weight. /courses and
+        # /book still show it (see SessionBannerTest below).
+        user, environ = self._login_as_guest("regular@example.org")
+        _status, _headers, body = self.app.my("GET", environ)
+        banner = body[body.index('class="session-banner"'):body.index("</div>")]
+        self.assertNotIn(">My bookings<", banner)
+        self.assertIn(self.settings.base_url, banner)  # homepage + Log out still there
 
     def test_my_page_bottom_row_has_only_the_delete_account_button(self):
         # The banner's own Logout replaces the old standalone "Log out"
