@@ -1285,7 +1285,15 @@ class App:
         # archive with a hashed email (Store.erase_user), and so did every
         # one of their registration rows, regardless of status. See
         # security.hash_email_for_erasure/is_erased_email.
-        all_regs = [Registration(**r) for r in self.store.read_registrations(scope="all")]
+        # Read live and archived separately (not just scope="all") so the
+        # past/upcoming filter below can treat archived rows as always-past
+        # regardless of their occurrence_date -- an erased user's booking
+        # was already force-canceled by Store.erase_user before archiving,
+        # so it's never something the "today + future only" view needs to
+        # surface; it should only appear once "include past" is toggled.
+        live_regs = [Registration(**r) for r in self.store.read_registrations(scope="live")]
+        archived_regs = [Registration(**r) for r in self.store.read_registrations(scope="archived")]
+        all_regs = live_regs + archived_regs
         users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
         # "Times booked" has always counted every registration ever made by
         # this user_id, live or since-canceled -- computed here from the
@@ -1293,16 +1301,17 @@ class App:
         # only reads the live CSV), so an erased user's historical count
         # doesn't drop to 0 just because their rows moved to the archive.
         times_by_user = Counter(r.user_id for r in all_regs)
-        regs = all_regs if show_past else [r for r in all_regs if date.fromisoformat(r.occurrence_date) >= today]
+        regs = all_regs if show_past else [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
         regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname))
         rows = []
         for r in regs:
             user = users_by_id.get(r.user_id)
             erased = user is not None and is_erased_email(user.email)
-            # course_shortname is the CSV's own internal key -- show the
-            # human title here too (same reasoning as the guest "My
-            # bookings" table), falling back to the shortname only if the
-            # course was since removed from settings.toml.
+            # The Course column shows the short internal key (r.course_shortname
+            # below), not the human title -- compact and matches how admins
+            # already refer to courses via /book/<shortname>. The full title
+            # is still used in the cancel-confirmation dialog text, where a
+            # human-readable name reads better than a shortname.
             course = self.settings.course(r.course_shortname)
             title = course.title if course else r.course_shortname
             if erased:
@@ -1350,7 +1359,7 @@ class App:
                 # CSV, so admin_cancel() couldn't find one of these anyway.
                 actions = ""
             rows.append(
-                f"<tr><td>{esc(r.status)}</td><td>{esc(title)}</td>"
+                f"<tr><td>{esc(r.status)}</td><td>{esc(r.course_shortname)}</td>"
                 f"<td>{esc(r.occurrence_date)}</td>{name_cell}{email_cell}"
                 f"<td>{esc(r.registered_at)}</td><td>{times}</td>"
                 f"<td>{actions}</td></tr>"

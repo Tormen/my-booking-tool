@@ -900,14 +900,16 @@ class BookingFlowTest(unittest.TestCase):
 
     # -- /admin overview: same shortname-leak audit as /my's table ----------
 
-    def test_admin_overview_shows_course_title_not_shortname(self):
+    def test_admin_overview_shows_course_shortname_not_title(self):
+        # 2026-07-06: the Course column shows the internal shortname (compact,
+        # matches /book/<shortname>) -- not the human title. The cancel-dialog
+        # text still uses the full title (see the cancel-dialog test below).
         self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         admin_sid = webapp._new_session({"kind": "admin"})
         environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
-        self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
-        self.assertNotIn("yoga-class-1", body)
+        self.assertIn("yoga-class-1", body)
 
     def test_admin_overview_has_filter_and_sort_wired_to_the_table(self):
         self._login_as_guest("regular@example.org")
@@ -943,6 +945,25 @@ class BookingFlowTest(unittest.TestCase):
         row_start = body.index("[erased]")
         row_html = body[row_start:row_start + 400]
         self.assertNotIn("confirm-dialog-btn", row_html)
+
+    def test_admin_overview_hides_archived_row_without_past_toggle_even_if_future_dated(self):
+        # 2026-07-06: archived (erased) registrations are always excluded
+        # from the default "today + future only" view regardless of their
+        # occurrence_date -- an erased user's booking was already
+        # force-canceled before archiving, so a still-future-dated archived
+        # row must not leak into the default view just because its date
+        # hasn't passed yet. It should only surface once "include past" is
+        # toggled on.
+        user, environ = self._login_as_guest("erased-guest3@example.org")
+        self._book("erased-guest3@example.org", name="ErasedGuest3")
+        erase_user_by_email(self.store, self.settings, "erased-guest3@example.org", today=date.fromisoformat(self.occ_date))
+        admin_sid = webapp._new_session({"kind": "admin"})
+        no_past_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", no_past_environ)
+        self.assertNotIn("[erased]", body)
+        past_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", past_environ)
+        self.assertIn("[erased]", body)
 
     def test_admin_overview_times_booked_counts_archived_registrations_too(self):
         user, environ = self._login_as_guest("erased-guest2@example.org")
