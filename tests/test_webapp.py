@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from app import webapp
 from app.caldav_client import CalDAVClient, Response
 from app.erasure import erase_user_by_email
-from app.security import hash_admin_password, hash_secret
+from app.security import hash_admin_password, hash_secret, hash_token
 from app.slots import Occurrence, build_occurrences
 from app.storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store,
@@ -762,6 +762,84 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("at least 8 characters", body)
         user = self.store.find_user_by_email("newguest@example.org")
         self.assertEqual(user.password_hash, "")
+
+    # -- my_confirm: link expiry + "a newer link was sent" (2026-07-07) -----
+    # the operator: "when will the confirmation links be invalid?" (they never
+    # expired before -- see CONFIRM_TOKEN_TTL_HOURS) and "a new email
+    # should invalidate the pending link ... [and] clicking the
+    # invalidated link should inform the user that there should be a NEW
+    # link coming to him".
+
+    def test_my_confirm_link_older_than_ttl_shows_expired_not_invalid(self):
+        self._book("newguest@example.org")
+        token = self._confirm_token_from_last_email()
+        user = self.store.find_user_by_email("newguest@example.org")
+        # Backdate the SAME token's created_at past the TTL -- set_confirm_token
+        # takes a hash + timestamp, so this re-stores the identical hash
+        # (the raw token in the emailed link is unchanged) with an old clock.
+        stale = (datetime.now(timezone.utc) - timedelta(hours=webapp.CONFIRM_TOKEN_TTL_HOURS, minutes=1)).isoformat(
+            timespec="seconds"
+        )
+        self.store.set_confirm_token(user.user_id, hash_token(token), stale)
+        _status, _headers, body = self.app.my_confirm("GET", token, {})
+        self.assertIn("expired", body.lower())
+        self.assertIn(f"{webapp.CONFIRM_TOKEN_TTL_HOURS} hours", body)
+        self.assertNotIn("invalid or has already been used", body)
+
+    def test_my_confirm_link_within_ttl_still_works(self):
+        self._book("newguest@example.org")
+        token = self._confirm_token_from_last_email()
+        _status, _headers, body = self.app.my_confirm("GET", token, {})
+        self.assertIn("Setting a password for", body)
+
+    def test_my_confirm_superseded_link_says_a_newer_one_was_sent(self):
+        self._book("newguest@example.org")
+        old_token = self._confirm_token_from_last_email()
+        # A second request for the same email (my_reset's unified
+        # resend/forgot-password flow -- see _send_confirm_email) generates
+        # a fresh token and, per Store.set_confirm_token, shifts the old
+        # hash into prev_confirm_token_hash before overwriting it.
+        self._post(self.app.my_reset, (), {"email": "newguest@example.org"})
+        new_token = self._confirm_token_from_last_email()
+        self.assertNotEqual(old_token, new_token)
+
+        _status, _headers, old_body = self.app.my_confirm("GET", old_token, {})
+        self.assertIn("newer link", old_body.lower())
+        self.assertIn("check your inbox", old_body.lower())
+        self.assertNotIn("invalid or has already been used", old_body)
+
+        _status, _headers, new_body = self.app.my_confirm("GET", new_token, {})
+        self.assertIn("Setting a password for", new_body)
+
+    def test_my_confirm_unknown_garbage_token_still_shows_generic_message(self):
+        # No confirm/reset flow was ever started for this exact string --
+        # neither the expiry nor the "superseded" path should fire.
+        _status, _headers, body = self.app.my_confirm("GET", "totally-made-up-token", {})
+        self.assertIn("invalid or has already been used", body)
+
+    def test_my_confirm_already_used_link_is_not_mistaken_for_superseded(self):
+        self._book("newguest@example.org")
+        token = self._confirm_token_from_last_email()
+        self._post(self.app.my_confirm, (token,), {"password": "hunter22"})
+        # Clicking the same (now-consumed) link again: set_password() clears
+        # both confirm_token_hash AND prev_confirm_token_hash, so this must
+        # fall through to the generic message, not "a newer link was sent".
+        _status, _headers, body = self.app.my_confirm("GET", token, {})
+        self.assertIn("invalid or has already been used", body)
+
+    # -- _send_confirm_email: full https:// URL + expiry note (2026-07-07) --
+    # the operator: "also please write rather https://booking.example.org in the text".
+
+    def test_confirm_email_body_spells_out_the_full_base_url(self):
+        self._book("newguest@example.org")
+        _, _, body = self.sent_emails[-1]
+        self.assertIn(f"confirm your {self.settings.base_url} booking account", body)
+
+    def test_confirm_email_states_the_expiry_and_that_older_links_are_void(self):
+        self._book("newguest@example.org")
+        _, _, body = self.sent_emails[-1]
+        self.assertIn(f"expires in {webapp.CONFIRM_TOKEN_TTL_HOURS} hours", body)
+        self.assertIn("only the link in this latest email will work", body)
 
     # -- my_reset: unified resend/forgot-password, never leaks existence ---
 

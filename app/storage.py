@@ -23,7 +23,8 @@ from .security import sanitize_csv_field
 
 USER_FIELDS = [
     "user_id", "email", "name", "password_hash", "password_salt",
-    "confirm_token_hash", "confirm_token_created_at", "created_at", "last_login_at",
+    "confirm_token_hash", "confirm_token_created_at", "prev_confirm_token_hash",
+    "created_at", "last_login_at",
 ]
 REG_FIELDS = [
     "registration_id", "course_shortname", "occurrence_date", "user_id", "status",
@@ -67,6 +68,18 @@ class User:
     # password" (see app/webapp.py's unified /my/reset).
     confirm_token_hash: str = ""
     confirm_token_created_at: str = ""
+    # The hash that confirm_token_hash held just before its last overwrite
+    # (2026-07-07, the operator: "a new email should invalidate the pending link
+    # ... and clicking the invalidated link should inform the user that
+    # there should be a NEW link coming to him"). set_confirm_token() always
+    # ALREADY invalidated the old link (find_user_by_confirm_token_hash
+    # simply stops matching it), but the guest just saw "invalid or already
+    # used" with no clue a fresher one is on its way. Keeping just the ONE
+    # immediately-preceding hash (not a full history) lets my_confirm() show
+    # that specific, friendlier message for the common case -- clicking an
+    # email 2+ generations stale still falls back to the generic message,
+    # a deliberate simplicity/CSV-row-growth tradeoff, not an oversight.
+    prev_confirm_token_hash: str = ""
     created_at: str = ""
     last_login_at: str = ""
 
@@ -246,10 +259,18 @@ class Store:
     def set_confirm_token(self, user_id: str, token_hash: str, created_at: str) -> None:
         """Stores a pending confirm-or-reset token for this user -- see
         User.confirm_token_hash's docstring for why the same field covers
-        both the first-ever confirmation and a later password reset."""
+        both the first-ever confirmation and a later password reset.
+
+        Shifts whatever was previously in confirm_token_hash into
+        prev_confirm_token_hash first (2026-07-07) -- see that field's own
+        docstring -- so my_confirm() can later tell "this exact link was
+        just superseded by a newer one" apart from "this link never
+        existed"/"already used", even though both already stop matching
+        confirm_token_hash the instant this runs."""
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             for row in rows:
                 if row["user_id"] == user_id:
+                    row["prev_confirm_token_hash"] = row["confirm_token_hash"]
                     row["confirm_token_hash"] = token_hash
                     row["confirm_token_created_at"] = created_at
                     write(rows)
@@ -264,9 +285,29 @@ class Store:
                     return User(**row)
         return None
 
+    def find_user_by_prev_confirm_token_hash(self, token_hash: str) -> User | None:
+        """2026-07-07 -- see User.prev_confirm_token_hash. Used only to
+        render a friendlier "a newer link was already sent" message; never
+        treated as proof of identity/ownership the way the CURRENT hash is.
+        Reads via .get() (not row[...]) since an existing deployment's
+        users.csv predates this column -- its on-disk header won't gain
+        prev_confirm_token_hash until the next write() to that file rewrites
+        it with the full USER_FIELDS header (same lazy-migration pattern
+        every earlier column addition here has relied on)."""
+        if not token_hash:
+            return None
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
+            for row in rows:
+                if row.get("prev_confirm_token_hash") == token_hash:
+                    return User(**row)
+        return None
+
     def set_password(self, user_id: str, password_hash: str, password_salt: str) -> None:
         """Sets the account's real login password and consumes (clears) any
-        pending confirm/reset token -- a used link can't be replayed."""
+        pending confirm/reset token -- a used link can't be replayed. Clears
+        prev_confirm_token_hash too, so an older superseded link can't keep
+        showing "a newer one is coming" after the account is already fully
+        set up and confirmed."""
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             for row in rows:
                 if row["user_id"] == user_id:
@@ -274,6 +315,7 @@ class Store:
                     row["password_salt"] = password_salt
                     row["confirm_token_hash"] = ""
                     row["confirm_token_created_at"] = ""
+                    row["prev_confirm_token_hash"] = ""
                     write(rows)
                     return
 

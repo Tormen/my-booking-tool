@@ -87,6 +87,13 @@ reset_ip_limiter = RateLimiter(max_attempts=20, window_seconds=3600)
 # the guest on the set-password form.
 MIN_PASSWORD_LENGTH = 8
 
+# 2026-07-07, the operator: "when will the confirmation links be invalid?" -- until
+# this, they never expired at all (confirm_token_created_at was stored but
+# nothing ever checked it). A leaked/forwarded/very-old link would work
+# forever. 24h matches typical "reset password" link conventions -- see
+# my_confirm()'s expiry check and _send_confirm_email()'s email text.
+CONFIRM_TOKEN_TTL_HOURS = 24
+
 # Guest bookings (2026-07, "+ Add participant" on the booking form, mirroring
 # SimplyMeet.me's own UX): a hard ceiling on how many guest rows book()
 # will ever look for (guest_email_0.. guest_email_{MAX_GUESTS-1}), so a
@@ -905,20 +912,36 @@ class App:
         booking under a not-yet-confirmed email, and from /my/reset's
         unified resend/forgot-password flow.
 
-        Names the site in both subject and body (see _site_label()) --
-        without it this email is just "Confirm your account" with no
-        indication of what account, for what, or from whom, which is
-        confusing on its own out of context (caught in practice
-        2026-07-05: "explain in the email an account for WHAT ?!")."""
+        Names the site in the subject (see _site_label()) -- without it
+        this email is just "Confirm your account" with no indication of
+        what account, for what, or from whom, which is confusing on its
+        own out of context (caught in practice 2026-07-05: "explain in the
+        email an account for WHAT ?!"). The BODY text spells out the full
+        https://... base_url instead (2026-07-07, the operator: "please write
+        rather https://booking.example.org in the text") -- a subject line reads
+        oddly with a URL scheme in it, but the body sentence doesn't.
+
+        Also states the link's expiry (CONFIRM_TOKEN_TTL_HOURS -- see
+        my_confirm()) and that any older link is now void: this call
+        always supersedes whatever confirm/reset link was outstanding
+        before it (see Store.set_confirm_token), so a guest who requested
+        twice needs to know the first email's link won't work anymore and
+        why (2026-07-07, the operator: "a new email should invalidate the pending
+        link ... [and] inform the user that there should be a NEW link
+        coming to him")."""
         confirm_url = self._confirm_url(user)
         first_time = not user.password_hash
         site = self._site_label()
+        site_url = self.settings.base_url
         subject = f"Confirm your {site} account" if first_time else f"Reset your {site} password"
-        verb = (f"confirm your {site} booking account and set a password"
-                if first_time else f"set a new password for your {site} booking account")
+        verb = (f"confirm your {site_url} booking account and set a password"
+                if first_time else f"set a new password for your {site_url} booking account")
         send_mail(
             self.settings, user.email, subject,
             f"Click below to {verb}:\n\n{confirm_url}\n\n"
+            f"This link expires in {CONFIRM_TOKEN_TTL_HOURS} hours. If you requested this more "
+            "than once, only the link in this latest email will work -- any earlier one is "
+            "no longer valid.\n\n"
             "If you didn't request this, you can safely ignore this email.",
         )
 
@@ -1527,15 +1550,49 @@ class App:
           <div class="submit-row"><button type="submit">Set password</button></div>
         </form>"""
 
+    def _confirm_token_expired(self, user) -> bool:
+        """2026-07-07 -- see CONFIRM_TOKEN_TTL_HOURS. `user` must already be
+        the result of a successful find_user_by_confirm_token_hash lookup
+        (i.e. confirm_token_created_at was set by the matching
+        set_confirm_token call); an empty value is treated as NOT expired
+        rather than raising, purely defensively."""
+        if not user.confirm_token_created_at:
+            return False
+        created = datetime.fromisoformat(user.confirm_token_created_at)
+        return datetime.now(timezone.utc) - created > timedelta(hours=CONFIRM_TOKEN_TTL_HOURS)
+
     def my_confirm(self, method: str, token: str, environ):
         """Landing page for BOTH the first-time account-confirmation link
         and a later password-reset link -- see storage.User.confirm_token_hash.
         Setting a password here also promotes every STATUS_PENDING_CONFIRMATION
         registration for this user, re-checking capacity fresh at this exact
         moment (it may have filled up while the account sat unconfirmed) --
-        see Store.confirm_pending_registration."""
-        user = self.store.find_user_by_confirm_token_hash(hash_token(token))
+        see Store.confirm_pending_registration.
+
+        Three distinct "this won't work" outcomes (2026-07-07, the operator asked
+        "when will the confirmation links be invalid?" and "clicking the
+        invalidated link should inform the user that there should be a NEW
+        link coming to him"), checked in this order:
+          1. Found + past CONFIRM_TOKEN_TTL_HOURS -> "expired" message.
+          2. Not found, but matches prev_confirm_token_hash -> "a newer
+             link was already sent to you" message (this is the common
+             case when a guest double-submits Sign up/reset).
+          3. Not found anywhere -> generic "invalid or already used"
+             message (garbage token, or already consumed to set a
+             password)."""
+        token_hash = hash_token(token)
+        user = self.store.find_user_by_confirm_token_hash(token_hash)
+        if user is not None and self._confirm_token_expired(user):
+            body = (f'<p>This link has expired -- confirmation links are only valid for '
+                     f'{CONFIRM_TOKEN_TTL_HOURS} hours. '
+                     '<a href="/my/reset">Request a new one</a>.</p>')
+            return "200 OK", [("Content-Type", "text/html")], page("Link expired", body)
         if user is None:
+            superseded = self.store.find_user_by_prev_confirm_token_hash(token_hash)
+            if superseded is not None:
+                body = ('<p>This link has been disabled because a newer link was already '
+                        'sent to you -- check your inbox for the latest email.</p>')
+                return "200 OK", [("Content-Type", "text/html")], page("Link replaced", body)
             body = ('<p>This link is invalid or has already been used. '
                     '<a href="/my/reset">Request a new one</a>.</p>')
             return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)

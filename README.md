@@ -989,6 +989,20 @@ overbooking. Each promoted registration gets its own confirmation email
 and its own cancel link (generated at promotion time, not at the original
 pending-booking time).
 
+**Link expiry & re-requesting (2026-07-07):** a confirm/reset link is only
+valid for `CONFIRM_TOKEN_TTL_HOURS` (24) after it was sent -- an older link
+shows "This link has expired" rather than silently pretending to work.
+Requesting a new link (via `/my/reset` or `/my/signup`) also immediately
+invalidates whatever link was outstanding before it; clicking that
+now-superseded link shows "a newer link was already sent to you -- check
+your inbox", not the generic invalid-link message, so a guest who
+double-submitted knows to look for the newest email instead of assuming
+something's broken. The confirm/reset email itself states the expiry and
+that only the latest email's link works. Both the expiry and the
+superseded-link check only recognize the single most recent request; a
+link from two or more requests back falls back to the generic "invalid or
+already been used" message.
+
 `/my` shows two CSS-only tabs (2026-07-06, no JS needed to switch between
 them): **Login** (default) and **Sign up**. Login asks for email +
 password (relabeled from "PIN"), and links to `/my/reset` for both
