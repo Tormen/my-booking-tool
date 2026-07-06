@@ -423,6 +423,17 @@ class App:
                     + self._booking_details_text(course, occurrence_date_str)
                     + f"\nManage or cancel this booking any time: {self.settings.base_url}/my\n",
                 )
+                # Both sides notified, same standing default as every other
+                # booking/cancellation email (see _send_booking_result_email/
+                # send_cancellation_emails) -- this was the one path that
+                # only told the promoted guest and left admin_email finding
+                # out some other way.
+                send_mail(
+                    self.settings, self.settings.admin_email,
+                    f"Promoted from waitlist: {course.title} on {occurrence_date_str}",
+                    f"{user.name} <{user.email}> was promoted from the waitlist to confirmed for:\n\n"
+                    + self._booking_details_text(course, occurrence_date_str),
+                )
         self._sync(course_shortname, date.fromisoformat(occurrence_date_str))
 
     # -- routing -----------------------------------------------------------

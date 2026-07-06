@@ -554,7 +554,7 @@ class BookingFlowTest(unittest.TestCase):
         # layout -- see _booking_details_text().
         guest0, environ0 = self._login_as_guest("guest0@example.org", "Guest0")
         self._book("guest0@example.org", name="Guest0")  # capacity=1, fills it
-        self._login_as_guest("guest1@example.org", "Guest1")
+        guest1, _environ1 = self._login_as_guest("guest1@example.org", "Guest1")
         self._book("guest1@example.org", name="Guest1")  # waitlisted
         reg0 = self.store.registrations_for_user(guest0.user_id)[0]
         self.sent_emails.clear()
@@ -564,6 +564,24 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", email_body)
         self.assertIn("Where: Example Community Gym, Room 1", email_body)
         self.assertIn("Manage or cancel this booking any time: https://example.org/my", email_body)
+
+        # 2026-07-06 fix: admin_email must ALSO get a copy, same standing
+        # default as every other booking/cancellation email in this app --
+        # this was the one path that silently left admin_email out.
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("admin@example.org", to_addrs)
+        admin_mail = next(
+            b for t, s, b in self.sent_emails
+            if t == "admin@example.org" and s.startswith("Promoted from waitlist:")
+        )
+        self.assertEqual(
+            next(s for t, s, _ in self.sent_emails if t == "admin@example.org" and s.startswith("Promoted")),
+            f"Promoted from waitlist: Dynamic Ashtanga Vinyasa Yoga on {self.occ_date}",
+        )
+        self.assertIn("Guest1 <guest1@example.org>", admin_mail)
+        self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
+        self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", admin_mail)
+        self.assertIn("Where: Example Community Gym, Room 1", admin_mail)
 
     # -- my_confirm: sets password, promotes pending ------------------------
 
