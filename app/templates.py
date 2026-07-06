@@ -20,7 +20,22 @@ def page(title: str, body: str, banner: str = "") -> str:
     previously adjacent buttons/forms in the same row relied on plain
     inline whitespace for spacing, which visually collapsed them together
     (worst on /my's bottom row). One shared fix here covers every
-    .submit-row in the app, not just /my's."""
+    .submit-row in the app, not just /my's.
+
+    .guests-section/.guest-row (2026-07-09, the operator, screenshot of the
+    booking form's "+ Add participant" rows: "lets please group each
+    guest with it's remove link visibly. and visibly separate the guests
+    from the main user ... here this is too close and so is the + Add
+    participant link below") -- previously neither class had ANY CSS at
+    all, so a guest row was just three bare, unboxed form fields blending
+    into the main "Your email" field above and the "+ Add participant"
+    link below. .guests-section now gets a top border + padding to set
+    the whole guest block apart from the main guest's own fields;
+    .guest-row boxes each individual guest's email+name+"Remove
+    participant" together like a mini-card, so it reads as one group.
+    See app/webapp.py's _book_page() guest-rows script, which is where
+    .guest-row elements are actually created (client-side, one per "+ Add
+    participant" click)."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -52,6 +67,11 @@ label{{display:block;margin-top:.6em}}
 .description{{background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;padding:1em 1.2em;margin:.8em 0}}
 .description ul,.description ol{{margin:.4em 0;padding-left:1.4em}}
 .description p:first-child{{margin-top:0}} .description p:last-child{{margin-bottom:0}}
+.guests-section{{margin-top:1.2em;padding-top:1em;border-top:1px solid #ddd}}
+.guest-row{{border:1px solid #ddd;border-radius:8px;padding:.8em 1em .6em;margin-bottom:.8em}}
+.guest-row label{{margin-top:.4em}} .guest-row label:first-child{{margin-top:0}}
+.guest-row .remove-guest-btn{{display:inline-block;margin-top:.6em}}
+#add-guest-btn{{display:inline-block;margin-top:.2em}}
 .submit-row{{margin-top:1.4em;display:flex;flex-wrap:wrap;align-items:center;gap:.6em}}
 button:disabled{{opacity:.5;cursor:not-allowed}}
 .link-button{{background:none;border:none;padding:0;margin:0;color:#196B24;text-decoration:underline;font:inherit;cursor:pointer}}
