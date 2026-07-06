@@ -711,6 +711,41 @@ each provider you use.
 `privacy.html`, and `impressum.html` via a small fine-print footer -- see
 `site/index.html.example` for a minimal generic starting point.
 
+**Login banner (2026-07-06):** `site/index.html.example` now has a small,
+static "Login" link in the top-right corner, linking to `/my`. This repo
+has no way to touch your own real, hand-maintained `site/index.html` for
+you (it's gitignored, not templated -- see "Generic template vs. your
+real config" above), so if you want this on your live homepage, add it
+yourself: paste this CSS into your `<style>` block --
+
+```css
+.top-bar { display: flex; justify-content: flex-end; margin-bottom: 0.5em; }
+.login-btn { font-size: 0.85em; padding: 0.3em 0.9em; border: 1px solid #ccc; border-radius: 4px;
+             text-decoration: none; color: #222; }
+.login-btn:hover { background: #f4f7f4; }
+```
+
+-- and this right after `<body>`:
+
+```html
+<div class="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+```
+
+The `target="_top"` is load-bearing, not decoration: this page is also
+embedded via `<iframe>` on a separate "center homepage," and `target="_top"`
+is what makes clicking Login break OUT of that iframe and navigate the
+whole browser tab to `/my`, instead of trying (and likely failing, or
+looking broken) to load the login page inside a small embedded iframe.
+Viewed standalone (not embedded), `target="_top"` behaves like a normal
+same-tab link -- no downside either way. Deliberately has no JS and no
+"logged in as..." state: this page can't reliably detect a `/my` session
+across the iframe boundary anyway (third-party-cookie restrictions), so a
+static, always-shown "Login" link is both the simplest and the only
+approach that's guaranteed to keep working inside the iframe embed. The
+dynamic, session-aware equivalent ("Logged in as x@example.org...") lives
+on `/courses` and `/book/<shortname>` instead -- see "Course overview
+page" above.
+
 `site/impressum.html`, `site/privacy.html` and `site/terms.html`:
 - `impressum.html` -- legal notice / responsible-party identification.
   Split into its own page rather than inlined on the homepage, so it's a
@@ -798,6 +833,30 @@ negative shows more. This is deliberately display-only
   adjustable, and it's floored at "1 spot left" (never "0" while a
   booking from there would in fact still be confirmed) and capped at the
   course's real capacity.
+
+## Course overview page (`/courses`)
+
+`/courses` (2026-07-06) lists every `[[course]]` configured in
+`settings.toml`, each linking to its own `/book/<shortname>` -- a
+SimplyMeet.me-style "pick a class" landing page. It's the destination for
+`/my`'s "New booking" button (see "Account confirmation" above), and can
+also be linked to directly from your static site if you want one page
+that lists all your offerings instead of separate links per course.
+`audience` (`"private"`/`"public"`) is display-only (see
+`settings.toml.example`) and does NOT filter this list -- every course is
+already reachable via a direct `/book/<shortname>` link regardless, so
+hiding one here would only make it harder to find, not more private.
+
+### Logged-in banner (`/courses`, `/book/<shortname>`)
+
+Both pages (2026-07-06) show a small "Logged in as x@example.org · My
+bookings · Log out" banner above their own heading when reached with an
+active `/my` guest session -- e.g. after clicking "New booking" from
+`/my`. It also carries through to the booking result page ("Booked!"/
+"Almost there"/waitlisted). An anonymous visitor sees no banner at all --
+both pages work perfectly well without ever logging in first; this is
+purely a courtesy cue plus a quick way back to `/my` or to log out for
+someone who arrived here already signed in.
 
 ## Booking page layout (`/book/<shortname>`)
 
@@ -910,6 +969,15 @@ password." `/my/reset` always returns the same response regardless of
 whether the submitted email exists, to avoid leaking which addresses have
 an account; it's rate-limited the same way as login (see "Logs &
 debugging" for the shared `RateLimiter`).
+
+Once logged in, `/my` (2026-07-06) shows bookings in two separate tables:
+**Upcoming** (all of them, soonest first) and **Past** (capped at the 3
+most recent, so someone who's been coming for years doesn't get a
+page-long history) -- the past table is omitted entirely if there are no
+past bookings. A **New booking** button links to `/courses` (see below)
+rather than to any one course, and a link to the main site
+(`settings.base_url`) opens in a new tab, so `/my`'s own session state is
+never at risk of leaking into that separately-served, iframe-embedded page.
 
 Abandoned pending signups (a confirmation link never clicked) are purged
 by the nightly retention job after `pending_confirmation_hours` (default

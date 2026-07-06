@@ -1,5 +1,6 @@
 """wsgiref-based web app -- no framework dependency. Routes:
 
+  GET      /courses                 overview of every configured course, linking to /book/<shortname>
   GET/POST /book/<shortname>        guest booking form (name+email only)
   GET/POST /cancel/<token>          guest self-cancel (link from email)
   GET/POST /my                      guest login (email+password) / bookings list
@@ -92,6 +93,13 @@ MIN_PASSWORD_LENGTH = 8
 # The form's own JS also stops offering "+ Add participant" once this many
 # rows exist -- see _book_page()'s guest-rows script.
 MAX_GUESTS = 9
+
+# 2026-07-06: "/my should always show the past 3 courses they scheduled."
+# Upcoming bookings are always shown in full (there's rarely more than a
+# couple at once); past bookings are capped at this many (most recent
+# first) so the page doesn't grow forever for someone who's booked for
+# years -- see my()'s docstring.
+MY_PAST_BOOKINGS_LIMIT = 3
 
 
 def _client_ip(environ: dict) -> str:
@@ -294,6 +302,22 @@ _DIALOG_WIRING_SCRIPT = """<script>
 </script>"""
 
 
+def _course_subtitle_html(course) -> str:
+    """Shared by _book_page() and courses() (2026-07-06) so the two never
+    drift apart on this. course.subtitle is optional: unset (None, the
+    default -- key omitted in settings.toml) auto-derives "<Weekday>s
+    <from>h<mm> - <till>h<mm> -- <location>" (e.g. "Saturdays 10h45 -
+    12h45 -- Ayur Yoga Center Trier Nord"); set to "" explicitly
+    suppresses the subtitle entirely; any other string overrides the
+    auto-derived one. Always plain text (esc()'d) -- unlike `description`,
+    this isn't meant to hold rich HTML."""
+    text = (
+        course.subtitle if course.subtitle is not None
+        else f"{course.weekday_label()}s {course.time_range_label()} -- {course.location}"
+    )
+    return f'<p class="subtitle">{esc(text)}</p>' if text else ""
+
+
 def _sortable_filterable_table_script(table_id: str) -> str:
     """Client-side filter (substring, across every cell) + click-a-header-
     to-sort for a <table id="{table_id}"> with a <thead>/<tbody> and a
@@ -450,6 +474,8 @@ class App:
         return [body.encode("utf-8")]
 
     def route(self, method: str, path: str, environ) -> tuple[str, list, str]:
+        if path == "/courses":
+            return self.courses(method, environ)
         if m := re.fullmatch(r"/book/([a-z0-9-]+)", path):
             return self.book(method, m.group(1), environ)
         if m := re.fullmatch(r"/cancel/([A-Za-z0-9_-]+)", path):
@@ -483,12 +509,48 @@ class App:
         raw = environ["wsgi.input"].read(size).decode("utf-8") if size else ""
         return {k: v[0] for k, v in parse_qs(raw).items()}
 
+    # -- /courses --------------------------------------------------------------
+
+    def courses(self, method: str, environ):
+        """Overview of every configured course (2026-07-06: "an overview
+        page as simplymeet.me... that shows all my possible courses", and
+        the destination for /my's "New booking" button, since /my itself
+        has no way to know which course a returning guest wants next).
+        Lists every `[[course]]` in settings.toml, each linking to its own
+        /book/<shortname> -- `audience` ("private"/"public") is display-
+        only per settings.toml.example, so this deliberately does NOT
+        filter by it; every configured course is bookable via a direct
+        /book/<shortname> link already, so hiding one here would just make
+        it harder to find, not actually more private."""
+        banner = self._session_banner_html(environ)
+        if not self.settings.courses:
+            body = "<p>No courses are configured yet.</p>"
+        else:
+            cards = []
+            for course in self.settings.courses:
+                subtitle = _course_subtitle_html(course)
+                desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
+                cards.append(
+                    '<div class="course-card">'
+                    f"<h2>{esc(course.title)}</h2>{subtitle}{desc_html}"
+                    '<div class="submit-row">'
+                    f'<a href="/book/{esc(course.shortname)}"><button type="button">View &amp; book</button></a>'
+                    "</div></div>"
+                )
+            body = "".join(cards)
+        return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Courses", body, banner=banner)
+
     # -- /book ---------------------------------------------------------------
 
     def book(self, method: str, shortname: str, environ):
         course = self.settings.course(shortname)
         if course is None:
             return "404 Not Found", [("Content-Type", "text/plain")], "unknown course"
+
+        # Computed once per request and threaded through every response
+        # this method (and its helpers _book_page/_book_with_guests) can
+        # return -- see _session_banner_html's own docstring.
+        banner = self._session_banner_html(environ)
 
         def capacity_lookup(sn, d):
             return self.store.count_confirmed(sn, d.isoformat())
@@ -501,22 +563,22 @@ class App:
         if method == "POST":
             form = self._read_form(environ)
             if form.get("agree") != "on":
-                return self._book_page(course, occurrences, error="Please acknowledge the participation terms.")
+                return self._book_page(course, occurrences, error="Please acknowledge the participation terms.", banner=banner)
             occ_date = form.get("occurrence_date", "")
             occ = {o.date.isoformat(): o for o in occurrences}.get(occ_date)
             if occ is None:
-                return self._book_page(course, occurrences, error="That slot is no longer available.")
+                return self._book_page(course, occurrences, error="That slot is no longer available.", banner=banner)
             email, name = form.get("email", "").strip(), form.get("name", "").strip()
             if not email or "@" not in email or not name:
-                return self._book_page(course, occurrences, error="Please fill in your name and a valid email.")
+                return self._book_page(course, occurrences, error="Please fill in your name and a valid email.", banner=banner)
 
             rejection = self._late_booking_rejection(occ, now)
             if rejection:
-                return self._book_page(course, occurrences, error=rejection)
+                return self._book_page(course, occurrences, error=rejection, banner=banner)
 
             guests, guest_error = self._parse_guest_entries(form, email)
             if guest_error:
-                return self._book_page(course, occurrences, error=guest_error)
+                return self._book_page(course, occurrences, error=guest_error, banner=banner)
 
             # No password is ever collected here -- upsert_user_for_booking
             # only ever touches `name`, leaving any existing account's
@@ -528,7 +590,7 @@ class App:
             user = self.store.upsert_user_for_booking(email, name)
 
             if guests:
-                return self._book_with_guests(course, shortname, occ_date, user, guests)
+                return self._book_with_guests(course, shortname, occ_date, user, guests, banner=banner)
 
             if user.password_hash:
                 # Already-confirmed account: book instantly, exactly as
@@ -551,7 +613,7 @@ class App:
                     else f"You're booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
                 )
                 return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
-                    "Booked!", f"<p>{msg} Check your email for confirmation and a cancel link.</p>"
+                    "Booked!", f"<p>{msg} Check your email for confirmation and a cancel link.</p>", banner=banner
                 )
 
             # Brand-new or still-unconfirmed email: deliberately does NOT
@@ -577,9 +639,9 @@ class App:
                 '</form><span id="resend-status"></span>.</div>'
                 + _resend_cooldown_inline_script("resend-form", "resend-btn", "resend-status", resend_label)
             )
-            return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Almost there", body)
+            return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Almost there", body, banner=banner)
 
-        return self._book_page(course, occurrences)
+        return self._book_page(course, occurrences, banner=banner)
 
     def _booking_details_text(self, course, occ_date: str) -> str:
         """Thin wrapper around app.cancellation.booking_details_text (moved
@@ -719,7 +781,9 @@ class App:
             f"(party of {len(users)}, all {'waitlisted' if status == STATUS_WAITLISTED else 'confirmed'} together).",
         )
 
-    def _book_with_guests(self, course, shortname: str, occ_date: str, leader, guests: list[tuple[str, str]]):
+    def _book_with_guests(
+        self, course, shortname: str, occ_date: str, leader, guests: list[tuple[str, str]], banner: str = "",
+    ):
         """The atomic party-booking path -- taken whenever the booking form
         included at least one "+ Add participant" guest (see book()).
         Unlike a solo booking, this runs regardless of whether `leader`
@@ -776,6 +840,34 @@ class App:
             "a personal cancel link and an invite to manage their booking via /my. "
             "Canceling is always individual: if someone in the party cancels later, "
             "it only affects their own spot.</p>",
+            banner=banner,
+        )
+
+    def _session_banner_html(self, environ) -> str:
+        """A small "Logged in as x@example.org - Logout" banner for the
+        dynamic pages a logged-in guest might reach while browsing/booking
+        (2026-07-06: "/my should have a 'new booking' button... but with a
+        banner showing them that they are logged in and with the ability
+        to logout. same for any booking done from within /my") -- see
+        courses() and book()/its helpers for where this gets passed to
+        page(banner=...). Blank (no banner at all) for an anonymous
+        visitor, since /book and /courses both work perfectly well without
+        ever logging in -- this is purely a courtesy cue plus a quick way
+        back to /my or to log out, for someone who arrived here already
+        logged in."""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "guest":
+            return ""
+        user = self.store.find_user_by_id(session["user_id"])
+        if user is None:
+            return ""
+        return (
+            '<div class="session-banner">'
+            f"<span>Logged in as <b>{esc(user.email)}</b></span>"
+            '<span><a href="/my">My bookings</a> &middot; '
+            '<form method="post" action="/my/logout">'
+            '<button type="submit" class="link-button">Log out</button></form></span>'
+            "</div>"
         )
 
     def _site_label(self) -> str:
@@ -895,19 +987,8 @@ class App:
             "if that's still reachable."
         )
 
-    def _book_page(self, course, occurrences, error: str | None = None):
-        # course.subtitle is optional: unset (None, the default -- key
-        # omitted in settings.toml) auto-derives "<Weekday>s <from>h<mm> -
-        # <till>h<mm> -- <location>" (e.g. "Saturdays 10h45 - 12h45 --
-        # Ayur Yoga Center Trier Nord"); set to "" explicitly suppresses
-        # the subtitle entirely; any other string overrides the
-        # auto-derived one. Always plain text (esc()'d) -- unlike
-        # `description` below, this isn't meant to hold rich HTML.
-        subtitle_text = (
-            course.subtitle if course.subtitle is not None
-            else f"{course.weekday_label()}s {course.time_range_label()} -- {course.location}"
-        )
-        subtitle = f'<p class="subtitle">{esc(subtitle_text)}</p>' if subtitle_text else ""
+    def _book_page(self, course, occurrences, error: str | None = None, banner: str = ""):
+        subtitle = _course_subtitle_html(course)
         # course.description is operator-authored (settings.toml, edited by
         # whoever runs this install), not guest-submitted -- unlike every
         # other value on this page it's deliberately rendered as raw HTML,
@@ -1064,7 +1145,7 @@ class App:
               refresh();
             }})();
             </script>"""
-        return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(course.title, body)
+        return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(course.title, body, banner=banner)
 
     # -- /cancel/<token> (guest, from email) ---------------------------------
 
@@ -1097,9 +1178,26 @@ class App:
     # -- /my (guest self-service) --------------------------------------------
 
     def my(self, method: str, environ):
+        """Note (2026-07-06): upcoming bookings are always shown in full,
+        sorted soonest-first; past bookings are sorted most-recent-first
+        and capped at MY_PAST_BOOKINGS_LIMIT -- "should always show the
+        past 3 courses they scheduled" -- shown as a separate table so the
+        cap is obvious rather than looking like an arbitrary cutoff on one
+        mixed list. A "New booking" button links to /courses (see
+        courses()) rather than back to any specific course, since this
+        guest may want a course they haven't booked before."""
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
-            regs = self.store.registrations_for_user(session["user_id"])
+            all_regs = self.store.registrations_for_user(session["user_id"])
+            today = datetime.now(timezone.utc).date()
+            upcoming = sorted(
+                (r for r in all_regs if date.fromisoformat(r.occurrence_date) >= today),
+                key=lambda r: r.occurrence_date,
+            )
+            past = sorted(
+                (r for r in all_regs if date.fromisoformat(r.occurrence_date) < today),
+                key=lambda r: r.occurrence_date, reverse=True,
+            )[:MY_PAST_BOOKINGS_LIMIT]
 
             def _row(r):
                 # course_shortname is the CSV's own key -- an internal
@@ -1149,23 +1247,41 @@ class App:
                     f"<td>{actions}</td></tr>"
                 )
 
-            rows = "".join(_row(r) for r in regs)
-            table_id = "my-bookings-table"
+            def _table(table_id: str, regs_for_table: list) -> str:
+                if not regs_for_table:
+                    return ""
+                rows = "".join(_row(r) for r in regs_for_table)
+                return f"""
+                <div class="table-tools">
+                  <input type="search" id="{table_id}-filter" class="big-input" placeholder="Filter bookings...">
+                </div>
+                <table id="{table_id}" border="1" cellpadding="6">
+                  <thead><tr>
+                    <th>Course<span class="sort-indicator"></span></th>
+                    <th>Date<span class="sort-indicator"></span></th>
+                    <th>Time<span class="sort-indicator"></span></th>
+                    <th>Location<span class="sort-indicator"></span></th>
+                    <th>Status<span class="sort-indicator"></span></th>
+                    <th>Actions<span class="sort-indicator"></span></th>
+                  </tr></thead>
+                  <tbody>{rows}</tbody>
+                </table>""" + _sortable_filterable_table_script(table_id)
+
+            upcoming_id, past_id = "my-upcoming-table", "my-past-table"
+            upcoming_html = _table(upcoming_id, upcoming) or "<p>You have no upcoming bookings.</p>"
+            past_html = _table(past_id, past)
+            past_section = (
+                f"<h3>Past (most recent {MY_PAST_BOOKINGS_LIMIT})</h3>{past_html}" if past_html else ""
+            )
             body = f"""
-            <div class="table-tools">
-              <input type="search" id="{table_id}-filter" class="big-input" placeholder="Filter bookings...">
+            <div class="submit-row">
+              <a href="/courses"><button type="button">New booking</button></a>
+              <a href="{esc(self.settings.base_url)}" target="_blank" rel="noopener">
+                Visit {esc(self._site_label())} (opens in a new tab)</a>
             </div>
-            <table id="{table_id}" border="1" cellpadding="6">
-              <thead><tr>
-                <th>Course<span class="sort-indicator"></span></th>
-                <th>Date<span class="sort-indicator"></span></th>
-                <th>Time<span class="sort-indicator"></span></th>
-                <th>Location<span class="sort-indicator"></span></th>
-                <th>Status<span class="sort-indicator"></span></th>
-                <th>Actions<span class="sort-indicator"></span></th>
-              </tr></thead>
-              <tbody>{rows}</tbody>
-            </table>
+            <h3>Upcoming</h3>
+            {upcoming_html}
+            {past_section}
             <div class="submit-row">
               <form method="post" action="/my/logout" style="display:inline">
                 <button type="submit">Log out</button>
@@ -1182,7 +1298,7 @@ class App:
                 <button type="submit" form="delete-account-form">Yes, delete everything</button>
                 <button type="button" class="dialog-close-btn" data-dialog="delete-account-dialog">Never mind</button>
               </div>
-            </dialog>""" + _sortable_filterable_table_script(table_id) + _DIALOG_WIRING_SCRIPT
+            </dialog>""" + _DIALOG_WIRING_SCRIPT
             return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
 
         error = None

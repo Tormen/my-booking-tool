@@ -3,7 +3,23 @@
      "Static-site pages"), replace every REPLACE-ME marker, and update the
      course list below to match your own settings.toml [[course]] entries
      (shortname must match exactly -- that's what /book/<shortname>
-     resolves to). -->
+     resolves to).
+
+     2026-07-06: the small "Login" link/button below is deliberately
+     STATIC -- no JS, no "logged in as..." state, nothing that reads
+     cookies or calls the app. Two reasons: (1) this page is also embedded
+     via <iframe> elsewhere (a separate "center homepage") -- anything
+     session-aware here would mean detecting login state across that
+     iframe boundary, which third-party-cookie restrictions in modern
+     browsers make unreliable at best; (2) target="_top" on the link means
+     clicking it always breaks OUT of any iframe and navigates the WHOLE
+     browser tab to /my, whether this page is being viewed standalone or
+     embedded -- so it keeps working inside the iframe embed without any
+     extra code, degrading to a perfectly normal same-tab link when this
+     page is viewed on its own. If you remove or restyle this, keep both
+     the target="_top" and the plain <a> (no onclick/JS) -- see
+     README.md's "Course overview page" section for the dynamic
+     (session-aware) banner equivalent on /courses and /book. -->
 <html>
 <head>
 <meta http-equiv=Content-Type content="text/html; charset=utf-8">
@@ -11,9 +27,15 @@
 <style>
  body { max-width: 760px; margin: 2em auto; padding: 0 1em; font-family: sans-serif; }
  footer { margin-top: 3em; font-size: 0.85em; color: #666; }
+ .top-bar { display: flex; justify-content: flex-end; margin-bottom: 0.5em; }
+ .login-btn { font-size: 0.85em; padding: 0.3em 0.9em; border: 1px solid #ccc; border-radius: 4px;
+              text-decoration: none; color: #222; }
+ .login-btn:hover { background: #f4f7f4; }
 </style>
 </head>
 <body>
+
+<div class="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
 
 <h1>REPLACE-ME-YOUR-SITE-NAME</h1>
 

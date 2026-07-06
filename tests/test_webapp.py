@@ -273,6 +273,115 @@ class BookPageTest(unittest.TestCase):
         self.assertIn('<span class="d-spots">9 spots left</span>', html)
 
 
+class CoursesPageTest(unittest.TestCase):
+    """/courses (2026-07-06): the "overview page as simplymeet.me" that
+    lists every configured course, each linking to /book/<shortname> --
+    the destination for /my's "New booking" button."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def test_lists_every_configured_course_linking_to_its_book_page(self):
+        c1 = make_course(shortname="yoga-wed", title="Vinyasa Yoga")
+        c2 = make_course(shortname="mindfulness-thu", title="Mindfulness Session")
+        app = App(make_settings(courses=(c1, c2)), self.store)
+        _status, _headers, body = app.courses("GET", {})
+        self.assertIn("Vinyasa Yoga", body)
+        self.assertIn('<a href="/book/yoga-wed">', body)
+        self.assertIn("Mindfulness Session", body)
+        self.assertIn('<a href="/book/mindfulness-thu">', body)
+
+    def test_shows_both_private_and_public_audience_courses_unfiltered(self):
+        # audience is documented as display-only, no access-control
+        # difference (settings.toml.example) -- /courses must not filter
+        # by it.
+        private = make_course(shortname="private-one", audience="private")
+        public = make_course(shortname="public-one", audience="public")
+        app = App(make_settings(courses=(private, public)), self.store)
+        _status, _headers, body = app.courses("GET", {})
+        self.assertIn("/book/private-one", body)
+        self.assertIn("/book/public-one", body)
+
+    def test_no_courses_configured_shows_a_friendly_message(self):
+        app = App(make_settings(courses=()), self.store)
+        _status, _headers, body = app.courses("GET", {})
+        self.assertIn("No courses are configured yet.", body)
+
+    def test_description_rendered_as_raw_html_same_as_book_page(self):
+        course = make_course(description="<b>Rich</b> text")
+        app = App(make_settings(courses=(course,)), self.store)
+        _status, _headers, body = app.courses("GET", {})
+        self.assertIn('<div class="description"><b>Rich</b> text</div>', body)
+
+
+class SessionBannerTest(unittest.TestCase):
+    """2026-07-06: "/my should have a 'new booking' button... but with a
+    banner showing them that they are logged in and with the ability to
+    logout. same for any booking done from within /my." -- /courses and
+    /book (form + result pages) show a small banner when reached with an
+    active guest session, and show nothing at all otherwise."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.course = make_course(shortname="yoga-class-1", weekday="wed", capacity=10)
+        self.settings = make_settings(courses=(self.course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        self.app = App(self.settings, self.store)
+        self.app.caldav = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=FakeTransport(),
+        )
+        self.app._sync = lambda *a, **kw: None
+        for target in ("app.webapp.send_mail", "app.cancellation.send_mail", "app.cancel_flow.send_mail"):
+            patcher = patch(target, side_effect=lambda *a, **kw: None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _login_environ(self, email: str = "regular@example.org") -> dict:
+        user = self.store.upsert_user_for_booking(email, "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        sid = webapp._new_session({"kind": "guest", "user_id": user.user_id})
+        return {"HTTP_COOKIE": f"session={sid}"}
+
+    def test_courses_shows_banner_when_logged_in(self):
+        environ = self._login_environ("regular@example.org")
+        _status, _headers, body = self.app.courses("GET", environ)
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("regular@example.org", body)
+        self.assertIn('action="/my/logout"', body)
+
+    def test_courses_shows_no_banner_when_anonymous(self):
+        _status, _headers, body = self.app.courses("GET", {})
+        self.assertNotIn('class="session-banner"', body)
+
+    def test_book_form_shows_banner_when_logged_in(self):
+        environ = self._login_environ("regular@example.org")
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("regular@example.org", body)
+
+    def test_book_form_shows_no_banner_when_anonymous(self):
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertNotIn('class="session-banner"', body)
+
+    def test_booking_result_page_also_shows_banner_when_logged_in(self):
+        environ = self._login_environ("regular@example.org")
+        occs = build_occurrences(
+            self.course, self.settings, datetime.now(timezone.utc), lambda sn, d: 0, lambda start, end: False,
+        )
+        occ_date = occs[0].date.isoformat()
+        form = {"occurrence_date": occ_date, "name": "Regular", "email": "regular@example.org", "agree": "on"}
+        body_bytes = urlencode(form).encode()
+        post_environ = dict(environ)
+        post_environ.update({"CONTENT_LENGTH": str(len(body_bytes)), "wsgi.input": io.BytesIO(body_bytes)})
+        _status, _headers, body = self.app.book("POST", "yoga-class-1", post_environ)
+        self.assertIn('class="session-banner"', body)
+
+
 class LateBookingQuorumTest(unittest.TestCase):
     """min_required_participants (settings.toml [defaults], default 1)
     only ever matters for a LATE booking (within min_notice_hours of
@@ -814,10 +923,10 @@ class BookingFlowTest(unittest.TestCase):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         _status, _headers, body = self.app.my("GET", environ)
-        self.assertIn('<table id="my-bookings-table"', body)
+        self.assertIn('<table id="my-upcoming-table"', body)
         self.assertIn("<thead><tr>", body)
-        self.assertIn('<input type="search" id="my-bookings-table-filter"', body)
-        self.assertIn('getElementById("my-bookings-table")', body)
+        self.assertIn('<input type="search" id="my-upcoming-table-filter"', body)
+        self.assertIn('getElementById("my-upcoming-table")', body)
 
     def test_my_bookings_cancel_button_enabled_for_waitlisted_row_too(self):
         # 2026-07-05 fix: the Cancel button used to be disabled for
@@ -1082,6 +1191,65 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Message: course canceled this week", participant_mail)
         admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", admin_mail)
+
+    # -- 2026-07-06: past-3 cap, "New booking", homepage link --------------
+
+    def _import_past(self, user_id: str, occurrence_date: str, registration_id: str, status=STATUS_CONFIRMED):
+        self.store.import_historical_registration(
+            registration_id=registration_id,
+            course_shortname="yoga-class-1",
+            occurrence_date=occurrence_date,
+            user_id=user_id,
+            status=status,
+            registered_at=f"{occurrence_date}T00:00:00",
+        )
+
+    def test_past_bookings_capped_at_three_most_recent(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        for i, d in enumerate(["2026-01-01", "2026-02-01", "2026-03-01", "2026-04-01", "2026-05-01"]):
+            self._import_past(user.user_id, d, f"past-{i}")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn("Past (most recent 3)", body)
+        # Most recent 3 by date: 2026-05-01, 2026-04-01, 2026-03-01
+        self.assertIn("2026-05-01", body)
+        self.assertIn("2026-04-01", body)
+        self.assertIn("2026-03-01", body)
+        self.assertNotIn("2026-02-01", body)
+        self.assertNotIn("2026-01-01", body)
+
+    def test_upcoming_bookings_are_never_capped(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        # book() only offers real future occurrences -- seed several
+        # confirmed upcoming rows directly instead, same as the past ones,
+        # just with future dates (any date >= "today" counts as upcoming).
+        for i, d in enumerate(["2027-01-01", "2027-02-01", "2027-03-01", "2027-04-01"]):
+            self._import_past(user.user_id, d, f"future-{i}")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn("<h3>Upcoming</h3>", body)
+        for d in ["2027-01-01", "2027-02-01", "2027-03-01", "2027-04-01"]:
+            self.assertIn(d, body)
+
+    def test_no_past_bookings_omits_the_past_section_entirely(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")  # one upcoming booking only
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertNotIn("Past (most recent", body)
+
+    def test_no_upcoming_bookings_shows_a_friendly_message(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn("You have no upcoming bookings.", body)
+
+    def test_my_page_has_new_booking_button_linking_to_courses(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn('<a href="/courses">', body)
+        self.assertIn("New booking", body)
+
+    def test_my_page_links_to_homepage_in_a_new_tab(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn(f'<a href="{self.settings.base_url}" target="_blank"', body)
 
 
 class AdminLoginRateLimitTest(unittest.TestCase):
