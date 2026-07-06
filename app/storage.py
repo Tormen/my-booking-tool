@@ -28,6 +28,7 @@ USER_FIELDS = [
 REG_FIELDS = [
     "registration_id", "course_shortname", "occurrence_date", "user_id", "status",
     "registered_at", "guest_cancel_token_hash", "canceled_at", "canceled_by", "host_message",
+    "party_id", "invited_by_user_id",
 ]
 
 STATUS_CONFIRMED = "confirmed"
@@ -82,6 +83,23 @@ class Registration:
     canceled_at: str = ""
     canceled_by: str = ""
     host_message: str = ""
+    # Guest-booking (2026-07): party_id is shared by every row created in
+    # one booking submission (the person who filled out the form, plus any
+    # "+ Add participant" guests they added) -- see
+    # Store.add_party_registrations_checking_capacity. Blank for any
+    # registration made without guests (including everything booked before
+    # this feature existed) -- treated as its own solo party of one
+    # wherever party membership matters (see promote_next_waitlisted).
+    # invited_by_user_id is blank for the person who actually filled out
+    # the form ("the leader") and set to the leader's user_id for every
+    # guest they added -- this is the only place "who booked together, and
+    # who was the guest" is recorded. Cancellation is always per-row/
+    # per-person regardless of party membership -- a guest (or the leader)
+    # can cancel their own spot without affecting anyone else's; only the
+    # ORIGINAL admission decision (confirmed vs. waitlisted) is atomic
+    # across the party.
+    party_id: str = ""
+    invited_by_user_id: str = ""
 
 
 class _LockedCsv:
@@ -343,6 +361,67 @@ class Store:
             write(rows)
             return reg
 
+    def add_party_registrations_checking_capacity(
+        self,
+        course_shortname: str,
+        occurrence_date: str,
+        entries: list[tuple[str, str]],
+        capacity: int,
+    ) -> list[Registration]:
+        """Books an entire party -- the person who filled out the booking
+        form (`entries[0]`, "the leader") plus any guests they added via
+        "+ Add participant" -- as ONE atomic admission decision: either
+        everyone is CONFIRMED or everyone is WAITLISTED, never split, in the
+        same single locked read-modify-write cycle
+        add_registration_checking_capacity uses for one row (see that
+        method's own docstring for the race this closes). `entries` is a
+        list of (user_id, guest_cancel_token_hash) pairs, one per party
+        member; every row this creates shares one fresh `party_id`, and
+        every row except the leader's (`entries[0]`) gets
+        `invited_by_user_id` set to the leader's user_id -- see
+        Registration's own docstring for what that records and why
+        cancellation is deliberately NOT part of this atomicity (each party
+        member can still cancel independently once booked).
+
+        Deliberately NOT gated behind app.webapp's usual
+        STATUS_PENDING_CONFIRMATION step for a brand-new guest email (see
+        app/webapp.py::book()'s guest-booking branch and
+        SOLUTION-DESIGN.md's guest-booking entry): an admission decision
+        that can only be reached once every brand-new guest has separately
+        clicked a confirmation email, possibly hours apart, doesn't match
+        "admitted all together, decided now" -- the leader vouches for
+        every guest they add by adding them, same trust model SimplyMeet.me
+        used. Guests still get a real account (via
+        Store.upsert_user_for_booking, called by the caller before this)
+        and can later set a password to manage their own booking via /my."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            confirmed = sum(
+                1 for r in rows
+                if r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+                and r["status"] == STATUS_CONFIRMED
+            )
+            status = STATUS_CONFIRMED if confirmed + len(entries) <= capacity else STATUS_WAITLISTED
+            party_id = str(uuid.uuid4())
+            leader_user_id = entries[0][0]
+            created = []
+            for i, (user_id, cancel_token_hash) in enumerate(entries):
+                reg = Registration(
+                    registration_id=str(uuid.uuid4()),
+                    course_shortname=course_shortname,
+                    occurrence_date=occurrence_date,
+                    user_id=user_id,
+                    status=status,
+                    registered_at=now_iso(),
+                    guest_cancel_token_hash=cancel_token_hash,
+                    party_id=party_id,
+                    invited_by_user_id="" if i == 0 else leader_user_id,
+                )
+                rows.append(asdict(reg))
+                created.append(reg)
+            write(rows)
+            return created
+
     def confirm_pending_registration(
         self, registration_id: str, capacity: int, cancel_token_hash: str
     ) -> Registration | None:
@@ -442,13 +521,28 @@ class Store:
 
     def promote_next_waitlisted(
         self, course_shortname: str, occurrence_date: str, capacity: int
-    ) -> Registration | None:
-        """Call this after any cancellation. If there's a free confirmed
-        spot (confirmed count < capacity -- NOT assumed, checked here),
-        promotes the longest-waiting waitlisted registration for this
-        occurrence to confirmed, FIFO by registered_at. Returns the promoted
-        Registration, or None if nobody was waiting or there's no free spot
-        (e.g. the cancellation was itself a waitlisted person leaving)."""
+    ) -> list[Registration] | None:
+        """Call this after any cancellation. If there's at least one free
+        confirmed spot (confirmed count < capacity -- NOT assumed, checked
+        here), promotes the longest-waiting waitlisted PARTY for this
+        occurrence to confirmed, FIFO by the party's earliest
+        registered_at. Returns the promoted Registration rows (one or more
+        -- every row in that party), or None if nobody was waiting or
+        there's no free spot at all (e.g. the cancellation was itself a
+        waitlisted person leaving).
+
+        Party-aware (2026-07, guest bookings): rows sharing a `party_id`
+        (see add_party_registrations_checking_capacity) are promoted
+        together, all or nothing, never split -- the same "admitted all or
+        nothing" rule that decided their original confirmed-vs-waitlisted
+        status applies again here. A row with a blank party_id (a solo
+        booking made without guests -- including everything booked before
+        this feature existed) is its own party of one, keyed by its
+        registration_id instead. If the front-of-line party is bigger than
+        the number of spots that just freed up, nothing is promoted this
+        call -- a smaller party further back is never promoted ahead of it
+        just because it happens to fit; same first-come-first-served
+        guarantee as before, just applied per-party instead of per-row."""
         with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
             confirmed = sum(
                 1 for r in rows
@@ -456,7 +550,8 @@ class Store:
                 and r["occurrence_date"] == occurrence_date
                 and r["status"] == STATUS_CONFIRMED
             )
-            if confirmed >= capacity:
+            free = capacity - confirmed
+            if free <= 0:
                 return None
             waitlisted = [
                 r for r in rows
@@ -466,11 +561,18 @@ class Store:
             ]
             if not waitlisted:
                 return None
-            waitlisted.sort(key=lambda r: r["registered_at"])
-            candidate = waitlisted[0]
-            candidate["status"] = STATUS_CONFIRMED
+            parties: dict[str, list[dict]] = {}
+            for r in waitlisted:
+                key = r.get("party_id") or r["registration_id"]
+                parties.setdefault(key, []).append(r)
+            ordered = sorted(parties.values(), key=lambda p: min(x["registered_at"] for x in p))
+            front = ordered[0]
+            if len(front) > free:
+                return None
+            for row in front:
+                row["status"] = STATUS_CONFIRMED
             write(rows)
-            return Registration(**candidate)
+            return [Registration(**r) for r in front]
 
     def import_historical_registration(
         self,
@@ -483,6 +585,8 @@ class Store:
         canceled_at: str = "",
         canceled_by: str = "",
         host_message: str = "",
+        party_id: str = "",
+        invited_by_user_id: str = "",
     ) -> bool:
         """One-off historical import (see app/migrate_simplymeet.py /
         scripts/migrate-simplymeet-history.py): unlike add_registration() /
@@ -496,6 +600,18 @@ class Store:
         idempotent: re-running the same import after a partial run (or just
         to pick up newly-added rows) never creates a duplicate.
 
+        `party_id`/`invited_by_user_id` (both blank by default, i.e. a solo
+        historical row) let the migration script reconstruct a
+        SimplyMeet.me booking's "Other participants" as linked guest
+        registrations, same party_id/invited_by_user_id relationship a live
+        guest booking gets from add_party_registrations_checking_capacity
+        -- see Registration's own docstring. Deliberately NOT atomic across
+        a party the way add_party_registrations_checking_capacity is: each
+        call here writes exactly one row, since the migration script needs
+        to check erasure-safety and idempotency per person, independently,
+        before deciding whether that particular person's row gets written
+        at all (see app/migrate_simplymeet.py's plan_import()).
+
         Returns False (a no-op, not an error) if a registration with this
         registration_id already exists -- callers should treat that as
         "already imported, nothing to do", not a failure."""
@@ -508,6 +624,8 @@ class Store:
                 occurrence_date=occurrence_date,
                 user_id=user_id,
                 status=status,
+                party_id=party_id,
+                invited_by_user_id=invited_by_user_id,
                 registered_at=registered_at,
                 guest_cancel_token_hash="",
                 canceled_at=canceled_at,

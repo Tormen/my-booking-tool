@@ -85,6 +85,14 @@ reset_ip_limiter = RateLimiter(max_attempts=20, window_seconds=3600)
 # the guest on the set-password form.
 MIN_PASSWORD_LENGTH = 8
 
+# Guest bookings (2026-07, "+ Add participant" on the booking form, mirroring
+# SimplyMeet.me's own UX): a hard ceiling on how many guest rows book()
+# will ever look for (guest_email_0.. guest_email_{MAX_GUESTS-1}), so a
+# hand-crafted POST can't make it scan an unbounded number of form fields.
+# The form's own JS also stops offering "+ Add participant" once this many
+# rows exist -- see _book_page()'s guest-rows script.
+MAX_GUESTS = 9
+
 
 def _client_ip(environ: dict) -> str:
     """Best-effort real client IP, for per-source rate limiting -- NOT for
@@ -506,6 +514,10 @@ class App:
             if rejection:
                 return self._book_page(course, occurrences, error=rejection)
 
+            guests, guest_error = self._parse_guest_entries(form, email)
+            if guest_error:
+                return self._book_page(course, occurrences, error=guest_error)
+
             # No password is ever collected here -- upsert_user_for_booking
             # only ever touches `name`, leaving any existing account's
             # password_hash (confirmed or still empty) completely alone.
@@ -514,6 +526,9 @@ class App:
             # account: nothing reachable from this form can change another
             # email's credential anymore.
             user = self.store.upsert_user_for_booking(email, name)
+
+            if guests:
+                return self._book_with_guests(course, shortname, occ_date, user, guests)
 
             if user.password_hash:
                 # Already-confirmed account: book instantly, exactly as
@@ -585,16 +600,16 @@ class App:
         full rationale (notify-both-sides, etc.)."""
         send_cancellation_emails(self.settings, course, occ_date, user, canceled_by, message)
 
-    def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
-        """The guest-facing booked/waitlisted email + admin notification --
-        shared by the instant-booking path above and by my_confirm()'s
-        promotion of a newly-confirmed account's pending registrations, so
-        the two paths can never drift out of sync in wording.
-
-        Every guest now gets an account (see my_confirm()), so this also
-        invites them to /my rather than only handing them a one-shot
-        cancel link.
-        """
+    def _send_booking_result_guest_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
+        """Just the guest-facing booked/waitlisted email (no admin copy) --
+        factored out of _send_booking_result_email() so a guest-booking
+        party (see _book_with_guests()) can send this exact same, unchanged
+        wording to every party member individually while sending only ONE
+        combined admin email for the whole party (see
+        _send_party_admin_email()), instead of the admin getting one nearly
+        identical email per person. Every guest gets an account (see
+        my_confirm()), so this also invites them to /my rather than only
+        handing them a one-shot cancel link."""
         cancel_url = f"{self.settings.base_url}/cancel/{cancel_token}"
         my_url = f"{self.settings.base_url}/my"
         details = self._booking_details_text(course, occ_date)
@@ -615,11 +630,130 @@ class App:
                 f"Manage your bookings any time: {my_url}\n"
                 f"Cancel this booking directly: {cancel_url}\n",
             )
+
+    def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
+        """The guest-facing booked/waitlisted email + admin notification --
+        shared by the instant-booking path above and by my_confirm()'s
+        promotion of a newly-confirmed account's pending registrations, so
+        the two paths can never drift out of sync in wording. Solo-booking
+        path only (see _book_with_guests() for the party equivalent, which
+        sends the same guest-facing email via
+        _send_booking_result_guest_email() but consolidates the admin
+        notification)."""
+        self._send_booking_result_guest_email(user, course, occ_date, status, cancel_token)
         send_mail(
             self.settings, self.settings.admin_email,
             f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
             f"{user.name} <{user.email}> {'joined the waitlist for' if status == STATUS_WAITLISTED else 'booked'} "
             f"{course.title} on {occ_date}.",
+        )
+
+    def _parse_guest_entries(self, form: dict, leader_email: str) -> tuple[list[tuple[str, str]], str | None]:
+        """Reads guest_email_0/guest_name_0 .. guest_email_{MAX_GUESTS-1}/
+        guest_name_{MAX_GUESTS-1} off a submitted booking form (see
+        _book_page()'s "+ Add participant" rows) -- name is optional per
+        guest, email is not (see _book_with_guests() for how a blank name
+        is resolved). Returns (entries, error): entries is a list of
+        (email, name) pairs in the order submitted; error is a guest-facing
+        message if validation failed (bad/duplicate email), in which case
+        entries should be ignored and the form re-shown with that error."""
+        entries: list[tuple[str, str]] = []
+        seen = {leader_email.strip().lower()}
+        for i in range(MAX_GUESTS):
+            g_email = form.get(f"guest_email_{i}", "").strip()
+            g_name = form.get(f"guest_name_{i}", "").strip()
+            if not g_email:
+                continue
+            if "@" not in g_email:
+                return [], f"Guest #{i + 1}'s email address doesn't look valid."
+            key = g_email.lower()
+            if key in seen:
+                return [], (
+                    f"{g_email} is listed more than once (or matches your own email) -- "
+                    "please list each participant only once."
+                )
+            seen.add(key)
+            entries.append((g_email, g_name))
+        return entries, None
+
+    def _send_party_admin_email(self, users: list, course, occ_date: str, status: str) -> None:
+        """ONE admin email covering an entire guest-booking party (leader +
+        every guest) -- see _send_booking_result_guest_email()'s docstring
+        for why this is split out instead of reusing
+        _send_booking_result_email()'s per-person admin email unchanged
+        (that would mean one admin email per party member for what is, to
+        the admin, a single booking event)."""
+        leader, guests = users[0], users[1:]
+        verb = "joined the waitlist for" if status == STATUS_WAITLISTED else "booked"
+        if guests:
+            guest_list = ", ".join(f"{u.name} <{u.email}>" for u in guests)
+            who = f"{leader.name} <{leader.email}> (+ guest(s): {guest_list})"
+        else:
+            who = f"{leader.name} <{leader.email}>"
+        send_mail(
+            self.settings, self.settings.admin_email,
+            f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
+            f"{who} {verb} {course.title} on {occ_date} "
+            f"(party of {len(users)}, all {'waitlisted' if status == STATUS_WAITLISTED else 'confirmed'} together).",
+        )
+
+    def _book_with_guests(self, course, shortname: str, occ_date: str, leader, guests: list[tuple[str, str]]):
+        """The atomic party-booking path -- taken whenever the booking form
+        included at least one "+ Add participant" guest (see book()).
+        Unlike a solo booking, this runs regardless of whether `leader`
+        already has a confirmed account: the whole party (leader + every
+        guest) is admitted -- confirmed or waitlisted -- together, right
+        now, never gated behind a brand-new guest's own email confirmation
+        click (see Store.add_party_registrations_checking_capacity's
+        docstring for the full reasoning, and SOLUTION-DESIGN.md's
+        guest-booking entry for the tradeoff this accepts: the leader is
+        trusted to vouch for who they add, same model SimplyMeet.me used).
+
+        A guest's name is optional on the form -- if left blank, an
+        already-existing account's real stored name is reused (never
+        overwritten with a blank), and a genuinely brand-new guest with no
+        name given falls back to the placeholder "Guest" rather than an
+        empty string (User.name has no blank default)."""
+        entries: list[tuple[str, str]] = []
+        tokens: list[str] = []
+        users = [leader]
+        leader_token = new_token()
+        entries.append((leader.user_id, hash_token(leader_token)))
+        tokens.append(leader_token)
+        for g_email, g_name in guests:
+            existing = self.store.find_user_by_email(g_email)
+            resolved_name = g_name or (existing.name if existing else "Guest")
+            guest_user = self.store.upsert_user_for_booking(g_email, resolved_name)
+            token = new_token()
+            entries.append((guest_user.user_id, hash_token(token)))
+            tokens.append(token)
+            users.append(guest_user)
+
+        regs = self.store.add_party_registrations_checking_capacity(
+            shortname, occ_date, entries, course.capacity
+        )
+        self._sync(shortname, date.fromisoformat(occ_date))
+        status = regs[0].status  # all-or-nothing -- every row shares the same status
+        for member, token in zip(users, tokens):
+            self._send_booking_result_guest_email(member, course, occ_date, status, token)
+        self._send_party_admin_email(users, course, occ_date, status)
+
+        party_size = len(users)
+        if status == STATUS_WAITLISTED:
+            msg = (
+                f"Your party of {party_size} is on the waitlist together for "
+                f"<b>{esc(course.title)}</b> on {esc(occ_date)} -- there wasn't room to confirm "
+                f"all {party_size} of you at once. You'll all be confirmed together automatically "
+                "if enough spots open up."
+            )
+        else:
+            msg = f"Your party of {party_size} is booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
+        return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
+            "Booked!",
+            f"<p>{msg}</p><p>Everyone in the party -- including you -- got their own email with "
+            "a personal cancel link and an invite to manage their booking via /my. "
+            "Canceling is always individual: if someone in the party cancels later, "
+            "it only affects their own spot.</p>",
         )
 
     def _site_label(self) -> str:
@@ -758,7 +892,16 @@ class App:
             date_buttons = "".join(
                 '<label class="date-btn">'
                 f'<input type="radio" name="occurrence_date" value="{esc(o.date.isoformat())}" '
-                f'data-date="{esc(o.date.isoformat())}" data-full="{"1" if o.is_full else "0"}"'
+                f'data-date="{esc(o.date.isoformat())}" data-full="{"1" if o.is_full else "0"}" '
+                # data-spots-left is the TRUE remaining count, deliberately
+                # separate from _spots_left_text()'s possibly
+                # spots_left_offset-adjusted display text -- the "adding a
+                # guest may waitlist your whole party" warning (see the
+                # guest-rows script below) has to reason from reality, not
+                # the display-only urgency number (see _spots_left_text's
+                # own docstring for why that number must never drive an
+                # actual admission decision).
+                f'data-spots-left="{o.spots_left}"'
                 + (" checked" if i == 0 else "")
                 + '><span><span class="d-date">' + esc(o.date.isoformat()) + "</span>"
                 + (f'<span class="d-spots">{esc(text)}</span>' if (text := self._spots_left_text(o)) else "")
@@ -784,6 +927,11 @@ class App:
                 <input class="big-input" name="email" type="email" required></label>
               <p class="hint">First time booking with this email? We'll send a link to confirm your
                 account and set a password.</p>
+              <div class="guests-section">
+                <div id="guest-rows"></div>
+                <button type="button" id="add-guest-btn" class="link-button">+ Add participant</button>
+                <p id="party-warning" class="note" style="display:none"></p>
+              </div>
               <label><input type="checkbox" name="agree" required> I acknowledge the
                 <a href="/terms.html" target="_blank">participation terms</a> (voluntary, at my own risk)
                 <span class="req">(required)</span>.</label>
@@ -806,6 +954,63 @@ class App:
               var emailEl = form.querySelector('[name="email"]');
               var agreeEl = form.querySelector('[name="agree"]');
 
+              // Guest rows ("+ Add participant", mirroring SimplyMeet.me's
+              // own UX) -- each row's fields are named guest_email_<n>/
+              // guest_name_<n> (never repeated -- see app/webapp.py::
+              // _parse_guest_entries(); form-encoded POST bodies here only
+              // ever keep the FIRST value of a repeated name, so distinct
+              // per-row names are required, not just a style choice).
+              var guestRowsEl = document.getElementById("guest-rows");
+              var addGuestBtn = document.getElementById("add-guest-btn");
+              var partyWarning = document.getElementById("party-warning");
+              var guestIndex = 0;
+              var MAX_GUESTS = {MAX_GUESTS};
+
+              function guestRowCount() {{ return guestRowsEl ? guestRowsEl.children.length : 0; }}
+
+              function updatePartyWarning() {{
+                var r = currentRadio();
+                if (!r || !partyWarning) return;
+                var spotsLeft = parseInt(r.dataset.spotsLeft, 10);
+                var partySize = 1 + guestRowCount();
+                if (r.dataset.full !== "1" && !isNaN(spotsLeft) && partySize > spotsLeft) {{
+                  var spotWord = spotsLeft === 1 ? "spot" : "spots";
+                  var peopleWord = partySize === 1 ? "person" : "people";
+                  partyWarning.textContent = "Only " + spotsLeft + " confirmed " + spotWord +
+                    " left for this session, but your party is " + partySize + " " + peopleWord +
+                    ". Submitting will place your whole group on the waitlist together -- " +
+                    "remove a guest above to get confirmed instantly instead.";
+                  partyWarning.style.display = "";
+                }} else {{
+                  partyWarning.style.display = "none";
+                }}
+              }}
+
+              function addGuestRow() {{
+                if (!guestRowsEl || guestRowCount() >= MAX_GUESTS) return;
+                var i = guestIndex++;
+                var row = document.createElement("div");
+                row.className = "guest-row";
+                row.innerHTML =
+                  '<label>Guest email <span class="req">(required)</span>' +
+                  '<input class="big-input" name="guest_email_' + i + '" type="email" required></label>' +
+                  '<label>Guest name <span class="opt">(optional)</span>' +
+                  '<input class="big-input" name="guest_name_' + i + '"></label>' +
+                  '<button type="button" class="link-button remove-guest-btn">Remove participant</button>';
+                guestRowsEl.appendChild(row);
+                row.querySelector(".remove-guest-btn").addEventListener("click", function() {{
+                  guestRowsEl.removeChild(row);
+                  if (addGuestBtn) addGuestBtn.style.display = "";
+                  updatePartyWarning();
+                  refresh();
+                }});
+                row.querySelector('[name="guest_email_' + i + '"]').addEventListener("input", updatePartyWarning);
+                if (guestRowCount() >= MAX_GUESTS && addGuestBtn) addGuestBtn.style.display = "none";
+                updatePartyWarning();
+                refresh();
+              }}
+              if (addGuestBtn) addGuestBtn.addEventListener("click", addGuestRow);
+
               function currentRadio() {{
                 for (var i = 0; i < radios.length; i++) {{ if (radios[i].checked) return radios[i]; }}
                 return null;
@@ -817,6 +1022,7 @@ class App:
                 if (r && submitBtn) submitBtn.textContent = r.dataset.full === "1" ? "Join waitlist" : bookLabel;
                 var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 && agreeEl.checked;
                 if (submitBtn) submitBtn.disabled = !ok;
+                updatePartyWarning();
               }}
               for (var i = 0; i < radios.length; i++) {{ radios[i].addEventListener("change", refresh); }}
               [nameEl, emailEl, agreeEl].forEach(function(el) {{
@@ -1255,6 +1461,19 @@ class App:
                 archived_ids_by_hash.setdefault(u.email, []).append(u.user_id)
         regs = all_regs if show_past else [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
         regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname))
+        # Guest bookings (2026-07): group every registration -- live AND
+        # archived, so an erased party member's row still counts toward
+        # "+N guest(s)" on the still-live leader's row -- by party_id, so
+        # each row can show who it booked together with (see Registration's
+        # own docstring for what party_id/invited_by_user_id record).
+        # Blank party_id (a solo booking, including everything made before
+        # this feature existed) is never grouped -- see Store's own
+        # promote_next_waitlisted docstring for the same "blank means not a
+        # party" convention.
+        party_members: dict[str, list[Registration]] = {}
+        for r in all_regs:
+            if r.party_id:
+                party_members.setdefault(r.party_id, []).append(r)
         rows = []
         for r in regs:
             user = users_by_id.get(r.user_id)
@@ -1323,10 +1542,31 @@ class App:
                 # aren't actionable here -- find_by_id() only reads the live
                 # CSV, so admin_cancel() couldn't find one of these anyway.
                 actions = ""
+            # "Guest of <leader>" if this row was added by someone else, or
+            # "+N guest(s)" on the leader's own row if they brought people
+            # along -- blank for an ordinary solo booking. Looked up by
+            # user_id (not registration_id) since the leader/guest relation
+            # is between PEOPLE, and the whole point of party_id is to
+            # survive each member canceling independently (see
+            # Registration's own docstring) -- so this still shows correctly
+            # even after some party members have already canceled.
+            party_cell = ""
+            if r.invited_by_user_id:
+                leader_user = users_by_id.get(r.invited_by_user_id)
+                leader_label = leader_user.name if leader_user else "(unknown)"
+                party_cell = f"guest of {leader_label}"
+            elif r.party_id:
+                other_members = {
+                    m.user_id for m in party_members.get(r.party_id, []) if m.user_id != r.user_id
+                }
+                if other_members:
+                    n = len(other_members)
+                    party_cell = f"+{n} guest{'s' if n != 1 else ''}"
             rows.append(
                 f"<tr><td>{esc(r.status)}</td><td>{esc(r.course_shortname)}</td>"
                 f"<td>{esc(r.occurrence_date)}</td>{name_cell}{email_cell}"
                 f"<td>{esc(r.registered_at)}</td><td>{esc(times_cell)}</td>"
+                f"<td>{esc(party_cell)}</td>"
                 f"<td>{actions}</td></tr>"
             )
         toggle = '<a href="/admin">today + future only</a>' if show_past else '<a href="/admin?past=1">include past</a>'
@@ -1344,6 +1584,7 @@ class App:
           <th>Email<span class="sort-indicator"></span></th>
           <th>Registered<span class="sort-indicator"></span></th>
           <th>Times booked<span class="sort-indicator"></span></th>
+          <th>Party<span class="sort-indicator"></span></th>
           <th>Actions<span class="sort-indicator"></span></th>
         </tr></thead>
         <tbody>{''.join(rows)}</tbody></table>""" + _sortable_filterable_table_script(table_id) + _DIALOG_WIRING_SCRIPT

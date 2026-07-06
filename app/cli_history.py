@@ -71,6 +71,17 @@ def build_history(store: Store, settings: Settings, email: str) -> HistoryResult
             "course_shortname": r.course_shortname,
             "occurrence_date": r.occurrence_date,
             "status": r.status,
+            # user_id/party_id/invited_by_user_id are included so a caller
+            # (e.g. scripts/my-bt's cmd_history) can run these through
+            # app.cli_list.annotate_party_info the same way `my-bt
+            # list`/`show` do -- see Registration's own docstring in
+            # app/storage.py for what party_id/invited_by_user_id record.
+            # user_id itself isn't shown by cmd_history today, but
+            # annotate_party_info requires it on every row to tell party
+            # members apart from each other.
+            "user_id": r.user_id,
+            "party_id": r.party_id,
+            "invited_by_user_id": r.invited_by_user_id,
         }
         for r in live_regs
     ]

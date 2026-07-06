@@ -110,9 +110,14 @@ class _Tee:
 # -- subcommands --------------------------------------------------------------
 
 def cmd_list(args) -> None:
-    """`my-bt list` -- query registrations across live/archived/all."""
+    """`my-bt list` -- query registrations across live/archived/all. Every
+    row gets a "party" column (see app.cli_list.annotate_party_info) --
+    "+N guest(s)" if this is the leader of a guest booking, "guest of
+    <email>" if this row was someone else's added guest, blank for an
+    ordinary solo booking."""
     store = _store(args)
     rows = store.read_registrations(scope=args.scope)
+    users = {u["user_id"]: u for u in store.read_users(scope="all")}
 
     if args.year:
         args.from_ = args.from_ or f"{args.year}-01-01"
@@ -127,7 +132,6 @@ def cmd_list(args) -> None:
         rows = [r for r in rows if _in_range(r["occurrence_date"], args.from_, args.to)]
     rows = app_cli_list.filter_by_date(rows, upcoming=args.upcoming, past=args.past)
     if args.email:
-        users = {u["user_id"]: u for u in store.read_users(scope="all")}
         needle = args.email.strip().lower()
         rows = [
             r for r in rows
@@ -135,6 +139,7 @@ def cmd_list(args) -> None:
         ]
 
     rows.sort(key=lambda r: (r["occurrence_date"], r["course_shortname"]))
+    rows = app_cli_list.annotate_party_info(rows, users)
     _print_rows(rows, args.format)
 
 
@@ -150,10 +155,16 @@ def cmd_users(args) -> None:
 
 
 def cmd_show(args) -> None:
-    """`my-bt show <registration_id>` -- full detail on one registration."""
+    """`my-bt show <registration_id>` -- full detail on one registration.
+    Gets the same "party" column `my-bt list` does (see
+    app.cli_list.annotate_party_info) -- computed across ALL rows in that
+    row's scope first (so a sibling party member elsewhere in the file is
+    actually found), then narrowed down to just the requested row."""
     store = _store(args)
+    users = {u["user_id"]: u for u in store.read_users(scope="all")}
     for scope in ("live", "archived"):
-        for r in store.read_registrations(scope=scope):
+        rows = app_cli_list.annotate_party_info(store.read_registrations(scope=scope), users)
+        for r in rows:
             if r["registration_id"] == args.registration_id:
                 r = {**r, "_scope": scope}
                 _print_rows([r], args.format)
@@ -237,8 +248,9 @@ def cmd_history(args) -> None:
 
     print(f"live user: {result.live_user.user_id} <{result.live_user.email}>")
     print()
+    users = {u["user_id"]: u for u in store.read_users(scope="all")}
     print(f"live registrations ({result.live_times_booked}):")
-    _print_rows(result.live_registrations, args.format)
+    _print_rows(app_cli_list.annotate_party_info(result.live_registrations, users), args.format)
 
     print()
     if result.archived_times_booked:

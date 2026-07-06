@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from app.cli_list import filter_by_date
+from app.cli_list import annotate_party_info, filter_by_date
 
 
 def _row(occurrence_date: str) -> dict:
@@ -42,6 +42,49 @@ class FilterByDateTest(unittest.TestCase):
         # must never show up as "upcoming".
         result = filter_by_date([_row("2000-01-01")], upcoming=True, past=False)
         self.assertEqual(result, [])
+
+
+class AnnotatePartyInfoTest(unittest.TestCase):
+    def setUp(self):
+        self.users = {
+            "leader-1": {"user_id": "leader-1", "email": "leader@example.com"},
+            "guest-1": {"user_id": "guest-1", "email": "guest@example.com"},
+        }
+
+    def test_solo_booking_gets_blank_party(self):
+        rows = [{"registration_id": "r1", "user_id": "leader-1", "party_id": "", "invited_by_user_id": ""}]
+        result = annotate_party_info(rows, self.users)
+        self.assertEqual(result[0]["party"], "")
+
+    def test_leader_row_shows_guest_count(self):
+        rows = [
+            {"registration_id": "r1", "user_id": "leader-1", "party_id": "p1", "invited_by_user_id": ""},
+            {"registration_id": "r2", "user_id": "guest-1", "party_id": "p1", "invited_by_user_id": "leader-1"},
+        ]
+        result = annotate_party_info(rows, self.users)
+        leader_row = next(r for r in result if r["user_id"] == "leader-1")
+        self.assertEqual(leader_row["party"], "+1 guest")
+
+    def test_guest_row_shows_who_they_are_a_guest_of(self):
+        rows = [
+            {"registration_id": "r1", "user_id": "leader-1", "party_id": "p1", "invited_by_user_id": ""},
+            {"registration_id": "r2", "user_id": "guest-1", "party_id": "p1", "invited_by_user_id": "leader-1"},
+        ]
+        result = annotate_party_info(rows, self.users)
+        guest_row = next(r for r in result if r["user_id"] == "guest-1")
+        self.assertEqual(guest_row["party"], "guest of leader@example.com")
+
+    def test_does_not_mutate_input_rows(self):
+        rows = [{"registration_id": "r1", "user_id": "leader-1", "party_id": "", "invited_by_user_id": ""}]
+        annotate_party_info(rows, self.users)
+        self.assertNotIn("party", rows[0])
+
+    def test_missing_party_fields_default_to_blank(self):
+        # Rows from before this feature existed have no party_id/
+        # invited_by_user_id key at all (old CSV header) -- must not crash.
+        rows = [{"registration_id": "r1", "user_id": "leader-1"}]
+        result = annotate_party_info(rows, self.users)
+        self.assertEqual(result[0]["party"], "")
 
 
 if __name__ == "__main__":

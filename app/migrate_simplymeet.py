@@ -43,19 +43,36 @@ should sanity-check them against the dry-run report before passing
     capacity/waitlist candidates again, so the placeholder has no
     functional effect on anything going forward.
 
-  - my-booking-tool has no multi-guest-per-registration model (one
-    registration = one person). SimplyMeet.me's "Other participants"
-    column (extra semicolon-separated emails CC'd onto someone else's
-    booking) is NOT imported as separate registrations -- rows that had
-    one are counted and flagged in the report so the operator can review them
-    manually if that history matters.
+  - SimplyMeet.me's "Other participants" column (extra semicolon-separated
+    emails CC'd onto someone else's booking) IS imported now (2026-07-06,
+    once my-booking-tool grew its own guest-booking model -- see
+    SOLUTION-DESIGN.md's guest-booking entry) as linked guest
+    registrations: the row's own "Client email" becomes the party leader,
+    each "Other participants" address becomes a guest sharing the same
+    party_id, invited_by_user_id pointing at the leader -- exactly the
+    same shape a live guest booking produces (see
+    Store.add_party_registrations_checking_capacity), just written one row
+    at a time via Store.import_historical_registration() instead of
+    atomically (see that method's docstring for why: erasure-safety and
+    idempotency are checked per PERSON here, not per party, so one bad
+    guest email never blocks the leader's own otherwise-valid row). A
+    guest's status/cancellation always matches the leader's row (SimplyMeet.me's
+    export has no PER-PARTICIPANT status at all -- "Is canceled" is a
+    property of the booking, not of any one attendee) and their name is
+    never known from this export, so it's resolved the same way a live
+    guest booking resolves a blank name (see plan_import(): an existing
+    account's real name if there is one, else the placeholder "Guest").
+    A malformed, duplicate (matching the leader or another guest on the
+    same row), or already-erased guest email is simply skipped and
+    counted -- never blocks the leader's own row from importing.
 
   - If an email's only my-booking-tool history is an ERASED (archived,
-    hashed) account, the row is skipped rather than silently creating a
-    fresh live account for them from old SimplyMeet.me data -- bulk-
-    importing history is not the same thing as that person choosing to
-    re-register, and this migration shouldn't be the thing that decides
-    that for them. See find_archived_user_ids_for_email().
+    hashed) account, that person's row is skipped rather than silently
+    creating a fresh live account for them from old SimplyMeet.me data --
+    bulk-importing history is not the same thing as that person choosing
+    to re-register, and this migration shouldn't be the thing that
+    decides that for them. Applies independently to the leader AND to
+    each "Other participants" guest. See find_archived_user_ids_for_email().
 """
 from __future__ import annotations
 
@@ -73,10 +90,14 @@ REGISTRATION_ID_PREFIX = "simplymeet-"
 
 @dataclass(frozen=True)
 class ImportPlan:
-    """One row's worth of decided action, before anything is written -- kept
-    separate from execution so a dry run can print exactly what would
-    happen without touching the store at all (see run_migration())."""
-    simplymeet_id: str
+    """One person's worth of decided action, before anything is written --
+    kept separate from execution so a dry run can print exactly what would
+    happen without touching the store at all (see run_migration()). A row
+    with SimplyMeet.me "Other participants" produces one leader ImportPlan
+    plus one more per valid guest, all sharing `party_id` -- see this
+    module's own docstring."""
+    simplymeet_id: str  # the SOURCE ROW's id -- shared by a leader and all its guests
+    registration_id: str  # this PERSON's own registration_id (leader vs. guest differ)
     email: str
     name: str
     course_shortname: str
@@ -85,6 +106,8 @@ class ImportPlan:
     registered_at: str
     canceled_at: str
     canceled_by: str
+    party_id: str = ""
+    invited_by_email: str = ""  # "" for the leader; the leader's email for a guest
 
 
 @dataclass
@@ -95,7 +118,10 @@ class MigrationReport:
     skipped_already_imported: int = 0
     skipped_erased_email: int = 0
     skipped_missing_email: int = 0
-    rows_with_other_participants: int = 0
+    guests_imported: int = 0
+    skipped_guest_duplicate: int = 0
+    skipped_guest_malformed: int = 0
+    skipped_guest_erased: int = 0
 
 
 def parse_simplymeet_export(path: str | Path) -> list[dict]:
@@ -109,6 +135,13 @@ def parse_simplymeet_export(path: str | Path) -> list[dict]:
     gives you -- see plan_import() for all the actual decision logic."""
     with open(path, newline="", encoding="utf-8-sig") as fh:
         return list(csv.DictReader(fh))
+
+
+def _parse_other_participants(raw: str) -> list[str]:
+    """SimplyMeet.me writes this column as e.g. "a@b.com; c@d.com; "
+    (semicolon-separated, trailing separator, inconsistent spacing) --
+    splits, strips, lowercases, and drops anything left blank."""
+    return [p.strip().lower() for p in (raw or "").split(";") if p.strip()]
 
 
 def plan_import(
@@ -138,23 +171,20 @@ def plan_import(
             report.skipped_unmatched_course.append(meeting_type)
             continue
 
-        email = (row.get("Client email") or "").strip().lower()
-        if not email:
+        leader_email = (row.get("Client email") or "").strip().lower()
+        if not leader_email:
             report.skipped_missing_email += 1
             continue
 
-        if find_archived_user_ids_for_email(store, settings, email):
+        if find_archived_user_ids_for_email(store, settings, leader_email):
             report.skipped_erased_email += 1
             continue
 
         simplymeet_id = row["id"].strip()
-        registration_id = f"{REGISTRATION_ID_PREFIX}{simplymeet_id}"
-        if store.find_by_id(registration_id) is not None:
+        leader_registration_id = f"{REGISTRATION_ID_PREFIX}{simplymeet_id}"
+        if store.find_by_id(leader_registration_id) is not None:
             report.skipped_already_imported += 1
             continue
-
-        if (row.get("Other participants") or "").strip():
-            report.rows_with_other_participants += 1
 
         occurrence_iso = occurrence_date.isoformat()
         is_canceled = (row.get("Is canceled") or "").strip().lower() == "yes"
@@ -170,36 +200,121 @@ def plan_import(
             status = STATUS_CONFIRMED
             canceled_at = ""
             canceled_by = ""
+        registered_at = f"{occurrence_iso}T00:00:00"
 
+        # -- guests ("Other participants") -----------------------------------
+        # Validated independently per guest email -- a bad one is skipped
+        # and counted, never blocks the leader's own row (see this module's
+        # docstring). party_id only gets set if at least one guest survives
+        # validation; a row with an "Other participants" value that's
+        # entirely blank/duplicate/erased ends up a perfectly ordinary solo
+        # import, same as a row with no "Other participants" at all.
+        seen_emails = {leader_email}
+        guest_plans: list[ImportPlan] = []
+        for i, guest_email in enumerate(_parse_other_participants(row.get("Other participants", ""))):
+            if "@" not in guest_email:
+                report.skipped_guest_malformed += 1
+                continue
+            if guest_email in seen_emails:
+                report.skipped_guest_duplicate += 1
+                continue
+            seen_emails.add(guest_email)
+            if find_archived_user_ids_for_email(store, settings, guest_email):
+                report.skipped_guest_erased += 1
+                continue
+            guest_registration_id = f"{leader_registration_id}-guest-{i}"
+            if store.find_by_id(guest_registration_id) is not None:
+                report.skipped_already_imported += 1
+                continue
+            guest_plans.append(ImportPlan(
+                simplymeet_id=simplymeet_id,
+                registration_id=guest_registration_id,
+                email=guest_email,
+                name="",  # resolved in run_migration(): existing account's name, else "Guest"
+                course_shortname=course.shortname,
+                occurrence_date=occurrence_iso,
+                status=status,
+                registered_at=registered_at,
+                canceled_at=canceled_at,
+                canceled_by=canceled_by,
+                party_id="",  # filled in below once we know there's >=1 real guest
+                invited_by_email=leader_email,
+            ))
+
+        party_id = f"simplymeet-party-{simplymeet_id}" if guest_plans else ""
         report.planned.append(ImportPlan(
             simplymeet_id=simplymeet_id,
-            email=email,
+            registration_id=leader_registration_id,
+            email=leader_email,
             name=(row.get("Client") or "").strip(),
             course_shortname=course.shortname,
             occurrence_date=occurrence_iso,
             status=status,
-            registered_at=f"{occurrence_iso}T00:00:00",
+            registered_at=registered_at,
             canceled_at=canceled_at,
             canceled_by=canceled_by,
+            party_id=party_id,
+            invited_by_email="",
         ))
+        for gp in guest_plans:
+            report.planned.append(
+                ImportPlan(
+                    simplymeet_id=gp.simplymeet_id, registration_id=gp.registration_id,
+                    email=gp.email, name=gp.name, course_shortname=gp.course_shortname,
+                    occurrence_date=gp.occurrence_date, status=gp.status,
+                    registered_at=gp.registered_at, canceled_at=gp.canceled_at,
+                    canceled_by=gp.canceled_by, party_id=party_id, invited_by_email=gp.invited_by_email,
+                )
+            )
+            report.guests_imported += 1
     return report
 
 
 def run_migration(plans: list[ImportPlan], store: Store) -> int:
     """Actually writes: find-or-create each user by email (never overwriting
     an existing user's name if the account already exists -- only a
-    brand-new account gets its name from the SimplyMeet.me row), then
-    Store.import_historical_registration() per plan. Returns the number of
-    registrations actually written (a plan can still be skipped here if a
-    matching registration_id appeared between plan_import() and now --
-    import_historical_registration() re-checks; see its own docstring)."""
+    brand-new account gets its name from the SimplyMeet.me row, or the
+    placeholder "Guest" if even that's blank, same fallback a live guest
+    booking uses -- see app/webapp.py::App._book_with_guests), then
+    Store.import_historical_registration() per plan, resolving each guest's
+    invited_by_email to that leader's now-known user_id.
+
+    Order-independent by design: `plan_import()` always places a leader's
+    plan before its guests' in the list it returns, but this function
+    doesn't rely on that -- a guest's `invited_by_email` is resolved via
+    `_user_id_for_email()` below, which checks the in-process cache first
+    and falls back to a fresh `store.find_user_by_email()` lookup, so it
+    still works correctly even if a caller re-orders or filters `plans`
+    before passing them in.
+
+    Returns the number of registrations actually written (a plan can still
+    be skipped here if a matching registration_id appeared between
+    plan_import() and now -- import_historical_registration() re-checks;
+    see its own docstring)."""
     written = 0
+    user_id_by_email: dict[str, str] = {}
+
+    def _user_id_for_email(email: str) -> str:
+        if email in user_id_by_email:
+            return user_id_by_email[email]
+        existing = store.find_user_by_email(email)
+        if existing is not None:
+            user_id_by_email[email] = existing.user_id
+            return existing.user_id
+        return ""
+
     for plan in plans:
-        user = store.find_user_by_email(plan.email)
-        if user is None:
-            user = store.upsert_user_for_booking(plan.email, plan.name)
+        existing = store.find_user_by_email(plan.email)
+        if existing is not None:
+            user = existing
+        else:
+            resolved_name = plan.name or "Guest"
+            user = store.upsert_user_for_booking(plan.email, resolved_name)
+        user_id_by_email[plan.email] = user.user_id
+
+        invited_by_user_id = _user_id_for_email(plan.invited_by_email) if plan.invited_by_email else ""
         created = store.import_historical_registration(
-            registration_id=f"{REGISTRATION_ID_PREFIX}{plan.simplymeet_id}",
+            registration_id=plan.registration_id,
             course_shortname=plan.course_shortname,
             occurrence_date=plan.occurrence_date,
             user_id=user.user_id,
@@ -207,6 +322,8 @@ def run_migration(plans: list[ImportPlan], store: Store) -> int:
             registered_at=plan.registered_at,
             canceled_at=plan.canceled_at,
             canceled_by=plan.canceled_by,
+            party_id=plan.party_id,
+            invited_by_user_id=invited_by_user_id,
         )
         if created:
             written += 1

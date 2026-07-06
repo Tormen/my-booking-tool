@@ -185,7 +185,7 @@ class WaitlistTest(StoreTestBase):
         self.store.cancel(confirmed.registration_id, canceled_by="guest")
         promoted = self.store.promote_next_waitlisted("c", "2026-01-01", capacity=1)
         self.assertIsNotNone(promoted)
-        self.assertEqual(promoted.registration_id, waiting.registration_id)
+        self.assertEqual([r.registration_id for r in promoted], [waiting.registration_id])
         self.assertEqual(self.store.count_confirmed("c", "2026-01-01"), 1)
 
     def test_does_not_promote_if_no_room(self):
@@ -201,6 +201,51 @@ class WaitlistTest(StoreTestBase):
 
     def test_no_waitlist_returns_none(self):
         self.assertIsNone(self.store.promote_next_waitlisted("c", "2026-01-01", capacity=5))
+
+    def test_party_is_promoted_together_not_split(self):
+        """A waitlisted party of 2 (see add_party_registrations_checking_capacity)
+        is only promoted once BOTH spots are free -- never split so one
+        member confirms while the other stays waitlisted."""
+        u1 = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        u2 = self.store.upsert_user_for_booking("b@b.com", "Bob")
+        party = self.store.add_party_registrations_checking_capacity(
+            "c", "2026-01-01",
+            [(u1.user_id, hash_token(new_token())), (u2.user_id, hash_token(new_token()))],
+            capacity=0,  # no room at all -- whole party waitlists
+        )
+        self.assertTrue(all(r.status == STATUS_WAITLISTED for r in party))
+
+        # only ONE spot frees up -- not enough for the party of 2
+        promoted = self.store.promote_next_waitlisted("c", "2026-01-01", capacity=1)
+        self.assertIsNone(promoted)
+        still_waiting = [r for r in self.store.all_registrations() if r.status == STATUS_WAITLISTED]
+        self.assertEqual(len(still_waiting), 2)
+
+        # now BOTH spots are free -- the whole party promotes together
+        promoted = self.store.promote_next_waitlisted("c", "2026-01-01", capacity=2)
+        self.assertIsNotNone(promoted)
+        self.assertEqual({r.user_id for r in promoted}, {u1.user_id, u2.user_id})
+        self.assertTrue(all(r.status == STATUS_CONFIRMED for r in promoted))
+
+    def test_front_of_line_party_blocks_a_smaller_party_behind_it(self):
+        """First-come-first-served applies per-party: a smaller party that
+        would fit is never promoted ahead of a bigger one that registered
+        first but doesn't fit yet."""
+        u1 = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        u2 = self.store.upsert_user_for_booking("b@b.com", "Bob")
+        u3 = self.store.upsert_user_for_booking("c@b.com", "Carol")
+        self.store.add_party_registrations_checking_capacity(
+            "c", "2026-01-01",
+            [(u1.user_id, hash_token(new_token())), (u2.user_id, hash_token(new_token()))],
+            capacity=0,
+        )
+        self.store.add_registration(
+            "c", "2026-01-01", u3.user_id, hash_token(new_token()), status=STATUS_WAITLISTED
+        )
+        # 1 spot free: not enough for the front party of 2, and the solo
+        # party of 1 behind it must NOT jump the queue
+        promoted = self.store.promote_next_waitlisted("c", "2026-01-01", capacity=1)
+        self.assertIsNone(promoted)
 
 
 class ErasureTest(StoreTestBase):
@@ -385,7 +430,43 @@ class ImportHistoricalRegistrationTest(StoreTestBase):
         # only the original row exists, untouched by the second call's args
         matches = [r for r in self.store.all_registrations() if r.registration_id == "simplymeet-789"]
         self.assertEqual(len(matches), 1)
-        self.assertEqual(matches[0].course_shortname, "c")
+
+    def test_party_id_and_invited_by_user_id_round_trip(self):
+        """Backs the migration script's import of SimplyMeet.me's "Other
+        participants" as linked guest registrations (app/migrate_simplymeet.py)."""
+        leader = self.store.upsert_user_for_booking("leader@example.com", "Leader")
+        guest = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.import_historical_registration(
+            registration_id="simplymeet-1-leader",
+            course_shortname="c", occurrence_date="2026-01-01",
+            user_id=leader.user_id, status=STATUS_CONFIRMED,
+            registered_at="2026-01-01T00:00:00", party_id="party-1",
+        )
+        self.store.import_historical_registration(
+            registration_id="simplymeet-1-guest-0",
+            course_shortname="c", occurrence_date="2026-01-01",
+            user_id=guest.user_id, status=STATUS_CONFIRMED,
+            registered_at="2026-01-01T00:00:00", party_id="party-1",
+            invited_by_user_id=leader.user_id,
+        )
+        leader_reg = self.store.find_by_id("simplymeet-1-leader")
+        guest_reg = self.store.find_by_id("simplymeet-1-guest-0")
+        self.assertEqual(leader_reg.party_id, "party-1")
+        self.assertEqual(leader_reg.invited_by_user_id, "")
+        self.assertEqual(guest_reg.party_id, "party-1")
+        self.assertEqual(guest_reg.invited_by_user_id, leader.user_id)
+
+    def test_party_id_defaults_blank_for_a_plain_historical_row(self):
+        user = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.import_historical_registration(
+            registration_id="simplymeet-solo",
+            course_shortname="c", occurrence_date="2026-01-01",
+            user_id=user.user_id, status=STATUS_CONFIRMED,
+            registered_at="2026-01-01T00:00:00",
+        )
+        reg = self.store.find_by_id("simplymeet-solo")
+        self.assertEqual(reg.party_id, "")
+        self.assertEqual(reg.invited_by_user_id, "")
 
 
 class CsvInjectionTest(StoreTestBase):

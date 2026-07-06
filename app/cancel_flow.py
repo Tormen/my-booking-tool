@@ -105,8 +105,17 @@ def cancel_and_promote(
         return
     promoted = store.promote_next_waitlisted(course_shortname, occurrence_date_str, course.capacity)
     if promoted:
-        user = store.find_user_by_id(promoted.user_id)
-        if user:
+        # promoted is every row in ONE promoted party (see
+        # Store.promote_next_waitlisted's docstring) -- a solo booking's
+        # party is just itself, so this loop runs once in the common case,
+        # and behavior here is unchanged for anyone not using guest
+        # bookings.
+        promoted_users = []
+        for reg in promoted:
+            user = store.find_user_by_id(reg.user_id)
+            if user is None:
+                continue
+            promoted_users.append(user)
             # Same What/When/Where(+description) layout as every other
             # booking-related email (see booking_details_text() in
             # app/cancellation.py) -- this used to be a plain one-liner with
@@ -124,15 +133,19 @@ def cancel_and_promote(
                 + booking_details_text(course, occurrence_date_str)
                 + f"\nManage or cancel this booking any time: {settings.base_url}/my\n",
             )
-            # Both sides notified, same standing default as every other
-            # booking/cancellation email (see _send_booking_result_email/
-            # send_cancellation_emails) -- this was the one path that only
-            # told the promoted guest and left admin_email finding out some
-            # other way.
+        if promoted_users:
+            # One combined admin email for the whole promoted party (not one
+            # per person) -- same standing default as every other booking/
+            # cancellation email (both sides notified, see
+            # _send_booking_result_email/send_cancellation_emails), just
+            # consolidated so promoting a party of 3 doesn't send admin 3
+            # near-identical emails at once.
+            names = ", ".join(f"{u.name} <{u.email}>" for u in promoted_users)
+            verb = "were" if len(promoted_users) > 1 else "was"
             send_mail(
                 settings, settings.admin_email,
                 f"Promoted from waitlist: {course.title} on {occurrence_date_str}",
-                f"{user.name} <{user.email}> was promoted from the waitlist to confirmed for:\n\n"
+                f"{names} {verb} promoted from the waitlist to confirmed for:\n\n"
                 + booking_details_text(course, occurrence_date_str),
             )
     if sync_fn is not None:

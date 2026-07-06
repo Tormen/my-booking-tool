@@ -249,6 +249,11 @@ Remove them yourself, on purpose, if you really want to: `sudo rm -rf
 Installed on PATH as `my-bt`. Run `my-bt --help` / `my-bt <command> --help`
 for the full option list. Highlights:
 
+`list`/`show`/`history` all include a "party" column (guest bookings,
+2026-07 -- see "Guests" under "Booking page layout" below): "+N guest(s)"
+on the leader's own row, "guest of `<email>`" on a guest's row, blank for
+an ordinary solo booking.
+
 ```
 my-bt --version                         # package version + git commit it was built from
 
@@ -467,10 +472,18 @@ re-run).
 Before running with `--commit`, read the assumptions documented at the top
 of `app/migrate_simplymeet.py` -- SimplyMeet.me's export can't tell us who
 canceled a booking (every canceled row imports as guest-canceled) or when
-it was originally booked (a placeholder is used), and it has no
-multi-guest-per-registration model, so any SimplyMeet.me "Other
-participants" aren't imported as their own bookings (just counted and
-flagged in the report).
+it was originally booked (a placeholder is used).
+
+SimplyMeet.me's "Other participants" column IS imported (2026-07-06, once
+this tool grew its own guest-booking model -- see "Guests" under "Booking
+page layout" above): the row's own "Client email" becomes the party
+leader, each "Other participants" address becomes a linked guest sharing
+the same party (`my-bt list`/`show` will show "+N guest(s)" on the
+leader's row). A guest's name is never known from this export, so it
+resolves the same way a live guest booking does: an existing account's
+real name if there is one, else the placeholder "Guest". A malformed,
+duplicate, or already-erased guest email is skipped and counted in the
+report -- it never blocks the leader's own row from importing.
 
 ## Logs & debugging
 
@@ -801,6 +814,33 @@ every required field validates, and its label switches between
 depending on the selected date's availability -- the waitlist label is
 never configurable, since it has to stay literally true to what
 submitting the form does.
+
+### Guests ("+ Add participant")
+
+Below the email field, "+ Add participant" adds a row per guest (email
+required, name optional, up to 9) -- mirrors SimplyMeet.me's own "add more
+participants" UX. Submitting with at least one guest books the whole
+party -- the person who filled out the form (the "leader") plus every
+guest -- as ONE atomic decision: either everyone is confirmed, or (if
+there isn't room for all of them) everyone is waitlisted together, never
+split. A brand-new guest's email does NOT have to click a confirmation
+link first (unlike a brand-new solo booker) -- the leader vouches for
+whoever they add, same trust model SimplyMeet.me used; guests still get a
+real account and can later set a password to manage their own booking via
+`/my`. If adding a guest would exceed the session's real remaining
+capacity, a warning appears live on the form (before you submit) so you
+can remove a guest and get confirmed instantly instead of waitlisting the
+whole group -- this uses the TRUE spots-left count, never the
+display-only `spots_left_offset`-adjusted number (see "Spots-left
+display" above).
+
+Cancellation is always per-person, regardless of party membership --
+if one guest (or the leader) cancels later, it only frees their own spot;
+everyone else in the party is untouched. `/admin`'s overview table has a
+Party column showing "+N guest(s)" on the leader's row and
+"guest of `<leader>`" on each guest's row, so it's always clear who booked
+together and who was a guest. The calendar invite intentionally does NOT
+show this (or anyone's name) -- it never has, for any registrant.
 
 Two more `[[course]]` fields control the page header:
 `subtitle` (optional plain text -- omit it to auto-show

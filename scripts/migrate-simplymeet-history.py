@@ -75,11 +75,18 @@ def main() -> None:
     report = plan_import(rows, settings, store)
 
     print(f"Parsed {len(rows)} row(s) from {args.csv_path}")
-    print(f"  {len(report.planned)} to import")
+    print(f"  {len(report.planned)} registration(s) to import (leaders + guests combined)")
+    print(f"    of which {report.guests_imported} are guests (from SimplyMeet.me's \"Other participants\")")
     print(f"  {report.skipped_future} skipped (future occurrence -- not history yet)")
     print(f"  {report.skipped_already_imported} skipped (already imported)")
     print(f"  {report.skipped_erased_email} skipped (email matches an erased/archived account)")
     print(f"  {report.skipped_missing_email} skipped (no client email on the row)")
+    if report.skipped_guest_duplicate:
+        print(f"  {report.skipped_guest_duplicate} guest(s) skipped (duplicate email -- matched the leader or another guest on the same row)")
+    if report.skipped_guest_malformed:
+        print(f"  {report.skipped_guest_malformed} guest(s) skipped (malformed email in \"Other participants\")")
+    if report.skipped_guest_erased:
+        print(f"  {report.skipped_guest_erased} guest(s) skipped (email matches an erased/archived account)")
     if report.skipped_unmatched_course:
         print(
             f"  {len(report.skipped_unmatched_course)} skipped (meeting type not found "
@@ -87,13 +94,6 @@ def main() -> None:
         )
         for title, count in Counter(report.skipped_unmatched_course).most_common():
             print(f"    {count:>4}x  {title!r}")
-    if report.rows_with_other_participants:
-        print(
-            f"  NOTE: {report.rows_with_other_participants} row(s) listed \"Other participants\" "
-            "in SimplyMeet.me -- my-booking-tool has no multi-guest registration model, so "
-            "those extra people are NOT imported as their own registrations. Review the "
-            "original export manually if that history matters."
-        )
 
     if not args.commit:
         print("\nDry run only -- nothing written. Re-run with --commit to actually import.")
