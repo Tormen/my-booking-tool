@@ -247,7 +247,7 @@ def check_selinux() -> list[Check]:
 # Kept as a plain tuple, not derived from the .example file itself, so this
 # check has no dependency on that file's exact on-disk location/format at
 # runtime (it only needs to know what to look FOR, not read the example).
-_REQUIRED_NGINX_LOCATIONS = ("/book/", "/cancel/", "/my", "/admin")
+_REQUIRED_NGINX_LOCATIONS = ("/courses", "/book/", "/cancel/", "/my", "/admin")
 
 
 def check_nginx_locations() -> list[Check]:

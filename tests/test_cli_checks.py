@@ -424,6 +424,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
     def test_all_locations_present_are_ok(self):
         merged = """
         server {
+            location /courses { proxy_pass http://127.0.0.1:8811; }
             location /book/ { proxy_pass http://127.0.0.1:8811; }
             location /cancel/ { proxy_pass http://127.0.0.1:8811; }
             location /my { proxy_pass http://127.0.0.1:8811; }
@@ -434,10 +435,14 @@ class CheckNginxLocationsTest(unittest.TestCase):
              patch("app.cli_checks.subprocess.run",
                    return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
             checks = cli_checks.check_nginx_locations()
-        self.assertEqual(len(checks), 4)
+        self.assertEqual(len(checks), 5)
         self.assertTrue(all(level == "ok" for _, level, _ in checks))
 
     def test_one_missing_location_warns_others_stay_ok(self):
+        # /courses (2026-07-06) deliberately left out here -- this locks in
+        # that a brand-new required location missing from an existing,
+        # not-yet-updated nginx vhost is reported on its own, without
+        # affecting the other, already-present locations.
         merged = """
         location /book/ { proxy_pass http://127.0.0.1:8811; }
         location /cancel/ { proxy_pass http://127.0.0.1:8811; }
@@ -448,6 +453,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
                    return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
             checks = cli_checks.check_nginx_locations()
         levels = _levels(checks)
+        self.assertEqual(levels["nginx location /courses"], "warn")
         self.assertEqual(levels["nginx location /my"], "warn")
         self.assertEqual(levels["nginx location /book/"], "ok")
         self.assertEqual(levels["nginx location /cancel/"], "ok")
