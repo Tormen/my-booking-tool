@@ -1,4 +1,5 @@
 import io
+import json
 import re
 import tempfile
 import unittest
@@ -380,6 +381,55 @@ class SessionBannerTest(unittest.TestCase):
         post_environ.update({"CONTENT_LENGTH": str(len(body_bytes)), "wsgi.input": io.BytesIO(body_bytes)})
         _status, _headers, body = self.app.book("POST", "yoga-class-1", post_environ)
         self.assertIn('class="session-banner"', body)
+
+    def test_banner_links_back_to_the_homepage(self):
+        # 2026-07-09, the operator: "allow in the banner to also go back to
+        # https://booking.example.org".
+        environ = self._login_environ("regular@example.org")
+        _status, _headers, body = self.app.courses("GET", environ)
+        self.assertIn(f'<a href="{self.settings.base_url}">', body)
+
+
+class MySessionStatusTest(unittest.TestCase):
+    """GET /my/session (2026-07-09) -- the STATIC homepage's own JS calls
+    this to ask "is this browser already logged in as a guest?" so it can
+    swap its plain Login button for the same banner-style affordance the
+    dynamic pages show. See my_session_status()'s own docstring for the
+    iframe/third-party-cookie caveat this doesn't (and can't) solve."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings()
+        self.app = App(self.settings, self.store)
+
+    def test_anonymous_reports_logged_out(self):
+        _status, _headers, body = self.app.my_session_status("GET", {})
+        self.assertEqual(json.loads(body), {"logged_in": False, "email": None})
+
+    def test_guest_session_reports_logged_in_with_email(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        sid = webapp._new_session({"kind": "guest", "user_id": user.user_id})
+        environ = {"HTTP_COOKIE": f"session={sid}"}
+        _status, _headers, body = self.app.my_session_status("GET", environ)
+        self.assertEqual(json.loads(body), {"logged_in": True, "email": "regular@example.org"})
+
+    def test_admin_session_never_reports_logged_in(self):
+        # This is a GUEST-identity check for the marketing homepage -- an
+        # admin session must never make it show "logged in as {admin}".
+        sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={sid}"}
+        _status, _headers, body = self.app.my_session_status("GET", environ)
+        self.assertEqual(json.loads(body), {"logged_in": False, "email": None})
+
+    def test_post_not_allowed(self):
+        status, _headers, _body = self.app.my_session_status("POST", {})
+        self.assertEqual(status, "405 Method Not Allowed")
+
+    def test_content_type_is_json(self):
+        _status, headers, _body = self.app.my_session_status("GET", {})
+        self.assertIn(("Content-Type", "application/json"), headers)
 
 
 class LateBookingQuorumTest(unittest.TestCase):
@@ -1382,11 +1432,17 @@ class BookingFlowTest(unittest.TestCase):
         for d in ["2027-01-01", "2027-02-01", "2027-03-01", "2027-04-01"]:
             self.assertIn(d, body)
 
-    def test_no_past_bookings_omits_the_past_section_entirely(self):
+    def test_no_past_bookings_shows_a_friendly_message(self):
+        # 2026-07-09 behavior change, the operator: "What about PAST meetings?",
+        # asked while looking at an account with no bookings at all -- the
+        # Past section used to be omitted entirely when empty, which looked
+        # indistinguishable from broken/missing rather than genuinely
+        # empty. Now mirrors Upcoming's own empty-state message exactly.
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")  # one upcoming booking only
         _status, _headers, body = self.app.my("GET", environ)
-        self.assertNotIn("Past (most recent", body)
+        self.assertIn("Past (most recent", body)
+        self.assertIn("You have no past bookings.", body)
 
     def test_no_upcoming_bookings_shows_a_friendly_message(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -1403,6 +1459,26 @@ class BookingFlowTest(unittest.TestCase):
         user, environ = self._login_as_guest("regular@example.org")
         _status, _headers, body = self.app.my("GET", environ)
         self.assertIn(f'<a href="{self.settings.base_url}" target="_blank"', body)
+
+    def test_my_page_shows_the_same_session_banner_as_courses_and_book(self):
+        # 2026-07-09, the operator: "Rather use the BANNER as here to be
+        # CONSISTENT!!" -- /my now shows the same _session_banner_html()
+        # banner /courses and /book already show, instead of a separate,
+        # redundant "Log out" button at the bottom of the page.
+        user, environ = self._login_as_guest("regular@example.org")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("regular@example.org", body)
+
+    def test_my_page_bottom_row_has_only_the_delete_account_button(self):
+        # The banner's own Logout replaces the old standalone "Log out"
+        # button here -- only the destructive "Delete my account" action
+        # remains in the bottom row now.
+        user, environ = self._login_as_guest("regular@example.org")
+        _status, _headers, body = self.app.my("GET", environ)
+        bottom = body.split("<h3>Past")[1]
+        self.assertNotIn(">Log out<", bottom)
+        self.assertIn("Delete my account", bottom)
 
 
 class AdminLoginRateLimitTest(unittest.TestCase):

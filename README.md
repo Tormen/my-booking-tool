@@ -743,14 +743,61 @@ is what makes clicking Login break OUT of that iframe and navigate the
 whole browser tab to `/my`, instead of trying (and likely failing, or
 looking broken) to load the login page inside a small embedded iframe.
 Viewed standalone (not embedded), `target="_top"` behaves like a normal
-same-tab link -- no downside either way. Deliberately has no JS and no
-"logged in as..." state: this page can't reliably detect a `/my` session
-across the iframe boundary anyway (third-party-cookie restrictions), so a
-static, always-shown "Login" link is both the simplest and the only
-approach that's guaranteed to keep working inside the iframe embed. The
-dynamic, session-aware equivalent ("Logged in as x@example.org...") lives
-on `/courses` and `/book/<shortname>` instead -- see "Course overview
-page" above.
+same-tab link -- no downside either way.
+
+**Session-aware upgrade (2026-07-09):** the operator: "if you are logged in,
+https://booking.example.org should show the same banner and not 'Login' button."
+`site/index.html.example` now has a small `<script>` at the bottom of
+`<body>` that calls `GET /my/session` (a same-origin `fetch()`, which
+carries the guest's session cookie automatically even though this page's
+own JS can never read that cookie directly) and, only if it comes back
+`{"logged_in": true, ...}`, swaps the Login button for a "My bookings"
+link + "Log out" button -- same `.login-btn` styling, no new CSS needed.
+Add the id and the script yourself if you're not starting from the
+`.example` file fresh:
+
+```html
+<div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+```
+
+```html
+<script>
+(function () {
+  fetch('/my/session', { credentials: 'same-origin' })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (!data.logged_in) return;
+      var bar = document.getElementById('top-bar');
+      if (!bar) return;
+      bar.innerHTML =
+        '<a class="login-btn" href="/my" target="_top">My bookings</a>' +
+        '<form method="post" action="/my/logout" target="_top" style="display:inline;margin-left:0.4em">' +
+        '<button type="submit" class="login-btn" style="border:none;cursor:pointer">Log out</button>' +
+        '</form>';
+    })
+    .catch(function () { /* stay on the plain Login button */ });
+})();
+</script>
+```
+
+This does NOT reverse the reasoning above about having no JS/session state
+at all -- it's a pure enhancement layered on top of the same static
+fallback. A same-origin fetch from a *direct/standalone* visit to the
+homepage works exactly as you'd expect. But a fetch from *inside* the
+`<iframe>` embed is a third-party request relative to the embedding page's
+origin, and modern browsers increasingly block or partition third-party
+cookies by default -- so the swap may simply not happen there even when
+the guest really is logged in, in the top-level tab. Any failure or
+negative result (network error, JS disabled, blocked cookie) just leaves
+the plain Login button exactly as it was before this existed, so there's
+no regression case, only an upgrade for the common direct-visit path. The
+dynamic, session-aware equivalent ("Logged in as x@example.org...") on
+`/courses` and `/book/<shortname>` doesn't have this limitation, since
+those pages are server-rendered by this app itself, not fetched from
+across an iframe boundary -- see "Course overview page" above. Both
+banners now also link back to the homepage itself (`settings.base_url`),
+not just to `/my` -- the operator: "allow in the banner to also go back to
+https://booking.example.org".
 
 **Variant: overlaying the button onto a boxed/backgrounded layout.** If
 your real homepage wraps its content in its own box (e.g. a fixed-width

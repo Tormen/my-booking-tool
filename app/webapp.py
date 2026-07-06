@@ -14,6 +14,8 @@
   POST     /my/cancel/<reg_id>      guest cancels one of their own bookings
   POST     /my/logout               guest logout
   POST     /my/delete-account       guest erases their own account (Art. 17)
+  GET      /my/session               JSON {"logged_in": bool, "email": ...} for the
+                                     STATIC homepage's own JS to check (see my_session_status)
   GET/POST /admin/login             admin login
   GET      /admin                   admin overview (today+future by default)
   GET/POST /admin/cancel/<reg_id>   host cancels a registration, optional message
@@ -502,6 +504,8 @@ class App:
             return self.my_logout(method, environ)
         if path == "/my/delete-account":
             return self.my_delete_account(method, environ)
+        if path == "/my/session":
+            return self.my_session_status(method, environ)
         if path == "/admin/login":
             return self.admin_login(method, environ)
         if path == "/admin":
@@ -864,7 +868,12 @@ class App:
         visitor, since /book and /courses both work perfectly well without
         ever logging in -- this is purely a courtesy cue plus a quick way
         back to /my or to log out, for someone who arrived here already
-        logged in."""
+        logged in. Also links back to the marketing homepage
+        (settings.base_url, 2026-07-09, the operator: "allow in the banner to
+        also go back to https://booking.example.org") -- this banner now shows on
+        /my too (see my()), so without this, a guest on /my had no
+        one-click way back to the homepage other than the separate
+        target="_blank" link my() already has for that."""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
             return ""
@@ -875,6 +884,7 @@ class App:
             '<div class="session-banner">'
             f"<span>Logged in as <b>{esc(user.email)}</b></span>"
             '<span><a href="/my">My bookings</a> &middot; '
+            f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a> &middot; '
             '<form method="post" action="/my/logout">'
             '<button type="submit" class="link-button">Log out</button></form></span>'
             "</div>"
@@ -1214,7 +1224,21 @@ class App:
         cap is obvious rather than looking like an arbitrary cutoff on one
         mixed list. A "New booking" button links to /courses (see
         courses()) rather than back to any specific course, since this
-        guest may want a course they haven't booked before."""
+        guest may want a course they haven't booked before.
+
+        (2026-07-09, the operator: "What about PAST meetings?", asked while
+        looking at an account with zero bookings of either kind) Past now
+        always shows its own "You have no past bookings." message when
+        empty, exactly like Upcoming already did -- omitting the whole
+        section when empty (the original behavior) looked indistinguishable
+        from the section being missing/broken rather than genuinely empty.
+
+        Also shows the same _session_banner_html() banner /courses and
+        /book already show (2026-07-09, the operator: "Rather use the BANNER as
+        here to be CONSISTENT!!") instead of a separate, redundant "Log
+        out" button in the bottom row -- the banner's own Logout covers
+        that; only "Delete my account & data" (a distinct, destructive
+        action) remains in that row on its own."""
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
             all_regs = self.store.registrations_for_user(session["user_id"])
@@ -1298,10 +1322,7 @@ class App:
 
             upcoming_id, past_id = "my-upcoming-table", "my-past-table"
             upcoming_html = _table(upcoming_id, upcoming) or "<p>You have no upcoming bookings.</p>"
-            past_html = _table(past_id, past)
-            past_section = (
-                f"<h3>Past (most recent {MY_PAST_BOOKINGS_LIMIT})</h3>{past_html}" if past_html else ""
-            )
+            past_html = _table(past_id, past) or "<p>You have no past bookings.</p>"
             body = f"""
             <div class="submit-row">
               <a href="/courses"><button type="button">New booking</button></a>
@@ -1310,11 +1331,9 @@ class App:
             </div>
             <h3>Upcoming</h3>
             {upcoming_html}
-            {past_section}
+            <h3>Past (most recent {MY_PAST_BOOKINGS_LIMIT})</h3>
+            {past_html}
             <div class="submit-row">
-              <form method="post" action="/my/logout" style="display:inline">
-                <button type="submit">Log out</button>
-              </form>
               <form method="post" action="/my/delete-account" style="display:inline" id="delete-account-form"
                 onsubmit="return confirm('Delete your account and all related data? This will cancel any booking you still have!');">
                 <button type="submit" class="confirm-dialog-btn" data-dialog="delete-account-dialog">Delete my account &amp; data</button>
@@ -1328,7 +1347,10 @@ class App:
                 <button type="button" class="dialog-close-btn" data-dialog="delete-account-dialog">Never mind</button>
               </div>
             </dialog>""" + _DIALOG_WIRING_SCRIPT
-            return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
+            return (
+                "200 OK", [("Content-Type", "text/html")],
+                page("My bookings", body, banner=self._session_banner_html(environ)),
+            )
 
         error = None
         lockout_seconds = 0.0
@@ -1724,6 +1746,52 @@ class App:
             erase_user_by_email(self.store, self.settings, user.email, caldav=self.caldav)
         SESSIONS.pop(session["_sid"], None)
         return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))], ""
+
+    def my_session_status(self, method: str, environ):
+        """GET-only JSON: {"logged_in": bool, "email": str|null} for
+        whatever guest session (if any) this request's cookie belongs to.
+        Never reports an admin session as logged in here -- this exists
+        purely so the STATIC homepage (site/index.html, served directly by
+        nginx, not proxied through this app -- see README's "Login banner"
+        section) can ask its own small question, "is this visitor's
+        browser already logged in as a guest?", via a same-origin fetch()
+        and swap its plain Login button for the same My-bookings/Log-out
+        affordance the dynamic pages (/courses, /book, /my) already show
+        (2026-07-09, the operator: "if you are logged in, https://booking.example.org
+        should show the same banner and not 'Login' button").
+
+        A same-origin browser request already carries the HttpOnly session
+        cookie automatically even though the static page's own JS can
+        never read it directly via document.cookie -- this endpoint is the
+        intentional, narrow exception that lets that JS learn ONLY
+        "yes/no, and which email," nothing else, and only for the browser
+        that already holds a valid session of its own (no cross-user
+        leakage). Under `/my`'s existing nginx prefix match, so (like
+        /my/signup etc.) no nginx config change was needed.
+
+        Important limitation, carried over from the homepage's own
+        existing comment on why it had NO session-awareness before this:
+        this page is also embedded via <iframe> on a separate "center
+        homepage." A same-origin fetch from WITHIN that iframe is a
+        third-party request relative to the embedding page's origin, and
+        modern browsers increasingly partition or block third-party
+        cookies by default -- so this endpoint (and the session cookie
+        itself) may simply not see the guest's login there, regardless of
+        whether they're actually logged in in the top-level tab. That's
+        not a bug in this endpoint; it's the same constraint the homepage
+        comment already documented. The static page's JS treats a failed
+        or negative check as "stay on the plain Login button" (the exact
+        prior behavior), so this is a pure enhancement for a direct/
+        standalone visit, never a regression for the iframe-embedded one."""
+        if method != "GET":
+            return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
+        session = _get_session(environ)
+        if session and session.get("kind") == "guest":
+            user = self.store.find_user_by_id(session["user_id"])
+        else:
+            user = None
+        payload = {"logged_in": user is not None, "email": user.email if user else None}
+        return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
 
     # -- /admin ---------------------------------------------------------------
 

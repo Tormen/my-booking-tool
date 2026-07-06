@@ -5,21 +5,37 @@
      (shortname must match exactly -- that's what /book/<shortname>
      resolves to).
 
-     2026-07-06: the small "Login" link/button below is deliberately
-     STATIC -- no JS, no "logged in as..." state, nothing that reads
-     cookies or calls the app. Two reasons: (1) this page is also embedded
-     via <iframe> elsewhere (a separate "center homepage") -- anything
-     session-aware here would mean detecting login state across that
-     iframe boundary, which third-party-cookie restrictions in modern
-     browsers make unreliable at best; (2) target="_top" on the link means
-     clicking it always breaks OUT of any iframe and navigates the WHOLE
-     browser tab to /my, whether this page is being viewed standalone or
-     embedded -- so it keeps working inside the iframe embed without any
-     extra code, degrading to a perfectly normal same-tab link when this
-     page is viewed on its own. If you remove or restyle this, keep both
-     the target="_top" and the plain <a> (no onclick/JS) -- see
-     README.md's "Course overview page" section for the dynamic
-     (session-aware) banner equivalent on /courses and /book. -->
+     2026-07-06: the small "Login" link/button below always starts out
+     plain, static HTML -- target="_top" is load-bearing, not decoration:
+     this page is also embedded via <iframe> elsewhere (a separate "center
+     homepage"), and target="_top" is what makes clicking Login break OUT
+     of that iframe and navigate the WHOLE browser tab to /my, instead of
+     trying (and likely failing, or looking broken) to load the login page
+     inside a small embedded iframe. Viewed standalone, it behaves like a
+     normal same-tab link -- no downside either way.
+
+     2026-07-09, the operator: "if you are logged in, https://booking.example.org should
+     show the same banner and not 'Login' button." The <script> at the
+     bottom of <body> opportunistically upgrades this on load: it asks
+     GET /my/session (same-origin fetch, so it carries the guest's session
+     cookie automatically even though this page's own JS can never read
+     that cookie directly) and, only if it comes back logged in, swaps
+     this button for a "My bookings" link + "Log out" button. IMPORTANT
+     limitation this can't get around: fetching /my/session from INSIDE
+     the iframe embed mentioned above is a third-party request relative to
+     the embedding page's origin, and modern browsers increasingly block
+     or partition third-party cookies by default -- so the swap may simply
+     not happen there even when the guest really is logged in (in the
+     top-level tab). That's not a bug, it's the same constraint this
+     comment used to cite as the reason for having NO session-awareness at
+     all; a failed/negative check just leaves the plain Login button in
+     place (the exact prior behavior), so this is a pure enhancement for a
+     direct/standalone visit, never a regression for the iframe-embedded
+     one. If you remove or restyle this, keep the target="_top" attribute
+     on BOTH the Login link and the swapped-in form (forms support
+     target= too) -- see README.md's "Login banner" section for more, and
+     "Course overview page" for the equivalent dynamic banner already used
+     on /courses and /book. -->
 <html>
 <head>
 <meta http-equiv=Content-Type content="text/html; charset=utf-8">
@@ -35,7 +51,7 @@
 </head>
 <body>
 
-<div class="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+<div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
 
 <h1>REPLACE-ME-YOUR-SITE-NAME</h1>
 
@@ -52,6 +68,28 @@
 <a href="/privacy.html">Privacy policy</a> &nbsp;|&nbsp;
 <a href="/impressum.html">Impressum / Legal notice</a>
 </footer>
+
+<script>
+// See the top-of-file comment for the full reasoning/limitations.
+// Opportunistic only: any failure here (network, JS disabled, blocked
+// third-party cookie inside the <iframe> embed) just leaves the plain
+// Login button in place -- exactly what was there before this existed.
+(function () {
+  fetch('/my/session', { credentials: 'same-origin' })
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (!data.logged_in) return;
+      var bar = document.getElementById('top-bar');
+      if (!bar) return;
+      bar.innerHTML =
+        '<a class="login-btn" href="/my" target="_top">My bookings</a>' +
+        '<form method="post" action="/my/logout" target="_top" style="display:inline;margin-left:0.4em">' +
+        '<button type="submit" class="login-btn" style="border:none;cursor:pointer">Log out</button>' +
+        '</form>';
+    })
+    .catch(function () { /* stay on the plain Login button */ });
+})();
+</script>
 
 </body>
 </html>

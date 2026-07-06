@@ -14,7 +14,13 @@ def page(title: str, body: str, banner: str = "") -> str:
     OPTIONAL, small, session-aware markup rendered above the page's own
     heading -- e.g. "Logged in as x@example.org - Logout" on /book and
     /courses when reached with an active guest session. Blank by default
-    for every other page, unchanged from before this existed."""
+    for every other page, unchanged from before this existed.
+
+    .submit-row is flex+gap (2026-07-09, the operator: "buttons too close") --
+    previously adjacent buttons/forms in the same row relied on plain
+    inline whitespace for spacing, which visually collapsed them together
+    (worst on /my's bottom row). One shared fix here covers every
+    .submit-row in the app, not just /my's."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -46,7 +52,7 @@ label{{display:block;margin-top:.6em}}
 .description{{background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;padding:1em 1.2em;margin:.8em 0}}
 .description ul,.description ol{{margin:.4em 0;padding-left:1.4em}}
 .description p:first-child{{margin-top:0}} .description p:last-child{{margin-bottom:0}}
-.submit-row{{margin-top:1.4em}}
+.submit-row{{margin-top:1.4em;display:flex;flex-wrap:wrap;align-items:center;gap:.6em}}
 button:disabled{{opacity:.5;cursor:not-allowed}}
 .link-button{{background:none;border:none;padding:0;margin:0;color:#196B24;text-decoration:underline;font:inherit;cursor:pointer}}
 .link-button:disabled{{color:#888;text-decoration:none;opacity:1}}
