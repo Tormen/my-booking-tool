@@ -433,6 +433,45 @@ step by step and have `my-bt` perform what it safely can:
   write access to the data directory, which the `my-booking` group
   already grants. See "Data dir git snapshot" below.
 
+## Migrating history from SimplyMeet.me (one-off)
+
+`scripts/migrate-simplymeet-history.py` imports a SimplyMeet.me "List view"
+CSV export into this tool's own data directory -- written for the 2026-07
+cutover away from SimplyMeet.me and kept around for reference, not a
+`my-bt` subcommand (see SOLUTION-DESIGN.md entry #28 for why: it's run
+once, not a piece of permanent CLI surface). It is NOT installed by the RPM
+-- run it straight from a checkout of this repo:
+
+```
+scripts/migrate-simplymeet-history.py path/to/export.csv
+  # dry run: parses the export and prints exactly what it WOULD do,
+  # writes nothing
+
+scripts/migrate-simplymeet-history.py path/to/export.csv --commit
+  # actually writes -- safe to re-run (including with --commit): rows
+  # already imported are detected and skipped, never duplicated
+
+scripts/migrate-simplymeet-history.py path/to/export.csv --commit \
+  --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking
+  # both flags already default to those paths; only needed if yours differ
+```
+
+Only imports bookings whose occurrence is strictly before today (the same
+"past" cutoff `/admin` and `my-bt list --past` already use) -- "all except
+future bookings," per the original ask. A SimplyMeet.me "Meeting type"
+column value is matched against your `settings.toml` `[[course]]` titles by
+exact string match; anything that doesn't match is skipped and listed in
+the report rather than guessed at (fix the mismatch in either place and
+re-run).
+
+Before running with `--commit`, read the assumptions documented at the top
+of `app/migrate_simplymeet.py` -- SimplyMeet.me's export can't tell us who
+canceled a booking (every canceled row imports as guest-canceled) or when
+it was originally booked (a placeholder is used), and it has no
+multi-guest-per-registration model, so any SimplyMeet.me "Other
+participants" aren't imported as their own bookings (just counted and
+flagged in the report).
+
 ## Logs & debugging
 
 **Viewing logs:**

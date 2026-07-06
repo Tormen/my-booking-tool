@@ -320,6 +320,74 @@ class MergeArchivedRegistrationsTest(StoreTestBase):
         self.assertEqual(remaining_archived[0]["user_id"], old2.user_id)
 
 
+class ImportHistoricalRegistrationTest(StoreTestBase):
+    """Store.import_historical_registration -- backs the one-off SimplyMeet.me
+    migration (app/migrate_simplymeet.py). Unlike add_registration(), the
+    caller supplies registration_id/status/registered_at directly."""
+
+    def test_writes_row_with_caller_supplied_fields(self):
+        user = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        created = self.store.import_historical_registration(
+            registration_id="simplymeet-123",
+            course_shortname="c",
+            occurrence_date="2026-01-01",
+            user_id=user.user_id,
+            status=STATUS_CONFIRMED,
+            registered_at="2026-01-01T00:00:00",
+        )
+        self.assertTrue(created)
+        reg = self.store.find_by_id("simplymeet-123")
+        self.assertIsNotNone(reg)
+        self.assertEqual(reg.course_shortname, "c")
+        self.assertEqual(reg.occurrence_date, "2026-01-01")
+        self.assertEqual(reg.user_id, user.user_id)
+        self.assertEqual(reg.status, STATUS_CONFIRMED)
+        self.assertEqual(reg.registered_at, "2026-01-01T00:00:00")
+        self.assertEqual(reg.guest_cancel_token_hash, "")
+
+    def test_canceled_fields_round_trip(self):
+        user = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.import_historical_registration(
+            registration_id="simplymeet-456",
+            course_shortname="c",
+            occurrence_date="2026-01-01",
+            user_id=user.user_id,
+            status="canceled_by_guest",
+            registered_at="2026-01-01T00:00:00",
+            canceled_at="2025-12-30T09:00:00",
+            canceled_by="guest",
+        )
+        reg = self.store.find_by_id("simplymeet-456")
+        self.assertEqual(reg.status, "canceled_by_guest")
+        self.assertEqual(reg.canceled_at, "2025-12-30T09:00:00")
+        self.assertEqual(reg.canceled_by, "guest")
+
+    def test_reimport_of_same_id_is_a_noop(self):
+        user = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        first = self.store.import_historical_registration(
+            registration_id="simplymeet-789",
+            course_shortname="c",
+            occurrence_date="2026-01-01",
+            user_id=user.user_id,
+            status=STATUS_CONFIRMED,
+            registered_at="2026-01-01T00:00:00",
+        )
+        second = self.store.import_historical_registration(
+            registration_id="simplymeet-789",
+            course_shortname="different-course",
+            occurrence_date="2027-01-01",
+            user_id=user.user_id,
+            status=STATUS_CONFIRMED,
+            registered_at="2027-01-01T00:00:00",
+        )
+        self.assertTrue(first)
+        self.assertFalse(second)
+        # only the original row exists, untouched by the second call's args
+        matches = [r for r in self.store.all_registrations() if r.registration_id == "simplymeet-789"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0].course_shortname, "c")
+
+
 class CsvInjectionTest(StoreTestBase):
     def test_dangerous_name_is_escaped_on_disk(self):
         self.store.upsert_user_for_booking("a@b.com", "=cmd|'/c calc'!A1")

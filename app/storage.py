@@ -472,6 +472,52 @@ class Store:
             write(rows)
             return Registration(**candidate)
 
+    def import_historical_registration(
+        self,
+        registration_id: str,
+        course_shortname: str,
+        occurrence_date: str,
+        user_id: str,
+        status: str,
+        registered_at: str,
+        canceled_at: str = "",
+        canceled_by: str = "",
+        host_message: str = "",
+    ) -> bool:
+        """One-off historical import (see app/migrate_simplymeet.py /
+        scripts/migrate-simplymeet-history.py): unlike add_registration() /
+        add_registration_checking_capacity(), the caller supplies
+        registration_id/status/registered_at directly instead of generating
+        or deriving them -- these rows describe bookings that already
+        happened in a since-retired external tool, so there's no "now" to
+        stamp them with and no live capacity to check (the session already
+        ran). The migration script reuses that external tool's own numeric
+        booking id to build registration_id, which is what makes this
+        idempotent: re-running the same import after a partial run (or just
+        to pick up newly-added rows) never creates a duplicate.
+
+        Returns False (a no-op, not an error) if a registration with this
+        registration_id already exists -- callers should treat that as
+        "already imported, nothing to do", not a failure."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            if any(r["registration_id"] == registration_id for r in rows):
+                return False
+            reg = Registration(
+                registration_id=registration_id,
+                course_shortname=course_shortname,
+                occurrence_date=occurrence_date,
+                user_id=user_id,
+                status=status,
+                registered_at=registered_at,
+                guest_cancel_token_hash="",
+                canceled_at=canceled_at,
+                canceled_by=canceled_by,
+                host_message=host_message,
+            )
+            rows.append(asdict(reg))
+            write(rows)
+            return True
+
     # -- right to erasure (Art. 17 GDPR) -------------------------------------
     #
     # "Erasing" a user does not shred their booking history outright: it moves
