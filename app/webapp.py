@@ -920,6 +920,9 @@ class App:
         https://... base_url instead (2026-07-07, the operator: "please write
         rather https://booking.example.org in the text") -- a subject line reads
         oddly with a URL scheme in it, but the body sentence doesn't.
+        Phrased as "...booking account on {url}..." rather than "...your
+        {url} booking account..." (2026-07-08, the operator's own exact requested
+        wording) -- reads more naturally with a full URL sitting mid-sentence.
 
         Also states the link's expiry (CONFIRM_TOKEN_TTL_HOURS -- see
         my_confirm()) and that any older link is now void: this call
@@ -934,8 +937,8 @@ class App:
         site = self._site_label()
         site_url = self.settings.base_url
         subject = f"Confirm your {site} account" if first_time else f"Reset your {site} password"
-        verb = (f"confirm your {site_url} booking account and set a password"
-                if first_time else f"set a new password for your {site_url} booking account")
+        verb = (f"confirm your booking account on {site_url} and set a password"
+                if first_time else f"set a new password for your booking account on {site_url}")
         send_mail(
             self.settings, user.email, subject,
             f"Click below to {verb}:\n\n{confirm_url}\n\n"

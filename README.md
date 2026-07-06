@@ -438,6 +438,12 @@ step by step and have `my-bt` perform what it safely can:
   write access to the data directory, which the `my-booking` group
   already grants. See "Data dir git snapshot" below.
 
+The closing "Done." line (2026-07-08) re-checks everything fresh (so it
+reflects whatever the walkthrough just fixed, not the state at the start)
+and says so: `"Done -- all checks pass now..."` if clean, or
+`"Done -- N problem(s), M warning(s) still need attention..."` if not --
+previously this was a flat "Done." with no relation to what was just shown.
+
 ## Migrating history from SimplyMeet.me (one-off)
 
 `scripts/migrate-simplymeet-history.py` imports a SimplyMeet.me "List view"

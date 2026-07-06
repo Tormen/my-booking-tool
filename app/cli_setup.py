@@ -549,4 +549,21 @@ def interactive_setup(
             except OSError as exc:
                 print_fn(f"[fail] could not initialize git repo at {data_dir_path}: {exc}")
 
-    print_fn("\nDone. Re-run `my-bt status` any time to re-check everything.")
+    # 2026-07-08, the operator: "would be better if 'Done' would reflect if there
+    # were any problems." -- previously this was a flat "Done." no matter
+    # how many [warn]/[fail] lines had just scrolled by above, so a real
+    # outstanding issue (e.g. step 10's stale nginx_access_log path) was
+    # exactly as easy to miss as a totally clean run. Re-running
+    # build_report() here (the same check set `status`/plain `setup` use,
+    # see its own docstring) picks up whatever the interactive prompts
+    # above actually fixed -- a check that was warn/fail at the top of this
+    # walkthrough may already be ok now, so this reflects the CURRENT state,
+    # not just "were there problems originally."
+    final_checks = [c for group in build_report(raw, settings_path, home, data_dir).values() for c in group]
+    fails = sum(1 for _, level, _ in final_checks if level == "fail")
+    warns = sum(1 for _, level, _ in final_checks if level == "warn")
+    if fails or warns:
+        print_fn(f"\nDone -- {fails} problem(s), {warns} warning(s) still need attention (see above, "
+                  "or re-run `my-bt status`).")
+    else:
+        print_fn("\nDone -- all checks pass now. Re-run `my-bt status` any time to re-check everything.")

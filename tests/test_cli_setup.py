@@ -739,6 +739,53 @@ class InteractiveSetupDataDirGitTest(unittest.TestCase):
         self.assertEqual(prompt.asked_matching("Initialize a git repo"), [])
 
 
+class InteractiveSetupFinalSummaryTest(unittest.TestCase):
+    """The closing "Done." line (2026-07-08, the operator: "would be better if
+    'Done' would reflect if there were any problems.") -- previously a flat
+    string printed unconditionally, identical whether the walkthrough above
+    just fixed everything or three warnings are still sitting there.
+    build_report() is patched directly here rather than relying on this
+    sandbox's real systemd/nginx/SELinux state (which varies by environment
+    and would make an "all clear" assertion flaky) -- all that needs
+    verifying is that interactive_setup() tallies whatever build_report()
+    returns (re-run fresh, so it reflects fixes just applied above, not
+    stale pre-walkthrough state) into the final line."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+
+    def _run(self, report: dict) -> str:
+        lines: list[str] = []
+        with patch.object(cli_setup, "build_report", return_value=report):
+            cli_setup.interactive_setup(
+                _raw(), self.settings_path, str(self.home),
+                prompt=FakePrompts(), run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lines.append,
+            )
+        return "\n".join(lines)
+
+    def test_all_clear_says_all_checks_pass(self):
+        text = self._run({"group": [("g", "ok", "fine")]})
+        self.assertIn("Done -- all checks pass now", text)
+
+    def test_remaining_problems_are_counted_in_the_final_line(self):
+        text = self._run({
+            "secrets": [("secret: x", "fail", "missing")],
+            "group": [("g", "warn", "not in group")],
+        })
+        self.assertIn("Done -- 1 problem(s), 1 warning(s) still need attention", text)
+
+    def test_warnings_only_no_fails_still_flagged(self):
+        text = self._run({"group": [("g", "warn", "not in group")]})
+        self.assertIn("Done -- 0 problem(s), 1 warning(s) still need attention", text)
+
+
 class AddNginxAccessLogSettingTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -833,7 +833,7 @@ class BookingFlowTest(unittest.TestCase):
     def test_confirm_email_body_spells_out_the_full_base_url(self):
         self._book("newguest@example.org")
         _, _, body = self.sent_emails[-1]
-        self.assertIn(f"confirm your {self.settings.base_url} booking account", body)
+        self.assertIn(f"confirm your booking account on {self.settings.base_url}", body)
 
     def test_confirm_email_states_the_expiry_and_that_older_links_are_void(self):
         self._book("newguest@example.org")
