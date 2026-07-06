@@ -77,15 +77,81 @@ should sanity-check them against the dry-run report before passing
 from __future__ import annotations
 
 import csv
+import difflib
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
-from .config import Settings
+from .config import Course, Settings
 from .erasure import find_archived_user_ids_for_email
 from .storage import STATUS_CANCELED_BY_GUEST, STATUS_CONFIRMED, Store
 
 REGISTRATION_ID_PREFIX = "simplymeet-"
+
+# Below this difflib.SequenceMatcher ratio, two titles are treated as
+# genuinely different courses, not a rename/typo -- see _match_course().
+# 0.72 was picked empirically against the 2026-07 export: it's loose
+# enough to catch a punctuation/wording tweak (e.g. a course renamed
+# slightly since the export was taken) but still rejects two distinct
+# courses that happen to share a few words (e.g. two different "DBG-only
+# ... Yoga" titles for different weekdays).
+FUZZY_MATCH_CUTOFF = 0.72
+
+
+def _normalize_title(s: str) -> str:
+    """Case/whitespace-insensitive comparison key -- catches the common,
+    harmless case where a title differs only by capitalization or extra/
+    collapsed whitespace, before falling back to full fuzzy matching."""
+    return " ".join(s.lower().split())
+
+
+def _match_course(meeting_type: str, courses: tuple[Course, ...]) -> tuple[Course | None, str | None]:
+    """Matches a SimplyMeet.me "Meeting type" string against configured
+    `[[course]]` titles, in three tiers -- returns (course, note); `note`
+    is None for an exact match (nothing to flag), and a human-readable
+    explanation whenever a looser tier was needed, so plan_import() can
+    surface it in the report for the operator to double-check before --commit
+    (see 2026-07-06: "Please allow to map the Mindfulness bookings as
+    well ... maybe the title is now slightly different, but still largely
+    the same" -- a course was renamed in settings.toml since the export
+    was taken, so a strict exact-match-only policy started silently
+    dropping real history):
+
+    1. Exact string match -- the common, safe case; no note.
+    2. Normalized match (case/whitespace differences only) -- a near-
+       certain match, still flagged so it's visible in the report.
+    3. Fuzzy match (difflib, cutoff=FUZZY_MATCH_CUTOFF) -- ONLY when
+       exactly one course clears the cutoff; if zero or more than one do,
+       this is deliberately treated as no match at all rather than
+       guessing between two plausible candidates -- see the "ambiguous"
+       branch below."""
+    for c in courses:
+        if c.title == meeting_type:
+            return c, None
+
+    normalized = _normalize_title(meeting_type)
+    for c in courses:
+        if _normalize_title(c.title) == normalized:
+            return c, (
+                f"{meeting_type!r} matched configured course {c.title!r} (shortname {c.shortname!r}) "
+                "-- only a capitalization/whitespace difference, treated as the same course"
+            )
+
+    titles = [c.title for c in courses]
+    close = difflib.get_close_matches(meeting_type, titles, n=2, cutoff=FUZZY_MATCH_CUTOFF)
+    if len(close) == 1:
+        c = next(c for c in courses if c.title == close[0])
+        return c, (
+            f"{meeting_type!r} fuzzy-matched to configured course {c.title!r} (shortname {c.shortname!r}) "
+            "-- VERIFY this is the same course before trusting --commit for these rows"
+        )
+    if len(close) > 1:
+        return None, (
+            f"{meeting_type!r} fuzzy-matched MORE THAN ONE configured course ({', '.join(close)}) -- "
+            "too ambiguous to guess; add/rename a [[course]] title so exactly one matches, or ignore "
+            "if this meeting type genuinely no longer exists"
+        )
+    return None, None
 
 
 @dataclass(frozen=True)
@@ -119,6 +185,15 @@ class MigrationReport:
     skipped_erased_email: int = 0
     skipped_missing_email: int = 0
     guests_imported: int = 0
+    # Course-title matching that wasn't an exact string match (see
+    # _match_course()) -- these rows DID get imported (fuzzy_matched_courses)
+    # or DIDN'T because more than one course was equally plausible
+    # (ambiguous_course_matches, folded into skipped_unmatched_course too).
+    # Surfaced separately so the CLI report can call them out distinctly --
+    # the operator should read every line here before trusting --commit for those
+    # rows.
+    fuzzy_matched_courses: list[str] = field(default_factory=list)
+    ambiguous_course_matches: list[str] = field(default_factory=list)
     skipped_guest_duplicate: int = 0
     skipped_guest_malformed: int = 0
     skipped_guest_erased: int = 0
@@ -155,7 +230,6 @@ def plan_import(
     (see run_migration() for the write step) -- see this module's own
     docstring for the assumptions baked in below."""
     today = today or date.today()
-    title_to_course = {c.title: c for c in settings.courses}
     report = MigrationReport(planned=[])
 
     for row in rows:
@@ -166,10 +240,14 @@ def plan_import(
             continue
 
         meeting_type = (row.get("Meeting type") or "").strip()
-        course = title_to_course.get(meeting_type)
+        course, fuzzy_note = _match_course(meeting_type, settings.courses)
         if course is None:
             report.skipped_unmatched_course.append(meeting_type)
+            if fuzzy_note:
+                report.ambiguous_course_matches.append(fuzzy_note)
             continue
+        if fuzzy_note:
+            report.fuzzy_matched_courses.append(fuzzy_note)
 
         leader_email = (row.get("Client email") or "").strip().lower()
         if not leader_email:

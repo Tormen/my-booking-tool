@@ -464,10 +464,16 @@ scripts/migrate-simplymeet-history.py path/to/export.csv --commit \
 Only imports bookings whose occurrence is strictly before today (the same
 "past" cutoff `/admin` and `my-bt list --past` already use) -- "all except
 future bookings," per the original ask. A SimplyMeet.me "Meeting type"
-column value is matched against your `settings.toml` `[[course]]` titles by
-exact string match; anything that doesn't match is skipped and listed in
-the report rather than guessed at (fix the mismatch in either place and
-re-run).
+column value is matched against your `settings.toml` `[[course]]` titles in
+three tiers: exact string match, then case/whitespace-insensitive match,
+then a fuzzy match (if the wording drifted slightly since the export was
+taken, e.g. a course title edited in `settings.toml` afterward). Anything
+still unmatched is skipped and listed in the report rather than guessed at
+(fix the mismatch in either place and re-run). Any non-exact (tier 2/3)
+match is also listed in the report -- double-check those before trusting
+`--commit`, since a fuzzy match could in principle pick the wrong course.
+If two configured courses are equally close to one "Meeting type" value,
+that's treated as no match (never guessed) and flagged as ambiguous.
 
 Before running with `--commit`, read the assumptions documented at the top
 of `app/migrate_simplymeet.py` -- SimplyMeet.me's export can't tell us who

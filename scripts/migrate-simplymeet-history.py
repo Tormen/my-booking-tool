@@ -90,10 +90,21 @@ def main() -> None:
     if report.skipped_unmatched_course:
         print(
             f"  {len(report.skipped_unmatched_course)} skipped (meeting type not found "
-            "among settings.toml [[course]] titles):"
+            "among settings.toml [[course]] titles, even after a fuzzy-match attempt):"
         )
         for title, count in Counter(report.skipped_unmatched_course).most_common():
             print(f"    {count:>4}x  {title!r}")
+    if report.ambiguous_course_matches:
+        print("\n  AMBIGUOUS course matches (more than one configured course looked equally plausible):")
+        for note in dict.fromkeys(report.ambiguous_course_matches):  # de-duplicated, order preserved
+            print(f"    - {note}")
+    if report.fuzzy_matched_courses:
+        print(
+            "\n  NOTE: the following rows were imported using a NON-EXACT course-title match -- "
+            "please verify each one is really the same course before trusting --commit:"
+        )
+        for note in dict.fromkeys(report.fuzzy_matched_courses):  # de-duplicated, order preserved
+            print(f"    - {note}")
 
     if not args.commit:
         print("\nDry run only -- nothing written. Re-run with --commit to actually import.")

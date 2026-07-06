@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from datetime import date
 
-from app.migrate_simplymeet import plan_import, run_migration
+from app.migrate_simplymeet import _match_course, plan_import, run_migration
 from app.security import hash_email_for_erasure
 from app.storage import STATUS_CANCELED_BY_GUEST, STATUS_CONFIRMED, Store
 
@@ -77,6 +77,46 @@ class PlanImportTest(MigrateSimplymeetTestBase):
         report = plan_import([row], self.settings, self.store, today=self.today)
         self.assertEqual(report.planned, [])
         self.assertEqual(report.skipped_unmatched_course, ["Some Retired Class"])
+
+    def test_whitespace_only_title_difference_matches_and_is_flagged(self):
+        row = _row(**{"Meeting type": "  Dynamic  Ashtanga Vinyasa Yoga "})
+        report = plan_import([row], self.settings, self.store, today=self.today)
+        self.assertEqual(len(report.planned), 1)
+        self.assertEqual(report.planned[0].course_shortname, "yoga-wed")
+        self.assertEqual(len(report.fuzzy_matched_courses), 1)
+
+    def test_slightly_reworded_title_fuzzy_matches_and_is_flagged(self):
+        # Real-world case (2026-07-06): a course title in settings.toml
+        # drifted slightly from what the SimplyMeet.me export recorded.
+        course = make_course(
+            shortname="lux-wed-mindfulness",
+            title="DBG-only WED@Lux - Mindfulness Session (Breathing / Pranayama)",
+        )
+        settings = make_settings(courses=(self.course, course))
+        row = _row(**{
+            "Meeting type": "DBG-only WED@Lux - Mindfulness Session (often Breathing / Pranayama)",
+        })
+        report = plan_import([row], settings, self.store, today=self.today)
+        self.assertEqual(len(report.planned), 1)
+        self.assertEqual(report.planned[0].course_shortname, "lux-wed-mindfulness")
+        self.assertEqual(len(report.fuzzy_matched_courses), 1)
+        self.assertIn("VERIFY", report.fuzzy_matched_courses[0])
+
+    def test_wildly_different_title_is_not_fuzzy_matched(self):
+        row = _row(**{"Meeting type": "Completely Unrelated Thing"})
+        report = plan_import([row], self.settings, self.store, today=self.today)
+        self.assertEqual(report.planned, [])
+        self.assertEqual(report.fuzzy_matched_courses, [])
+        self.assertEqual(report.skipped_unmatched_course, ["Completely Unrelated Thing"])
+
+    def test_ambiguous_between_two_similar_courses_is_not_guessed(self):
+        course_a = make_course(shortname="a", title="Yoga Session Alpha")
+        course_b = make_course(shortname="b", title="Yoga Session Beta")
+        settings = make_settings(courses=(course_a, course_b))
+        row = _row(**{"Meeting type": "Yoga Session Alph"})  # close to BOTH
+        report = plan_import([row], settings, self.store, today=self.today)
+        self.assertEqual(report.planned, [])
+        self.assertEqual(len(report.ambiguous_course_matches), 1)
 
     def test_missing_email_is_skipped(self):
         row = _row(**{"Client email": ""})
