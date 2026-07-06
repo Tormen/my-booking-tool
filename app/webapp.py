@@ -1427,16 +1427,24 @@ class App:
             login_body += _lockout_countdown_script(login_lockout_seconds, "my-login-btn", login_label)
 
         if signup_success:
-            signup_body = f'<p class="hint">{esc(signup_success)}</p>'
+            # Boxed the same as the form it replaces (2026-07-06 fix: a
+            # bare, unboxed <p> here looked like a stray sentence floating
+            # on an otherwise-empty page -- the operator: "This is a bit ugly").
+            signup_body = f'<div class="card"><p>{esc(signup_success)}</p></div>'
         else:
             signup_err_html = f'<p class="err">{esc(signup_error)}</p>' if signup_error else ""
             signup_label = "Sign up"
+            # The "we'll email you a link" hint lives INSIDE the card, right
+            # after the fields it explains -- same placement convention as
+            # book()'s own "First time booking with this email?" hint --
+            # rather than dangling below the closed form (2026-07-06 fix,
+            # same complaint as the success message above).
             signup_body = f"""{signup_err_html}<form method="post" action="/my/signup" class="card">
               <label>Name <input class="big-input" name="name" type="text" required></label>
               <label>Email <input class="big-input" name="email" type="email" required></label>
+              <p class="hint">We'll email you a link to set your password.</p>
               <div class="submit-row"><button type="submit" id="my-signup-btn">{esc(signup_label)}</button></div>
-            </form>
-            <p class="hint">We'll email you a link to set your password.</p>"""
+            </form>"""
             if signup_lockout_seconds:
                 signup_body += _lockout_countdown_script(signup_lockout_seconds, "my-signup-btn", signup_label)
 

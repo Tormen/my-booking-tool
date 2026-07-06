@@ -857,6 +857,23 @@ class BookingFlowTest(unittest.TestCase):
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertEqual(subjects, ["Confirm your example.org account"])
 
+    def test_signup_success_message_is_boxed_not_a_bare_paragraph(self):
+        # 2026-07-06 fix: the operator flagged the success message (and the
+        # signup form's own "we'll email you a link" hint) as looking like
+        # stray unstyled sentences on an otherwise-empty page ("This is a
+        # bit ugly" / "same here with the sentence") -- both now render
+        # inside a .card, same visual weight as the form it replaces.
+        _status, _headers, body = self._post(
+            self.app.my_signup, (), {"name": "New Person", "email": "boxed@example.org"}
+        )
+        self.assertIn('<div class="card"><p>Check your email', body)
+
+    def test_signup_form_hint_lives_inside_the_card(self):
+        _status, _headers, body = self.app.my("GET", {})
+        card_start = body.index('<form method="post" action="/my/signup"')
+        card_end = body.index("</form>", card_start)
+        self.assertIn("We'll email you a link", body[card_start:card_end])
+
     def test_signup_existing_account_does_not_overwrite_name(self):
         user = self.store.upsert_user_for_booking("existing@example.org", "Real Name")
         self._post(self.app.my_signup, (), {"name": "Some Other Name", "email": "existing@example.org"})
