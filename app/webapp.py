@@ -42,6 +42,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
+from .cancel_flow import cancel_and_promote
 from .cancellation import booking_details_text, html_to_text, send_cancellation_emails
 from .config import Settings
 from .emailer import _masked, send_mail
@@ -398,43 +399,21 @@ class App:
         calendar_sync.sync_occurrence(self.caldav, href, self.store, self.settings, course, occurrence_date)
 
     def _cancel_and_promote(self, course_shortname: str, occurrence_date_str: str) -> None:
-        """Call right after store.cancel(): if that freed a confirmed spot,
-        promote the longest-waiting person on the waitlist and email them,
-        then re-sync the calendar event once with the final state."""
-        course = self.settings.course(course_shortname)
-        promoted = self.store.promote_next_waitlisted(course_shortname, occurrence_date_str, course.capacity)
-        if promoted:
-            user = self.store.find_user_by_id(promoted.user_id)
-            if user:
-                # Same What/When/Where(+description) layout as
-                # _send_booking_result_email() -- see _booking_details_text()
-                # -- this used to be a plain one-liner with only start_time,
-                # which drifted out of sync the moment that method got the
-                # richer layout (caught in the 2026-07-05 consistency
-                # review). No fresh cancel link here: the original waitlist-
-                # join token's plaintext isn't recoverable from its stored
-                # hash, and regenerating one would need a DB write for a
-                # link the operator didn't specifically ask for -- /my already
-                # lists this booking with its own Cancel button now that
-                # every guest has an account, so that's the invite instead.
-                send_mail(
-                    self.settings, user.email, f"You're in! {course.title} on {occurrence_date_str}",
-                    "A spot opened up and you were next on the waitlist -- you're now confirmed:\n\n"
-                    + self._booking_details_text(course, occurrence_date_str)
-                    + f"\nManage or cancel this booking any time: {self.settings.base_url}/my\n",
-                )
-                # Both sides notified, same standing default as every other
-                # booking/cancellation email (see _send_booking_result_email/
-                # send_cancellation_emails) -- this was the one path that
-                # only told the promoted guest and left admin_email finding
-                # out some other way.
-                send_mail(
-                    self.settings, self.settings.admin_email,
-                    f"Promoted from waitlist: {course.title} on {occurrence_date_str}",
-                    f"{user.name} <{user.email}> was promoted from the waitlist to confirmed for:\n\n"
-                    + self._booking_details_text(course, occurrence_date_str),
-                )
-        self._sync(course_shortname, date.fromisoformat(occurrence_date_str))
+        """Thin wrapper around app.cancel_flow.cancel_and_promote (moved
+        there 2026-07-06 so `my-bt cancel`/`my-bt erase`, which have no App
+        instance, run the exact same promote+calendar-sync logic instead of
+        a smaller reimplementation of it) -- kept as an App method since
+        every existing call site here already has `self.store`/
+        `self.settings`/`self.caldav`. Passes self._sync as the sync_fn
+        override so this keeps using App's own cached calendar-href lookup
+        (self._calendars/self._href) exactly as before, instead of the
+        standalone function's one-off PROPFIND -- also what lets tests keep
+        stubbing self.app._sync to a no-op. See cancel_and_promote's own
+        docstring for the full rationale."""
+        cancel_and_promote(
+            self.store, self.settings, self.caldav, course_shortname, occurrence_date_str,
+            sync_fn=lambda sn, occ_str: self._sync(sn, date.fromisoformat(occ_str)),
+        )
 
     # -- routing -----------------------------------------------------------
 
@@ -1185,13 +1164,16 @@ class App:
             return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
         user = self.store.find_user_by_id(session["user_id"])
         if user:
-            future_regs = [
-                r for r in self.store.registrations_for_user(user.user_id)
-                if r.status in (STATUS_CONFIRMED, STATUS_WAITLISTED)
-            ]
-            erase_user_by_email(self.store, self.settings, user.email)
-            for r in future_regs:
-                self._cancel_and_promote(r.course_shortname, r.occurrence_date)
+            # erase_user_by_email now runs the same promote+calendar-sync
+            # (app.cancel_flow.cancel_and_promote) for each future
+            # confirmed/waitlisted booking it force-cancels, given a caldav
+            # client -- passing self.caldav here is what used to be this
+            # method's own separate loop (pre-computing future_regs, then
+            # calling self._cancel_and_promote() per row after erasing).
+            # That loop is gone: erasure.py does it internally now, so the
+            # web `/my` self-erasure path and `my-bt erase` (scripts/my-bt)
+            # can never drift apart on this.
+            erase_user_by_email(self.store, self.settings, user.email, caldav=self.caldav)
         SESSIONS.pop(session["_sid"], None)
         return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))], ""
 

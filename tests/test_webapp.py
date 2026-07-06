@@ -427,11 +427,14 @@ class BookingFlowTest(unittest.TestCase):
 
         recorder = lambda settings, to, subject, body: self.sent_emails.append((to, subject, body))
         # Cancellation emails are composed in app.cancellation (factored
-        # out of App on 2026-07-06 so `my-bt cancel` can reuse them) and
-        # call their own imported send_mail reference there -- patching
-        # app.webapp.send_mail alone wouldn't touch that call site, same as
-        # app.watchdog.send_mail needs its own patch in test_watchdog.py.
-        for target in ("app.webapp.send_mail", "app.cancellation.send_mail"):
+        # out of App on 2026-07-06 so `my-bt cancel` can reuse them), and the
+        # promotion emails in app.cancel_flow (factored out the same day so
+        # `my-bt cancel`/`my-bt erase` can reuse the full cancel+promote+sync
+        # flow) -- each calls its own imported send_mail reference, so
+        # patching app.webapp.send_mail alone wouldn't touch those call
+        # sites, same as app.watchdog.send_mail needs its own patch in
+        # test_watchdog.py.
+        for target in ("app.webapp.send_mail", "app.cancellation.send_mail", "app.cancel_flow.send_mail"):
             patcher = patch(target, side_effect=recorder)
             patcher.start()
             self.addCleanup(patcher.stop)

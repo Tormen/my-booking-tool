@@ -18,7 +18,9 @@ from zoneinfo import ZoneInfo
 from .caldav_client import CalDAVClient
 from .config import Course, Settings
 from .ics import VEvent
-from .storage import STATUS_CONFIRMED, STATUS_WAITLISTED, Store
+from .storage import (
+    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED, Store,
+)
 
 
 def _uid_parts(settings: Settings) -> tuple[str, str]:
@@ -49,11 +51,28 @@ def sync_occurrence(
     course: Course,
     occurrence_date: date,
 ) -> None:
-    """Call this after every registration/cancellation for the occurrence."""
+    """Call this after every registration/cancellation for the occurrence.
+
+    The invite lists THREE groups: active (confirmed), waiting
+    (waitlisted), and canceled (STATUS_CANCELED_BY_GUEST or
+    STATUS_CANCELED_BY_HOST) -- each line shows the same identifying info
+    (registration status/position + a cancel link) plus the timestamp of
+    that registrant's LAST action: registered_at for an active/waiting row
+    (their last action was registering -- they haven't canceled), or
+    canceled_at (plus who canceled it, canceled_by) for a canceled row.
+    Canceled registrants are never dropped from the invite -- they stay
+    visible, separately labeled, so the host can see who left and when
+    without needing to cross-reference the CSV. Only when there are ZERO
+    active (confirmed) registrants left is the event actually REMOVED from
+    the calendar, regardless of how many are canceled or still waitlisted
+    (see the `if not active:` branch below) -- a course with any confirmed
+    spot filled always keeps its calendar entry, updated in place.
+    """
     tz = ZoneInfo(settings.timezone)
     regs = store.registrations_for_occurrence(course.shortname, occurrence_date.isoformat())
     active = [r for r in regs if r.status == STATUS_CONFIRMED]
     waiting = [r for r in regs if r.status == STATUS_WAITLISTED]
+    canceled = [r for r in regs if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST)]
     uid = event_uid(settings, course.shortname, occurrence_date)
 
     existing = {
@@ -84,6 +103,8 @@ def sync_occurrence(
     lines = [f"{course.title} -- {len(active)}/{course.capacity} registered"]
     if waiting:
         lines.append(f"{len(waiting)} on waitlist")
+    if canceled:
+        lines.append(f"{len(canceled)} canceled")
     lines.append("")
     for r in active:
         lines.append(
@@ -95,6 +116,20 @@ def sync_occurrence(
             f"- waitlisted #{waiting.index(r) + 1} | registered {r.registered_at} | "
             f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
         )
+    if canceled:
+        # Separate group, listed last -- kept OUT of the active/waiting
+        # counts/lines above (this is display-only context on who left and
+        # when, not part of "who currently holds a spot"). Shows
+        # canceled_at (their last action -- NOT registered_at, which would
+        # be stale/misleading here) and canceled_by ("guest" or "host") for
+        # context, same vocabulary as Store.cancel()'s own parameter.
+        lines.append("")
+        lines.append("Canceled:")
+        for r in canceled:
+            lines.append(
+                f"- {r.status} | canceled {r.canceled_at} by {r.canceled_by} | "
+                f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
+            )
     summary = f"{course.title} ({len(active)}/{course.capacity}"
     summary += f"+{len(waiting)}wl)" if waiting else ")"
     event = VEvent(

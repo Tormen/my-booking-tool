@@ -8,20 +8,21 @@ module so it's unit-tested the normal way (see tests/test_cli_cancel.py).
 admin's /admin/cancel/<reg_id> (see app/webapp.py::App.admin_cancel): same
 identification (by registration_id, via Store.find_by_id), same status
 transition (Store.cancel(..., canceled_by="host", ...)), same optional
-message stored in host_message, and the SAME cancellation emails to both
-the participant and admin_email -- via app.cancellation.send_cancellation_emails,
-not a reimplementation of it. The one thing this CLI command does NOT do
-that admin_cancel() does is promote the next waitlisted person / re-sync
-the calendar (App._cancel_and_promote) -- that needs a live CalDAV
-connection, which this CLI intentionally has no dependency on (same
-reasoning as `my-bt erase`'s own docstring). Run the app's normal cancel
-flow from the web admin, or restart the service (which re-syncs lazily),
-if the calendar needs to reflect this cancellation immediately.
+message stored in host_message, the SAME cancellation emails to both the
+participant and admin_email -- via app.cancellation.send_cancellation_emails,
+not a reimplementation of it -- and, since 2026-07-06, the SAME
+promote-next-waitlisted + calendar re-sync as the web admin's cancel too,
+via app.cancel_flow.cancel_and_promote (see that module's docstring). This
+used to be a smaller subset (email only, no promotion, no calendar sync) --
+that gap is closed now: this command has a real CalDAV network dependency,
+same as every other cancel path, since a cancellation isn't actually
+"the same" without it.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .cancel_flow import build_caldav_client, cancel_and_promote
 from .cancellation import send_cancellation_emails
 from .config import Settings
 from .storage import STATUS_CONFIRMED, STATUS_WAITLISTED, Store
@@ -54,7 +55,13 @@ def cancel_registration(
     both the participant and admin_email via
     app.cancellation.send_cancellation_emails -- the identical function
     app/webapp.py's App.admin_cancel calls, so the CLI can never drift out
-    of sync with what the web admin path sends.
+    of sync with what the web admin path sends. Then runs the exact same
+    app.cancel_flow.cancel_and_promote as admin_cancel() does: promotes the
+    next waitlisted person (if this cancellation freed a confirmed spot)
+    and re-syncs the calendar event -- this builds its own CalDAVClient
+    (app.cancel_flow.build_caldav_client) since this CLI has no App
+    instance/long-lived process to hold one on, so it needs a real
+    network/CalDAV connection to complete, same as the web admin path does.
 
     Returns a CancelResult with ok=False (no exception, no side effects)
     if:
@@ -63,10 +70,6 @@ def cancel_registration(
         stale pending_confirmation row) -- Store.cancel() itself is a
         no-op in that case, so this checks the status up front to give a
         clear reason instead of silently "succeeding" at nothing.
-
-    Does NOT promote the next waitlisted person or re-sync the calendar
-    (see this module's own docstring) -- callers needing that should use
-    the web admin's /admin/cancel instead.
     """
     reg = store.find_by_id(registration_id)
     if reg is None:
@@ -101,6 +104,15 @@ def cancel_registration(
         # path -- see send_cancellation_emails's own docstring.
         send_cancellation_emails(settings, course, reg.occurrence_date, user, canceled_by="host", message=message)
         emailed = True
+        # Same promote-next-waitlisted + calendar re-sync as the web admin's
+        # /admin/cancel (app/webapp.py::App.admin_cancel via
+        # App._cancel_and_promote) -- see app.cancel_flow's own docstring.
+        # Guarded by `if course:` (cancel_and_promote needs course.capacity)
+        # same as the email above: a registration for a course shortname no
+        # longer in settings.toml can still be canceled, it just can't be
+        # promoted/synced without a course to promote/sync against.
+        caldav = build_caldav_client(settings)
+        cancel_and_promote(store, settings, caldav, reg.course_shortname, reg.occurrence_date)
 
     return CancelResult(
         ok=True,
