@@ -1,9 +1,18 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
 
 from app.security import hash_secret, hash_token, new_token
-from app.storage import STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store
+from app.storage import (
+    REG_FIELDS,
+    STATUS_CONFIRMED,
+    STATUS_PENDING_CONFIRMATION,
+    STATUS_WAITLISTED,
+    Store,
+    _LockedCsv,
+)
 
 
 class StoreTestBase(unittest.TestCase):
@@ -316,6 +325,123 @@ class CsvInjectionTest(StoreTestBase):
         self.store.upsert_user_for_booking("a@b.com", "=cmd|'/c calc'!A1")
         raw = Path(self.store.users_path).read_text()
         self.assertIn("'=cmd", raw)
+
+
+class LockedCsvReadonlyModeTest(unittest.TestCase):
+    """_LockedCsv(readonly=True) must open "r", never "r+" -- "r+" fails
+    outright on a genuinely read-only file/mount (e.g. systemd's
+    ReadOnlyPaths=, which the my-booking-watchdog unit sets on
+    /var/lib/my-booking), even though nothing was ever going to be
+    written."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "registrations.csv"
+        with _LockedCsv(self.path, REG_FIELDS) as (rows, write):
+            write([])  # create the file with just a header
+
+    def tearDown(self):
+        # restore write perms so TemporaryDirectory cleanup can remove it
+        os.chmod(self.path, 0o600)
+        os.chmod(self.path.parent, 0o700)
+        self._tmp.cleanup()
+
+    def test_readonly_mode_opens_file_in_read_only_mode(self):
+        seen_modes = []
+        real_open = open
+
+        def spy_open(path, mode="r", *args, **kwargs):
+            if str(path) == str(self.path):
+                seen_modes.append(mode)
+            return real_open(path, mode, *args, **kwargs)
+
+        import builtins
+        orig = builtins.open
+        builtins.open = spy_open
+        try:
+            with _LockedCsv(self.path, REG_FIELDS, readonly=True) as (rows, _write):
+                pass
+        finally:
+            builtins.open = orig
+
+        self.assertEqual(seen_modes, ["r"])
+
+    def test_readonly_mode_survives_a_chmod_read_only_file(self):
+        os.chmod(self.path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)  # 0o444
+        try:
+            with _LockedCsv(self.path, REG_FIELDS, readonly=True) as (rows, _write):
+                self.assertEqual(rows, [])
+        except OSError:
+            self.fail("_LockedCsv(readonly=True) must not require write access")
+
+    def test_readonly_mode_survives_a_chmod_read_only_directory(self):
+        # Mirrors systemd's ReadOnlyPaths=/var/lib/my-booking: the whole
+        # mount/directory is read-only, not just the file.
+        os.chmod(self.path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        os.chmod(self.path.parent, stat.S_IRUSR | stat.S_IXUSR)  # r-x, no write
+        try:
+            with _LockedCsv(self.path, REG_FIELDS, readonly=True) as (rows, _write):
+                self.assertEqual(rows, [])
+        except OSError:
+            self.fail("_LockedCsv(readonly=True) must not require write access to the directory")
+
+    def test_readonly_mode_raises_if_write_is_called(self):
+        with _LockedCsv(self.path, REG_FIELDS, readonly=True) as (rows, write):
+            with self.assertRaises(RuntimeError):
+                write(rows)
+
+
+class StoreReadOnlyMethodsUnderReadOnlyMountTest(StoreTestBase):
+    """End-to-end proof for the actual bug report: every Store method that
+    never writes must keep working when its data files (and the containing
+    directory, mirroring systemd ReadOnlyPaths=) are chmod'd read-only --
+    this is exactly the my-booking-watchdog scenario."""
+
+    def setUp(self):
+        super().setUp()
+        # Populate some data while the directory is still writable.
+        self.user = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.set_confirm_token(self.user.user_id, "tokhash", "2026-07-05T00:00:00+00:00")
+        self.guest_token = new_token()
+        self.reg = self.store.add_registration(
+            "c", "2026-07-08", self.user.user_id, hash_token(self.guest_token)
+        )
+
+    def _make_read_only(self):
+        for p in (self.store.users_path, self.store.registrations_path):
+            os.chmod(p, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+        os.chmod(self.store.data_dir, stat.S_IRUSR | stat.S_IXUSR)
+
+    def tearDown(self):
+        os.chmod(self.store.data_dir, 0o700)
+        os.chmod(self.store.users_path, 0o600)
+        os.chmod(self.store.registrations_path, 0o600)
+        super().tearDown()
+
+    def test_all_pure_read_methods_work_under_read_only_mount(self):
+        self._make_read_only()
+        # users.csv-backed reads
+        self.assertEqual(self.store.find_user_by_email("guest@example.com").user_id, self.user.user_id)
+        self.assertEqual(self.store.find_user_by_id(self.user.user_id).user_id, self.user.user_id)
+        self.assertEqual(
+            self.store.find_user_by_confirm_token_hash("tokhash").user_id, self.user.user_id
+        )
+        # registrations.csv-backed reads
+        self.assertEqual(self.store.count_confirmed("c", "2026-07-08"), 1)
+        self.assertEqual(self.store.times_registered(self.user.user_id), 1)
+        self.assertEqual(
+            len(self.store.registrations_for_occurrence("c", "2026-07-08")), 1
+        )
+        self.assertEqual(len(self.store.registrations_for_user(self.user.user_id)), 1)
+        self.assertEqual(
+            self.store.find_by_id(self.reg.registration_id).registration_id,
+            self.reg.registration_id,
+        )
+        self.assertEqual(
+            self.store.find_by_guest_token_hash(hash_token(self.guest_token)).registration_id,
+            self.reg.registration_id,
+        )
+        self.assertEqual(len(self.store.all_registrations()), 1)
 
 
 if __name__ == "__main__":

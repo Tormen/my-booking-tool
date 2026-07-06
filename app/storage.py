@@ -87,15 +87,34 @@ class Registration:
 class _LockedCsv:
     """Context manager: opens `path` for locked read-modify-write, creating it
     with a header if missing. Yields (rows: list[dict], write(rows)) where
-    write() only takes effect if called before the `with` block exits."""
+    write() only takes effect if called before the `with` block exits.
 
-    def __init__(self, path: Path, fieldnames: list[str]):
+    Pass `readonly=True` for call sites that never call write(): this opens
+    the file "r" instead of "r+" (so it works even when the file/mount is
+    genuinely read-only -- e.g. under systemd's ReadOnlyPaths=, as the
+    watchdog unit uses) and takes a SHARED flock (LOCK_SH) instead of an
+    exclusive one, so concurrent reads don't block each other while still
+    being consistent with (blocking on, and blocked by) a concurrent
+    read-modify-write cycle. Calling the yielded write() in readonly mode
+    is a programming error and raises."""
+
+    def __init__(self, path: Path, fieldnames: list[str], readonly: bool = False):
         self.path = path
         self.fieldnames = fieldnames
+        self.readonly = readonly
         self._fh = None
         self._to_write: list[dict] | None = None
 
     def __enter__(self):
+        if self.readonly:
+            if not self.path.exists():
+                return [], self._set_rows_to_write
+            self._fh = open(self.path, "r", newline="", encoding="utf-8")
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_SH)
+            reader = csv.DictReader(self._fh)
+            rows = list(reader)
+            return rows, self._set_rows_to_write
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.path.touch()
@@ -108,6 +127,8 @@ class _LockedCsv:
         return rows, self._set_rows_to_write
 
     def _set_rows_to_write(self, rows: list[dict]) -> None:
+        if self.readonly:
+            raise RuntimeError("_LockedCsv(readonly=True) must never call write()")
         self._to_write = rows
 
     def __exit__(self, exc_type, exc, tb):
@@ -115,8 +136,9 @@ class _LockedCsv:
             if exc_type is None and self._to_write is not None:
                 self._atomic_write(self._to_write)
         finally:
-            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-            self._fh.close()
+            if self._fh is not None:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+                self._fh.close()
         return False
 
     def _atomic_write(self, rows: list[dict]) -> None:
@@ -162,14 +184,14 @@ class Store:
 
     def find_user_by_email(self, email: str) -> User | None:
         email = email.strip().lower()
-        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, _write):
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
             for row in rows:
                 if row["email"].strip().lower() == email:
                     return User(**row)
         return None
 
     def find_user_by_id(self, user_id: str) -> User | None:
-        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, _write):
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
             for row in rows:
                 if row["user_id"] == user_id:
                     return User(**row)
@@ -218,7 +240,7 @@ class Store:
     def find_user_by_confirm_token_hash(self, token_hash: str) -> User | None:
         if not token_hash:
             return None  # never match on a blank hash (no user has "" stored as a real token)
-        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, _write):
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
             for row in rows:
                 if row["confirm_token_hash"] and row["confirm_token_hash"] == token_hash:
                     return User(**row)
@@ -250,7 +272,7 @@ class Store:
     # -- registrations ---------------------------------------------------------
 
     def count_confirmed(self, course_shortname: str, occurrence_date: str) -> int:
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return sum(
                 1 for r in rows
                 if r["course_shortname"] == course_shortname
@@ -262,7 +284,7 @@ class Store:
         """Total confirmed-or-was-confirmed bookings by this user, ever --
         used for the admin "how often have they registered" column. Computed
         on read, not stored, so it can never drift out of sync."""
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return sum(1 for r in rows if r["user_id"] == user_id)
 
     def add_registration(
@@ -359,7 +381,7 @@ class Store:
     def registrations_for_occurrence(
         self, course_shortname: str, occurrence_date: str
     ) -> list[Registration]:
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return [
                 Registration(**r) for r in rows
                 if r["course_shortname"] == course_shortname
@@ -367,11 +389,11 @@ class Store:
             ]
 
     def registrations_for_user(self, user_id: str) -> list[Registration]:
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return [Registration(**r) for r in rows if r["user_id"] == user_id]
 
     def find_by_guest_token_hash(self, token_hash: str) -> Registration | None:
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             for r in rows:
                 if r["guest_cancel_token_hash"] == token_hash and r["status"] in (
                     STATUS_CONFIRMED, STATUS_WAITLISTED,
@@ -380,7 +402,7 @@ class Store:
         return None
 
     def find_by_id(self, registration_id: str) -> Registration | None:
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             for r in rows:
                 if r["registration_id"] == registration_id:
                     return Registration(**r)
@@ -408,7 +430,7 @@ class Store:
             return changed
 
     def all_registrations(self) -> list[Registration]:
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, _write):
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return [Registration(**r) for r in rows]
 
     def replace_all_registrations(self, registrations: Iterable[Registration]) -> None:
