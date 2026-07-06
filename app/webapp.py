@@ -815,7 +815,7 @@ class App:
         # boundary, just a place raw HTML is intentionally allowed through.
         desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
         if not occurrences:
-            body = subtitle + desc_html + "<p>No upcoming slots -- if a date isn't listed, that session isn't happening.</p>"
+            body = subtitle + desc_html + "<p>No dates currently available, please check back next week.</p>"
         else:
             date_buttons = "".join(
                 '<label class="date-btn">'
@@ -836,8 +836,8 @@ class App:
             {note_html}
             {err_html}
             <form method="post" class="card" id="book-form" data-book-label="{esc(self.settings.book_button_label)}">
-              <label>Date
-                <div class="dates" role="radiogroup" aria-label="Date">{date_buttons}</div>
+              <label>Dates available
+                <div class="dates" role="radiogroup" aria-label="Dates available">{date_buttons}</div>
               </label>
               <div class="selected-box">Selected date: <strong id="selected-date-text">{esc(occurrences[0].date.isoformat())}</strong></div>
               <label>Your name <span class="req">(required)</span>
