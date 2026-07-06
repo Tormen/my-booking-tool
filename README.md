@@ -928,16 +928,25 @@ that lists all your offerings instead of separate links per course.
 already reachable via a direct `/book/<shortname>` link regardless, so
 hiding one here would only make it harder to find, not more private.
 
-### Logged-in banner (`/courses`, `/book/<shortname>`)
+### Logged-in banner (`/courses`, `/book/<shortname>`, `/my`)
 
-Both pages (2026-07-06) show a small "Logged in as x@example.org · My
-bookings · Log out" banner above their own heading when reached with an
-active `/my` guest session -- e.g. after clicking "New booking" from
-`/my`. It also carries through to the booking result page ("Booked!"/
-"Almost there"/waitlisted). An anonymous visitor sees no banner at all --
-both pages work perfectly well without ever logging in first; this is
-purely a courtesy cue plus a quick way back to `/my` or to log out for
-someone who arrived here already signed in.
+All three pages (2026-07-06, and `/my` too as of 2026-07-09) show a small
+"Logged in as x@example.org · My bookings · booking.example.org · Log out" banner
+above their own heading when reached with an active `/my` guest session --
+e.g. after clicking "New booking" from `/my`. It also carries through to
+the booking result page ("Booked!"/"Almost there"/waitlisted). An
+anonymous visitor sees no banner at all -- these pages work perfectly well
+without ever logging in first; this is purely a courtesy cue plus a quick
+way back to `/my`, to the main site, or to log out for someone who arrived
+here already signed in. The "booking.example.org" link in the middle
+(`settings.base_url`, labeled with the same hostname `_site_label()` uses
+elsewhere) was added 2026-07-09 (the operator: "allow in the banner to also go
+back to https://booking.example.org") -- this is a normal same-tab link, distinct
+from the STATIC homepage's own separate, session-aware corner widget (see
+"Login banner" further below), which is intentionally NOT this same big
+banner: the homepage never shows "Logged in as ...", only a compact
+"My bookings"/"Log out" swap-in for its plain "Login" button, since it's a
+much smaller/differently-styled corner widget by design.
 
 ## Booking page layout (`/book/<shortname>`)
 
@@ -1097,11 +1106,17 @@ exactly as before; this is purely an additional way in through `/my`.
 Once logged in, `/my` (2026-07-06) shows bookings in two separate tables:
 **Upcoming** (all of them, soonest first) and **Past** (capped at the 3
 most recent, so someone who's been coming for years doesn't get a
-page-long history) -- the past table is omitted entirely if there are no
-past bookings. A **New booking** button links to `/courses` (see below)
-rather than to any one course, and a link to the main site
-(`settings.base_url`) opens in a new tab, so `/my`'s own session state is
-never at risk of leaking into that separately-served, iframe-embedded page.
+page-long history) -- both always show a friendly "You have no ... 
+bookings." message when empty (2026-07-09: Past used to be omitted
+entirely when empty, which looked indistinguishable from broken/missing).
+A **New booking** button links to `/courses` (see below) rather than to
+any one course. `/my` also shows the same session banner `/courses` and
+`/book` do (see "Course overview page" above) instead of its own separate
+Logout button -- that banner's own link back to the main site
+(`settings.base_url`) replaced a dedicated "visit the homepage" link `/my`
+used to show on its own (2026-07-09, the operator: "Now we can get rid of the
+ugly green sentence behind New bookings as we have https://booking.example.org in
+the top-bar").
 
 Abandoned pending signups (a confirmation link never clicked) are purged
 by the nightly retention job after `pending_confirmation_hours` (default

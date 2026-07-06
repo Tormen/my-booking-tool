@@ -1455,10 +1455,16 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<a href="/courses">', body)
         self.assertIn("New booking", body)
 
-    def test_my_page_links_to_homepage_in_a_new_tab(self):
+    def test_my_page_no_longer_has_its_own_separate_homepage_link(self):
+        # 2026-07-09, the operator: "Now we can get rid of the ugly green
+        # sentence behind New bookings as we have https://booking.example.org in
+        # the top-bar" -- the banner's own homepage link (see
+        # test_my_page_shows_the_same_session_banner_as_courses_and_book
+        # below) replaces this dedicated new-tab link.
         user, environ = self._login_as_guest("regular@example.org")
         _status, _headers, body = self.app.my("GET", environ)
-        self.assertIn(f'<a href="{self.settings.base_url}" target="_blank"', body)
+        self.assertNotIn(f'<a href="{self.settings.base_url}" target="_blank"', body)
+        self.assertNotIn("opens in a new tab", body)
 
     def test_my_page_shows_the_same_session_banner_as_courses_and_book(self):
         # 2026-07-09, the operator: "Rather use the BANNER as here to be

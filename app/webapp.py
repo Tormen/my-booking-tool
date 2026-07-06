@@ -1238,7 +1238,13 @@ class App:
         here to be CONSISTENT!!") instead of a separate, redundant "Log
         out" button in the bottom row -- the banner's own Logout covers
         that; only "Delete my account & data" (a distinct, destructive
-        action) remains in that row on its own."""
+        action) remains in that row on its own. The top row's own
+        separate "Visit booking.example.org (opens in a new tab)" link is gone too
+        now (2026-07-09, the operator: "Now we can get rid of the ugly green
+        sentence behind New bookings as we have https://booking.example.org in the
+        top-bar") -- the banner's own homepage link (see
+        _session_banner_html) covers it, in the same tab, alongside "My
+        bookings" and "Log out"."""
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
             all_regs = self.store.registrations_for_user(session["user_id"])
@@ -1326,8 +1332,6 @@ class App:
             body = f"""
             <div class="submit-row">
               <a href="/courses"><button type="button">New booking</button></a>
-              <a href="{esc(self.settings.base_url)}" target="_blank" rel="noopener">
-                Visit {esc(self._site_label())} (opens in a new tab)</a>
             </div>
             <h3>Upcoming</h3>
             {upcoming_html}
