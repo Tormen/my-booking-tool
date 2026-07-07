@@ -379,6 +379,180 @@ class MaintenanceModeTest(unittest.TestCase):
         self.assertEqual(status, "200 OK")
 
 
+class MaintenanceBypassTest(unittest.TestCase):
+    """2026-07-10: "can the maintenance mode still let me access the site
+    from ssh.example.net please?" -- [site].maintenance_bypass_hostname,
+    resolved fresh per request (app.webapp._maintenance_bypass_allowed),
+    lets a request whose (nginx-forwarded) client IP matches that
+    hostname's CURRENT address through /courses and /book/<shortname> as
+    normal even while maintenance mode blocks everyone else."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        maintenance.enable(self.store.data_dir, message="down")
+
+    def _environ(self, ip: str) -> dict:
+        return {"HTTP_X_FORWARDED_FOR": ip}
+
+    def test_matching_ip_bypasses_courses(self):
+        app = App(make_settings(maintenance_bypass_hostname="ssh.example.net"), self.store)
+        with patch("app.webapp.socket.getaddrinfo", return_value=[(None, None, None, None, ("1.2.3.4", 0))]):
+            status, _headers, _body = app.courses("GET", self._environ("1.2.3.4"))
+        self.assertEqual(status, "200 OK")
+
+    def test_matching_ip_bypasses_book(self):
+        # Unknown shortname (same trick test_book_page_maintenance_check_
+        # happens_before_course_lookup uses above) -- proves the bypass took
+        # effect via the ordinary 404 instead of 503, without needing a real
+        # course/CalDAV round trip just to prove the maintenance gate itself
+        # was skipped.
+        app = App(make_settings(courses=(), maintenance_bypass_hostname="ssh.example.net"), self.store)
+        with patch("app.webapp.socket.getaddrinfo", return_value=[(None, None, None, None, ("1.2.3.4", 0))]):
+            status, _headers, _body = app.book("GET", "no-such-course", self._environ("1.2.3.4"))
+        self.assertEqual(status, "404 Not Found")
+
+    def test_non_matching_ip_still_blocked(self):
+        app = App(make_settings(maintenance_bypass_hostname="ssh.example.net"), self.store)
+        with patch("app.webapp.socket.getaddrinfo", return_value=[(None, None, None, None, ("1.2.3.4", 0))]):
+            status, _headers, _body = app.courses("GET", self._environ("9.9.9.9"))
+        self.assertEqual(status, "503 Service Unavailable")
+
+    def test_no_hostname_configured_never_bypasses(self):
+        app = App(make_settings(), self.store)
+        status, _headers, _body = app.courses("GET", self._environ("1.2.3.4"))
+        self.assertEqual(status, "503 Service Unavailable")
+
+    def test_dns_failure_fails_closed_still_blocked(self):
+        import socket as socket_module
+        app = App(make_settings(maintenance_bypass_hostname="ssh.example.net"), self.store)
+        with patch("app.webapp.socket.getaddrinfo", side_effect=socket_module.gaierror("no such host")):
+            status, _headers, _body = app.courses("GET", self._environ("1.2.3.4"))
+        self.assertEqual(status, "503 Service Unavailable")
+
+    def test_bypass_ip_still_gets_normal_maintenance_check_when_off(self):
+        # sanity: with maintenance OFF entirely, behaves as if the hostname
+        # setting didn't matter at all (no accidental interaction).
+        maintenance.disable(self.store.data_dir)
+        app = App(make_settings(maintenance_bypass_hostname="ssh.example.net"), self.store)
+        status, _headers, _body = app.courses("GET", self._environ("9.9.9.9"))
+        self.assertEqual(status, "200 OK")
+
+    def test_ip_log_alone_bypasses_even_with_dns_unresolvable(self):
+        # 2026-07-10, the operator: "if you need an IP this changes and the latest
+        # can be found in /home/me/my-ip.log, but else the DNS also
+        # auto-updates! Please make this a config variable." -- either
+        # source is independently sufficient; DNS failing shouldn't take
+        # the log-file source down with it.
+        import socket as socket_module
+        ip_log = str(self.store.data_dir) + "/my-ip.log"
+        with open(ip_log, "w", encoding="utf-8") as f:
+            f.write("5.6.7.8\n")
+        app = App(make_settings(
+            maintenance_bypass_hostname="ssh.example.net",
+            maintenance_bypass_ip_log=ip_log,
+        ), self.store)
+        with patch("app.webapp.socket.getaddrinfo", side_effect=socket_module.gaierror("no such host")):
+            status, _headers, _body = app.courses("GET", self._environ("5.6.7.8"))
+        self.assertEqual(status, "200 OK")
+
+    def test_ip_log_only_last_line_counts(self):
+        ip_log = str(self.store.data_dir) + "/my-ip.log"
+        with open(ip_log, "w", encoding="utf-8") as f:
+            f.write("1.1.1.1\n5.6.7.8\n")
+        app = App(make_settings(maintenance_bypass_ip_log=ip_log), self.store)
+        status, _headers, _body = app.courses("GET", self._environ("1.1.1.1"))
+        self.assertEqual(status, "503 Service Unavailable")
+
+
+class MaintenanceBypassAllowedUnitTest(unittest.TestCase):
+    """Direct unit tests of app.webapp._maintenance_bypass_allowed(), the
+    pure function powering MaintenanceBypassTest above."""
+
+    def test_no_hostname_returns_false(self):
+        self.assertFalse(webapp._maintenance_bypass_allowed("1.2.3.4", None))
+        self.assertFalse(webapp._maintenance_bypass_allowed("1.2.3.4", ""))
+
+    def test_matching_resolved_ip_returns_true(self):
+        with patch("app.webapp.socket.getaddrinfo", return_value=[(None, None, None, None, ("1.2.3.4", 0))]):
+            self.assertTrue(webapp._maintenance_bypass_allowed("1.2.3.4", "ssh.example.net"))
+
+    def test_non_matching_resolved_ip_returns_false(self):
+        with patch("app.webapp.socket.getaddrinfo", return_value=[(None, None, None, None, ("1.2.3.4", 0))]):
+            self.assertFalse(webapp._maintenance_bypass_allowed("9.9.9.9", "ssh.example.net"))
+
+    def test_gaierror_returns_false(self):
+        import socket as socket_module
+        with patch("app.webapp.socket.getaddrinfo", side_effect=socket_module.gaierror("no such host")):
+            self.assertFalse(webapp._maintenance_bypass_allowed("1.2.3.4", "ssh.example.net"))
+
+    def test_generic_os_error_returns_false(self):
+        with patch("app.webapp.socket.getaddrinfo", side_effect=OSError("network unreachable")):
+            self.assertFalse(webapp._maintenance_bypass_allowed("1.2.3.4", "ssh.example.net"))
+
+    def test_multiple_resolved_addresses_any_can_match(self):
+        with patch("app.webapp.socket.getaddrinfo", return_value=[
+            (None, None, None, None, ("1.2.3.4", 0)),
+            (None, None, None, None, ("::1", 0)),
+        ]):
+            self.assertTrue(webapp._maintenance_bypass_allowed("::1", "ssh.example.net"))
+
+    def test_ip_log_source_matches_independently_of_hostname(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = tmp + "/my-ip.log"
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("5.6.7.8\n")
+            self.assertTrue(webapp._maintenance_bypass_allowed("5.6.7.8", None, log_path))
+
+    def test_ip_log_source_survives_hostname_dns_failure(self):
+        import socket as socket_module
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = tmp + "/my-ip.log"
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.write("5.6.7.8\n")
+            with patch("app.webapp.socket.getaddrinfo", side_effect=socket_module.gaierror("no such host")):
+                self.assertTrue(webapp._maintenance_bypass_allowed("5.6.7.8", "ssh.example.net", log_path))
+
+    def test_neither_source_configured_returns_false(self):
+        self.assertFalse(webapp._maintenance_bypass_allowed("5.6.7.8", None, None))
+
+    def test_both_sources_configured_neither_matching_returns_false(self):
+        with patch("app.webapp.socket.getaddrinfo", return_value=[(None, None, None, None, ("1.2.3.4", 0))]):
+            self.assertFalse(webapp._maintenance_bypass_allowed("9.9.9.9", "ssh.example.net", "/nonexistent/my-ip.log"))
+
+
+class LatestLoggedIpTest(unittest.TestCase):
+    """Direct unit tests of app.webapp._latest_logged_ip()."""
+
+    def test_no_path_returns_none(self):
+        self.assertIsNone(webapp._latest_logged_ip(None))
+        self.assertIsNone(webapp._latest_logged_ip(""))
+
+    def test_missing_file_returns_none(self):
+        self.assertIsNone(webapp._latest_logged_ip("/no/such/file-my-ip.log"))
+
+    def test_returns_last_non_empty_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp + "/my-ip.log"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("1.1.1.1\n2.2.2.2\n\n5.6.7.8\n")
+            self.assertEqual(webapp._latest_logged_ip(path), "5.6.7.8")
+
+    def test_empty_file_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp + "/my-ip.log"
+            open(path, "w", encoding="utf-8").close()
+            self.assertIsNone(webapp._latest_logged_ip(path))
+
+    def test_strips_whitespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = tmp + "/my-ip.log"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("5.6.7.8  \n")
+            self.assertEqual(webapp._latest_logged_ip(path), "5.6.7.8")
+
+
 class SessionBannerTest(unittest.TestCase):
     """2026-07-06: "/my should have a 'new booking' button... but with a
     banner showing them that they are logged in and with the ability to

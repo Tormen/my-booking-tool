@@ -22,6 +22,20 @@ static_site_dir = "/var/www/example.org"
 # a hard FAILURE, not a warning -- setting this path is you telling us this
 # file is real and matters. Comment out / remove to skip this check entirely.
 # nginx_conf_path = "/etc/nginx/conf.d/nginx-locations.conf"
+# Optional: while `my-bt maintenance on` is blocking /courses and
+# /book/<shortname> for everyone (see [privacy] below / README.md
+# "Maintenance mode"), a request whose (nginx-forwarded) client IP matches
+# EITHER of these two still gets through as normal -- handy so you can
+# still test/use the live booking flow yourself during a maintenance
+# window. Both are optional and independent (either alone is enough);
+# leave both unset (the default) for no bypass at all. Re-checked fresh on
+# every request while maintenance is on, never cached.
+# maintenance_bypass_hostname = "your-dynamic-dns-name.example"
+# A plain text file whose LAST non-empty line is your current IP, kept
+# fresh by infrastructure outside this app (e.g. a script watching your own
+# WAN IP) -- useful as a fallback for when DNS hasn't caught up with a
+# recent IP change yet.
+# maintenance_bypass_ip_log = "/home/you/my-ip.log"
 
 [calendar]
 caldav_url            = "https://dav.example.org/"

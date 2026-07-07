@@ -76,6 +76,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -182,6 +183,69 @@ def _client_ip(environ: dict) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return environ.get("REMOTE_ADDR", "unknown")
+
+
+def _latest_logged_ip(path: str | None) -> str | None:
+    """Last non-empty line of an IP-tracking log file (e.g. the operator's own
+    /home/me/my-ip.log, kept fresh by infrastructure outside this app) --
+    a second source of "what's my current IP" alongside DNS, for exactly
+    the same reason nginx's own sync-dynamic-ip-acls.sh already checks
+    both when rebuilding /admin's IP allowlist: DNS can lag an actual IP
+    change by however long the record's TTL/propagation takes, while a
+    locally-written log file is updated the moment the IP itself changes.
+    None on any error (unset, missing file, unreadable, empty) -- this is
+    just one of two independent sources (see _maintenance_bypass_allowed
+    below), so a problem with this one alone shouldn't take out the other."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+    except OSError:
+        return None
+    return lines[-1] if lines else None
+
+
+def _maintenance_bypass_allowed(client_ip: str, hostname: str | None, ip_log_path: str | None = None) -> bool:
+    """True if `client_ip` matches EITHER `hostname`'s current resolved
+    address(es) OR the last logged IP in `ip_log_path` -- lets
+    [site].maintenance_bypass_hostname/maintenance_bypass_ip_log (e.g.
+    the operator's own dynamic-DNS name "ssh.example.net" and his
+    /home/me/my-ip.log -- the exact same two sources nginx's own
+    sync-dynamic-ip-acls.sh already checks to keep /admin's IP allowlist
+    current) still reach /courses and /book/<shortname> normally while
+    maintenance mode blocks everyone else (2026-07-10: "can the
+    maintenance mode still let me access the site from ssh.example.net
+    please?", then "if you need an IP this changes and the latest can be
+    found in /home/me/my-ip.log, but else the DNS also auto-updates!").
+    Either source alone is enough -- they're independent fallbacks for
+    each other, not both required.
+
+    Both sources are read fresh on every call rather than cached --
+    maintenance mode is rare and short-lived by nature, so the extra DNS
+    lookup/file read only ever happens while it's actually on, and a stale
+    cached IP would be exactly wrong if your dynamic IP changes
+    mid-window. Fails CLOSED (returns False, i.e. no bypass -- maintenance
+    stays in effect) if NEITHER setting is configured, or every configured
+    source errors out (unresolvable hostname, unreadable/missing/empty log
+    file): an outage in either source should never accidentally leave
+    maintenance mode not actually blocking the general public, only
+    worst-case block you too until DNS/the log file recovers.
+
+    Same trust model as `_client_ip()` itself (see its own docstring) --
+    this app is only ever reachable via its own nginx reverse proxy on
+    127.0.0.1, which is what actually sets X-Forwarded-For, so an outside
+    client can't spoof its way past this."""
+    allowed: set[str] = set()
+    if hostname:
+        try:
+            allowed |= {info[4][0] for info in socket.getaddrinfo(hostname, None)}
+        except (socket.gaierror, OSError):
+            pass
+    logged_ip = _latest_logged_ip(ip_log_path)
+    if logged_ip:
+        allowed.add(logged_ip)
+    return client_ip in allowed
 
 
 def _new_session(data: dict) -> str:
@@ -648,7 +712,10 @@ class App:
         /book/<shortname> link already, so hiding one here would just make
         it harder to find, not actually more private."""
         maintenance_state = maintenance.read_state(self.store.data_dir)
-        if maintenance_state.enabled:
+        if maintenance_state.enabled and not _maintenance_bypass_allowed(
+            _client_ip(environ), self.settings.maintenance_bypass_hostname,
+            self.settings.maintenance_bypass_ip_log,
+        ):
             return self._maintenance_response(maintenance_state)
         banner = self._session_banner_html(environ)
         if not self.settings.courses:
@@ -672,7 +739,10 @@ class App:
 
     def book(self, method: str, shortname: str, environ):
         maintenance_state = maintenance.read_state(self.store.data_dir)
-        if maintenance_state.enabled:
+        if maintenance_state.enabled and not _maintenance_bypass_allowed(
+            _client_ip(environ), self.settings.maintenance_bypass_hostname,
+            self.settings.maintenance_bypass_ip_log,
+        ):
             return self._maintenance_response(maintenance_state)
         course = self.settings.course(shortname)
         if course is None:

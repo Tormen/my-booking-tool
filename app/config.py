@@ -184,6 +184,34 @@ class Settings:
     # None (the default) means this check/action is skipped entirely.
     static_site_dir: str | None = None
 
+    # Optional: a hostname (typically your own dynamic-DNS name, e.g.
+    # "ssh.example.net") whose CURRENT resolved IP is allowed to keep using
+    # /courses and /book/<shortname> as normal even while maintenance mode
+    # (app/maintenance.py) is ON for everyone else (2026-07-10, the operator: "can
+    # the maintenance mode still let me access the site from
+    # ssh.example.net please?"). Resolved fresh on every request while
+    # maintenance is on (rare/short-lived by nature, so no caching), NOT
+    # baked in once at startup -- your dynamic IP can change between when
+    # you turn maintenance on and when you next check the site. None (the
+    # default) means no bypass at all -- maintenance blocks everyone,
+    # including you, same as before this setting existed. See
+    # app/webapp.py::_maintenance_bypass_allowed().
+    maintenance_bypass_hostname: str | None = None
+    # Optional second source for the same bypass check, checked IN ADDITION
+    # to (not instead of) maintenance_bypass_hostname above -- the path to a
+    # plain text file whose LAST non-empty line is your current IP, kept
+    # fresh by infrastructure outside this app (2026-07-10, the operator: "if you
+    # need an IP this changes and the latest can be found in
+    # /home/me/my-ip.log, but else the DNS also auto-updates!"). Mirrors
+    # nginx's own sync-dynamic-ip-acls.sh, which already checks both the
+    # same hostname AND this same log file when rebuilding /admin's IP
+    # allowlist -- DNS can lag an actual IP change by however long the
+    # record's TTL/propagation takes, while this file is updated the moment
+    # the IP itself changes. None (the default) skips this source; either
+    # source alone is enough to match (see
+    # app/webapp.py::_maintenance_bypass_allowed()).
+    maintenance_bypass_ip_log: str | None = None
+
     # --- Watchdog (app/watchdog.py) -- see README.md "Watchdog" and
     # [watchdog] in settings.toml. A periodic (systemd-timer-driven) health
     # check, NOT a replacement for fail2ban or fine-grained per-key rate
@@ -320,6 +348,8 @@ def load_settings(toml_path: str | Path) -> Settings:
         admin_email=site["admin_email"],
         base_url=site["base_url"].rstrip("/"),
         static_site_dir=(site.get("static_site_dir") or None),
+        maintenance_bypass_hostname=(site.get("maintenance_bypass_hostname") or None),
+        maintenance_bypass_ip_log=(site.get("maintenance_bypass_ip_log") or None),
         caldav_url=cal["caldav_url"],
         caldav_username=cal["caldav_username"],
         caldav_password=_read_secret(cal["caldav_password_file"]),

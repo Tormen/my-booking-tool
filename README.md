@@ -1052,6 +1052,33 @@ as a `warn` (not silence) whenever it's ON, specifically so it can't stay
 enabled for days after a real maintenance window ends without anyone
 noticing -- see `app/cli_checks.py::check_maintenance_mode`.
 
+**Bypassing it for yourself** (2026-07-10, the operator: "can the maintenance
+mode still let me access the site from ssh.example.net please?"): two
+optional, independent `[site]` settings let a matching request keep using
+`/courses`/`/book/<shortname>` normally even while everyone else is
+blocked --
+
+```
+maintenance_bypass_hostname = "ssh.example.net"   # your own dynamic-DNS name
+maintenance_bypass_ip_log   = "/home/me/my-ip.log" # last line = your current IP
+```
+
+Either one alone is enough; both are re-checked fresh on every request
+(never cached), and both fail CLOSED -- an unresolvable hostname or an
+unreadable/missing log file just means that source doesn't match, not an
+error, and if NEITHER setting is configured the bypass does nothing at
+all (maintenance blocks everyone, same as before these existed). The two
+sources mirror exactly what nginx's own `sync-dynamic-ip-acls.sh` already
+checks to keep `/admin`'s IP allowlist current (see
+`site/nginx-locations.conf`'s own comment on that script) -- DNS can lag
+an actual IP change by however long the record's TTL/propagation takes,
+while a locally-written log file updates the moment the IP itself
+changes, so checking both covers either kind of lag. Trust model: the
+same as `_client_ip()`'s own (this app is only ever reachable through its
+own nginx reverse proxy on 127.0.0.1, which is what actually sets
+`X-Forwarded-For`, so this can't be spoofed by an outside client). See
+`app/webapp.py::_maintenance_bypass_allowed()`.
+
 ## Spots-left display (`[defaults]` in `settings.toml`)
 
 `show_spots_left` (default `true`) toggles the "N spots left" / "FULL,
