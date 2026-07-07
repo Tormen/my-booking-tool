@@ -108,6 +108,27 @@ def course_recap_html(course: Course, occ_date: str) -> str:
     )
 
 
+def intro_html(text: str) -> str:
+    """The FIRST sentence of every HTML booking/cancellation/promotion
+    email (2026-07-10, the operator: "please make the first sentance in email a
+    bit more visible (bold mayb and for sure larger font size, compare to
+    all other things in the email and email header) ... same of course
+    for ALL emails") -- bigger and bolder than the recap/detail text below
+    it (and than a typical mail client's own From/Subject header line), so
+    the single most important fact (booked, waitlisted, canceled,
+    promoted...) is the first thing a skimming reader's eye lands on.
+
+    `text` is a plain string, escaped HERE (not by the caller) -- unlike
+    html_email_body()'s own `inner_html` param, which callers assemble
+    from several already-escaped pieces (course_recap_html() etc.) and is
+    deliberately trusted as-is, this narrower helper always wraps exactly
+    ONE sentence built from a mix of fixed wording and (in the admin-
+    cancellation and promotion emails) a guest-supplied name -- escaping
+    inside this one shared helper means every call site gets it for free
+    instead of relying on each one to remember."""
+    return f'<p style="font-size:1.25em;font-weight:bold;margin:0 0 .5em">{html.escape(text, quote=True)}</p>'
+
+
 def html_email_body(inner_html: str) -> str:
     """Minimal, portable HTML shell (2026-07-09) every HTML email in this
     app is wrapped in -- no external stylesheet/JS, just a plain
@@ -162,13 +183,21 @@ def send_cancellation_emails(
     my_url = f"{settings.base_url}/my"
     if user:
         participant_who = "You" if canceled_by == "guest" else "The host"
+        # 2026-07-10, the operator: "With the reschedule button the email could
+        # also contain it: If this was a mistake... The what can be a link
+        # to the booking page for this course" -- participant-facing only,
+        # the admin copy below has no need to rebook.
+        rebook_url = f"{settings.base_url}/book/{course.shortname}"
         send_mail(
             settings, user.email, subject,
             f"{participant_who} canceled this booking:\n\n{details}\n{reason_block}"
-            f"Manage your bookings: {my_url}\n",
+            f"Manage your bookings: {my_url}\n"
+            f"If this was a mistake, you can book again here: {rebook_url}\n",
             html_body=html_email_body(
-                f"<p>{participant_who} canceled this booking:</p>{recap_html}{reason_html}"
+                intro_html(f"{participant_who} canceled this booking:") + f"{recap_html}{reason_html}"
                 f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+                f'<p>If this was a mistake, you can book again here: '
+                f'<a href="{rebook_url}">{rebook_url}</a></p>'
             ),
             ics_attachment=ics_attachment,
         )
@@ -176,5 +205,5 @@ def send_cancellation_emails(
     send_mail(
         settings, settings.admin_email, subject,
         f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}",
-        html_body=html_email_body(f"<p>{admin_who} canceled this booking:</p>{recap_html}{reason_html}"),
+        html_body=html_email_body(intro_html(f"{admin_who} canceled this booking:") + f"{recap_html}{reason_html}"),
     )

@@ -28,7 +28,7 @@ from typing import Callable
 
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
-from .cancellation import booking_details_text, course_recap_html, html_email_body
+from .cancellation import booking_details_text, course_recap_html, html_email_body, intro_html
 from .config import Settings
 from .emailer import send_mail
 from .storage import Store
@@ -138,7 +138,7 @@ def cancel_and_promote(
                 + booking_details_text(course, occurrence_date_str)
                 + f"\nManage or cancel this booking: {my_url}\n",
                 html_body=html_email_body(
-                    f"<p>{intro}</p>"
+                    intro_html(intro)
                     + course_recap_html(course, occurrence_date_str)
                     + f'<p>Manage or cancel this booking: <a href="{my_url}">{my_url}</a></p>'
                 ),
@@ -159,7 +159,7 @@ def cancel_and_promote(
                 f"Promoted from waitlist: {course.title} on {occurrence_date_str}",
                 f"{admin_intro}\n\n" + booking_details_text(course, occurrence_date_str),
                 html_body=html_email_body(
-                    f"<p>{admin_intro}</p>" + course_recap_html(course, occurrence_date_str)
+                    intro_html(admin_intro) + course_recap_html(course, occurrence_date_str)
                 ),
             )
     if sync_fn is not None:

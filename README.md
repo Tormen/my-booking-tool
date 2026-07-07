@@ -311,18 +311,21 @@ erase, restart `my-booking.service` or just wait for the next
 booking/cancellation on that occurrence.
 
 If an erased guest later books again with the same email, they get a
-brand-new live account -- their old, erased identity is now just a hash,
-so their pre-erasure bookings stay parked under that old, archived
-user_id (nothing restores them automatically -- see "GDPR notes" below).
-`my-bt history --email ...` shows both sets side by side, read-only,
-exactly like the admin overview's "N (incl. M pre-erasure)" count.
-`my-bt merge --email ...` is the explicit, deliberate action that actually
-re-attaches that old history to the live account: it moves the archived
-registration rows onto the live user_id (re-parented, `registration_id`
-unchanged) and removes them from the archive. It never touches the
-archived user row itself -- that old identity's name stays `[erased]` and
-email stays the hash, forever; only the registrations (which never held
-name/email, just a user_id) move.
+brand-new live account -- their old, erased identity is now just a hash.
+As of 2026-07-10, `/admin` automatically re-attaches any pre-erasure
+registrations sharing that same real email onto the new live account on
+every page load (the operator: "the merge should be automatically done if you
+also display the history in the /admin page") -- no button, no CLI step
+needed for this to show up in the web admin overview. `my-bt merge
+--email ...` still exists for the CLI/`my-bt history` path and does the
+identical underlying move (`app/cli_history.py::run_merge`, the same
+helper `/admin` now calls itself): it moves the archived registration
+rows onto the live user_id (re-parented, `registration_id` unchanged) and
+removes them from the archive. It never touches the archived user row
+itself -- that old identity's name stays `[erased]` and email stays the
+hash, forever; only the registrations (which never held name/email, just
+a user_id) move. Both paths are idempotent: running/loading either again
+once everything's already merged is a no-op.
 
 `my-bt cancel --registration-id ...` is the CLI equivalent of the web
 admin's cancel button (`/admin` -> Cancel): same status transition (->
@@ -683,19 +686,22 @@ statistical/audit value (how many sessions happened, aggregate attendance)
 without retaining identifiable personal data past the point someone asked to
 be forgotten.
 
-**Re-booking after erasure:** nothing is ever restored automatically -- a
-guest who books again under the same email simply gets a fresh live
-account, and their pre-erasure registrations stay under the old, archived
-user_id indefinitely. The admin overview shows this merged into "Times
-booked" for display only, nothing is written to disk by viewing it.
-`my-bt history --email ...` is the CLI equivalent (also read-only).
-`my-bt merge --email ...` is the one explicit, admin-invoked action that
-actually moves those archived registrations onto the live user_id -- a
-deliberate choice made per-case, the same way `my-bt erase` is a
-deliberate choice, never something that happens as a side effect. It
-never un-erases the old identity itself: the archived user row keeps its
-hashed email and `[erased]` name forever; only the registration rows
-(which never held name/email) get re-parented.
+**Re-booking after erasure:** a guest who books again under the same
+email gets a fresh live account. As of 2026-07-10, `/admin` automatically
+moves their pre-erasure registrations onto that new live user_id on every
+page load (a real write, not just a display-time fold-in) -- deliberately
+made a side effect of viewing the page rather than a separate confirm
+step, since it's idempotent by construction (a repeat load finds nothing
+left to merge) and there's no plausible case where you'd want to VIEW an
+account's history without also having it reflect their full history.
+`my-bt history --email ...` remains read-only (no merge as a side
+effect of just looking), and `my-bt merge --email ...` remains the
+explicit CLI action for anyone managing the archive outside the web
+admin -- both call the same underlying `app/cli_history.py::run_merge`
+the web admin now calls. None of these ever un-erase the old identity
+itself: the archived user row keeps its hashed email and `[erased]` name
+forever; only the registration rows (which never held name/email) get
+re-parented.
 
 **DPIA (Data Protection Impact Assessment):** whether you need one depends
 on your own scale, data categories, and risk profile -- this is a

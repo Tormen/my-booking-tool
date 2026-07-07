@@ -68,13 +68,14 @@ from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import cancel_and_promote
 from .cancellation import (
-    booking_details_text, course_recap_html, html_email_body, html_to_text, send_cancellation_emails,
+    booking_details_text, course_recap_html, html_email_body, html_to_text, intro_html, send_cancellation_emails,
 )
 from .config import Settings
 from .emailer import _masked, send_mail
-from .erasure import erase_user_by_email
+from .cli_history import run_merge
+from .erasure import erase_user_by_email, find_archived_user_ids_for_email
 from .security import (
-    RateLimiter, hash_email_for_erasure, hash_secret, hash_token, is_erased_email, new_token,
+    RateLimiter, hash_secret, hash_token, is_erased_email, new_token,
     sanitize_csv_field, tokens_match, verify_admin_password, verify_secret,
 )
 from .slots import build_occurrences
@@ -372,62 +373,77 @@ def _course_recap_html(course, occ_date: str) -> str:
     return course_recap_html(course, occ_date)
 
 
-def _sortable_filterable_table_script(table_id: str) -> str:
-    """Client-side filter (substring, across every cell) + click-a-header-
-    to-sort for a <table id="{table_id}"> with a <thead>/<tbody> and a
-    sibling <input type="search" id="{table_id}-filter">. Standing default
-    for every table in the app now (2026-07-05, see SOLUTION-DESIGN.md) --
-    both /my's bookings table and /admin's overview table use this, so a
-    future third table gets the same behavior for free rather than a
-    one-off. Deliberately vanilla JS/no library: these tables are small
-    (one operator's own bookings, or one small deployment's admin view),
-    so a full data-grid dependency would be more weight than the problem
-    needs. Sorting is index-based (numeric-aware, falls back to a
-    locale-aware string compare) -- every row in a given table must have
-    the same number of cells as the header for column indexes to line up
-    (see admin_overview()'s comment on why an erased row's hash goes in
-    the Email cell rather than a colspan, specifically because of this)."""
-    return f"""<script>
-(function() {{
-  var table = document.getElementById({json.dumps(table_id)});
-  if (!table || !table.tHead || !table.tBodies.length) return;
+# Client-side filter (substring, across every cell) + click-a-header-to-sort
+# for a <table> immediately preceded by a `.table-tools` <div> containing an
+# `<input type="search">` (see _table()/admin_overview()'s own markup for
+# that exact structure) -- standing default for every table in the app
+# (2026-07-05, see SOLUTION-DESIGN.md); both /my's bookings table(s) and
+# /admin's overview table use this, so a future third table gets the same
+# behavior for free rather than a one-off. Deliberately vanilla JS/no
+# library: these tables are small (one operator's own bookings, or one
+# small deployment's admin view), so a full data-grid dependency would be
+# more weight than the problem needs. Sorting is index-based (numeric-aware,
+# falls back to a locale-aware string compare) -- every row in a given table
+# must have the same number of cells as the header for column indexes to
+# line up (see admin_overview()'s comment on why an erased row's hash goes
+# in the Email cell rather than a colspan, specifically because of this).
+#
+# A MODULE-LEVEL CONSTANT (2026-07-10 fix), not a function taking table_id
+# anymore -- it used to interpolate table_id directly into the script text
+# via document.getElementById(...), which meant EVERY distinct table_id
+# produced a byte-different script, and therefore a DIFFERENT CSP
+# script-src hash per table. That's unmaintainable behind a hash-based CSP
+# (real incident: booking.example.org's hardened nginx config only allow-lists two
+# script hashes total, so /my's table silently got a different hash than
+# /admin's, and neither was actually allow-listed -- BOTH were silently
+# non-functional, including the confirm-dialog wiring script that's
+# concatenated right after this one). Fixed by locating the table/filter
+# input via DOM relationships (`document.currentScript`'s own preceding
+# siblings) instead of by id -- this script's text is now IDENTICAL no
+# matter how many tables exist or what they're named, so ONE hash covers
+# every one of them, forever.
+_SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
+(function() {
+  var table = document.currentScript.previousElementSibling;
+  if (!table || table.tagName !== "TABLE" || !table.tHead || !table.tBodies.length) return;
   var tbody = table.tBodies[0];
   var headerCells = Array.prototype.slice.call(table.tHead.rows[0].cells);
   var rows = Array.prototype.slice.call(tbody.rows);
-  headerCells.forEach(function(th, idx) {{
+  headerCells.forEach(function(th, idx) {
     th.style.cursor = "pointer";
     var indicator = th.querySelector(".sort-indicator");
-    th.addEventListener("click", function() {{
+    th.addEventListener("click", function() {
       var dir = th.dataset.dir === "asc" ? "desc" : "asc";
-      headerCells.forEach(function(h) {{
+      headerCells.forEach(function(h) {
         h.dataset.dir = "";
         var i = h.querySelector(".sort-indicator");
         if (i) i.textContent = "";
-      }});
+      });
       th.dataset.dir = dir;
       if (indicator) indicator.textContent = dir === "asc" ? " ▲" : " ▼";
-      var sorted = rows.slice().sort(function(a, b) {{
+      var sorted = rows.slice().sort(function(a, b) {
         var av = a.cells[idx] ? a.cells[idx].textContent.trim() : "";
         var bv = b.cells[idx] ? b.cells[idx].textContent.trim() : "";
         var an = parseFloat(av), bn = parseFloat(bv);
         var bothNumeric = av !== "" && bv !== "" && !isNaN(an) && !isNaN(bn)
           && /^-?[0-9.]+$/.test(av) && /^-?[0-9.]+$/.test(bv);
-        var cmp = bothNumeric ? (an - bn) : av.localeCompare(bv, undefined, {{sensitivity: "base"}});
+        var cmp = bothNumeric ? (an - bn) : av.localeCompare(bv, undefined, {sensitivity: "base"});
         return dir === "asc" ? cmp : -cmp;
-      }});
-      sorted.forEach(function(r) {{ tbody.appendChild(r); }});
-    }});
-  }});
-  var filterInput = document.getElementById({json.dumps(table_id + "-filter")});
-  if (filterInput) {{
-    filterInput.addEventListener("input", function() {{
+      });
+      sorted.forEach(function(r) { tbody.appendChild(r); });
+    });
+  });
+  var toolsDiv = table.previousElementSibling;
+  var filterInput = toolsDiv ? toolsDiv.querySelector('input[type="search"]') : null;
+  if (filterInput) {
+    filterInput.addEventListener("input", function() {
       var q = filterInput.value.trim().toLowerCase();
-      rows.forEach(function(r) {{
+      rows.forEach(function(r) {
         r.style.display = (!q || r.textContent.toLowerCase().indexOf(q) !== -1) ? "" : "none";
-      }});
-    }});
-  }}
-}})();
+      });
+    });
+  }
+})();
 </script>"""
 
 
@@ -828,7 +844,7 @@ class App:
                 f"Leave the waitlist directly: {cancel_url}\n"
                 f"{account_line}",
                 html_body=html_email_body(
-                    f"<p>{intro}</p>{recap_html}"
+                    intro_html(intro) + f"{recap_html}"
                     f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
                     f'<p>Leave the waitlist directly: <a href="{cancel_url}">{cancel_url}</a></p>'
                     f"{account_line_html}"
@@ -844,7 +860,7 @@ class App:
                 f"Cancel this booking directly: {cancel_url}\n"
                 f"{account_line}",
                 html_body=html_email_body(
-                    f"<p>Your spot is confirmed:</p>{recap_html}"
+                    intro_html("Your spot is confirmed:") + f"{recap_html}"
                     f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
                     f'<p>Cancel this booking directly: <a href="{cancel_url}">{cancel_url}</a></p>'
                     f"{account_line_html}"
@@ -1407,16 +1423,26 @@ class App:
         if method == "POST":
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
-            self.store.cancel(reg.registration_id, canceled_by="guest", host_message=message)
-            self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
-            if course:
-                user = self.store.find_user_by_id(reg.user_id)
-                # Both sides notified, same as every other cancellation path
-                # (see _send_cancellation_emails) -- this guest already knows
-                # they just did this, but the email is still their own copy
-                # of "here's what got canceled and when", same as the other
-                # two paths get.
-                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
+            # Naturally guarded against a stale/replayed submission already
+            # (find_by_guest_token_hash above only ever matches a still-
+            # CONFIRMED/WAITLISTED row, so a second POST with the same
+            # token would already have hit "reg is None" above) -- this
+            # explicit changed-guard (2026-07-10, same fix as
+            # admin_cancel()/host_cancel()/my_cancel()) additionally closes
+            # a genuine concurrent double-submit (two requests racing on
+            # the same token), where both could pass the lookup above
+            # before either actually cancels.
+            changed = self.store.cancel(reg.registration_id, canceled_by="guest", host_message=message)
+            if changed:
+                self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
+                if course:
+                    user = self.store.find_user_by_id(reg.user_id)
+                    # Both sides notified, same as every other cancellation path
+                    # (see _send_cancellation_emails) -- this guest already knows
+                    # they just did this, but the email is still their own copy
+                    # of "here's what got canceled and when", same as the other
+                    # two paths get.
+                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Your booking has been canceled.</p>")
         # 2026-07-09, the operator: "This page should look like as described for
         # the admin and like the email ... WHAT WHEN WHERE with emojis and
@@ -1546,7 +1572,7 @@ class App:
                     <th>Actions<span class="sort-indicator"></span></th>
                   </tr></thead>
                   <tbody>{rows}</tbody>
-                </table>""" + _sortable_filterable_table_script(table_id)
+                </table>""" + _SORTABLE_FILTERABLE_TABLE_SCRIPT
 
             upcoming_id, past_id = "my-upcoming-table", "my-past-table"
             upcoming_html = _table(upcoming_id, upcoming) or "<p>You have no upcoming bookings.</p>"
@@ -1937,16 +1963,25 @@ class App:
         if reg and reg.user_id == session["user_id"]:
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
-            self.store.cancel(registration_id, canceled_by="guest", host_message=message)
-            self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
-            course = self.settings.course(reg.course_shortname)
-            if course:
-                user = self.store.find_user_by_id(session["user_id"])
-                # Both sides notified, always -- see _send_cancellation_emails
-                # (standing default now, SOLUTION-DESIGN.md). This is what
-                # lets the real account owner notice a cancellation made by
-                # someone who got into their /my session but isn't them.
-                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
+            # Guarded on cancel()'s return value (2026-07-10 fix, same as
+            # admin_cancel()/host_cancel()) -- this already redirects to
+            # /my afterward, but a stale cached copy of /my (browser
+            # back-button, or a double-click before the redirect lands)
+            # could still resubmit this exact POST for an already-canceled
+            # registration_id; without this guard that would silently
+            # re-run the waitlist-promotion attempt and send a second round
+            # of "canceled" emails to both sides.
+            changed = self.store.cancel(registration_id, canceled_by="guest", host_message=message)
+            if changed:
+                self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
+                course = self.settings.course(reg.course_shortname)
+                if course:
+                    user = self.store.find_user_by_id(session["user_id"])
+                    # Both sides notified, always -- see _send_cancellation_emails
+                    # (standing default now, SOLUTION-DESIGN.md). This is what
+                    # lets the real account owner notice a cancellation made by
+                    # someone who got into their /my session but isn't them.
+                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
         return "302 Found", [("Location", "/my")], ""
 
     def my_logout(self, method: str, environ):
@@ -2319,27 +2354,41 @@ class App:
         # was already force-canceled by Store.erase_user before archiving,
         # so it's never something the "today + future only" view needs to
         # surface; it should only appear once "include past" is toggled.
+        # 2026-07-10, the operator: "the merge should be automatically done if you
+        # also display the history in the /admin page" -- viewing this
+        # page (logging in, requesting the overview) now performs the same
+        # merge admin_merge()/`my-bt merge` do explicitly: any LIVE guest
+        # whose current email hashes to an already-archived (erased)
+        # identity gets that pre-erasure registration history moved onto
+        # their live user_id, right here, before anything below is read.
+        # This used to be display-only (a "N (incl. M pre-erasure)"
+        # fold-in recomputed fresh on every render, never touching disk) --
+        # now it's the real thing, done automatically as a side effect of
+        # loading this page instead of needing a separate explicit click.
+        # Nominally unusual for a GET to mutate state, but idempotent by
+        # construction: run_merge() only ever moves rows that are STILL
+        # archived, so reloading this page immediately after finds nothing
+        # left to merge and is a pure no-op, same as any other page reload.
+        for live_user_row in self.store.read_users(scope="live"):
+            archived_user_ids = find_archived_user_ids_for_email(
+                self.store, self.settings, live_user_row["email"]
+            )
+            if archived_user_ids:
+                run_merge(self.store, archived_user_ids, live_user_row["user_id"])
+
         live_regs = [Registration(**r) for r in self.store.read_registrations(scope="live")]
         archived_regs = [Registration(**r) for r in self.store.read_registrations(scope="archived")]
         all_regs = live_regs + archived_regs
         users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
-        # "Times booked" has always counted every registration ever made by
-        # this user_id, live or since-canceled -- computed here from the
-        # same all-scope set rather than Store.times_registered() (which
-        # only reads the live CSV), so an erased user's historical count
-        # doesn't drop to 0 just because their rows moved to the archive.
+        # "Times booked" counts every registration ever made by this
+        # user_id, live or since-canceled, including whatever the auto-merge
+        # above just folded in for real -- computed from the same all-scope
+        # set rather than Store.times_registered() (which only reads the
+        # live CSV), so an erased identity that never got a live rebook
+        # (nothing to merge into) still shows its own true historical count
+        # rather than dropping to 0 just because its rows live in the
+        # archive.
         times_by_user = Counter(r.user_id for r in all_regs)
-        # Map hashed-email -> archived user_ids sharing that hash, so a live
-        # user who re-books under the same email after being erased can have
-        # their pre-erasure history folded into "Times booked" below. This
-        # never touches the archived row itself (still just its own count,
-        # name "[erased]", hashed email) -- see the docstring at the top of
-        # this method's PR description / the maintainer's local notes for why nothing is
-        # restored or merged on disk, only summed for display here.
-        archived_ids_by_hash: dict[str, list[str]] = {}
-        for u in users_by_id.values():
-            if is_erased_email(u.email):
-                archived_ids_by_hash.setdefault(u.email, []).append(u.user_id)
         regs = all_regs if show_past else [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
         regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname))
         # Guest bookings (2026-07): group every registration -- live AND
@@ -2385,25 +2434,19 @@ class App:
             else:
                 name_cell = "<td>(unknown)</td>"
                 email_cell = "<td>(unknown)</td>"
-            times = times_by_user.get(r.user_id, 0)
-            prior = 0
-            if user and not erased:
-                # Same email, re-booked after a prior erasure: the old
-                # identity's hash (Store.erase_user) still matches
-                # hash_email_for_erasure(this live user's real email), even
-                # though it's a brand-new user_id. Fold that pre-erasure
-                # history into the displayed count -- nothing on disk
-                # changes, this is display-only.
-                hashed = hash_email_for_erasure(user.email, self.settings.erasure_pepper)
-                for prior_uid in archived_ids_by_hash.get(hashed, []):
-                    prior += times_by_user.get(prior_uid, 0)
-                times += prior
-            times_cell = f"{times} (incl. {prior} pre-erasure)" if prior > 0 else str(times)
+            # No more separate "(incl. M pre-erasure)" fold-in needed here
+            # (2026-07-10) -- the auto-merge pass at the top of this method
+            # already moved any pre-erasure history for a live, re-booked
+            # guest into their real registrations before times_by_user was
+            # even computed, so this count is already the true total.
+            times_cell = str(times_by_user.get(r.user_id, 0))
             if user and not erased:
                 cancel_id = f"admin-cancel-{esc(r.registration_id)}"
                 disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED)
+                past_field = '<input type="hidden" name="past" value="1">' if show_past else ""
                 actions = (
                     f'<form method="post" action="/admin/cancel/{esc(r.registration_id)}" id="{cancel_id}-form">'
+                    f'{past_field}'
                     f'<button type="submit" class="confirm-dialog-btn" data-dialog="{cancel_id}-dialog" '
                     f'{"disabled" if disabled else ""}>Cancel</button>'
                     "</form>"
@@ -2418,6 +2461,11 @@ class App:
                     f'<button type="button" class="dialog-close-btn" data-dialog="{cancel_id}-dialog">Never mind</button>'
                     "</div></dialog>"
                 )
+                # No separate "Merge history" button (2026-07-10) -- see the
+                # auto-merge pass at the top of this method's own comment:
+                # merging now happens automatically just by loading this
+                # page, so there's nothing left for a manual button to do
+                # by the time these rows are built.
             else:
                 # Archived (erased) or otherwise unresolvable registrations
                 # aren't actionable here -- find_by_id() only reads the live
@@ -2468,7 +2516,7 @@ class App:
           <th>Party<span class="sort-indicator"></span></th>
           <th>Actions<span class="sort-indicator"></span></th>
         </tr></thead>
-        <tbody>{''.join(rows)}</tbody></table>""" + _sortable_filterable_table_script(table_id) + _DIALOG_WIRING_SCRIPT
+        <tbody>{''.join(rows)}</tbody></table>""" + _SORTABLE_FILTERABLE_TABLE_SCRIPT + _DIALOG_WIRING_SCRIPT
         return "200 OK", [("Content-Type", "text/html")], page("Admin overview", body)
 
     def admin_cancel(self, method: str, registration_id: str, environ):
@@ -2483,15 +2531,30 @@ class App:
         if method == "POST":
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
-            self.store.cancel(registration_id, canceled_by="host", host_message=message)
-            self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
-            if course:
-                # Both sides notified, always -- see _send_cancellation_emails
-                # (standing default now, SOLUTION-DESIGN.md). The admin's own
-                # copy is what surfaces an unexpected cancellation if someone
-                # other than you got into /admin and did this.
-                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
-            return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
+            # changed is False if this exact registration was already
+            # canceled by the time this POST landed (2026-07-10 fix, real
+            # incident: the admin table's own Cancel button submits this
+            # POST directly and used to stay on this exact URL afterward --
+            # no redirect -- so a browser back-button + resubmit, or a
+            # double-click, replayed the promote/email side effects below a
+            # SECOND time for a booking that was already canceled, sending
+            # duplicate "canceled" emails to both sides even though
+            # Store.cancel() itself is idempotent about the row. Guarding on
+            # its return value, not just calling it, is what actually stops
+            # the duplicate side effects; the redirect below (instead of
+            # rendering "Canceled" on this same POST URL) additionally
+            # closes the back-button-resubmit path itself at the source.
+            changed = self.store.cancel(registration_id, canceled_by="host", host_message=message)
+            if changed:
+                self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
+                if course:
+                    # Both sides notified, always -- see _send_cancellation_emails
+                    # (standing default now, SOLUTION-DESIGN.md). The admin's own
+                    # copy is what surfaces an unexpected cancellation if someone
+                    # other than you got into /admin and did this.
+                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
+            location = "/admin?past=1" if form.get("past") == "1" else "/admin"
+            return "302 Found", [("Location", location)], ""
         # Same recap + "space, then reason, then button" layout as
         # guest_cancel()/host_cancel() -- see host_cancel()'s docstring for
         # the full "Can be always the same code" rationale.
@@ -2542,13 +2605,22 @@ class App:
         if method == "POST":
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
-            self.store.cancel(registration_id, canceled_by="host", host_message=message)
-            self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
-            if course:
-                # Both sides notified, always -- see admin_cancel()'s own
-                # comment on why: the admin's own copy is what surfaces an
-                # unexpected cancellation if this link ever leaks.
-                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
+            # See admin_cancel()'s own comment (2026-07-10 fix) on why this
+            # is guarded on cancel()'s return value -- a magic link like
+            # this one can plausibly be tapped twice from a calendar app
+            # (e.g. a slow first tap, then a retry) even without a browser
+            # back-button involved, so the same duplicate-email risk
+            # applies here too. No redirect to add here, unlike
+            # admin_cancel() -- this is a standalone, no-login page with no
+            # "list" to send anyone back to.
+            changed = self.store.cancel(registration_id, canceled_by="host", host_message=message)
+            if changed:
+                self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
+                if course:
+                    # Both sides notified, always -- see admin_cancel()'s own
+                    # comment on why: the admin's own copy is what surfaces an
+                    # unexpected cancellation if this link ever leaks.
+                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (

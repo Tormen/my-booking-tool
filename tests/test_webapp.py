@@ -1494,7 +1494,13 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<table id="my-upcoming-table"', body)
         self.assertIn("<thead><tr>", body)
         self.assertIn('<input type="search" id="my-upcoming-table-filter"', body)
-        self.assertIn('getElementById("my-upcoming-table")', body)
+        # 2026-07-10: the sort/filter script no longer looks up the table by
+        # id (that made its own text, and therefore its CSP hash, differ per
+        # table_id) -- it locates the table via document.currentScript's own
+        # DOM position instead, so the same script text is emitted verbatim
+        # everywhere. Assert on that stable marker instead of the old
+        # getElementById() call.
+        self.assertIn("document.currentScript.previousElementSibling", body)
 
     def test_my_bookings_cancel_button_enabled_for_waitlisted_row_too(self):
         # 2026-07-05 fix: the Cancel button used to be disabled for
@@ -1568,6 +1574,20 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Message: can't make it", admin_mail)
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
 
+    def test_my_cancel_email_offers_a_rebook_link_to_the_participant_only(self):
+        # 2026-07-10, the operator: "With the reschedule button the email could
+        # also contain it: If this was a mistake... The what can be a link
+        # to the booking page for this course."
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
+        self.assertIn("If this was a mistake, you can book again here: https://example.org/book/yoga-class-1", participant_mail)
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Canceled:"))
+        self.assertNotIn("book again", admin_mail)
+
     def test_my_cancel_without_reason_omits_message_line(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
@@ -1576,6 +1596,21 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
         admin_mail = next(b for _, s, b in self.sent_emails if s.startswith("Canceled:"))
         self.assertNotIn("Message:", admin_mail)
+
+    def test_my_cancel_resubmission_does_not_send_duplicate_emails(self):
+        # 2026-07-10 fix: a stale cached /my page (browser back-button) or a
+        # double-click could resubmit this exact POST for an
+        # already-canceled registration_id -- Store.cancel() itself is
+        # idempotent about the ROW, but the promote/email side effects
+        # weren't gated on that before this fix, so a resubmit used to
+        # silently send a second round of "canceled" emails to both sides.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        self.assertEqual(self.sent_emails, [])
 
     def _post_with_session(self, fn, args, form: dict, environ: dict):
         body = urlencode(form).encode()
@@ -1626,6 +1661,25 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("What:</b>", body)
         self.assertIn("When:</b>", body)
         self.assertIn("Where:</b>", body)
+
+    def test_guest_cancel_token_reuse_shows_invalid_and_sends_no_duplicate_emails(self):
+        # 2026-07-10: guest_cancel() is naturally protected against replay
+        # (find_by_guest_token_hash only matches a still-CONFIRMED/
+        # WAITLISTED row, and Store.cancel() flips that status away), but
+        # confirm the end-to-end effect directly: a second POST with the
+        # same token must neither re-cancel anything nor send a second
+        # round of emails.
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        confirmed_body = next(b for _, s2, b in self.sent_emails if s2.startswith("Booking confirmed:"))
+        token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
+        self._post(self.app.guest_cancel, (token,), {"message": ""})
+        self.sent_emails.clear()
+        _status, _headers, body = self._post(self.app.guest_cancel, (token,), {"message": ""})
+        self.assertIn("invalid or already used", body)
+        self.assertEqual(self.sent_emails, [])
 
     def test_cancellation_email_includes_an_html_alternative_with_the_recap(self):
         # Wiring check: cancellation.send_cancellation_emails (called from
@@ -1679,7 +1733,34 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<table id="admin-overview-table"', body)
         self.assertIn('<thead><tr>', body)
         self.assertIn('<input type="search" id="admin-overview-table-filter"', body)
-        self.assertIn('getElementById("admin-overview-table")', body)
+        # See the same 2026-07-10 comment in the /my equivalent test above.
+        self.assertIn("document.currentScript.previousElementSibling", body)
+
+    def test_sort_filter_script_is_byte_identical_on_my_and_admin_pages(self):
+        # 2026-07-10: the whole point of no longer interpolating table_id
+        # into this script (see webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT's
+        # own docstring -- a real incident where a hash-based CSP allow-list
+        # could only ever cover ONE table_id's worth of script text, leaving
+        # every other table silently broken) is that ONE sha256 hash covers
+        # every table on every page. Directly assert that property: extract
+        # the script block from both /my (which used table_id
+        # "my-upcoming-table") and /admin (which used "admin-overview-table")
+        # and confirm they're the exact same string, not just "both contain
+        # a similar-looking script."
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, my_body = self.app.my(
+            "GET", {"HTTP_COOKIE": f"session={webapp._new_session({'kind': 'guest', 'user_id': self.store.find_user_by_email('regular@example.org').user_id})}"},
+        )
+        admin_sid = webapp._new_session({"kind": "admin"})
+        _status, _headers, admin_body = self.app.admin_overview("GET", {"HTTP_COOKIE": f"session={admin_sid}"})
+
+        def extract_sort_script(body: str) -> str:
+            start = body.index("<script>\n(function() {\n  var table = document.currentScript")
+            end = body.index("</script>", start) + len("</script>")
+            return body[start:end]
+
+        self.assertEqual(extract_sort_script(my_body), extract_sort_script(admin_body))
 
     def test_admin_overview_shows_erased_users_past_registration_with_hash(self):
         # 2026-07-05: erasure moves the user row AND every one of their
@@ -1736,15 +1817,17 @@ class BookingFlowTest(unittest.TestCase):
         row_html = body[row_start:row_start + 400]
         self.assertIn("<td>1</td>", row_html)
 
-    def test_admin_overview_folds_pre_erasure_count_into_new_live_row_same_email(self):
-        # 2026-07-06: if an erased guest books again with the SAME email,
-        # book() creates a brand-new live user_id (the old email no longer
-        # exists in the live table -- it's now a hash on the archived row).
-        # hash_email_for_erasure(their current real email) still matches
-        # the hash stored on that old archived row, so admin_overview()
-        # should fold the archived count into the live row's "Times
-        # booked" (display-only -- nothing is restored/merged on disk, and
-        # the archived row's own cell stays untouched).
+    def test_admin_overview_auto_merges_pre_erasure_registrations_on_load(self):
+        # 2026-07-10, the operator: "the merge should be automatically done if you
+        # also display the history in the /admin page" -- if an erased
+        # guest books again with the SAME email, book() creates a brand-new
+        # live user_id (the old email no longer exists in the live table --
+        # it's now a hash on the archived row). Merely LOADING /admin now
+        # physically moves that old registration onto the new live user_id
+        # (Store.merge_archived_registrations, via app.cli_history.run_merge)
+        # -- no separate button/action needed, and no more display-only
+        # "(incl. N pre-erasure)" annotation, since the count is now the
+        # real thing rather than an estimate.
         email = "comeback-guest@example.org"
         user, environ = self._login_as_guest(email)
         self._book(email, name="ComebackGuest")
@@ -1752,22 +1835,40 @@ class BookingFlowTest(unittest.TestCase):
 
         # Same email books again post-erasure -- brand-new live user_id.
         self._book(email, name="ComebackGuest")
+        live_user = self.store.find_user_by_email(email)
 
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
 
-        # The live row (real email visible) shows the combined total with
-        # an annotation explaining the pre-erasure history.
-        live_row_start = body.index(email)
-        live_row_html = body[max(0, live_row_start - 400):live_row_start + 400]
-        self.assertIn("2 (incl. 1 pre-erasure)", live_row_html)
+        # Both registrations now resolve to the live account -- the old
+        # archived row's user_id was rewritten to the live user_id by the
+        # merge, so there's no more separate "[erased]"/hashed row for this
+        # email, and no display-only annotation either.
+        self.assertNotIn("[erased]", body)
+        self.assertNotIn("pre-erasure", body)
+        self.assertEqual(body.count(f"<td>{email}</td>"), 2)
+        self.assertIn("<td>2</td>", body)  # true combined "Times booked"
+        self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 2)
 
-        # The archived row's own cell is unchanged -- still just "1".
-        archived_row_start = body.index("[erased]")
-        archived_row_html = body[archived_row_start:archived_row_start + 400]
-        self.assertIn("<td>1</td>", archived_row_html)
-        self.assertNotIn("pre-erasure", archived_row_html)
+    def test_admin_overview_merge_is_idempotent_on_repeated_loads(self):
+        # A second GET right after the first must find nothing left to
+        # merge and be a pure no-op -- merging is a side effect of a GET
+        # here, so it must not do anything surprising on a plain reload.
+        email = "comeback-guest2@example.org"
+        self._login_as_guest(email)
+        self._book(email, name="ComebackGuest2")
+        erase_user_by_email(self.store, self.settings, email, today=date.fromisoformat(self.occ_date))
+        self._book(email, name="ComebackGuest2")
+        live_user = self.store.find_user_by_email(email)
+
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        self.app.admin_overview("GET", admin_environ)
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+
+        self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 2)
+        self.assertNotIn("[erased]", body)
 
     def test_admin_overview_cancel_button_opens_dialog_with_reason_field(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -1804,6 +1905,50 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Message: course canceled this week", participant_mail)
         admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", admin_mail)
+
+    def test_admin_cancel_redirects_to_admin_after_post(self):
+        # 2026-07-10 fix, real incident: the admin overview's own Cancel
+        # button POSTs straight to /admin/cancel/<reg_id>, and this used to
+        # respond 200 directly on that same URL instead of redirecting --
+        # so a browser back-button + resubmit (or a reload) could replay
+        # the cancellation. Now redirects (Post/Redirect/Get), same as
+        # my_cancel/my_delete_account/my_logout already do.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        status, headers, _body = self._post_with_session(
+            self.app.admin_cancel, (reg.registration_id,), {"message": ""}, admin_environ
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin")
+
+    def test_admin_cancel_redirect_preserves_past_query_param(self):
+        # The admin table's own Cancel form carries a hidden past=1 field
+        # when reached from the "include past" view, so canceling from
+        # there doesn't silently drop the admin back to today+future only.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        status, headers, _body = self._post_with_session(
+            self.app.admin_cancel, (reg.registration_id,), {"message": "", "past": "1"}, admin_environ
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin?past=1")
+
+    def test_admin_cancel_resubmission_does_not_send_duplicate_emails(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        self._post_with_session(self.app.admin_cancel, (reg.registration_id,), {"message": ""}, admin_environ)
+        self.sent_emails.clear()
+        self._post_with_session(self.app.admin_cancel, (reg.registration_id,), {"message": ""}, admin_environ)
+        self.assertEqual(self.sent_emails, [])
 
     # -- /host-cancel: no-login "magic link" from the calendar event -------
 
@@ -1846,6 +1991,18 @@ class BookingFlowTest(unittest.TestCase):
     def test_host_cancel_unknown_registration_is_404_not_redirect(self):
         status, _headers, body = self.app.host_cancel("GET", "00000000-0000-0000-0000-000000000000", {})
         self.assertIn("404", status)
+
+    def test_host_cancel_resubmission_does_not_send_duplicate_emails(self):
+        # 2026-07-10 fix -- a magic link like this one can plausibly be
+        # tapped twice (slow first tap + retry) even without a browser
+        # back-button involved.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post(self.app.host_cancel, (reg.registration_id,), {"message": ""})
+        self.sent_emails.clear()
+        self._post(self.app.host_cancel, (reg.registration_id,), {"message": ""})
+        self.assertEqual(self.sent_emails, [])
 
     # -- 2026-07-06: past-3 cap, "New booking", homepage link --------------
 

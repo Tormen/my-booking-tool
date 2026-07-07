@@ -10,7 +10,7 @@ their own rather than only ever asserting on giant end-to-end email
 bodies."""
 import unittest
 
-from app.cancellation import booking_details_text, course_recap_html, html_email_body
+from app.cancellation import booking_details_text, course_recap_html, html_email_body, intro_html
 
 from .helpers import make_course
 
@@ -72,6 +72,28 @@ class HtmlEmailBodyTest(unittest.TestCase):
         wrapped = html_email_body("<p>hello</p>")
         self.assertIn("<html>", wrapped)
         self.assertIn("<p>hello</p>", wrapped)
+
+
+class IntroHtmlTest(unittest.TestCase):
+    """2026-07-10, the operator: "please make the first sentance in email a bit
+    more visible (bold mayb and for sure larger font size...) ... same of
+    course for ALL emails" -- shared by every html_body-carrying email
+    (booking confirmed/waitlisted, cancellation participant+admin,
+    promoted-from-waitlist guest+admin)."""
+
+    def test_is_bold_and_larger_than_normal_text(self):
+        rendered = intro_html("Your spot is confirmed:")
+        self.assertIn("font-weight:bold", rendered)
+        self.assertIn("font-size:1.25em", rendered)
+        self.assertIn("Your spot is confirmed:", rendered)
+
+    def test_escapes_a_guest_supplied_name(self):
+        # admin-cancellation/promotion emails interpolate a guest's own
+        # name into the intro sentence (e.g. "Jane <jane@x.com> canceled
+        # this booking:") -- this must not be a raw HTML-injection hole.
+        rendered = intro_html('<script>alert(1)</script> canceled this booking:')
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
 
 
 if __name__ == "__main__":
