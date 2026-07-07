@@ -43,7 +43,14 @@ rpmdev-setuptree >/dev/null 2>&1 || mkdir -p "$RPMBUILD_DIR"/{SOURCES,SPECS,RPMS
 # do have"). If you already have real files (the normal case for an
 # actual deployment), every line below is a no-op -- this NEVER
 # overwrites a real file that already exists.
-for real in settings.toml site/index.html site/impressum.html site/terms.html site/privacy.html.tmpl; do
+#
+# site/nginx-locations.conf added 2026-07-10: without this, the packaged
+# RPM never carried this file at all (see packaging/my-booking-tool.spec's
+# %install/%files, updated the same day) -- meaning `my-bt setup -i`
+# (default MY_BOOKING_HOME=/opt/my-booking) could never find a real one to
+# vimdiff against, no matter how complete this SOURCE checkout's own copy
+# was. the operator: "That's the whole point HAVING this file locally!!"
+for real in settings.toml site/index.html site/impressum.html site/terms.html site/privacy.html.tmpl site/nginx-locations.conf; do
   if [ ! -f "$HERE/$real" ] && [ -f "$HERE/$real.example" ]; then
     cp "$HERE/$real.example" "$HERE/$real"
     echo "no $real found -- using the generic $real.example as a starting point"

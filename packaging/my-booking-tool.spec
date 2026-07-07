@@ -102,6 +102,21 @@ install -d %{buildroot}/etc/my-booking/secrets
 install -d %{buildroot}/opt/my-booking/site
 install -m 644 site/privacy.html.tmpl %{buildroot}/opt/my-booking/site/privacy.html.tmpl
 
+# Same reasoning, added 2026-07-10: `my-bt setup`/`status`/`setup -i`
+# (app/cli_checks.py::check_nginx_conf_repo_file/_resolve_nginx_conf_checkout_source)
+# read THIS installed copy at runtime too (default MY_BOOKING_HOME is
+# /opt/my-booking, same as privacy.html.tmpl above) -- a real, personal,
+# hand-hardened resource these checks compare the live deployed vhost
+# against and offer a vimdiff for, not just documentation. Before this,
+# the package never carried it at all, so that vimdiff offer could never
+# fire on a stock RPM install no matter how complete the SOURCE checkout's
+# own copy was (scripts/build-rpm.sh's materialize-from-.example step
+# guarantees this file exists by the time %install runs, same as
+# privacy.html.tmpl). the operator: "That's the whole point HAVING this file
+# locally!!"
+install -m 644 site/nginx-locations.conf %{buildroot}/opt/my-booking/site/nginx-locations.conf
+install -m 644 site/nginx-locations.conf.example %{buildroot}/opt/my-booking/site/nginx-locations.conf.example
+
 install -d %{buildroot}%{_sharedstatedir}/my-booking
 
 install -d %{buildroot}%{_docdir}/%{name}
@@ -172,6 +187,15 @@ my-booking-tool: privacy.html.tmpl has local changes -- merge:
 
 MSG
 fi
+if [ -f /opt/my-booking/site/nginx-locations.conf.rpmnew ]; then
+  cat <<'MSG'
+
+my-booking-tool: nginx-locations.conf has local changes -- merge:
+  sudo vimdiff /opt/my-booking/site/nginx-locations.conf \
+    /opt/my-booking/site/nginx-locations.conf.rpmnew
+
+MSG
+fi
 
 # Lines here are kept short (well under 80 cols, prefix included) on
 # purpose: dnf's "Scriptlet output:" display truncates/wraps long lines
@@ -214,6 +238,8 @@ exit 0
 /usr/local/bin/my-bt
 %attr(755,root,root) /opt/my-booking/bin/my-bt
 %config(noreplace) /opt/my-booking/site/privacy.html.tmpl
+%config(noreplace) /opt/my-booking/site/nginx-locations.conf
+/opt/my-booking/site/nginx-locations.conf.example
 %config(noreplace) /etc/my-booking/settings.toml
 /etc/my-booking/settings.toml.example
 %dir %attr(700,my-booking,my-booking) /etc/my-booking/secrets

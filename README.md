@@ -69,7 +69,12 @@ disk is called, only that it's included). Unlike the others, this one is
 entirely optional: `my-bt setup`/`status` only report on it if
 `site/nginx-locations.conf` actually exists, and never auto-generate or
 edit it (rewriting a hand-hardened vhost would be worse than asking) --
-see `app/cli_checks.py::check_nginx_conf_repo_file()`.
+see `app/cli_checks.py::check_nginx_conf_repo_file()`. This file is
+`%config(noreplace)`-packaged into `/opt/my-booking/site/` (2026-07-10;
+see "Installing" step 2) specifically so this check -- and `setup -i`'s
+vimdiff offer below -- work against a stock RPM install (default
+`MY_BOOKING_HOME=/opt/my-booking`), not only when running `my-bt` straight
+out of a source checkout via `MY_BOOKING_HOME`.
 
 Want an even stricter check against the file nginx is *actually* running
 with, not just this checkout's copy? Set `[site].nginx_conf_path` in your
@@ -236,15 +241,20 @@ full detail, for reference:
    `mv` (unlike `cp`) preserves a file's *original* label, so if you draft
    a secret elsewhere first and move it in, run `sudo restorecon -Rv
    /etc/my-booking/secrets` afterwards to be safe.
-2. Review `/etc/my-booking/settings.toml` and
-   `/opt/my-booking/site/privacy.html.tmpl` -- both are `%config(noreplace)`
-   files (reinstalling/upgrading the RPM never overwrites your edits to
-   either). If the packaged version of one also changed since you edited
-   it, rpm can't just pick a side: it saves the new version alongside yours
-   as `<file>.rpmnew` instead, and `%post` (and `my-bt status`/`my-bt
-   setup`) flag it loudly so a pending merge can't go unnoticed. Merge by
-   hand, then remove the `.rpmnew`, e.g.:
+2. Review `/etc/my-booking/settings.toml`,
+   `/opt/my-booking/site/privacy.html.tmpl`, and
+   `/opt/my-booking/site/nginx-locations.conf` -- all three are
+   `%config(noreplace)` files (reinstalling/upgrading the RPM never
+   overwrites your edits to any of them). If the packaged version of one
+   also changed since you edited it, rpm can't just pick a side: it saves
+   the new version alongside yours as `<file>.rpmnew` instead, and `%post`
+   (and `my-bt status`/`my-bt setup`) flag it loudly so a pending merge
+   can't go unnoticed. Merge by hand, then remove the `.rpmnew`, e.g.:
    `sudo vimdiff /etc/my-booking/settings.toml /etc/my-booking/settings.toml.rpmnew`.
+   (2026-07-10: `nginx-locations.conf` only just joined this list -- before
+   that, the RPM never carried this file at all, so `my-bt setup -i`'s own
+   vimdiff offer against it could never fire on a stock install, no matter
+   how complete your source checkout's own copy was.)
 
    Every *other* file the package installs (systemd units, app code, the
    nginx example) isn't meant to be hand-edited, so it doesn't get the
