@@ -28,6 +28,7 @@ from . import calendar_sync
 from .cancel_flow import build_caldav_client, cancel_and_promote
 from .cancellation import send_cancellation_emails
 from .config import Settings
+from .security import hash_token, new_token
 from .storage import STATUS_CONFIRMED, STATUS_WAITLISTED, Store
 
 
@@ -90,7 +91,15 @@ def cancel_registration(
     user = store.find_user_by_id(reg.user_id)
     course = settings.course(reg.course_shortname)
 
-    changed = store.cancel(registration_id, canceled_by="host", host_message=message)
+    # Freshly minted (2026-07-10) so the participant's cancellation email
+    # gets a working /reinstate/<token> link too -- see
+    # Store.cancel()'s own `reinstate_token_hash` docstring for why the
+    # ORIGINAL cancel token can't be reused for this.
+    reinstate_token = new_token()
+    changed = store.cancel(
+        registration_id, canceled_by="host", host_message=message,
+        reinstate_token_hash=hash_token(reinstate_token),
+    )
     if not changed:  # pragma: no cover - guarded by the status check above; belt-and-suspenders
         return CancelResult(
             ok=False,
@@ -109,6 +118,7 @@ def cancel_registration(
         ics_filename, ics_text = calendar_sync.guest_cancel_ics(settings, course, date.fromisoformat(reg.occurrence_date))
         send_cancellation_emails(
             settings, course, reg.occurrence_date, user, canceled_by="host", message=message,
+            registration_id=registration_id, reinstate_token=reinstate_token,
             ics_attachment=(ics_filename, ics_text, "CANCEL"),
         )
         emailed = True

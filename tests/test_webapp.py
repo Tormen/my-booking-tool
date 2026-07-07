@@ -1575,19 +1575,46 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Message: can't make it", admin_mail)
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
 
-    def test_my_cancel_email_offers_a_rebook_link_to_the_participant_only(self):
-        # 2026-07-10, the operator: "With the reschedule button the email could
-        # also contain it: If this was a mistake... The what can be a link
-        # to the booking page for this course."
+    def test_my_cancel_email_offers_a_reinstate_link_to_the_participant(self):
+        # 2026-07-10: originally a plain "book again" link ("With the
+        # reschedule button the email could also contain it: If this was
+        # a mistake... The what can be a link to the booking page for this
+        # course"), superseded same day once a real no-login reinstate
+        # page existed for it ("Only from the email there will be a single
+        # page for this ... WHAT, WHEN, WHERE like in the confirmation
+        # email") -- reinstating the SAME registration is strictly better
+        # than a fresh booking, so this replaced the old rebook link.
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
         self.sent_emails.clear()
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
-        self.assertIn("If this was a mistake, you can book again here: https://example.org/book/yoga-class-1", participant_mail)
+        self.assertIn("If this was a mistake, you can reinstate it here: https://example.org/reinstate/", participant_mail)
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Canceled:"))
-        self.assertNotIn("book again", admin_mail)
+        self.assertNotIn("/reinstate/", admin_mail)
+        self.assertIn("Reinstate this booking: https://example.org/host-reinstate/", admin_mail)
+
+    def test_my_cancel_reinstate_link_actually_reinstates_the_booking(self):
+        # End-to-end: the token embedded in the participant's cancellation
+        # email must be a real, working /reinstate/<token> link.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
+        token = participant_mail.split("/reinstate/")[1].split("\n")[0].strip()
+        self._post(self.app.guest_reinstate, (token,), {"message": ""})
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
+
+    def test_host_cancel_email_reinstate_link_actually_reinstates_the_booking(self):
+        # And the admin's own copy's /host-reinstate/<reg_id> link too.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        self._post(self.app.host_reinstate, (reg.registration_id,), {"message": ""})
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
 
     def test_my_cancel_without_reason_omits_message_line(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -2146,6 +2173,104 @@ class BookingFlowTest(unittest.TestCase):
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         self._post_with_session(self.app.admin_reinstate, (reg.registration_id,), {}, admin_environ)
         self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_HOST)
+
+    # -- /reinstate/<token>: no-login "magic link" from the cancellation ---
+    # email (2026-07-10, the operator: "for /my and /admin ... this POPUP should
+    # be used ... Only from the email there will be a single page for
+    # this ... WHAT, WHEN, WHERE like in the confirmation email").
+
+    def test_guest_reinstate_page_shows_recap_and_message_field(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        token = new_token()
+        self.store.cancel(reg.registration_id, canceled_by="guest", reinstate_token_hash=hash_token(token))
+        _status, _headers, body = self.app.guest_reinstate("GET", token, {})
+        self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
+        self.assertIn("17h15 - 18h55", body)
+        self.assertIn("Example Community Gym, Room 1", body)
+        self.assertIn('<textarea name="message" rows="2" class="big-input">', body)
+        self.assertIn("Yes, reinstate it", body)
+
+    def test_guest_reinstate_invalid_token_shows_invalid_message(self):
+        _status, _headers, body = self.app.guest_reinstate("GET", "not-a-real-token", {})
+        self.assertIn("invalid or already used", body)
+
+    def test_guest_reinstate_token_reuse_shows_invalid_and_sends_no_duplicate_emails(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
+        token = participant_mail.split("/reinstate/")[1].split("\n")[0].strip()
+        self._post(self.app.guest_reinstate, (token,), {"message": ""})
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
+        self.sent_emails.clear()
+        # Token was for the CANCELED status -- now that it's reinstated
+        # (confirmed), the same token no longer matches anything.
+        _status, _headers, body = self.app.guest_reinstate("GET", token, {})
+        self.assertIn("invalid or already used", body)
+        self._post(self.app.guest_reinstate, (token,), {"message": ""})
+        self.assertEqual(self.sent_emails, [])
+
+    def test_guest_reinstate_email_includes_the_optional_comment(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
+        token = participant_mail.split("/reinstate/")[1].split("\n")[0].strip()
+        self.sent_emails.clear()
+        self._post(self.app.guest_reinstate, (token,), {"message": "sorry, my mistake"})
+        reinstated_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("Message: sorry, my mistake", reinstated_mail)
+
+    def test_guest_reinstate_rejects_a_past_occurrence(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        reg = self.store.add_registration("yoga-class-1", "2020-01-01", user.user_id, hash_token(new_token()))
+        token = new_token()
+        self.store.cancel(reg.registration_id, canceled_by="guest", reinstate_token_hash=hash_token(token))
+        _status, _headers, body = self.app.guest_reinstate("GET", token, {})
+        self.assertIn("can no longer be reinstated", body)
+        self._post(self.app.guest_reinstate, (token,), {"message": ""})
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_GUEST)
+
+    # -- /host-reinstate/<reg_id>: no-login "magic link" from the admin's --
+    # own copy of the cancellation email.
+
+    def test_host_reinstate_needs_no_admin_session(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        status, _headers, body = self.app.host_reinstate("GET", reg.registration_id, {})
+        self.assertIn("200", status)
+        self.assertNotIn("/admin/login", status + str(_headers))
+        self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
+
+    def test_host_reinstate_invalid_id_shows_invalid_message(self):
+        _status, _headers, body = self.app.host_reinstate("GET", "no-such-id", {})
+        self.assertIn("invalid", body)
+
+    def test_host_reinstate_confirms_again_and_notifies_both_sides(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        self.sent_emails.clear()
+        status, _headers, body = self._post(self.app.host_reinstate, (reg.registration_id,), {"message": "welcome back"})
+        self.assertIn("200", status)
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("The host reinstated this booking", participant_mail)
+        self.assertIn("Message: welcome back", participant_mail)
+
+    def test_host_reinstate_rejects_a_past_occurrence(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        reg = self.store.add_registration("yoga-class-1", "2020-01-01", user.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        _status, _headers, body = self.app.host_reinstate("GET", reg.registration_id, {})
+        self.assertIn("can no longer be reinstated", body)
 
     # -- /host-cancel: no-login "magic link" from the calendar event -------
 

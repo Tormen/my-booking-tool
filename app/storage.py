@@ -629,6 +629,28 @@ class Store:
                     return Registration(**r)
         return None
 
+    def find_canceled_by_guest_token_hash(self, token_hash: str) -> Registration | None:
+        """The reinstate twin of find_by_guest_token_hash() above (2026-07-10:
+        the operator wants a no-login "magic link" reinstate page reachable from
+        the cancellation email, same trust model as /cancel/<token>'s own
+        link) -- matches CANCELED_BY_GUEST/CANCELED_BY_HOST instead of
+        CONFIRMED/WAITLISTED, everything else identical. The hash this
+        looks up is a FRESH token minted at cancellation time (see
+        cancel()'s own `reinstate_token_hash` param for why the original
+        booking's cancel token can't be reused here), not the guest's
+        original cancel-link token. A blank token_hash never matches
+        (every row's default is also ""), same guard as the sibling
+        lookup."""
+        if not token_hash:
+            return None
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
+            for r in rows:
+                if r["guest_cancel_token_hash"] == token_hash and r["status"] in (
+                    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST,
+                ):
+                    return Registration(**r)
+        return None
+
     def find_by_id(self, registration_id: str) -> Registration | None:
         with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             for r in rows:
@@ -636,10 +658,35 @@ class Store:
                     return Registration(**r)
         return None
 
-    def cancel(self, registration_id: str, canceled_by: str, host_message: str = "") -> bool:
+    def cancel(
+        self, registration_id: str, canceled_by: str, host_message: str = "", reinstate_token_hash: str = "",
+    ) -> bool:
         """canceled_by is 'guest' or 'host'. Works on confirmed OR waitlisted
         rows (leaving the waitlist is just a cancel). Idempotent: canceling
-        an already canceled registration is a no-op returning False."""
+        an already canceled registration is a no-op returning False.
+
+        `reinstate_token_hash` (2026-07-10, the operator: a no-login "magic link"
+        reinstate page reachable straight from the cancellation email,
+        "like for cancel link") -- when given AND this call actually
+        changes the row, OVERWRITES `guest_cancel_token_hash` with it in
+        this same locked write. This is deliberate, not incidental: the
+        ORIGINAL cancel token's plaintext was never persisted (only its
+        hash was, same as every other token in this app -- see
+        confirm_pending_registration's own docstring on why), so by the
+        time a cancellation happens there's no way to hand the guest a
+        working `/reinstate/<token>` link built from that original token
+        even though its hash is still sitting right here. The caller
+        (app/webapp.py's four cancel routes, app/cli_cancel.py) mints a
+        FRESH token right before calling this, keeps the plaintext to put
+        in the cancellation email's reinstate link, and passes this
+        parameter as that new token's hash. Once overwritten, the OLD
+        token's plaintext (from the guest's original booking-confirmation
+        email) stops matching -- harmless, since that link was only ever
+        good for canceling an active booking, and this one no longer is;
+        find_by_guest_token_hash's own status filter would already show
+        "invalid" for it regardless of whether the hash still matched.
+        Omitted (the default), the hash is left exactly as it was, e.g.
+        for a caller (or a test) that doesn't need this feature."""
         with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
             changed = False
             for row in rows:
@@ -652,6 +699,8 @@ class Store:
                     row["canceled_at"] = now_iso()
                     row["canceled_by"] = canceled_by
                     row["host_message"] = host_message
+                    if reinstate_token_hash:
+                        row["guest_cancel_token_hash"] = reinstate_token_hash
                     changed = True
             if changed:
                 write(rows)

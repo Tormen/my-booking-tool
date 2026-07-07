@@ -164,6 +164,7 @@ def html_email_body(inner_html: str) -> str:
 
 def send_cancellation_emails(
     settings: Settings, course: Course, occ_date: str, user, canceled_by: str, message: str,
+    registration_id: str, reinstate_token: str | None = None,
     ics_attachment: tuple[str, str, str] | None = None,
 ) -> None:
     """Every cancellation -- whichever of the four paths triggers it (the
@@ -183,6 +184,21 @@ def send_cancellation_emails(
     "host", the same as the web admin's /admin/cancel, since both are the
     operator acting on a guest's behalf.
 
+    `registration_id` builds the host's no-login `/host-reinstate/<id>`
+    magic link (2026-07-10, the operator: "for /my and /admin ... this POPUP
+    should be used ... Only from the email there will be a single page
+    for this ... WHAT, WHEN, WHERE like in the confirmation email", "Both"
+    -- participant AND admin copies get a reinstate link) -- same trust
+    model as the existing `/host-cancel/<id>` link (gated purely by this
+    being an unguessable uuid4, no separate secret; see host_cancel()'s
+    own docstring). `reinstate_token` is the PLAINTEXT of a token the
+    caller freshly minted right before calling this (see Store.cancel()'s
+    own `reinstate_token_hash` param for why it can't be the guest's
+    original cancel token) -- builds the participant's `/reinstate/<token>`
+    link the same way `/cancel/<token>` itself is built. `None` (the
+    default) omits the participant's reinstate line entirely, e.g. for a
+    caller that has no user/email to send it to anyway.
+
     `ics_attachment` (2026-07-09, the operator: "AND CANCEL-ics as well please.
     Let's be nice :)") is the caller's already-built (filename, ics_text,
     "CANCEL") tuple from app.calendar_sync.guest_cancel_ics() -- built by
@@ -200,31 +216,44 @@ def send_cancellation_emails(
     reason_block = f"\nMessage: {message}\n" if message else ""
     reason_html = message_html(message) if message else ""
     my_url = f"{settings.base_url}/my"
+    host_reinstate_url = f"{settings.base_url}/host-reinstate/{registration_id}"
     if user:
         participant_who = "You" if canceled_by == "guest" else "The host"
-        # 2026-07-10, the operator: "With the reschedule button the email could
-        # also contain it: If this was a mistake... The what can be a link
-        # to the booking page for this course" -- participant-facing only,
-        # the admin copy below has no need to rebook.
-        rebook_url = f"{settings.base_url}/book/{course.shortname}"
+        # 2026-07-10: superseded the earlier plain "book again" link with a
+        # real reinstate-this-exact-booking one, now that a dedicated
+        # no-login page exists for it -- reinstating (same registration,
+        # same party) is strictly better than starting a fresh booking
+        # from scratch, so there's no reason to offer both.
+        reinstate_line = ""
+        reinstate_line_html = ""
+        if reinstate_token:
+            guest_reinstate_url = f"{settings.base_url}/reinstate/{reinstate_token}"
+            reinstate_line = f"If this was a mistake, you can reinstate it here: {guest_reinstate_url}\n"
+            reinstate_line_html = (
+                f'<p>If this was a mistake, you can reinstate it here: '
+                f'<a href="{guest_reinstate_url}">{guest_reinstate_url}</a></p>'
+            )
         send_mail(
             settings, user.email, subject,
             f"{participant_who} canceled this booking:\n\n{details}\n{reason_block}"
             f"Manage your bookings: {my_url}\n"
-            f"If this was a mistake, you can book again here: {rebook_url}\n",
+            f"{reinstate_line}",
             html_body=html_email_body(
                 intro_html(f"{participant_who} canceled this booking:") + f"{recap_html}{reason_html}"
                 f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
-                f'<p>If this was a mistake, you can book again here: '
-                f'<a href="{rebook_url}">{rebook_url}</a></p>'
+                f"{reinstate_line_html}"
             ),
             ics_attachment=ics_attachment,
         )
     admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
     send_mail(
         settings, settings.admin_email, subject,
-        f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}",
-        html_body=html_email_body(intro_html(f"{admin_who} canceled this booking:") + f"{recap_html}{reason_html}"),
+        f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}"
+        f"Reinstate this booking: {host_reinstate_url}\n",
+        html_body=html_email_body(
+            intro_html(f"{admin_who} canceled this booking:") + f"{recap_html}{reason_html}"
+            f'<p>Reinstate this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
+        ),
     )
 
 

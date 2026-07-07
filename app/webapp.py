@@ -3,6 +3,14 @@
   GET      /courses                 overview of every configured course, linking to /book/<shortname>
   GET/POST /book/<shortname>        guest booking form (name+email only)
   GET/POST /cancel/<token>          guest self-cancel (link from email)
+  GET/POST /reinstate/<token>       guest self-reinstate (link from the
+                                     cancellation email), no login needed --
+                                     same bearer-token model as /cancel/<token>,
+                                     but the token is a FRESH one minted at
+                                     cancellation time, not the original
+                                     booking's own cancel token (see
+                                     Store.cancel()'s reinstate_token_hash
+                                     param and guest_reinstate()'s docstring)
   GET/POST /my                      guest login (email+password, "Login"/"Sign up" tabs) / bookings list
   POST     /my/signup               "Sign up" tab's target -- create account + email a confirm link
   GET/POST /my/confirm/<token>      set password -- first-time account confirmation
@@ -44,6 +52,11 @@
                                      being an unguessable uuid4 (see
                                      host_cancel()'s own docstring for why
                                      that's an adequate boundary here).
+  GET/POST /host-reinstate/<reg_id> no-login "magic link" reinstate, reachable
+                                     from the ADMIN's own copy of the
+                                     cancellation email -- same gating as
+                                     /host-cancel/<reg_id> (unguessable uuid4
+                                     only, no separate token).
 
 A booking under an email with no confirmed account yet doesn't hold a real
 spot or sync to the calendar until the guest clicks the confirmation link --
@@ -557,6 +570,8 @@ class App:
             return self.book(method, m.group(1), environ)
         if m := re.fullmatch(r"/cancel/([A-Za-z0-9_-]+)", path):
             return self.guest_cancel(method, m.group(1), environ)
+        if m := re.fullmatch(r"/reinstate/([A-Za-z0-9_-]+)", path):
+            return self.guest_reinstate(method, m.group(1), environ)
         if path == "/my":
             return self.my(method, environ)
         if path == "/my/signup":
@@ -595,6 +610,8 @@ class App:
             return self.admin_reinstate(method, m.group(1), environ)
         if m := re.fullmatch(r"/host-cancel/([0-9a-fA-F-]+)", path):
             return self.host_cancel(method, m.group(1), environ)
+        if m := re.fullmatch(r"/host-reinstate/([0-9a-fA-F-]+)", path):
+            return self.host_reinstate(method, m.group(1), environ)
         return "404 Not Found", [("Content-Type", "text/plain")], "not found"
 
     @staticmethod
@@ -785,14 +802,15 @@ class App:
         return booking_details_text(course, occ_date)
 
     def _send_cancellation_emails(
-        self, course, occ_date: str, user, canceled_by: str, message: str
+        self, course, occ_date: str, user, canceled_by: str, message: str,
+        registration_id: str, reinstate_token: str | None = None,
     ) -> None:
         """Thin wrapper around app.cancellation.send_cancellation_emails
         (moved there 2026-07-06 so `my-bt cancel` triggers IDENTICAL emails
         to the web admin's /admin/cancel, instead of reimplementing this)
         -- kept as an App method since every existing call site here
         already has `self.settings`. See that function's docstring for the
-        full rationale (notify-both-sides, etc.).
+        full rationale (notify-both-sides, reinstate-link params, etc.).
 
         Also builds the CANCEL .ics attachment (2026-07-09) here, once, so
         guest_cancel()/admin_cancel()/host_cancel() -- every web caller of
@@ -800,6 +818,7 @@ class App:
         ics_filename, ics_text = calendar_sync.guest_cancel_ics(self.settings, course, date.fromisoformat(occ_date))
         send_cancellation_emails(
             self.settings, course, occ_date, user, canceled_by, message,
+            registration_id, reinstate_token,
             ics_attachment=(ics_filename, ics_text, "CANCEL"),
         )
 
@@ -1463,7 +1482,17 @@ class App:
             # a genuine concurrent double-submit (two requests racing on
             # the same token), where both could pass the lookup above
             # before either actually cancels.
-            changed = self.store.cancel(reg.registration_id, canceled_by="guest", host_message=message)
+            # Freshly minted here (2026-07-10), not reused from `token`
+            # above -- see Store.cancel()'s own `reinstate_token_hash`
+            # docstring for why the ORIGINAL cancel token can't double as
+            # the reinstate one. This becomes the row's new
+            # guest_cancel_token_hash too, so it doubles as this booking's
+            # ongoing cancel-link token if it's later reinstated.
+            reinstate_token = new_token()
+            changed = self.store.cancel(
+                reg.registration_id, canceled_by="guest", host_message=message,
+                reinstate_token_hash=hash_token(reinstate_token),
+            )
             if changed:
                 self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
                 if course:
@@ -1473,7 +1502,10 @@ class App:
                     # they just did this, but the email is still their own copy
                     # of "here's what got canceled and when", same as the other
                     # two paths get.
-                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
+                    self._send_cancellation_emails(
+                        course, reg.occurrence_date, user, canceled_by="guest", message=message,
+                        registration_id=reg.registration_id, reinstate_token=reinstate_token,
+                    )
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Your booking has been canceled.</p>")
         # 2026-07-09, the operator: "This page should look like as described for
         # the admin and like the email ... WHAT WHEN WHERE with emojis and
@@ -1492,6 +1524,59 @@ class App:
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
+
+    def guest_reinstate(self, method: str, token: str, environ):
+        """No-login "magic link" twin of my_reinstate(), reachable straight
+        from the cancellation email (2026-07-10: "for /my and /admin ...
+        this POPUP should be used ... Only from the email there will be a
+        single page for this ... WHAT, WHEN, WHERE like in the confirmation
+        email") -- same page shape as guest_cancel() above (recap, then an
+        optional message field, then a confirm button), same trust model
+        (a hashed, single-purpose bearer token in the URL, just like
+        `/cancel/<token>`), but looked up against a currently-CANCELED row
+        instead of a CONFIRMED/WAITLISTED one (Store.find_canceled_by_guest_token_hash).
+
+        `token` is NOT the guest's original cancel-link token -- it's a
+        fresh one minted at the moment of THIS booking's most recent
+        cancellation (see Store.cancel()'s own `reinstate_token_hash`
+        param for why) -- so this link only ever works for the specific
+        cancellation email it was sent in, and stops working the moment
+        the booking is reinstated by ANY path (dialog or this link) or
+        canceled again (a new cancellation mints yet another fresh one)."""
+        reg = self.store.find_canceled_by_guest_token_hash(hash_token(token))
+        if reg is None:
+            return "404 Not Found", [("Content-Type", "text/html")], page(
+                "Not found", "<p>This link is invalid or already used.</p>"
+            )
+        course = self.settings.course(reg.course_shortname)
+        if course is None or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date():
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Not found", "<p>This booking can no longer be reinstated.</p>"
+            )
+        if method == "POST":
+            form = self._read_form(environ)
+            message = sanitize_csv_field(form.get("message", "").strip())
+            updated = self.store.reinstate(reg.registration_id, course.capacity)
+            if updated is not None:
+                self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
+                user = self.store.find_user_by_id(reg.user_id)
+                # Both sides notified, always -- same standing default as
+                # every other registration-status email.
+                self._send_reinstatement_emails(
+                    course, reg.occurrence_date, user,
+                    confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="guest", message=message,
+                )
+            return "200 OK", [("Content-Type", "text/html")], page("Reinstated", "<p>Your booking has been reinstated.</p>")
+        body = (
+            "<p>Reinstate your booking?</p>"
+            + _course_recap_html(course, reg.occurrence_date)
+            + """<form method="post" class="card">
+          <label>Optional message <span class="opt">(optional)</span>
+            <textarea name="message" rows="2" class="big-input"></textarea></label>
+          <div class="submit-row"><button type="submit">Yes, reinstate it</button></div>
+        </form>"""
+        )
+        return "200 OK", [("Content-Type", "text/html")], page("Reinstate booking", body)
 
     # -- /my (guest self-service) --------------------------------------------
 
@@ -2031,7 +2116,11 @@ class App:
             # registration_id; without this guard that would silently
             # re-run the waitlist-promotion attempt and send a second round
             # of "canceled" emails to both sides.
-            changed = self.store.cancel(registration_id, canceled_by="guest", host_message=message)
+            reinstate_token = new_token()
+            changed = self.store.cancel(
+                registration_id, canceled_by="guest", host_message=message,
+                reinstate_token_hash=hash_token(reinstate_token),
+            )
             if changed:
                 self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
                 course = self.settings.course(reg.course_shortname)
@@ -2041,7 +2130,10 @@ class App:
                     # (standing default now, SOLUTION-DESIGN.md). This is what
                     # lets the real account owner notice a cancellation made by
                     # someone who got into their /my session but isn't them.
-                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
+                    self._send_cancellation_emails(
+                        course, reg.occurrence_date, user, canceled_by="guest", message=message,
+                        registration_id=registration_id, reinstate_token=reinstate_token,
+                    )
         return "302 Found", [("Location", "/my")], ""
 
     def my_reinstate(self, method: str, registration_id: str, environ):
@@ -2670,7 +2762,11 @@ class App:
             # the duplicate side effects; the redirect below (instead of
             # rendering "Canceled" on this same POST URL) additionally
             # closes the back-button-resubmit path itself at the source.
-            changed = self.store.cancel(registration_id, canceled_by="host", host_message=message)
+            reinstate_token = new_token()
+            changed = self.store.cancel(
+                registration_id, canceled_by="host", host_message=message,
+                reinstate_token_hash=hash_token(reinstate_token),
+            )
             if changed:
                 self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
                 if course:
@@ -2678,7 +2774,10 @@ class App:
                     # (standing default now, SOLUTION-DESIGN.md). The admin's own
                     # copy is what surfaces an unexpected cancellation if someone
                     # other than you got into /admin and did this.
-                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
+                    self._send_cancellation_emails(
+                        course, reg.occurrence_date, user, canceled_by="host", message=message,
+                        registration_id=registration_id, reinstate_token=reinstate_token,
+                    )
             location = "/admin?past=1" if form.get("past") == "1" else "/admin"
             return "302 Found", [("Location", location)], ""
         # Same recap + "space, then reason, then button" layout as
@@ -2772,14 +2871,21 @@ class App:
             # applies here too. No redirect to add here, unlike
             # admin_cancel() -- this is a standalone, no-login page with no
             # "list" to send anyone back to.
-            changed = self.store.cancel(registration_id, canceled_by="host", host_message=message)
+            reinstate_token = new_token()
+            changed = self.store.cancel(
+                registration_id, canceled_by="host", host_message=message,
+                reinstate_token_hash=hash_token(reinstate_token),
+            )
             if changed:
                 self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
                 if course:
                     # Both sides notified, always -- see admin_cancel()'s own
                     # comment on why: the admin's own copy is what surfaces an
                     # unexpected cancellation if this link ever leaks.
-                    self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
+                    self._send_cancellation_emails(
+                        course, reg.occurrence_date, user, canceled_by="host", message=message,
+                        registration_id=registration_id, reinstate_token=reinstate_token,
+                    )
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (
@@ -2793,3 +2899,55 @@ class App:
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
+
+    def host_reinstate(self, method: str, registration_id: str, environ):
+        """No-login "magic link" twin of admin_reinstate(), reachable
+        straight from the ADMIN's copy of the cancellation email
+        (2026-07-10: "Both" [participant and admin copies get a reinstate
+        link] / "for /my and /admin ... POPUP ... Only from the email
+        there will be a single page ... WHAT WHEN WHERE like in the
+        confirmation email"). Same security model as host_cancel() above:
+        gated purely by `registration_id` being an unguessable uuid4 (see
+        that method's own docstring on why that's an adequate boundary
+        here) -- no separate token needed, unlike guest_reinstate()'s
+        /reinstate/<token>."""
+        reg = self.store.find_by_id(registration_id)
+        if reg is None:
+            return "404 Not Found", [("Content-Type", "text/html")], page(
+                "Not found", "<p>This link is invalid.</p>"
+            )
+        user = self.store.find_user_by_id(reg.user_id)
+        course = self.settings.course(reg.course_shortname)
+        if (
+            reg.status not in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST)
+            or course is None
+            or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date()
+        ):
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Not found", "<p>This booking can no longer be reinstated.</p>"
+            )
+        if method == "POST":
+            form = self._read_form(environ)
+            message = sanitize_csv_field(form.get("message", "").strip())
+            updated = self.store.reinstate(registration_id, course.capacity)
+            if updated is not None:
+                self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
+                self._send_reinstatement_emails(
+                    course, reg.occurrence_date, user,
+                    confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host", message=message,
+                )
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Reinstated", "<p>Registration reinstated and guest notified.</p>"
+            )
+        recap = _course_recap_html(course, reg.occurrence_date) if course else ""
+        body = (
+            f"<p>Reinstate <b>{esc(user.name if user else '(erased)')}</b> "
+            f"({esc(user.email if user else '(erased)')})'s booking?</p>"
+            + recap
+            + """<form method="post" class="card">
+          <label>Optional message to them <span class="opt">(optional)</span>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>
+          <div class="submit-row"><button type="submit">Confirm reinstatement</button></div>
+        </form>"""
+        )
+        return "200 OK", [("Content-Type", "text/html")], page("Reinstate booking", body)

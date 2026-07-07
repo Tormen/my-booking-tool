@@ -349,6 +349,18 @@ Same confirm-dialog-with-optional-comment flow as Cancel -- whatever you
 type is emailed to the other side in a light-grey box, and the admin's
 own dialog shows the guest's email address next to their name so you can
 tell same-named guests apart before acting.
+
+Every cancellation email also carries its own no-login "Reinstate" link
+straight to a dedicated page (same What/When/Where recap + optional
+comment + confirm button as the popup, just as a real page since email
+can't open one) -- the participant's copy links to `/reinstate/<token>`
+(a fresh, single-use token minted at that specific cancellation -- not
+the original booking's own cancel token, whose plaintext is never kept
+around), and the admin's own copy links to `/host-reinstate/<reg_id>`,
+gated the same way `/host-cancel/<reg_id>` already is (an unguessable
+ID, no login wall). **New nginx locations** (`/reinstate/`,
+`/host-reinstate/`) are needed for these -- see
+`nginx/my-booking.conf`; `my-bt status` flags them if missing.
 No CLI equivalent yet.
 
 ### `my-bt status`

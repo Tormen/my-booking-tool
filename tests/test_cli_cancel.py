@@ -128,6 +128,18 @@ class CancelRegistrationTest(unittest.TestCase):
         reloaded = self.store.find_by_id(reg.registration_id)
         self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
 
+    def test_cancel_email_includes_a_working_reinstate_link(self):
+        # 2026-07-10: `my-bt cancel` mints a fresh reinstate token the same
+        # way every web cancel path does, so its own cancellation email
+        # gets a working /reinstate/<token> link too -- not just the web
+        # admin's /admin/cancel.
+        user, reg = self._book("guest@example.org", "Guest")
+        cancel_registration(self.store, self.settings, reg.registration_id)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "guest@example.org")
+        self.assertIn("If this was a mistake, you can reinstate it here: https://", participant_mail)
+        token = participant_mail.split("/reinstate/")[1].split("\n")[0].strip()
+        self.assertIsNotNone(self.store.find_canceled_by_guest_token_hash(hash_token(token)))
+
     def test_without_message_omits_message_line_and_reports_empty(self):
         user, reg = self._book("guest@example.org", "Guest")
         result = cancel_registration(self.store, self.settings, reg.registration_id)

@@ -165,6 +165,61 @@ class RegistrationTest(StoreTestBase):
         self.assertEqual(found.registration_id, reg.registration_id)
 
 
+class CancelReinstateTokenTest(StoreTestBase):
+    """2026-07-10: cancel()'s own `reinstate_token_hash` param -- the web
+    app's no-login /reinstate/<token> magic-link page (see
+    app/webapp.py::guest_reinstate) needs a token whose PLAINTEXT is known
+    at cancellation time, which the original booking's own cancel token
+    never is (only its hash was ever persisted)."""
+
+    def test_reinstate_token_hash_overwrites_guest_cancel_token_hash(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        original_token = new_token()
+        reg = self.store.add_registration("c", "2026-01-01", u.user_id, hash_token(original_token))
+        new_reinstate_token = new_token()
+        self.store.cancel(
+            reg.registration_id, canceled_by="guest", reinstate_token_hash=hash_token(new_reinstate_token),
+        )
+        # The OLD (original booking) token no longer matches anything --
+        # this row is canceled now, and find_by_guest_token_hash only ever
+        # matches CONFIRMED/WAITLISTED anyway.
+        self.assertIsNone(self.store.find_by_guest_token_hash(hash_token(original_token)))
+        # The NEW token matches this now-canceled row via the reinstate lookup.
+        found = self.store.find_canceled_by_guest_token_hash(hash_token(new_reinstate_token))
+        self.assertEqual(found.registration_id, reg.registration_id)
+
+    def test_omitting_reinstate_token_hash_leaves_the_existing_hash_untouched(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        token = new_token()
+        reg = self.store.add_registration("c", "2026-01-01", u.user_id, hash_token(token))
+        self.store.cancel(reg.registration_id, canceled_by="guest")  # no reinstate_token_hash given
+        found = self.store.find_canceled_by_guest_token_hash(hash_token(token))
+        self.assertEqual(found.registration_id, reg.registration_id)
+
+    def test_reinstate_token_hash_is_not_applied_when_cancel_is_a_no_op(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        reg = self.store.add_registration("c", "2026-01-01", u.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        stale_token = new_token()
+        # Second cancel is a no-op (already canceled) -- must not silently
+        # rotate the token out from under a link already emailed once.
+        changed = self.store.cancel(
+            reg.registration_id, canceled_by="guest", reinstate_token_hash=hash_token(stale_token),
+        )
+        self.assertFalse(changed)
+        self.assertIsNone(self.store.find_canceled_by_guest_token_hash(hash_token(stale_token)))
+
+    def test_find_canceled_by_guest_token_hash_does_not_match_an_active_registration(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        token = new_token()
+        self.store.add_registration("c", "2026-01-01", u.user_id, hash_token(token))
+        self.assertIsNone(self.store.find_canceled_by_guest_token_hash(hash_token(token)))
+
+    def test_find_canceled_by_guest_token_hash_blank_hash_never_matches(self):
+        self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.assertIsNone(self.store.find_canceled_by_guest_token_hash(""))
+
+
 class ReinstateTest(StoreTestBase):
     """2026-07-10: "undo the cancel" -- see Store.reinstate()'s own
     docstring and app/webapp.py's my_reinstate()/admin_reinstate()."""
