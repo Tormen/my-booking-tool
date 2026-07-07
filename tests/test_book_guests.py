@@ -54,7 +54,7 @@ class GuestBookingTestBase(unittest.TestCase):
         )
         self.occ_date = occs[0].date.isoformat()
 
-        recorder = lambda settings, to, subject, body: self.sent_emails.append((to, subject, body))
+        recorder = lambda settings, to, subject, body, html_body=None: self.sent_emails.append((to, subject, body))
         for target in ("app.webapp.send_mail", "app.cancellation.send_mail", "app.cancel_flow.send_mail"):
             patcher = patch(target, side_effect=recorder)
             patcher.start()

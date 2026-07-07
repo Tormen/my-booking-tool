@@ -35,7 +35,7 @@ class CancelAndPromoteCourseRemovedTest(unittest.TestCase):
         self.sent_emails: list[tuple[str, str, str]] = []
         patcher = patch(
             "app.cancel_flow.send_mail",
-            side_effect=lambda settings, to, subject, body: self.sent_emails.append((to, subject, body)),
+            side_effect=lambda settings, to, subject, body, html_body=None: self.sent_emails.append((to, subject, body)),
         )
         patcher.start()
         self.addCleanup(patcher.stop)

@@ -28,7 +28,7 @@ from typing import Callable
 
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
-from .cancellation import booking_details_text
+from .cancellation import booking_details_text, course_recap_html, html_email_body
 from .config import Settings
 from .emailer import send_mail
 from .storage import Store
@@ -127,11 +127,18 @@ def cancel_and_promote(
             # link the operator didn't specifically ask for -- /my already lists
             # this booking with its own Cancel button now that every guest
             # has an account, so that's the invite instead.
+            intro = "A spot opened up and you were next on the waitlist -- you're now confirmed:"
+            my_url = f"{settings.base_url}/my"
             send_mail(
                 settings, user.email, f"You're in! {course.title} on {occurrence_date_str}",
-                "A spot opened up and you were next on the waitlist -- you're now confirmed:\n\n"
+                f"{intro}\n\n"
                 + booking_details_text(course, occurrence_date_str)
-                + f"\nManage or cancel this booking any time: {settings.base_url}/my\n",
+                + f"\nManage or cancel this booking: {my_url}\n",
+                html_body=html_email_body(
+                    f"<p>{intro}</p>"
+                    + course_recap_html(course, occurrence_date_str)
+                    + f'<p>Manage or cancel this booking: <a href="{my_url}">{my_url}</a></p>'
+                ),
             )
         if promoted_users:
             # One combined admin email for the whole promoted party (not one
@@ -142,11 +149,14 @@ def cancel_and_promote(
             # near-identical emails at once.
             names = ", ".join(f"{u.name} <{u.email}>" for u in promoted_users)
             verb = "were" if len(promoted_users) > 1 else "was"
+            admin_intro = f"{names} {verb} promoted from the waitlist to confirmed for:"
             send_mail(
                 settings, settings.admin_email,
                 f"Promoted from waitlist: {course.title} on {occurrence_date_str}",
-                f"{names} {verb} promoted from the waitlist to confirmed for:\n\n"
-                + booking_details_text(course, occurrence_date_str),
+                f"{admin_intro}\n\n" + booking_details_text(course, occurrence_date_str),
+                html_body=html_email_body(
+                    f"<p>{admin_intro}</p>" + course_recap_html(course, occurrence_date_str)
+                ),
             )
     if sync_fn is not None:
         sync_fn(course_shortname, occurrence_date_str)

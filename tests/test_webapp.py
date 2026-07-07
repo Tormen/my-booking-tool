@@ -588,7 +588,7 @@ class BookingFlowTest(unittest.TestCase):
         )
         self.occ_date = occs[0].date.isoformat()
 
-        recorder = lambda settings, to, subject, body: self.sent_emails.append((to, subject, body))
+        recorder = lambda settings, to, subject, body, html_body=None: self.sent_emails.append((to, subject, body))
         # Cancellation emails are composed in app.cancellation (factored
         # out of App on 2026-07-06 so `my-bt cancel` can reuse them), and the
         # promotion emails in app.cancel_flow (factored out the same day so
@@ -693,7 +693,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", email_body)
         self.assertIn("Where: Example Community Gym, Room 1", email_body)
         self.assertIn("test", email_body)  # course.description, repeated in full
-        self.assertIn("Manage your bookings any time: https://example.org/my", email_body)
+        self.assertIn("Manage your bookings: https://example.org/my", email_body)
         self.assertIn("Cancel this booking directly: https://example.org/cancel/", email_body)
 
     def test_confirmed_account_waitlisted_when_full(self):
@@ -710,7 +710,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", email_body)
         self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", email_body)
         self.assertIn("Where: Example Community Gym, Room 1", email_body)
-        self.assertIn("Manage your bookings any time: https://example.org/my", email_body)
+        self.assertIn("Manage your bookings: https://example.org/my", email_body)
         self.assertIn("Leave the waitlist directly: https://example.org/cancel/", email_body)
 
     def test_promoted_from_waitlist_email_matches_the_same_layout(self):
@@ -729,7 +729,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", email_body)
         self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", email_body)
         self.assertIn("Where: Example Community Gym, Room 1", email_body)
-        self.assertIn("Manage or cancel this booking any time: https://example.org/my", email_body)
+        self.assertIn("Manage or cancel this booking: https://example.org/my", email_body)
 
         # 2026-07-06 fix: admin_email must ALSO get a copy, same standing
         # default as every other booking/cancellation email in this app --
@@ -1251,6 +1251,45 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self.app.guest_cancel("GET", token, {})
         self.assertIn('<textarea name="message"', body)
 
+    def test_guest_cancel_confirm_page_shows_the_course_recap(self):
+        # 2026-07-09, the operator: "This page should look like as described for
+        # the admin and like the email ... WHAT WHEN WHERE with emojis and
+        # bold font for the keyword followed by the description."
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        confirmed_body = next(b for _, s2, b in self.sent_emails if s2.startswith("Booking confirmed:"))
+        token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
+        _status, _headers, body = self.app.guest_cancel("GET", token, {})
+        self.assertIn("What:</b>", body)
+        self.assertIn("When:</b>", body)
+        self.assertIn("Where:</b>", body)
+
+    def test_cancellation_email_includes_an_html_alternative_with_the_recap(self):
+        # Wiring check: cancellation.send_cancellation_emails (called from
+        # guest_cancel) must actually pass html_body through to send_mail,
+        # not just be capable of building one -- test_cancellation.py
+        # covers course_recap_html()/html_email_body() in isolation, this
+        # confirms the real flow uses them.
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        confirmed_body = next(b for _, s2, b in self.sent_emails if s2.startswith("Booking confirmed:"))
+        token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
+        captured = {}
+
+        def spy(settings, to, subject, body, html_body=None):
+            if subject.startswith("Canceled:") and to == "regular@example.org":
+                captured["html_body"] = html_body
+            self.sent_emails.append((to, subject, body))
+
+        with patch("app.cancellation.send_mail", side_effect=spy):
+            self._post(self.app.guest_cancel, (token,), {"message": ""})
+        self.assertIsNotNone(captured.get("html_body"))
+        self.assertIn("\U0001F9D8 What:</b>", captured["html_body"])
+
     # -- /admin overview: same shortname-leak audit as /my's table ----------
 
     def test_admin_overview_shows_course_shortname_not_title(self):
@@ -1416,9 +1455,9 @@ class BookingFlowTest(unittest.TestCase):
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
         _status, _headers, body = self.app.host_cancel("GET", reg.registration_id, {})
-        self.assertIn("<b>What:</b>", body)
-        self.assertIn("<b>Where:</b>", body)
-        self.assertIn("<b>When:</b>", body)
+        self.assertIn("What:</b>", body)
+        self.assertIn("Where:</b>", body)
+        self.assertIn("When:</b>", body)
         self.assertIn('<textarea name="message"', body)
         self.assertIn("Confirm cancellation", body)
 

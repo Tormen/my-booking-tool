@@ -58,7 +58,9 @@ from urllib.parse import parse_qs, urlparse
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import cancel_and_promote
-from .cancellation import booking_details_text, html_to_text, send_cancellation_emails
+from .cancellation import (
+    booking_details_text, course_recap_html, html_email_body, html_to_text, send_cancellation_emails,
+)
 from .config import Settings
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
@@ -342,21 +344,14 @@ def _course_subtitle_html(course) -> str:
 
 
 def _course_recap_html(course, occ_date: str) -> str:
-    """WHAT/WHERE/WHEN/description recap block for the booking-confirmation
-    pages (2026-07-09, the operator: "repeat here the WHAT, WHERE, WHEN and the
-    DESCRIPTION of the COURSE please") -- so a guest doesn't have to go
-    back to the booking page to recall where or when they're expected.
-    description is raw HTML, same as _book_page()/courses() (see their own
-    comments on why: operator-authored, not guest input)."""
-    desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
-    return (
-        '<div class="course-recap">'
-        f"<p><b>What:</b> {esc(course.title)}</p>"
-        f"<p><b>Where:</b> {esc(course.location)}</p>"
-        f"<p><b>When:</b> {esc(course.weekday_label())}, {esc(occ_date)}, {esc(course.time_range_label())}</p>"
-        f"{desc_html}"
-        "</div>"
-    )
+    """Thin wrapper around app.cancellation.course_recap_html (2026-07-09) --
+    the WHAT/WHEN/WHERE(+description) recap shown on the booking-confirmation
+    page and every cancel-confirmation page (guest_cancel/admin_cancel/
+    host_cancel), reusing the EXACT SAME generator the HTML emails use
+    (the operator: "Can be always the same code that generates this for the page
+    or email"), so page and email can never drift apart on layout, emoji,
+    or ordering. See that function's own docstring for the full rationale."""
+    return course_recap_html(course, occ_date)
 
 
 def _sortable_filterable_table_script(table_id: str) -> str:
@@ -738,31 +733,52 @@ class App:
         cancel_url = f"{self.settings.base_url}/cancel/{cancel_token}"
         my_url = f"{self.settings.base_url}/my"
         details = self._booking_details_text(course, occ_date)
+        recap_html = _course_recap_html(course, occ_date)
         account_line = ""
+        account_line_html = ""
         if not user.password_hash:
             confirm_url = self._confirm_url(user)
             account_line = (
-                f"Optional: set up a password to view/manage this from {my_url} anytime: "
+                f"Optional: set up a password to view/manage this from {my_url}: "
                 f"{confirm_url}\n"
             )
+            account_line_html = (
+                f'<p>Optional: set up a password to view/manage this from '
+                f'<a href="{my_url}">{my_url}</a>: <a href="{confirm_url}">{confirm_url}</a></p>'
+            )
         if status == STATUS_WAITLISTED:
+            intro = (
+                "You're on the waitlist -- full for now, but you'll be confirmed automatically "
+                "by email if a spot opens up:"
+            )
             send_mail(
                 self.settings, user.email, f"Waitlisted: {course.title} on {occ_date}",
-                "You're on the waitlist -- full for now, but you'll be confirmed automatically "
-                "by email if a spot opens up:\n\n"
+                f"{intro}\n\n"
                 f"{details}\n"
-                f"Manage your bookings any time: {my_url}\n"
+                f"Manage your bookings: {my_url}\n"
                 f"Leave the waitlist directly: {cancel_url}\n"
                 f"{account_line}",
+                html_body=html_email_body(
+                    f"<p>{intro}</p>{recap_html}"
+                    f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+                    f'<p>Leave the waitlist directly: <a href="{cancel_url}">{cancel_url}</a></p>'
+                    f"{account_line_html}"
+                ),
             )
         else:
             send_mail(
                 self.settings, user.email, f"Booking confirmed: {course.title} on {occ_date}",
                 "Your spot is confirmed:\n\n"
                 f"{details}\n"
-                f"Manage your bookings any time: {my_url}\n"
+                f"Manage your bookings: {my_url}\n"
                 f"Cancel this booking directly: {cancel_url}\n"
                 f"{account_line}",
+                html_body=html_email_body(
+                    f"<p>Your spot is confirmed:</p>{recap_html}"
+                    f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+                    f'<p>Cancel this booking directly: <a href="{cancel_url}">{cancel_url}</a></p>'
+                    f"{account_line_html}"
+                ),
             )
 
     def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
@@ -1281,11 +1297,22 @@ class App:
                 # two paths get.
                 self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Your booking has been canceled.</p>")
-        body = f"""<p>Cancel your booking for <b>{esc(course.title)}</b> on {esc(reg.occurrence_date)}?</p>
-        <form method="post" class="card">
-          <label>Optional reason <textarea name="message" rows="2" class="big-input"></textarea></label>
+        # 2026-07-09, the operator: "This page should look like as described for
+        # the admin and like the email ... WHAT WHEN WHERE with emojis and
+        # bold font for the keyword followed by the description ... And
+        # THEN a bit of space and the optional reason and the button as it
+        # is." Same _course_recap_html() every other cancel-confirmation
+        # page (admin_cancel/host_cancel) and the booking-confirmation page
+        # use -- see that function's own docstring on why it's shared.
+        body = (
+            "<p>Cancel your booking?</p>"
+            + _course_recap_html(course, reg.occurrence_date)
+            + """<form method="post" class="card">
+          <label>Reason <span class="opt">(optional)</span>
+            <textarea name="message" rows="2" class="big-input"></textarea></label>
           <div class="submit-row"><button type="submit">Yes, cancel it</button></div>
         </form>"""
+        )
         return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
 
     # -- /my (guest self-service) --------------------------------------------
@@ -2099,14 +2126,20 @@ class App:
                 # other than you got into /admin and did this.
                 self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
-        body = f"""
-        <p>About to cancel <b>{esc(user.name if user else '(erased)')}</b>
-        ({esc(user.email if user else '(erased)')}) for
-        <b>{esc(course.title)}</b> on {esc(reg.occurrence_date)}.</p>
-        <form method="post" class="card">
-          <label>Optional message to them <textarea name="message" rows="3" class="big-input"></textarea></label>
+        # Same recap + "space, then reason, then button" layout as
+        # guest_cancel()/host_cancel() -- see host_cancel()'s docstring for
+        # the full "Can be always the same code" rationale.
+        recap = _course_recap_html(course, reg.occurrence_date) if course else ""
+        body = (
+            f"<p>About to cancel <b>{esc(user.name if user else '(erased)')}</b> "
+            f"({esc(user.email if user else '(erased)')})'s booking.</p>"
+            + recap
+            + """<form method="post" class="card">
+          <label>Message to them <span class="opt">(optional)</span>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>
           <div class="submit-row"><button type="submit">Cancel this booking</button></div>
         </form>"""
+        )
         return "200 OK", [("Content-Type", "text/html")], page("Cancel registration", body)
 
     def host_cancel(self, method: str, registration_id: str, environ):

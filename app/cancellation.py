@@ -49,6 +49,16 @@ def html_to_text(markup: str) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
+# Shared What/When/Where emoji (2026-07-09, the operator: "Please use yoga emoji
+# for the What" -- was the generic pushpin \U0001F4CC before this). Kept as
+# module constants so booking_details_text() (plain text) and
+# course_recap_html() (HTML, below) can never drift to different emoji or
+# ordering -- both read from here.
+_WHAT_EMOJI = "\U0001F9D8"  # person in lotus position
+_WHEN_EMOJI = "\U0001F550"  # clock face
+_WHERE_EMOJI = "\U0001F4CD"  # round pushpin
+
+
 def booking_details_text(course: Course, occ_date: str) -> str:
     """Shared What/When/Where(+description) block (the operator's requested
     layout, 2026-07-05) for every guest email that tells them about one
@@ -56,16 +66,60 @@ def booking_details_text(course: Course, occ_date: str) -> str:
     email (booking confirmed/waitlisted, promoted-from-waitlist,
     cancellation), so none of them can drift apart the way two of them did
     before this was pulled into one function. Description is repeated in
-    full via html_to_text(), since send_mail is plain-text only -- so a
-    guest never has to go back to the booking page to see what they signed
-    up for."""
+    full via html_to_text() -- this is the plain-text ALTERNATIVE part of
+    the email (see emailer.send_mail's html_body param); course_recap_html()
+    below is the richer HTML twin most clients will actually render."""
     details = (
-        f"\U0001F4CC What: {course.title}\n"
-        f"\U0001F550 When: {occ_date} {course.time_range_label()}\n"
-        f"\U0001F4CD Where: {course.location}\n"
+        f"{_WHAT_EMOJI} What: {course.title}\n"
+        f"{_WHEN_EMOJI} When: {occ_date} {course.time_range_label()}\n"
+        f"{_WHERE_EMOJI} Where: {course.location}\n"
     )
     description_text = html_to_text(course.description) if course.description else ""
     return details + (f"\n{description_text}\n" if description_text else "")
+
+
+def course_recap_html(course: Course, occ_date: str) -> str:
+    """HTML twin of booking_details_text() above -- same What/When/Where
+    emoji/ordering, plus the operator's own rich-HTML `description` in a
+    boxed, background-colored block (2026-07-09, the operator: "format description
+    in email as on page ... box the description and put the background
+    color (as on the page). ... Can be always the same code that generates
+    this for the page or email."). Deliberately INLINE-styled, not
+    dependent on any CSS class/`<style>` block: the app's own pages could
+    use either, but an HTML email can't rely on a `<style>` block or class
+    surviving every mail client's sanitizer, so inline is the one style
+    that reliably renders identically in both places. See
+    app/webapp.py::_course_recap_html, a thin wrapper around this exact
+    function, for the page-side call sites (booking confirmation, the
+    cancel-confirmation pages)."""
+    esc = lambda v: html.escape(str(v), quote=True)  # noqa: E731
+    desc_html = (
+        '<div style="background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;'
+        f'padding:1em 1.2em;margin:.6em 0 0">{course.description}</div>'
+    ) if course.description else ""
+    return (
+        '<div style="background:#f4f7f4;border:1px solid #ddd;border-radius:8px;'
+        'padding:1em 1.2em;margin:1em 0;font-family:sans-serif">'
+        f'<p style="margin:.3em 0"><b>{_WHAT_EMOJI} What:</b> {esc(course.title)}</p>'
+        f'<p style="margin:.3em 0"><b>{_WHEN_EMOJI} When:</b> {esc(occ_date)} {esc(course.time_range_label())}</p>'
+        f'<p style="margin:.3em 0"><b>{_WHERE_EMOJI} Where:</b> {esc(course.location)}</p>'
+        f"{desc_html}"
+        "</div>"
+    )
+
+
+def html_email_body(inner_html: str) -> str:
+    """Minimal, portable HTML shell (2026-07-09) every HTML email in this
+    app is wrapped in -- no external stylesheet/JS, just a plain
+    font/color/line-height baseline, since mail clients vary wildly in
+    what they strip from a `<style>` block. `inner_html` is whatever
+    per-email content the caller built (course_recap_html() plus its own
+    surrounding paragraphs/links)."""
+    return (
+        '<html><body style="font-family:sans-serif;color:#222;line-height:1.5;margin:0;padding:0">'
+        f"{inner_html}"
+        "</body></html>"
+    )
 
 
 def send_cancellation_emails(
@@ -89,17 +143,25 @@ def send_cancellation_emails(
     operator acting on a guest's behalf.
     """
     details = booking_details_text(course, occ_date)
+    recap_html = course_recap_html(course, occ_date)
     subject = f"Canceled: {course.title} on {occ_date}"
     reason_block = f"\nMessage: {message}\n" if message else ""
+    reason_html = f"<p>Message: {html.escape(message, quote=True)}</p>" if message else ""
+    my_url = f"{settings.base_url}/my"
     if user:
         participant_who = "You" if canceled_by == "guest" else "The host"
         send_mail(
             settings, user.email, subject,
             f"{participant_who} canceled this booking:\n\n{details}\n{reason_block}"
-            f"Manage your bookings any time: {settings.base_url}/my\n",
+            f"Manage your bookings: {my_url}\n",
+            html_body=html_email_body(
+                f"<p>{participant_who} canceled this booking:</p>{recap_html}{reason_html}"
+                f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+            ),
         )
     admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
     send_mail(
         settings, settings.admin_email, subject,
         f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}",
+        html_body=html_email_body(f"<p>{admin_who} canceled this booking:</p>{recap_html}{reason_html}"),
     )

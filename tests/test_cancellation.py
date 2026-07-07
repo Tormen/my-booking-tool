@@ -1,0 +1,78 @@
+"""Direct unit coverage for app/cancellation.py's shared booking-detail
+generators -- previously only exercised indirectly through the full email
+flows in test_webapp.py/test_book_guests.py/test_cli_cancel.py. Added
+2026-07-09 alongside course_recap_html()/html_email_body() (the operator: "Please
+use yoga emoji for the What" / "format description in email as on page ...
+box the description and put the background color (as on the page)" /
+"Can be always the same code that generates this for the page or email"),
+since those are new, easy-to-drift-apart pieces worth pinning down on
+their own rather than only ever asserting on giant end-to-end email
+bodies."""
+import unittest
+
+from app.cancellation import booking_details_text, course_recap_html, html_email_body
+
+from .helpers import make_course
+
+
+class BookingDetailsTextTest(unittest.TestCase):
+    def test_what_uses_a_yoga_emoji_not_a_pushpin(self):
+        course = make_course(description="")
+        details = booking_details_text(course, "2026-07-11")
+        self.assertIn("\U0001F9D8 What:", details)  # person in lotus position
+        self.assertNotIn("\U0001F4CC", details)  # old generic pushpin, must be gone
+
+    def test_order_is_what_when_where(self):
+        course = make_course(description="")
+        details = booking_details_text(course, "2026-07-11")
+        self.assertLess(details.index("What:"), details.index("When:"))
+        self.assertLess(details.index("When:"), details.index("Where:"))
+
+
+class CourseRecapHtmlTest(unittest.TestCase):
+    def test_same_yoga_emoji_and_order_as_the_text_version(self):
+        course = make_course(description="")
+        html = course_recap_html(course, "2026-07-11")
+        self.assertIn("\U0001F9D8 What:</b>", html)
+        self.assertLess(html.index("What:"), html.index("When:"))
+        self.assertLess(html.index("When:"), html.index("Where:"))
+
+    def test_labels_are_bold(self):
+        course = make_course(description="")
+        html = course_recap_html(course, "2026-07-11")
+        self.assertIn("<b>\U0001F9D8 What:</b>", html)
+        self.assertIn("<b>\U0001F550 When:</b>", html)
+        self.assertIn("<b>\U0001F4CD Where:</b>", html)
+
+    def test_description_is_boxed_with_a_background_color(self):
+        # the operator: "box the description and put the background color (as on
+        # the page)" -- inline-styled (not class-based) so this exact
+        # markup also renders correctly embedded in an HTML email, where
+        # a <style> block/class isn't reliable across mail clients.
+        course = make_course(description="<p>Bring your own mat.</p>")
+        html = course_recap_html(course, "2026-07-11")
+        self.assertIn("background:#fdf8ef", html)
+        self.assertIn("Bring your own mat.", html)
+
+    def test_no_description_omits_the_empty_box(self):
+        course = make_course(description="")
+        html = course_recap_html(course, "2026-07-11")
+        self.assertNotIn("background:#fdf8ef", html)
+
+    def test_escapes_title_and_location(self):
+        course = make_course(title="A & B Yoga", location="<Studio>", description="")
+        html = course_recap_html(course, "2026-07-11")
+        self.assertIn("A &amp; B Yoga", html)
+        self.assertIn("&lt;Studio&gt;", html)
+        self.assertNotIn("<Studio>", html)
+
+
+class HtmlEmailBodyTest(unittest.TestCase):
+    def test_wraps_inner_html_in_a_self_contained_document(self):
+        wrapped = html_email_body("<p>hello</p>")
+        self.assertIn("<html>", wrapped)
+        self.assertIn("<p>hello</p>", wrapped)
+
+
+if __name__ == "__main__":
+    unittest.main()
