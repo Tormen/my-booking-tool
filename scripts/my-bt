@@ -581,7 +581,6 @@ def cmd_status(args) -> None:
     else:
         checks.append((f"data dir ({data_dir})", "ok", "exists and writable"))
     checks.extend(cli_checks.check_data_dir_git(data_dir))
-    checks.extend(cli_checks.check_maintenance_mode(data_dir))
 
     # -- configured log file, if any ---------------------------------------------
     log_file = app_config.peek_log_file(args.settings) if raw else None
@@ -629,6 +628,19 @@ def cmd_status(args) -> None:
     # a problem").
     if raw:
         checks.extend(cli_checks.check_nginx_conf_deployed(raw))
+
+    # -- maintenance mode ---------------------------------------------------------
+    # 2026-07-11, the operator: "maintenance happens enough often that it is
+    # annoying to have to check what this warning was about.. so please do
+    # this at the end as last check so that it's easily visible." Used to
+    # sit right after the data-dir/git-snapshot check, near the top of a
+    # long list -- easy to miss in a scroll-back, and the operator toggles
+    # maintenance mode often enough that this specific WARN was the one he
+    # kept having to hunt for. Deliberately last of every check group here
+    # (both `print_report()`/plain `setup` and `interactive_setup()`/
+    # `setup -i` already did this -- see their own "12. Maintenance mode"
+    # steps -- only plain `status` hadn't caught up).
+    checks.extend(cli_checks.check_maintenance_mode(data_dir))
 
     # -- report -------------------------------------------------------------------
     icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
