@@ -3,8 +3,11 @@ Settings/Course directly via tests/helpers.py's make_settings/make_course,
 bypassing the TOML file entirely. This file covers what only load_settings()
 itself does: reading real secret files, and (2026-07-09, the operator: "add a
 sorting key ... allowing me to determine the ORDER of the courses on
-https://booking.example.org/courses") sorting courses by their optional `order` key
-before they ever reach Settings.courses."""
+https://booking.example.org/courses"; the key was originally named `order`, renamed
+to `order_in_all_courses` the same day -- the operator: "please rename to
+something like order_in_all_courses to be self-explanatory how this
+'order' is actually USED") sorting courses by this optional key before
+they ever reach Settings.courses."""
 import tempfile
 import unittest
 from pathlib import Path
@@ -64,8 +67,8 @@ class LoadSettingsCourseOrderTest(unittest.TestCase):
         toml_path.write_text(header + course_blocks)
         return toml_path
 
-    def _course_block(self, shortname: str, order: int | None = None) -> str:
-        extra = f"order = {order}\n" if order is not None else ""
+    def _course_block(self, shortname: str, order_in_all_courses: int | None = None) -> str:
+        extra = f"order_in_all_courses = {order_in_all_courses}\n" if order_in_all_courses is not None else ""
         return f"""
 [[course]]
 shortname = "{shortname}"
@@ -78,8 +81,9 @@ capacity = 10
 {extra}"""
 
     def test_courses_with_no_order_keep_settings_toml_file_order(self):
-        # Backward compatibility: an existing settings.toml with no `order`
-        # keys anywhere must not have its course list silently reordered.
+        # Backward compatibility: an existing settings.toml with no
+        # `order_in_all_courses` keys anywhere must not have its course
+        # list silently reordered.
         toml_path = self._write(
             self._course_block("third")
             + self._course_block("first")
@@ -90,27 +94,27 @@ capacity = 10
 
     def test_explicit_order_overrides_file_position(self):
         toml_path = self._write(
-            self._course_block("c-last", order=30)
-            + self._course_block("c-first", order=10)
-            + self._course_block("c-middle", order=20)
+            self._course_block("c-last", order_in_all_courses=30)
+            + self._course_block("c-first", order_in_all_courses=10)
+            + self._course_block("c-middle", order_in_all_courses=20)
         )
         settings = load_settings(toml_path)
         self.assertEqual([c.shortname for c in settings.courses], ["c-first", "c-middle", "c-last"])
 
     def test_order_defaults_to_zero_and_sorts_before_any_positive_order(self):
         toml_path = self._write(
-            self._course_block("has-order", order=5)
+            self._course_block("has-order", order_in_all_courses=5)
             + self._course_block("no-order")
         )
         settings = load_settings(toml_path)
         self.assertEqual([c.shortname for c in settings.courses], ["no-order", "has-order"])
-        self.assertEqual(settings.course("no-order").order, 0)
+        self.assertEqual(settings.course("no-order").order_in_all_courses, 0)
 
     def test_ties_at_the_same_order_fall_back_to_file_order(self):
         toml_path = self._write(
-            self._course_block("tie-a", order=10)
-            + self._course_block("tie-b", order=5)
-            + self._course_block("tie-c", order=10)
+            self._course_block("tie-a", order_in_all_courses=10)
+            + self._course_block("tie-b", order_in_all_courses=5)
+            + self._course_block("tie-c", order_in_all_courses=10)
         )
         settings = load_settings(toml_path)
         # tie-b (order 5) first, then tie-a/tie-c (both order 10) in their
