@@ -689,7 +689,10 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
         old.parent.mkdir()
         old.write_text("location /admin { }")
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})
-        prompt = FakePrompts({}, default=True)
+        # Decline the (root-independent) "point the setting at reality"
+        # offer explicitly, so this test actually exercises the root gate
+        # on the rename fallback instead of resolving via that other path.
+        prompt = FakePrompts({"instead of renaming": False}, default=True)
         calls: list[list[str]] = []
         with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
             cli_setup.interactive_setup(
@@ -706,7 +709,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
         old.parent.mkdir()
         old.write_text("location /admin { }")
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})
-        prompt = FakePrompts({"Rename": False})
+        prompt = FakePrompts({"instead of renaming": False, "Rename": False})
         calls: list[list[str]] = []
         with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
             cli_setup.interactive_setup(
@@ -717,6 +720,48 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
         self.assertTrue(old.exists())
         self.assertFalse(self.deployed.exists())
         self.assertEqual(calls, [])
+
+    def test_offers_to_point_nginx_conf_path_at_the_live_file_instead(self):
+        """2026-07-10, the operator, pushing back on an earlier version of this
+        step that only ever offered to rename the live file: "settings.toml
+        should tell you that I AM using booking.example.org.conf and hence my-bt
+        should respect this." This is the low-risk alternative: just fix
+        the setting, never touch the actual nginx file. Doesn't need root
+        (writing settings.toml isn't a privileged operation)."""
+        old = self.home / "old-etc" / "booking.example.org.conf"
+        old.parent.mkdir()
+        old.write_text("location /admin { }")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"instead of renaming": True})
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(prompt.asked_matching("Rename"), [])  # resolved, nothing left to rename
+        self.assertTrue(old.exists())  # the actual file is untouched
+        self.assertFalse(self.deployed.exists())
+        written = Path(self.settings_path).read_text()
+        self.assertIn(f'nginx_conf_path = "{old}"', written)
+        self.assertEqual(raw["site"]["nginx_conf_path"], str(old))
+
+    def test_declining_to_point_nginx_conf_path_falls_through_to_rename_offer(self):
+        old = self.home / "old-etc" / "booking.example.org.conf"
+        old.parent.mkdir()
+        old.write_text("location /admin { }")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"instead of renaming": False, "Rename": True})
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(len(prompt.asked_matching("Rename")), 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(self.deployed.exists())
+        self.assertNotIn("nginx_conf_path", Path(self.settings_path).read_text())
 
     def test_no_live_file_detected_never_offers_to_rename(self):
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})

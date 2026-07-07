@@ -80,6 +80,39 @@ def _add_nginx_access_log_setting(settings_path: str, value: str) -> None:
     Path(settings_path).write_text(text, encoding="utf-8")
 
 
+_SITE_HEADER_RE = re.compile(r"^\[site\][ \t]*\r?\n", re.MULTILINE)
+_NGINX_CONF_PATH_LINE_RE = re.compile(r'^nginx_conf_path[ \t]*=.*\r?\n', re.MULTILINE)
+
+
+def _write_nginx_conf_path_setting(settings_path: str, value: str) -> None:
+    """Writes `nginx_conf_path = "<value>"` into settings.toml's [site]
+    table -- replacing an existing line in place if there is one (the
+    normal case: this is only ever called when [site].nginx_conf_path was
+    ALREADY configured, just naming a file nginx doesn't actually have --
+    see interactive_setup's own comment on why "point the setting at
+    reality" is offered before "rename the live file to match the
+    setting"), falling back to inserting one right after the [site] header
+    otherwise. Same plain-text-edit approach as
+    _add_nginx_access_log_setting() and for the same reason -- tomllib has
+    no writer, and re-emitting the whole file from the parsed dict would
+    drop every comment in this hand-maintained file."""
+    text = Path(settings_path).read_text(encoding="utf-8")
+    line = f'nginx_conf_path = "{value}"\n'
+    m = _NGINX_CONF_PATH_LINE_RE.search(text)
+    if m is not None:
+        text = text[:m.start()] + line + text[m.end():]
+        Path(settings_path).write_text(text, encoding="utf-8")
+        return
+    m = _SITE_HEADER_RE.search(text)
+    if m is None:
+        if not text.endswith("\n"):
+            text += "\n"
+        text += f"\n[site]\n{line}"
+    else:
+        text = text[:m.end()] + line + text[m.end():]
+    Path(settings_path).write_text(text, encoding="utf-8")
+
+
 def tmpl_path(home: str) -> Path:
     return Path(home) / "site" / site_render.TEMPLATE_NAME
 
@@ -421,13 +454,42 @@ def interactive_setup(
         for label, level, detail in cli_checks.check_nginx_conf_deployed(raw):
             print_fn(f"[{level}] {label}: {detail}")
 
-        # Reconcile CONTENT first, against whichever file is actually live
-        # right now (the configured path if it exists, else the old-named
-        # one just detected above) -- still never auto-written, just the
-        # same vimdiff offer already used for .rpmnew merges and stale
-        # hand-authored static pages, so a location block that's in the
-        # checkout but was never deployed (e.g. /reinstate, /host-reinstate)
-        # gets caught regardless of what the live file happens to be named.
+        # nginx doesn't care what a conf.d file is called -- the live file
+        # having a different name than [site].nginx_conf_path isn't itself
+        # wrong (_resolve_nginx_conf_checkout_source()'s own docstring
+        # already says as much: the checkout side is deliberately
+        # independent of this too). So the FIRST, lowest-risk offer here is
+        # just correcting the SETTING to point at reality, not touching the
+        # live file at all (2026-07-10, the operator, pushing back on an earlier
+        # version of this step that only ever offered to rename the live
+        # file: "settings.toml should tell you that I AM using
+        # booking.example.org.conf and hence my-bt should respect this" -- renaming
+        # an already-working, hand-hardened vhost file is real risk for no
+        # benefit if the setting can simply be corrected instead). Renaming
+        # the file to match the setting is still offered further down, for
+        # anyone who genuinely wants that convention enforced on the server
+        # too -- just no longer the only option, and no longer asked first.
+        if live_file is not None and prompt(
+            f"[site].nginx_conf_path doesn't match a real file, but nginx is loading this vhost "
+            f"from {live_file} -- point nginx_conf_path there instead of renaming the file?"
+        ):
+            try:
+                _write_nginx_conf_path_setting(settings_path, str(live_file))
+                raw.setdefault("site", {})["nginx_conf_path"] = str(live_file)
+                deployed = live_file
+                print_fn(f"[ok] updated [site].nginx_conf_path to {live_file}")
+                live_file = None  # resolved -- nothing left to rename
+            except OSError as exc:
+                print_fn(f"[fail] could not write {settings_path}: {exc}")
+
+        # Reconcile CONTENT next, against whichever file is actually live
+        # right now (the configured path if it exists -- possibly just
+        # updated above -- else the old-named one detected earlier) --
+        # still never auto-written, just the same vimdiff offer already
+        # used for .rpmnew merges and stale hand-authored static pages, so
+        # a location block that's in the checkout but was never deployed
+        # (e.g. /reinstate, /host-reinstate) gets caught regardless of what
+        # the live file happens to be named.
         source = cli_checks._resolve_nginx_conf_checkout_source(home)
         live_now = deployed if deployed.exists() else live_file
         if source is not None and live_now is not None:
@@ -436,10 +498,10 @@ def interactive_setup(
             if not same and prompt(f"Open vimdiff {live_now} {source} now?"):
                 run(["vimdiff", str(live_now), str(source)])
 
-        # Renaming into place is a separate, much lower-risk offer -- unlike
-        # the vimdiff above, it never touches a single byte of content, just
-        # the filename -- so it's offered regardless of whether that vimdiff
-        # ran/was accepted.
+        # Renaming into place: the alternative fix, only still relevant if
+        # you didn't just update the setting above. Unlike that offer, this
+        # one does need root (it's touching a file outside anything this
+        # tool/its group otherwise owns).
         if live_file is not None:
             if not is_root():
                 print_fn("(needs root to rename into place -- re-run `sudo my-bt setup -i`)")

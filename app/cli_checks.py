@@ -390,8 +390,8 @@ def check_nginx_conf_deployed(raw: dict) -> list[Check]:
         if live_file is not None and live_file.exists() and live_file.resolve() != p.resolve():
             return [(f"nginx vhost conf ({path_str})", "fail",
                       f"configured but not found -- nginx currently loads this vhost from "
-                      f"{live_file} instead; rename it to match (`my-bt setup -i` can do this "
-                      "for you), or update [site].nginx_conf_path")]
+                      f"{live_file} instead; point [site].nginx_conf_path at it (`my-bt setup -i` "
+                      "can do this for you), or rename the file to match nginx_conf_path instead")]
         return [(f"nginx vhost conf ({path_str})", "fail",
                   "configured but not found -- check [site].nginx_conf_path")]
     text = p.read_text(encoding="utf-8", errors="replace")
