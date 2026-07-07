@@ -1043,6 +1043,36 @@ class CheckStaticPagesDeployedTest(unittest.TestCase):
         label, level, detail = checks[0]
         self.assertEqual(level, "ok")
 
+    def test_maintenance_banner_alone_does_not_count_as_a_difference(self):
+        # 2026-07-10, the operator, looking at a vimdiff setup -i offered him where
+        # the ONLY difference was the maintenance banner: "my-bt setup -i
+        # should know about the maintenance mode and ignore any change
+        # linked to this, and should not propose this vimdiff if this is
+        # the only difference." -- `my-bt maintenance on` inserts the
+        # banner directly into the LIVE deployed index.html (by design, so
+        # it shows up immediately), so the deployed copy legitimately
+        # differs from the checkout for as long as maintenance stays on.
+        content = "<html><body>hello world</body></html>"
+        (self.home / "site" / "index.html").write_text(content)
+        banner = maintenance.banner_html("admin@example.org", "back soon")
+        (self.static_dir / "index.html").write_text(maintenance.insert_banner(content, banner))
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        levels = _levels(checks)
+        self.assertEqual(levels["static site content (" + str(self.static_dir / "index.html") + ")"], "ok")
+
+    def test_a_real_difference_alongside_the_banner_still_warns(self):
+        # The banner-stripping normalization must not mask a GENUINE
+        # content difference just because maintenance mode also happens to
+        # be on.
+        (self.home / "site" / "index.html").write_text("<html><body>new content</body></html>")
+        banner = maintenance.banner_html("admin@example.org")
+        deployed = maintenance.insert_banner("<html><body>old content</body></html>", banner)
+        (self.static_dir / "index.html").write_text(deployed)
+        checks = cli_checks.check_static_pages_deployed(self._raw(), str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("differs", detail)
+
 
 class CheckRpmVerifyTest(unittest.TestCase):
     def test_rpm_not_present_is_ok(self):

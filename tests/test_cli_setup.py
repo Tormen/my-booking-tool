@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import cli_setup, site_render
+from app import cli_setup, maintenance, site_render
 
 
 def _raw(**overrides) -> dict:
@@ -496,6 +496,33 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         )
         self.assertEqual(calls, [])
         self.assertEqual((self.static_dir / "index.html").read_text(), "old content")
+
+    def test_maintenance_banner_alone_does_not_trigger_a_vimdiff_offer(self):
+        # 2026-07-10, the operator, looking at a vimdiff setup -i offered him where
+        # the ONLY difference was the maintenance banner `my-bt maintenance
+        # on` had inserted into the live index.html: "my-bt setup -i should
+        # know about the maintenance mode and ignore any change linked to
+        # this, and should not propose this vimdiff if this is the only
+        # difference."
+        content = "<html><body>hello world</body></html>"
+        (self.home / "site" / "index.html").write_text(content)
+        banner = maintenance.banner_html("admin@example.org", "back soon")
+        (self.static_dir / "index.html").write_text(maintenance.insert_banner(content, banner))
+        raw = _raw(site={"static_site_dir": str(self.static_dir)})
+        # default=True: would open vimdiff if (wrongly) asked+accepted --
+        # also makes unrelated prompts elsewhere in interactive_setup()
+        # (e.g. an nginx reload offer) accept too, so this test asserts
+        # specifically on "no vimdiff for index.html", not on the full
+        # (unrelated) call list.
+        prompt = FakePrompts({}, default=True)
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("vimdiff"), [])
+        self.assertFalse(any(c[0] == "vimdiff" for c in calls))
 
     def test_accepting_copy_deploys_a_never_deployed_page(self):
         (self.home / "site" / "terms.html").write_text("terms content")

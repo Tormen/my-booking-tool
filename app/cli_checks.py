@@ -712,6 +712,29 @@ def _resolve_static_source(home: str, name: str) -> Path | None:
     return None
 
 
+def _diffable_static_page_text(text: str) -> str:
+    """Strips `my-bt maintenance on`'s banner block (if present) before
+    comparing a deployed static page against this checkout's own source
+    (2026-07-10, the operator, looking at a vimdiff `setup -i` offered him: "my-bt
+    setup -i should know about the maintenance mode and ignore any change
+    linked to this, and should not propose this vimdiff if this is the
+    only difference"). Without this, `index.html` legitimately differs
+    from the checkout's copy the ENTIRE time maintenance mode is on (the
+    banner is inserted directly into the live file, see app/maintenance.py
+    -- that's the whole point, it needs to show up immediately) --
+    `check_static_pages_deployed()` and `interactive_setup()`'s vimdiff
+    offer would otherwise both treat that expected, deliberate difference
+    as drift needing a manual merge, every single time, for as long as
+    maintenance mode stays on. `maintenance.remove_banner()` is a safe
+    no-op on any text that never had the banner inserted (its regex only
+    matches the exact delimiter comments my-bt itself writes), so this is
+    applied unconditionally to every static page's text, not just
+    index.html specifically -- there's nothing to strip on the other two
+    pages, and this stays correct even if banner insertion ever extends to
+    them."""
+    return maintenance.remove_banner(text)
+
+
 def check_static_pages_deployed(raw: dict, home: str) -> list[Check]:
     """For each of index.html/impressum.html/terms.html: is it deployed to
     [site].static_site_dir at all, and if so, does it match what's in this
@@ -734,8 +757,8 @@ def check_static_pages_deployed(raw: dict, home: str) -> list[Check]:
             checks.append((f"static site content ({deployed})", "warn",
                             f"not deployed yet -- copy {source} there"))
             continue
-        same = deployed.read_text(encoding="utf-8", errors="replace") == \
-            source.read_text(encoding="utf-8", errors="replace")
+        same = _diffable_static_page_text(deployed.read_text(encoding="utf-8", errors="replace")) == \
+            _diffable_static_page_text(source.read_text(encoding="utf-8", errors="replace"))
         if same:
             checks.append((f"static site content ({deployed})", "ok", "matches your checkout"))
         else:

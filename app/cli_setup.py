@@ -631,8 +631,16 @@ def interactive_setup(
                     except OSError as exc:
                         print_fn(f"[fail] could not write {deployed}: {exc}")
                 continue
-            same = deployed.read_text(encoding="utf-8", errors="replace") == \
-                source.read_text(encoding="utf-8", errors="replace")
+            # cli_checks._diffable_static_page_text() strips
+            # `my-bt maintenance on`'s banner block before comparing
+            # (2026-07-10, the operator: "my-bt setup -i should know about the
+            # maintenance mode and ignore any change linked to this, and
+            # should not propose this vimdiff if this is the only
+            # difference") -- without it, index.html looks permanently
+            # "different" from the checkout for as long as maintenance mode
+            # stays on, offering a pointless vimdiff every single run.
+            same = cli_checks._diffable_static_page_text(deployed.read_text(encoding="utf-8", errors="replace")) == \
+                cli_checks._diffable_static_page_text(source.read_text(encoding="utf-8", errors="replace"))
             if same:
                 continue  # already in sync -- already reported "[ok]" above
             if prompt(f"Open vimdiff {deployed} {source} now?"):
