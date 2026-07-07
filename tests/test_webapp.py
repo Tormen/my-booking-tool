@@ -1399,6 +1399,48 @@ class BookingFlowTest(unittest.TestCase):
         admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", admin_mail)
 
+    # -- /host-cancel: no-login "magic link" from the calendar event -------
+
+    def test_host_cancel_needs_no_admin_session(self):
+        # 2026-07-09, the operator, screenshot of being bounced to /admin/login:
+        # "instead it should be a magic link that does not need a password."
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        status, _headers, body = self.app.host_cancel("GET", reg.registration_id, {})
+        self.assertIn("200", status)
+        self.assertNotIn("/admin/login", status + str(_headers))
+
+    def test_host_cancel_confirm_page_shows_what_where_when_and_reason_field(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        _status, _headers, body = self.app.host_cancel("GET", reg.registration_id, {})
+        self.assertIn("<b>What:</b>", body)
+        self.assertIn("<b>Where:</b>", body)
+        self.assertIn("<b>When:</b>", body)
+        self.assertIn('<textarea name="message"', body)
+        self.assertIn("Confirm cancellation", body)
+
+    def test_host_cancel_notifies_both_sides_with_reason(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.sent_emails.clear()
+        self._post(self.app.host_cancel, (reg.registration_id,), {"message": "instructor is sick"})
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, "canceled_by_host")
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("regular@example.org", to_addrs)
+        self.assertIn("admin@example.org", to_addrs)
+        participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
+        self.assertIn("The host canceled this booking:", participant_mail)
+        self.assertIn("Message: instructor is sick", participant_mail)
+
+    def test_host_cancel_unknown_registration_is_404_not_redirect(self):
+        status, _headers, body = self.app.host_cancel("GET", "00000000-0000-0000-0000-000000000000", {})
+        self.assertIn("404", status)
+
     # -- 2026-07-06: past-3 cap, "New booking", homepage link --------------
 
     def _import_past(self, user_id: str, occurrence_date: str, registration_id: str, status=STATUS_CONFIRMED):

@@ -1018,7 +1018,13 @@ same thing: a "Participants:" table (status, name, email, self/guest,
 registered-at, cancel link) for active/waitlisted registrants, and a
 separate "Canceled:" table (same columns, canceled-at + who canceled
 instead) for anyone who dropped out -- see `app/calendar_sync.py`'s
-`sync_occurrence()` docstring for the exact line format.
+`sync_occurrence()` docstring for the exact line format. That per-participant
+"cancel:" line is a `/host-cancel/<reg_id>` link (2026-07-09) -- a no-login
+"magic link" straight to a Cancel Booking confirmation page (What/Where/When
++ an optional reason), so tapping it from your phone's calendar app doesn't
+first bounce you through `/admin/login`. Gated only by the registration ID
+being an unguessable `uuid4`, not a separate secret -- see `host_cancel()`'s
+own docstring in `app/webapp.py` for the trust-boundary reasoning.
 
 Two more `[[course]]` fields control the page header:
 `subtitle` (optional plain text -- omit it to auto-show

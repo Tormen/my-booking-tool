@@ -427,6 +427,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
             location /courses { proxy_pass http://127.0.0.1:8811; }
             location /book/ { proxy_pass http://127.0.0.1:8811; }
             location /cancel/ { proxy_pass http://127.0.0.1:8811; }
+            location /host-cancel/ { proxy_pass http://127.0.0.1:8811; }
             location /my { proxy_pass http://127.0.0.1:8811; }
             location /admin { proxy_pass http://127.0.0.1:8811; }
         }
@@ -435,7 +436,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
              patch("app.cli_checks.subprocess.run",
                    return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
             checks = cli_checks.check_nginx_locations()
-        self.assertEqual(len(checks), 5)
+        self.assertEqual(len(checks), 6)
         self.assertTrue(all(level == "ok" for _, level, _ in checks))
 
     def test_one_missing_location_warns_others_stay_ok(self):
@@ -446,6 +447,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
         merged = """
         location /book/ { proxy_pass http://127.0.0.1:8811; }
         location /cancel/ { proxy_pass http://127.0.0.1:8811; }
+        location /host-cancel/ { proxy_pass http://127.0.0.1:8811; }
         location /admin { proxy_pass http://127.0.0.1:8811; }
         """
         with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
@@ -457,6 +459,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
         self.assertEqual(levels["nginx location /my"], "warn")
         self.assertEqual(levels["nginx location /book/"], "ok")
         self.assertEqual(levels["nginx location /cancel/"], "ok")
+        self.assertEqual(levels["nginx location /host-cancel/"], "ok")
         self.assertEqual(levels["nginx location /admin"], "ok")
 
     def test_match_modifier_is_still_detected(self):

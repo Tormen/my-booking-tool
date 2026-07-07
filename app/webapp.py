@@ -19,6 +19,17 @@
   GET/POST /admin/login             admin login
   GET      /admin                   admin overview (today+future by default)
   GET/POST /admin/cancel/<reg_id>   host cancels a registration, optional message
+                                     (requires an admin login session)
+  GET/POST /host-cancel/<reg_id>    same cancellation, but as a no-login "magic
+                                     link" -- this is what the calendar event's
+                                     own per-participant "cancel:" line links
+                                     to (see app/calendar_sync.py), so the host
+                                     can cancel someone straight from their
+                                     calendar app without first logging into
+                                     /admin. Gated only by registration_id
+                                     being an unguessable uuid4 (see
+                                     host_cancel()'s own docstring for why
+                                     that's an adequate boundary here).
 
 A booking under an email with no confirmed account yet doesn't hold a real
 spot or sync to the calendar until the guest clicks the confirmation link --
@@ -532,6 +543,8 @@ class App:
             return self.admin_overview(method, environ)
         if m := re.fullmatch(r"/admin/cancel/([0-9a-fA-F-]+)", path):
             return self.admin_cancel(method, m.group(1), environ)
+        if m := re.fullmatch(r"/host-cancel/([0-9a-fA-F-]+)", path):
+            return self.host_cancel(method, m.group(1), environ)
         return "404 Not Found", [("Content-Type", "text/plain")], "not found"
 
     @staticmethod
@@ -2095,3 +2108,58 @@ class App:
           <div class="submit-row"><button type="submit">Cancel this booking</button></div>
         </form>"""
         return "200 OK", [("Content-Type", "text/html")], page("Cancel registration", body)
+
+    def host_cancel(self, method: str, registration_id: str, environ):
+        """A no-login "magic link" twin of admin_cancel() above, same
+        cancellation logic (canceled_by="host", both sides notified via
+        _send_cancellation_emails) but reachable without an admin session
+        (2026-07-09, the operator, screenshot of being bounced to /admin/login:
+        "instead it should be a magic link that does not need a password,
+        but directly shows the page where it tells you: Cancel Booking /
+        WHAT / WHERE / WHEN / Reason: <optional> / CONFIRM button"). This is
+        what app/calendar_sync.py's per-participant "cancel:" line in the
+        calendar EVENT DESCRIPTION now links to -- so from his own phone's
+        calendar app, tapping that link goes straight to a confirm page
+        instead of an admin login wall first.
+
+        Security note: unlike guest_cancel()'s /cancel/<token> (a hashed,
+        single-purpose token), this is gated purely by registration_id
+        being an unguessable uuid4 (see storage.py's add_registration_*
+        methods) -- there's no separate secret. That's an intentional,
+        narrower trust boundary than the guest-facing link: this ID only
+        ever appears somewhere already inside the operator's own trust boundary
+        (his own CalDAV calendar, the password-gated /admin overview, or a
+        guest's OWN /my page for their OWN booking) -- never broadcast the
+        way a guest's emailed cancel link is. If that calendar is ever
+        shared/exported somewhere less private, treat this the same as any
+        other bearer link in it and reconsider."""
+        reg = self.store.find_by_id(registration_id)
+        if reg is None:
+            return "404 Not Found", [("Content-Type", "text/html")], page(
+                "Not found", "<p>This link is invalid.</p>"
+            )
+        user = self.store.find_user_by_id(reg.user_id)
+        course = self.settings.course(reg.course_shortname)
+        if method == "POST":
+            form = self._read_form(environ)
+            message = sanitize_csv_field(form.get("message", "").strip())
+            self.store.cancel(registration_id, canceled_by="host", host_message=message)
+            self._cancel_and_promote(reg.course_shortname, reg.occurrence_date)
+            if course:
+                # Both sides notified, always -- see admin_cancel()'s own
+                # comment on why: the admin's own copy is what surfaces an
+                # unexpected cancellation if this link ever leaks.
+                self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="host", message=message)
+            return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
+        recap = _course_recap_html(course, reg.occurrence_date) if course else ""
+        body = (
+            f"<p>Cancel <b>{esc(user.name if user else '(erased)')}</b> "
+            f"({esc(user.email if user else '(erased)')})'s booking?</p>"
+            + recap
+            + """<form method="post" class="card">
+          <label>Reason <span class="opt">(optional)</span>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>
+          <div class="submit-row"><button type="submit">Confirm cancellation</button></div>
+        </form>"""
+        )
+        return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)

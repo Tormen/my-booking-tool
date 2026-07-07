@@ -145,14 +145,14 @@ def sync_occurrence(
             lines.append(
                 f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
                 f"registered {r.registered_at} | "
-                f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
+                f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
             )
         for r in waiting:
             name, email = _name_email(r, users_by_id)
             lines.append(
                 f"- waitlisted #{waiting.index(r) + 1} | {name} | {email} | "
                 f"{_self_or_guest(r, users_by_id)} | registered {r.registered_at} | "
-                f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
+                f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
             )
     if canceled:
         # Separate group, listed last -- kept OUT of the active/waiting
@@ -169,7 +169,7 @@ def sync_occurrence(
             lines.append(
                 f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
                 f"canceled {r.canceled_at} by {r.canceled_by} | "
-                f"cancel: {settings.base_url}/admin/cancel/{r.registration_id}"
+                f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
             )
     summary = f"{course.title} ({len(active)}/{course.capacity}"
     summary += f"+{len(waiting)}wl)" if waiting else ")"
