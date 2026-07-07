@@ -123,7 +123,8 @@ def html_email_body(inner_html: str) -> str:
 
 
 def send_cancellation_emails(
-    settings: Settings, course: Course, occ_date: str, user, canceled_by: str, message: str
+    settings: Settings, course: Course, occ_date: str, user, canceled_by: str, message: str,
+    ics_attachment: tuple[str, str, str] | None = None,
 ) -> None:
     """Every cancellation -- whichever of the four paths triggers it (the
     guest's one-click link from their booking email, the guest's own /my
@@ -141,7 +142,18 @@ def send_cancellation_emails(
     vocabulary as Store.cancel()'s own parameter -- `my-bt cancel` uses
     "host", the same as the web admin's /admin/cancel, since both are the
     operator acting on a guest's behalf.
-    """
+
+    `ics_attachment` (2026-07-09, the operator: "AND CANCEL-ics as well please.
+    Let's be nice :)") is the caller's already-built (filename, ics_text,
+    "CANCEL") tuple from app.calendar_sync.guest_cancel_ics() -- built by
+    the CALLER, not here, since this module deliberately has no dependency
+    on app.calendar_sync (which itself imports FROM this module, for
+    html_to_text -- importing back would be a cycle). Only ever attached to
+    the PARTICIPANT's copy, never the admin's: the admin's own calendar
+    already gets the authoritative update straight from CalDAV
+    (calendar_sync.sync_occurrence), so a second, personal "delete this
+    from your calendar" attachment on their own admin-copy email would be
+    redundant at best, confusing at worst."""
     details = booking_details_text(course, occ_date)
     recap_html = course_recap_html(course, occ_date)
     subject = f"Canceled: {course.title} on {occ_date}"
@@ -158,6 +170,7 @@ def send_cancellation_emails(
                 f"<p>{participant_who} canceled this booking:</p>{recap_html}{reason_html}"
                 f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
             ),
+            ics_attachment=ics_attachment,
         )
     admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
     send_mail(

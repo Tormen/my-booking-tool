@@ -588,7 +588,7 @@ class BookingFlowTest(unittest.TestCase):
         )
         self.occ_date = occs[0].date.isoformat()
 
-        recorder = lambda settings, to, subject, body, html_body=None: self.sent_emails.append((to, subject, body))
+        recorder = lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body))
         # Cancellation emails are composed in app.cancellation (factored
         # out of App on 2026-07-06 so `my-bt cancel` can reuse them), and the
         # promotion emails in app.cancel_flow (factored out the same day so
@@ -696,6 +696,28 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Manage your bookings: https://example.org/my", email_body)
         self.assertIn("Cancel this booking directly: https://example.org/cancel/", email_body)
 
+    def test_confirmed_booking_email_attaches_a_publish_ics(self):
+        # 2026-07-09, the operator: "Can you please attach a calendar invite also
+        # in the email that is sent to the participant?"
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        captured = {}
+
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+            if subject.startswith("Booking confirmed:"):
+                captured["ics_attachment"] = ics_attachment
+            self.sent_emails.append((to, subject, body))
+
+        with patch("app.webapp.send_mail", side_effect=spy):
+            self._book("regular@example.org", name="Regular")
+        self.assertIsNotNone(captured.get("ics_attachment"))
+        filename, ics_text, method = captured["ics_attachment"]
+        self.assertTrue(filename.endswith(".ics"))
+        self.assertEqual(method, "PUBLISH")
+        self.assertIn("METHOD:PUBLISH", ics_text)
+        self.assertIn("Dynamic Ashtanga Vinyasa Yoga", ics_text)
+
     def test_confirmed_account_waitlisted_when_full(self):
         for i in range(2):
             user = self.store.upsert_user_for_booking(f"guest{i}@example.org", f"Guest{i}")
@@ -712,6 +734,25 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Where: Example Community Gym, Room 1", email_body)
         self.assertIn("Manage your bookings: https://example.org/my", email_body)
         self.assertIn("Leave the waitlist directly: https://example.org/cancel/", email_body)
+
+    def test_waitlisted_booking_email_has_no_ics_attachment(self):
+        # No confirmed slot yet -- nothing real to add to a calendar.
+        for i in range(2):
+            user = self.store.upsert_user_for_booking(f"guest{i}@example.org", f"Guest{i}")
+            h, s = hash_secret("hunter22")
+            self.store.set_password(user.user_id, h, s)
+        captured = {}
+
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+            if subject.startswith("Waitlisted:"):
+                captured["ics_attachment"] = ics_attachment
+            self.sent_emails.append((to, subject, body))
+
+        self._book("guest0@example.org", name="Guest0")  # capacity=1, fills it
+        with patch("app.webapp.send_mail", side_effect=spy):
+            self._book("guest1@example.org", name="Guest1")
+        self.assertIn("ics_attachment", captured)  # subject matched
+        self.assertIsNone(captured["ics_attachment"])
 
     def test_promoted_from_waitlist_email_matches_the_same_layout(self):
         # Regression coverage for the 2026-07-05 consistency fix: this
@@ -748,6 +789,26 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
         self.assertIn(f"When: {self.occ_date} 17h15 - 18h55", admin_mail)
         self.assertIn("Where: Example Community Gym, Room 1", admin_mail)
+
+    def test_promoted_from_waitlist_email_attaches_a_publish_ics(self):
+        guest0, environ0 = self._login_as_guest("guest0@example.org", "Guest0")
+        self._book("guest0@example.org", name="Guest0")  # capacity=1, fills it
+        guest1, _environ1 = self._login_as_guest("guest1@example.org", "Guest1")
+        self._book("guest1@example.org", name="Guest1")  # waitlisted
+        reg0 = self.store.registrations_for_user(guest0.user_id)[0]
+        captured = {}
+
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+            if subject.startswith("You're in!"):
+                captured["ics_attachment"] = ics_attachment
+            self.sent_emails.append((to, subject, body))
+
+        with patch("app.cancel_flow.send_mail", side_effect=spy):
+            self._post_with_session(self.app.my_cancel, (reg0.registration_id,), {"message": ""}, environ0)
+        self.assertIsNotNone(captured.get("ics_attachment"))
+        _filename, ics_text, method = captured["ics_attachment"]
+        self.assertEqual(method, "PUBLISH")
+        self.assertIn("METHOD:PUBLISH", ics_text)
 
     # -- my_confirm: sets password, promotes pending ------------------------
 
@@ -1280,15 +1341,21 @@ class BookingFlowTest(unittest.TestCase):
         token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
             if subject.startswith("Canceled:") and to == "regular@example.org":
                 captured["html_body"] = html_body
+                captured["ics_attachment"] = ics_attachment
             self.sent_emails.append((to, subject, body))
 
         with patch("app.cancellation.send_mail", side_effect=spy):
             self._post(self.app.guest_cancel, (token,), {"message": ""})
         self.assertIsNotNone(captured.get("html_body"))
         self.assertIn("\U0001F9D8 What:</b>", captured["html_body"])
+        # 2026-07-09, the operator: "AND CANCEL-ics as well please. Let's be nice :)"
+        ics_filename, ics_text, ics_method = captured["ics_attachment"]
+        self.assertEqual(ics_method, "CANCEL")
+        self.assertIn("METHOD:CANCEL", ics_text)
+        self.assertIn("STATUS:CANCELLED", ics_text)
 
     # -- /admin overview: same shortname-leak audit as /my's table ----------
 

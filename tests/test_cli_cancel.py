@@ -62,7 +62,7 @@ class CancelRegistrationTest(unittest.TestCase):
         for target in ("app.cancellation.send_mail", "app.cancel_flow.send_mail"):
             patcher = patch(
                 target,
-                side_effect=lambda settings, to, subject, body, html_body=None: self.sent_emails.append((to, subject, body)),
+                side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body)),
             )
             patcher.start()
             self.addCleanup(patcher.stop)

@@ -54,7 +54,7 @@ class GuestBookingTestBase(unittest.TestCase):
         )
         self.occ_date = occs[0].date.isoformat()
 
-        recorder = lambda settings, to, subject, body, html_body=None: self.sent_emails.append((to, subject, body))
+        recorder = lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body))
         for target in ("app.webapp.send_mail", "app.cancellation.send_mail", "app.cancel_flow.send_mail"):
             patcher = patch(target, side_effect=recorder)
             patcher.start()
@@ -95,6 +95,25 @@ class PartyAdmissionTest(GuestBookingTestBase):
         leader_reg = next(r for r in regs if r.user_id == leader.user_id)
         self.assertEqual(guest_reg.invited_by_user_id, leader.user_id)
         self.assertEqual(leader_reg.invited_by_user_id, "")
+
+    def test_every_confirmed_party_member_gets_their_own_publish_ics(self):
+        # 2026-07-09, the operator: "attach a calendar invite also in the email
+        # that is sent to the participant" -- _book_with_guests() sends
+        # each party member their own copy of _send_booking_result_guest_email,
+        # so each should get their own ics_attachment too, not just the leader.
+        captured = []
+
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+            if subject.startswith("Booking confirmed:"):
+                captured.append((to, ics_attachment))
+            self.sent_emails.append((to, subject, body))
+
+        with patch("app.webapp.send_mail", side_effect=spy):
+            self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
+        self.assertEqual(len(captured), 2)
+        for to, ics_attachment in captured:
+            self.assertIsNotNone(ics_attachment, f"no ics attached for {to}")
+            self.assertEqual(ics_attachment[2], "PUBLISH")
 
     def test_whole_party_waitlisted_together_when_not_enough_room(self):
         course = make_course(shortname="yoga-class-1", weekday="wed", capacity=1)

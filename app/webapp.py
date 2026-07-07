@@ -704,8 +704,16 @@ class App:
         to the web admin's /admin/cancel, instead of reimplementing this)
         -- kept as an App method since every existing call site here
         already has `self.settings`. See that function's docstring for the
-        full rationale (notify-both-sides, etc.)."""
-        send_cancellation_emails(self.settings, course, occ_date, user, canceled_by, message)
+        full rationale (notify-both-sides, etc.).
+
+        Also builds the CANCEL .ics attachment (2026-07-09) here, once, so
+        guest_cancel()/admin_cancel()/host_cancel() -- every web caller of
+        this method -- get it for free without each building it themselves."""
+        ics_filename, ics_text = calendar_sync.guest_cancel_ics(self.settings, course, date.fromisoformat(occ_date))
+        send_cancellation_emails(
+            self.settings, course, occ_date, user, canceled_by, message,
+            ics_attachment=(ics_filename, ics_text, "CANCEL"),
+        )
 
     def _send_booking_result_guest_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
         """Just the guest-facing booked/waitlisted email (no admin copy) --
@@ -766,6 +774,7 @@ class App:
                 ),
             )
         else:
+            ics_filename, ics_text = calendar_sync.guest_invite_ics(self.settings, course, date.fromisoformat(occ_date))
             send_mail(
                 self.settings, user.email, f"Booking confirmed: {course.title} on {occ_date}",
                 "Your spot is confirmed:\n\n"
@@ -779,6 +788,7 @@ class App:
                     f'<p>Cancel this booking directly: <a href="{cancel_url}">{cancel_url}</a></p>'
                     f"{account_line_html}"
                 ),
+                ics_attachment=(ics_filename, ics_text, "PUBLISH"),
             )
 
     def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:

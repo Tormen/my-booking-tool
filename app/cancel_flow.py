@@ -129,6 +129,9 @@ def cancel_and_promote(
             # has an account, so that's the invite instead.
             intro = "A spot opened up and you were next on the waitlist -- you're now confirmed:"
             my_url = f"{settings.base_url}/my"
+            ics_filename, ics_text = calendar_sync.guest_invite_ics(
+                settings, course, date.fromisoformat(occurrence_date_str)
+            )
             send_mail(
                 settings, user.email, f"You're in! {course.title} on {occurrence_date_str}",
                 f"{intro}\n\n"
@@ -139,6 +142,7 @@ def cancel_and_promote(
                     + course_recap_html(course, occurrence_date_str)
                     + f'<p>Manage or cancel this booking: <a href="{my_url}">{my_url}</a></p>'
                 ),
+                ics_attachment=(ics_filename, ics_text, "PUBLISH"),
             )
         if promoted_users:
             # One combined admin email for the whole promoted party (not one

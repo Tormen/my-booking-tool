@@ -7,7 +7,8 @@ import unittest
 from datetime import date
 
 from app.caldav_client import CalDAVClient, Response
-from app.calendar_sync import sync_occurrence
+from app.calendar_sync import event_uid, guest_cancel_ics, guest_invite_ics, sync_occurrence
+from app.ics import parse_uid
 from app.storage import STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED, Store
 
 from .helpers import make_course, make_settings
@@ -195,6 +196,52 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         methods = [m for m, _u, _b, _h in transport.calls]
         self.assertIn("PUT", methods)
         self.assertNotIn("DELETE", methods)
+
+
+class GuestInviteAndCancelIcsTest(unittest.TestCase):
+    """2026-07-09, the operator: "Can you please attach a calendar invite also in
+    the email that is sent to the participant?" -- guest_invite_ics()
+    (confirmed booking, METHOD:PUBLISH) and guest_cancel_ics() (later
+    cancellation, METHOD:CANCEL, "Let's be nice :)"). Both are personal,
+    single-guest .ics builders meant as EMAIL ATTACHMENTS, distinct from
+    sync_occurrence()'s own shared operator-facing calendar event above."""
+
+    def setUp(self):
+        self.course = make_course(shortname="yoga-class-1", title="Yoga", location="Studio 1", description="Bring a mat.")
+        self.settings = make_settings(courses=(self.course,), base_url="https://example.org")
+
+    def test_invite_is_a_publish_with_no_status(self):
+        filename, ics_text = guest_invite_ics(self.settings, self.course, date(2026, 8, 1))
+        self.assertTrue(filename.endswith(".ics"))
+        self.assertIn("METHOD:PUBLISH", ics_text)
+        self.assertNotIn("STATUS:", ics_text)
+        self.assertIn("SEQUENCE:0", ics_text)
+        self.assertIn("Bring a mat.", ics_text)
+
+    def test_cancel_is_a_cancel_with_cancelled_status_and_bumped_sequence(self):
+        filename, ics_text = guest_cancel_ics(self.settings, self.course, date(2026, 8, 1))
+        self.assertTrue(filename.endswith(".ics"))
+        self.assertIn("METHOD:CANCEL", ics_text)
+        self.assertIn("STATUS:CANCELLED", ics_text)
+        self.assertIn("SEQUENCE:1", ics_text)
+
+    def test_invite_and_cancel_share_the_same_uid_as_the_operators_own_event(self):
+        # So a client that DOES correlate by UID (even though these are
+        # separate, standalone .ics files, never PUT to CalDAV) sees the
+        # same event identity as the operator's own synced calendar entry.
+        expected_uid = event_uid(self.settings, self.course.shortname, date(2026, 8, 1))
+        _f1, invite_ics = guest_invite_ics(self.settings, self.course, date(2026, 8, 1))
+        _f2, cancel_ics = guest_cancel_ics(self.settings, self.course, date(2026, 8, 1))
+        self.assertEqual(parse_uid(invite_ics), expected_uid)
+        self.assertEqual(parse_uid(cancel_ics), expected_uid)
+
+    def test_cancel_has_no_alarms(self):
+        _filename, ics_text = guest_cancel_ics(self.settings, self.course, date(2026, 8, 1))
+        self.assertNotIn("BEGIN:VALARM", ics_text)
+
+    def test_invite_still_has_alarms(self):
+        _filename, ics_text = guest_invite_ics(self.settings, self.course, date(2026, 8, 1))
+        self.assertIn("BEGIN:VALARM", ics_text)
 
 
 if __name__ == "__main__":

@@ -47,21 +47,47 @@ class VEvent:
     start: datetime
     end: datetime
     alarms_minutes_before: tuple[int, ...] = (24 * 60, 60)
+    # Added 2026-07-09 for the emailed guest invite/cancel attachments (see
+    # app/calendar_sync.py::guest_invite_ics/guest_cancel_ics) -- all three
+    # default to "off"/0/None so the CalDAV-stored event this class was
+    # originally built for (app/calendar_sync.py::sync_occurrence, a plain
+    # PUT with no METHOD/STATUS semantics) renders byte-identical to before
+    # these fields existed.
+    #
+    # method: VCALENDAR-level METHOD, e.g. "PUBLISH" (a plain "add this to
+    # your calendar" notice) or "CANCEL" (paired with status="CANCELLED"
+    # below) -- see guest_invite_ics()'s own docstring for why PUBLISH,
+    # not REQUEST/RSVP, is the right one for a booking confirmation.
+    method: str | None = None
+    # sequence: RFC 5545 SEQUENCE -- iTIP's way of saying "this replaces
+    # whatever you previously received for this UID". The initial PUBLISH
+    # invite is sequence 0 (the default); a later CANCEL for the same
+    # booking uses 1, signaling calendar apps that support it to treat it
+    # as an update/cancellation of that same event rather than a new one.
+    sequence: int = 0
+    # status: RFC 5545 STATUS, e.g. "CANCELLED" on a CANCEL event. None
+    # (the default) omits the property entirely, same as before this
+    # field existed.
+    status: str | None = None
 
     def to_ics(self) -> str:
-        lines = [
-            "BEGIN:VCALENDAR",
-            "VERSION:2.0",
+        lines = ["BEGIN:VCALENDAR", "VERSION:2.0"]
+        if self.method:
+            lines.append(f"METHOD:{self.method}")
+        lines += [
             "PRODID:-//my-booking-tool//booking//EN",
             "BEGIN:VEVENT",
             f"UID:{self.uid}",
             f"DTSTAMP:{_fmt_dt(datetime.now(timezone.utc))}",
             f"DTSTART:{_fmt_dt(self.start)}",
             f"DTEND:{_fmt_dt(self.end)}",
+            f"SEQUENCE:{self.sequence}",
             f"SUMMARY:{_escape_text(self.summary)}",
             f"DESCRIPTION:{_escape_text(self.description)}",
             f"LOCATION:{_escape_text(self.location)}",
         ]
+        if self.status:
+            lines.append(f"STATUS:{self.status}")
         for minutes in self.alarms_minutes_before:
             lines += [
                 "BEGIN:VALARM",

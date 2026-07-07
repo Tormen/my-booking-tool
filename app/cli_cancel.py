@@ -22,6 +22,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from datetime import date
+
+from . import calendar_sync
 from .cancel_flow import build_caldav_client, cancel_and_promote
 from .cancellation import send_cancellation_emails
 from .config import Settings
@@ -100,9 +103,14 @@ def cancel_registration(
 
     emailed = False
     if course:
-        # Same "both sides, always" notification as every other cancellation
-        # path -- see send_cancellation_emails's own docstring.
-        send_cancellation_emails(settings, course, reg.occurrence_date, user, canceled_by="host", message=message)
+        # Same "both sides, always" notification (+ CANCEL .ics attachment
+        # on the participant's copy) as every other cancellation path --
+        # see send_cancellation_emails's own docstring.
+        ics_filename, ics_text = calendar_sync.guest_cancel_ics(settings, course, date.fromisoformat(reg.occurrence_date))
+        send_cancellation_emails(
+            settings, course, reg.occurrence_date, user, canceled_by="host", message=message,
+            ics_attachment=(ics_filename, ics_text, "CANCEL"),
+        )
         emailed = True
         # Same promote-next-waitlisted + calendar re-sync as the web admin's
         # /admin/cancel (app/webapp.py::App.admin_cancel via

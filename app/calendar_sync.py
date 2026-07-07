@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from .caldav_client import CalDAVClient
+from .cancellation import html_to_text
 from .config import Course, Settings
 from .ics import VEvent
 from .storage import (
@@ -62,6 +63,17 @@ def event_uid(settings: Settings, course_shortname: str, occurrence_date: date) 
 def is_own_event(uid: str, settings: Settings) -> bool:
     slug, domain = _uid_parts(settings)
     return uid.startswith(f"{slug}-") and uid.endswith(f"@{domain}")
+
+
+def occurrence_start_end(course: Course, occurrence_date: date, tz: ZoneInfo) -> tuple[datetime, datetime]:
+    """Shared start/end datetime pair for one course occurrence -- factored
+    out of sync_occurrence() (2026-07-09) so guest_invite_ics()/
+    guest_cancel_ics() below build the EXACT same window the operator's own
+    synced calendar event uses, rather than a second, easy-to-drift-apart
+    copy of this three-line calculation."""
+    h, m = course.start_hm()
+    start = datetime(occurrence_date.year, occurrence_date.month, occurrence_date.day, h, m, tzinfo=tz)
+    return start, start + timedelta(minutes=course.duration_minutes)
 
 
 def sync_occurrence(
@@ -120,9 +132,7 @@ def sync_occurrence(
             client.delete_event(calendar_href, uid, etag)
         return
 
-    h, m = course.start_hm()
-    start = datetime(occurrence_date.year, occurrence_date.month, occurrence_date.day, h, m, tzinfo=tz)
-    end = start + timedelta(minutes=course.duration_minutes)
+    start, end = occurrence_start_end(course, occurrence_date, tz)
 
     # One lookup covering everyone on this occurrence, live or archived (an
     # erased registrant can still be a CANCELED row here) -- read_users(
@@ -182,3 +192,83 @@ def sync_occurrence(
         end=end,
     )
     client.put_event(calendar_href, uid, event.to_ics(), etag=etag)
+
+
+# -- Emailed guest invite/cancel attachments (2026-07-09, the operator: "Can you
+# please attach a calendar invite also in the email that is sent to the
+# participant?") ------------------------------------------------------------
+#
+# Deliberately separate from sync_occurrence() above: that function builds
+# ONE shared operator-facing event (all participants + a "Participants:"
+# table) and PUTs it to the operator's own CalDAV calendar. These two
+# functions instead build a personal, single-guest .ics MEANT AS AN EMAIL
+# ATTACHMENT -- never sent to CalDAV, never containing anyone else's name/
+# email. Same UID as the operator's own event (via event_uid()) since it's
+# the same real-world occurrence, so if a client ever DOES correlate by UID
+# across the two, the identity still matches correctly.
+
+
+def guest_invite_ics(settings: Settings, course: Course, occurrence_date: date) -> tuple[str, str]:
+    """Returns (filename, ics_text) for the "add this to your calendar"
+    attachment on a CONFIRMED booking's own email (see
+    app/webapp.py::_send_booking_result_guest_email and
+    app/cancel_flow.py's promoted-from-waitlist email) -- both are the only
+    two points where a guest goes from "not confirmed" to "actually holds a
+    real spot", which is the only time there's a real event worth adding to
+    a personal calendar. Deliberately NOT sent on a waitlisted email: there's
+    no confirmed slot yet, nothing real to add.
+
+    METHOD:PUBLISH, not REQUEST: this is a plain "here's your booking, add
+    it if you like" notice, not a meeting invite with ORGANIZER/ATTENDEE/
+    RSVP tracking. A REQUEST's Accept/Decline buttons (rendered natively by
+    Outlook/Google Calendar) would imply declining changes something -- it
+    wouldn't, canceling still only ever happens via the real cancel link --
+    so offering that button would be actively misleading. This is exactly
+    what real booking confirmations (train tickets, cinema, restaurant
+    reservations) use for the same reason.
+    """
+    tz = ZoneInfo(settings.timezone)
+    start, end = occurrence_start_end(course, occurrence_date, tz)
+    description = html_to_text(course.description) if course.description else course.title
+    event = VEvent(
+        uid=event_uid(settings, course.shortname, occurrence_date),
+        summary=course.title,
+        description=description,
+        location=course.location,
+        start=start,
+        end=end,
+        method="PUBLISH",
+    )
+    return f"{course.shortname}-{occurrence_date.isoformat()}.ics", event.to_ics()
+
+
+def guest_cancel_ics(settings: Settings, course: Course, occurrence_date: date) -> tuple[str, str]:
+    """Returns (filename, ics_text) for a METHOD:CANCEL attachment on a
+    cancellation email (2026-07-09, the operator: "AND CANCEL-ics as well please.
+    Let's be nice :)") -- same UID as the original guest_invite_ics() above,
+    SEQUENCE bumped to 1 and STATUS:CANCELLED set, so a calendar app that
+    both (a) previously imported the PUBLISH invite via UID and (b) honors
+    plain (non-REQUEST) CANCEL/SEQUENCE semantics will remove or gray out
+    the entry on its own. Support for that varies by client -- there's no
+    ORGANIZER/ATTENDEE relationship to formally correlate through (see
+    guest_invite_ics()'s own docstring on why this deliberately isn't a
+    REQUEST/RSVP flow) -- but it's the standard, correct thing to send
+    regardless, and costs nothing for a client that ignores it: worst case
+    the guest just deletes the (now stale) entry themselves, exactly as if
+    this attachment didn't exist. No VALARMs on a cancellation -- nothing
+    left to be reminded about."""
+    tz = ZoneInfo(settings.timezone)
+    start, end = occurrence_start_end(course, occurrence_date, tz)
+    event = VEvent(
+        uid=event_uid(settings, course.shortname, occurrence_date),
+        summary=course.title,
+        description=f"Canceled: {course.title}",
+        location=course.location,
+        start=start,
+        end=end,
+        method="CANCEL",
+        sequence=1,
+        status="CANCELLED",
+        alarms_minutes_before=(),
+    )
+    return f"{course.shortname}-{occurrence_date.isoformat()}-canceled.ics", event.to_ics()

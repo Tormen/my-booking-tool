@@ -19,7 +19,11 @@ def _masked(addr: str) -> str:
     return f"{local[:1]}***@{domain}" if domain else "***"
 
 
-def send_mail(settings: Settings, to_addr: str, subject: str, body: str, html_body: str | None = None) -> None:
+def send_mail(
+    settings: Settings, to_addr: str, subject: str, body: str,
+    html_body: str | None = None,
+    ics_attachment: tuple[str, str, str] | None = None,
+) -> None:
     """`html_body` (2026-07-09, the operator: "format description in email as on
     page ... box the description and put the background color (as on the
     page)") is optional -- omitting it (every pre-existing call site that
@@ -30,7 +34,19 @@ def send_mail(settings: Settings, to_addr: str, subject: str, body: str, html_bo
     `html_body` is added as the richer alternative most clients will
     actually render -- see app/cancellation.py's course_recap_html()/
     html_email_body() for the shared generator both the app's own pages
-    and this HTML part are built from."""
+    and this HTML part are built from.
+
+    `ics_attachment` (2026-07-09, the operator: "attach a calendar invite also in
+    the email that is sent to the participant") is `(filename, ics_text,
+    method)` -- `method` is "PUBLISH" or "CANCEL" (see
+    app/calendar_sync.py's guest_invite_ics()/guest_cancel_ics(), the only
+    two builders of this tuple), echoed into the attachment's own
+    Content-Type `method` parameter, which is what lets a calendar app
+    recognize which kind of .ics this is without parsing the body itself.
+    `add_attachment()` after `set_content()`/`add_alternative()` correctly
+    promotes the message to multipart/mixed (text+html alternative, plus
+    this attachment) -- standard `email.message.EmailMessage` behavior,
+    no manual MIME structuring needed."""
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
@@ -38,6 +54,12 @@ def send_mail(settings: Settings, to_addr: str, subject: str, body: str, html_bo
     msg.set_content(body)
     if html_body:
         msg.add_alternative(html_body, subtype="html")
+    if ics_attachment:
+        filename, ics_text, method = ics_attachment
+        msg.add_attachment(
+            ics_text.encode("utf-8"), maintype="text", subtype="calendar",
+            filename=filename, params={"method": method, "charset": "UTF-8"},
+        )
 
     log.debug("sending %r to %s", subject, _masked(to_addr))
     with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port) as smtp:

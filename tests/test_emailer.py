@@ -45,6 +45,35 @@ class SendMailTest(unittest.TestCase):
         self.assertEqual(text_part.get_content().strip(), "plain body")
         self.assertIn("rich body", html_part.get_content())
 
+    def test_ics_attachment_is_attached_with_the_right_content_type(self):
+        # 2026-07-09, the operator: "attach a calendar invite also in the email
+        # that is sent to the participant" -- see
+        # app/calendar_sync.py::guest_invite_ics/guest_cancel_ics for the
+        # only two builders of the (filename, ics_text, method) tuple.
+        with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
+            smtp = mock_smtp_ssl.return_value.__enter__.return_value
+            send_mail(
+                self.settings, "guest@example.org", "Subject", "plain body",
+                html_body="<p>rich body</p>",
+                ics_attachment=("invite.ics", "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", "PUBLISH"),
+            )
+        sent_msg = smtp.send_message.call_args[0][0]
+        self.assertTrue(sent_msg.is_multipart())
+        ics_part = next(p for p in sent_msg.walk() if p.get_content_type() == "text/calendar")
+        self.assertEqual(ics_part.get_filename(), "invite.ics")
+        self.assertEqual(ics_part.get_param("method"), "PUBLISH")
+        self.assertIn("BEGIN:VCALENDAR", ics_part.get_content())
+        # The plain/html alternative must still be intact alongside it.
+        self.assertTrue(any(p.get_content_type() == "text/plain" for p in sent_msg.walk()))
+        self.assertTrue(any(p.get_content_type() == "text/html" for p in sent_msg.walk()))
+
+    def test_no_ics_attachment_by_default(self):
+        with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
+            smtp = mock_smtp_ssl.return_value.__enter__.return_value
+            send_mail(self.settings, "guest@example.org", "Subject", "plain body")
+        sent_msg = smtp.send_message.call_args[0][0]
+        self.assertFalse(any(p.get_content_type() == "text/calendar" for p in sent_msg.walk()))
+
 
 if __name__ == "__main__":
     unittest.main()
