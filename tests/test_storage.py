@@ -73,6 +73,65 @@ class UserTest(StoreTestBase):
         self.assertEqual(reloaded.password_hash, h)
 
 
+class PendingEmailTest(StoreTestBase):
+    """2026-07-10: /my/settings' email-change flow -- see app/webapp.py's
+    "-- /my/settings --" section for the request/confirm handlers that
+    call these."""
+
+    def test_set_name_updates_it(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_name(u.user_id, "Alice Renamed")
+        self.assertEqual(self.store.find_user_by_email("a@b.com").name, "Alice Renamed")
+
+    def test_set_pending_email_then_find_by_token(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(u.user_id, "new@b.com", "deadbeef", "2026-07-10T00:00:00+00:00")
+        found = self.store.find_user_by_pending_email_token_hash("deadbeef")
+        self.assertEqual(found.user_id, u.user_id)
+        self.assertEqual(found.pending_email, "new@b.com")
+        self.assertEqual(found.email, "a@b.com")  # not swapped yet
+
+    def test_second_request_overwrites_the_first_and_supersedes_its_token(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(u.user_id, "first@b.com", "hash1", "2026-07-10T00:00:00+00:00")
+        self.store.set_pending_email(u.user_id, "second@b.com", "hash2", "2026-07-10T01:00:00+00:00")
+        self.assertIsNone(self.store.find_user_by_pending_email_token_hash("hash1"))
+        current = self.store.find_user_by_pending_email_token_hash("hash2")
+        self.assertEqual(current.pending_email, "second@b.com")
+        superseded = self.store.find_user_by_prev_pending_email_token_hash("hash1")
+        self.assertEqual(superseded.user_id, u.user_id)
+
+    def test_clear_pending_email_does_not_mark_it_as_superseded(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(u.user_id, "new@b.com", "hash1", "2026-07-10T00:00:00+00:00")
+        self.store.clear_pending_email(u.user_id)
+        self.assertIsNone(self.store.find_user_by_pending_email_token_hash("hash1"))
+        # An aborted change is not "superseded by a newer one" -- nothing
+        # newer was ever sent, so the friendlier message would be wrong.
+        self.assertIsNone(self.store.find_user_by_prev_pending_email_token_hash("hash1"))
+        reloaded = self.store.find_user_by_email("a@b.com")
+        self.assertEqual(reloaded.pending_email, "")
+
+    def test_apply_pending_email_swaps_email_and_clears_pending_fields(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(u.user_id, "new@b.com", "hash1", "2026-07-10T00:00:00+00:00")
+        updated = self.store.apply_pending_email(u.user_id)
+        self.assertEqual(updated.email, "new@b.com")
+        self.assertEqual(updated.pending_email, "")
+        self.assertEqual(updated.pending_email_token_hash, "")
+        self.assertIsNone(self.store.find_user_by_email("a@b.com"))
+        self.assertIsNotNone(self.store.find_user_by_email("new@b.com"))
+
+    def test_apply_pending_email_is_a_no_op_without_one_outstanding(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.assertIsNone(self.store.apply_pending_email(u.user_id))
+        self.assertEqual(self.store.find_user_by_email("a@b.com").email, "a@b.com")
+
+    def test_find_by_pending_email_token_blank_hash_never_matches(self):
+        self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.assertIsNone(self.store.find_user_by_pending_email_token_hash(""))
+
+
 class RegistrationTest(StoreTestBase):
     def test_add_and_count(self):
         u = self.store.upsert_user_for_booking("a@b.com", "Alice")

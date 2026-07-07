@@ -1143,6 +1143,49 @@ by the nightly retention job after `pending_confirmation_hours` (default
 than, `retention_months`/`canceled_retention_months` below, since a
 pending row never held a real booking in the first place.
 
+## Account settings (`/my/settings`, `/my/confirm-email/<token>`) (2026-07-10)
+
+A logged-in guest can change their display **name** (immediately, no
+confirmation needed) and their login **email** (a two-step,
+dual-address-notified flow) from a new **Account settings** button next
+to `/my`'s "New booking" one.
+
+Requesting an email change (`POST /my/settings/email`) rejects an invalid
+address, the account's own current address, or an address already
+claimed by a *different* account -- and is rate-limited per account
+(5/hour, same ceiling as login, just its own bucket since this action is
+only ever reachable from an authenticated session, unlike the anonymous
+`/my/reset`). On success it sends **two different emails**:
+
+- The **new** address gets the actionable confirm link
+  (`/my/confirm-email/<token>`), plus a note on what it's replacing and
+  when it becomes active.
+- The **current** address gets an informational notice only (no link) --
+  which new address was requested, and how to cancel the change from
+  `/my/settings` if this wasn't the account owner's own doing.
+
+Only **one** pending email change can ever be outstanding at a time; a
+second request simply replaces the first (same "a newer link
+supersedes an older one" behavior as `/my/confirm/<token>` -- see above).
+While a change is pending, `/my/settings` shows its status (old -> new,
+plus a **Cancel this change** button) instead of the request form.
+
+Clicking the link in the new address's email (`GET
+/my/confirm-email/<token>`) only *previews* the change -- nothing is
+applied until the guest submits the confirmation form on that page
+(`POST`), the same GET-preview/POST-consume shape `/my/confirm/<token>`
+uses, so an email-scanning security service pre-fetching the link can't
+silently consume it. This route deliberately does **not** require an
+active login session -- the new address may be checked from a completely
+different browser or device than the one the change was requested from.
+An expired (`CONFIRM_TOKEN_TTL_HOURS`, same 24h as account confirmation),
+superseded, or otherwise invalid/already-used link shows the same three
+distinct messages `/my/confirm/<token>` does.
+
+Once confirmed, **both** addresses get a short final notice: the new one
+told it's now the account's login email, the old one told it no longer
+has access.
+
 ## Watchdog (`[watchdog]` in `settings.toml`)
 
 A periodic health check (`systemd/my-booking-watchdog.timer`, every 15 min

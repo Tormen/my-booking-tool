@@ -25,6 +25,8 @@ USER_FIELDS = [
     "user_id", "email", "name", "password_hash", "password_salt",
     "confirm_token_hash", "confirm_token_created_at", "prev_confirm_token_hash",
     "created_at", "last_login_at",
+    "pending_email", "pending_email_token_hash", "pending_email_token_created_at",
+    "prev_pending_email_token_hash",
 ]
 REG_FIELDS = [
     "registration_id", "course_shortname", "occurrence_date", "user_id", "status",
@@ -82,6 +84,23 @@ class User:
     prev_confirm_token_hash: str = ""
     created_at: str = ""
     last_login_at: str = ""
+    # Email-change (2026-07-10, /my/settings): a REQUESTED-but-not-yet-
+    # confirmed new login email, plus its own token pair -- deliberately
+    # separate fields from confirm_token_hash/prev_confirm_token_hash
+    # above (which are about proving ownership of the EXISTING email to
+    # set/reset a password), not a reuse of them, since a guest could in
+    # principle have both a password-reset link AND an email-change link
+    # outstanding at once without either interfering with the other.
+    # Same "shift the old hash into a prev_ field first" pattern as
+    # prev_confirm_token_hash (see set_pending_email) so my_confirm_email()
+    # can show the same friendlier "a newer link was already sent"
+    # message. Only ONE pending_email can ever be outstanding at a time
+    # ("one active + one pending max") -- a second request overwrites the
+    # first outright rather than queuing.
+    pending_email: str = ""
+    pending_email_token_hash: str = ""
+    pending_email_token_created_at: str = ""
+    prev_pending_email_token_hash: str = ""
 
 
 @dataclass
@@ -328,6 +347,94 @@ class Store:
                     changed = True
             if changed:
                 write(rows)
+
+    def set_name(self, user_id: str, name: str) -> None:
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    row["name"] = name
+                    write(rows)
+                    return
+
+    def set_pending_email(self, user_id: str, pending_email: str, token_hash: str, created_at: str) -> None:
+        """Requests an email change -- see User.pending_email. Shifts any
+        previously-outstanding pending-email token into
+        prev_pending_email_token_hash first (same "tell them a newer link
+        superseded this one" pattern as set_confirm_token /
+        prev_confirm_token_hash), and OVERWRITES any earlier pending_email
+        outright: only one pending change can ever be outstanding at a
+        time ("one active + one pending max"), so requesting a second
+        change -- even to a different address -- simply replaces the
+        first rather than queuing alongside it."""
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    row["prev_pending_email_token_hash"] = row.get("pending_email_token_hash", "")
+                    row["pending_email"] = pending_email
+                    row["pending_email_token_hash"] = token_hash
+                    row["pending_email_token_created_at"] = created_at
+                    write(rows)
+                    return
+
+    def clear_pending_email(self, user_id: str) -> None:
+        """Aborts a pending email change (guest-initiated cancel from
+        /my/settings). Deliberately does NOT touch prev_pending_email_token_hash
+        -- an aborted change's token should read as a plain "invalid/already
+        used" link if somehow clicked afterward, not the friendlier
+        "superseded by a newer one" message, since nothing newer was ever
+        sent."""
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    row["pending_email"] = ""
+                    row["pending_email_token_hash"] = ""
+                    row["pending_email_token_created_at"] = ""
+                    write(rows)
+                    return
+
+    def find_user_by_pending_email_token_hash(self, token_hash: str) -> User | None:
+        if not token_hash:
+            return None
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
+            for row in rows:
+                if row.get("pending_email_token_hash") and row.get("pending_email_token_hash") == token_hash:
+                    return User(**row)
+        return None
+
+    def find_user_by_prev_pending_email_token_hash(self, token_hash: str) -> User | None:
+        """See User.prev_pending_email_token_hash -- same "was this
+        superseded, not just invalid" nicety as
+        find_user_by_prev_confirm_token_hash, for the same reason."""
+        if not token_hash:
+            return None
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
+            for row in rows:
+                if row.get("prev_pending_email_token_hash") == token_hash:
+                    return User(**row)
+        return None
+
+    def apply_pending_email(self, user_id: str) -> User | None:
+        """Finalizes a confirmed email change: copies pending_email into
+        the real email field and clears every pending_email_* field in
+        the SAME locked read-modify-write cycle (never a separate
+        clear_pending_email() call after the fact), so a concurrent
+        request can never observe a half-applied state. Returns None (a
+        no-op, not an error) if this user has no pending_email outstanding
+        -- e.g. the change was already applied or aborted by the time
+        this runs; the caller (my_confirm_email) should treat that the
+        same as any other "already used" token."""
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    if not row.get("pending_email"):
+                        return None
+                    row["email"] = row["pending_email"]
+                    row["pending_email"] = ""
+                    row["pending_email_token_hash"] = ""
+                    row["pending_email_token_created_at"] = ""
+                    write(rows)
+                    return User(**row)
+        return None
 
     # -- registrations ---------------------------------------------------------
 

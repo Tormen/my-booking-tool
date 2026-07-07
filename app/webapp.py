@@ -16,6 +16,15 @@
   POST     /my/delete-account       guest erases their own account (Art. 17)
   GET      /my/session               JSON {"logged_in": bool, "email": ...} for the
                                      STATIC homepage's own JS to check (see my_session_status)
+  GET      /my/settings             view/change name, view or abort a pending
+                                     email change
+  POST     /my/settings/name        change display name (takes effect immediately)
+  POST     /my/settings/email       request an email change (rate-limited,
+                                     sends a confirm link to the NEW address)
+  POST     /my/settings/email/cancel  abort a pending email change
+  GET/POST /my/confirm-email/<token>  finalize a requested email change --
+                                     same GET-preview/POST-consume shape as
+                                     /my/confirm/<token>, see my_confirm_email()
   GET/POST /admin/login             admin login
   GET      /admin                   admin overview (today+future by default)
   GET/POST /admin/cancel/<reg_id>   host cancels a registration, optional message
@@ -94,6 +103,15 @@ login_limiter = RateLimiter(max_attempts=5, window_seconds=3600)
 # which one (if either) blocks a request never depends on whether the
 # submitted email actually has an account -- see my_reset()'s own comment.
 reset_ip_limiter = RateLimiter(max_attempts=20, window_seconds=3600)
+
+# /my/settings' "change email" request (2026-07-10) -- keyed by user_id
+# (not email/IP) since this action is only reachable from an already
+# logged-in session, unlike login_limiter/reset_ip_limiter which must
+# stay usable against an anonymous, possibly-fake email string. Same
+# 5/hour ceiling as login_limiter, just a different bucket -- there's no
+# reason a guest changing their own email needs a looser or stricter
+# budget than a login attempt does.
+email_change_limiter = RateLimiter(max_attempts=5, window_seconds=3600)
 
 # 4 was too low -- NIST SP 800-63B's own minimum recommendation is 8.
 # hashlib.scrypt (see .security) has no upper length limit and no
@@ -532,6 +550,16 @@ class App:
             return self.my_delete_account(method, environ)
         if path == "/my/session":
             return self.my_session_status(method, environ)
+        if path == "/my/settings":
+            return self.my_settings(method, environ)
+        if path == "/my/settings/name":
+            return self.my_settings_name(method, environ)
+        if path == "/my/settings/email":
+            return self.my_settings_email(method, environ)
+        if path == "/my/settings/email/cancel":
+            return self.my_settings_email_cancel(method, environ)
+        if m := re.fullmatch(r"/my/confirm-email/([A-Za-z0-9_-]+)", path):
+            return self.my_confirm_email(method, m.group(1), environ)
         if path == "/admin/login":
             return self.admin_login(method, environ)
         if path == "/admin":
@@ -1526,6 +1554,7 @@ class App:
             body = f"""
             <div class="submit-row">
               <a href="/courses"><button type="button">New booking</button></a>
+              <a href="/my/settings"><button type="button">Account settings</button></a>
             </div>
             <h3>Upcoming</h3>
             {upcoming_html}
@@ -1990,6 +2019,250 @@ class App:
             user = None
         payload = {"logged_in": user is not None, "email": user.email if user else None}
         return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
+
+    # -- /my/settings -----------------------------------------------------------
+    #
+    # 2026-07-10: a guest's own name is fixed at signup/first-booking time,
+    # and there was previously no way to change it or the login email
+    # without deleting the whole account. Name changes take effect
+    # immediately (nothing sensitive). Email changes are a two-step,
+    # dual-address-notified flow -- see my_settings_email()/
+    # _send_email_change_emails() below -- because the login email IS the
+    # account identifier: changing it silently, or without the account's
+    # ORIGINAL owner ever finding out, would be a much bigger deal than a
+    # display-name edit.
+
+    def _confirm_email_expired(self, user) -> bool:
+        """See _confirm_token_expired's own docstring -- identical shape,
+        just checking pending_email_token_created_at/CONFIRM_TOKEN_TTL_HOURS
+        instead. Reusing the same TTL constant rather than inventing a
+        second one: there's no reason an email-change link should live
+        longer or shorter than an account-confirmation link."""
+        if not user.pending_email_token_created_at:
+            return False
+        created = datetime.fromisoformat(user.pending_email_token_created_at)
+        return datetime.now(timezone.utc) - created > timedelta(hours=CONFIRM_TOKEN_TTL_HOURS)
+
+    def _send_email_change_emails(self, user, new_email: str, token: str) -> None:
+        """Sent the moment a change is REQUESTED (not yet confirmed) -- one
+        to the NEW address (the only one that can actually confirm, via
+        the link below) and one to the CURRENT address (informational
+        only, no link), so the real account owner notices if they didn't
+        request this themselves. Mirrors _send_confirm_email's tone/expiry
+        wording. See _send_email_change_confirmed_emails for the matching
+        final-confirmation pair, sent once the link below is actually
+        clicked (in my_confirm_email)."""
+        site = self._site_label()
+        confirm_url = f"{self.settings.base_url}/my/confirm-email/{token}"
+        send_mail(
+            self.settings, new_email, f"Confirm your new email for your {site} account",
+            f"You requested to change the login email on your {site} booking account from "
+            f"{user.email} to this address.\n\nClick below to confirm:\n\n{confirm_url}\n\n"
+            f"This link expires in {CONFIRM_TOKEN_TTL_HOURS} hours. Once confirmed, this address "
+            f"becomes your login email and {user.email} will no longer have access to this "
+            "account.\n\nIf you didn't request this, you can safely ignore this email -- nothing "
+            "changes unless this link is clicked.",
+        )
+        send_mail(
+            self.settings, user.email, f"Email change requested for your {site} account",
+            f"A request was made to change the login email on your {site} booking account from "
+            f"this address to {new_email}.\n\nIf you made this request, no action is needed here "
+            f"-- once {new_email} confirms via its own emailed link, this address will no longer "
+            "have access to the account.\n\nIf you didn't request this, log in and cancel the "
+            f"pending change under Account settings ({self.settings.base_url}/my/settings), or "
+            "contact us.",
+        )
+
+    def _send_email_change_confirmed_emails(self, old_email: str, new_email: str) -> None:
+        """Sent once (in my_confirm_email, right after Store.apply_pending_email
+        actually swaps the email) -- to BOTH the new (now active) and old
+        (now removed) addresses, so neither side is left guessing which
+        one won. Deliberately plain-text only (no ics/html) -- this is a
+        one-line account notice, not a booking."""
+        site = self._site_label()
+        send_mail(
+            self.settings, new_email, f"Your {site} login email is now confirmed",
+            f"Your {site} booking account's login email is now {new_email}. Use this address to "
+            "log in from now on.",
+        )
+        send_mail(
+            self.settings, old_email, f"Your {site} login email has changed",
+            f"Your {site} booking account's login email has changed from this address to "
+            f"{new_email}. This address can no longer be used to log in.",
+        )
+
+    def _my_settings_page(
+        self, environ, user, *, name_error: str | None = None,
+        email_error: str | None = None,
+    ):
+        banner = self._session_banner_html(environ, on_my_page=True)
+        name_err_html = f'<p class="err">{esc(name_error)}</p>' if name_error else ""
+        name_body = f"""{name_err_html}<form method="post" action="/my/settings/name" class="card">
+          <label>Name <input class="big-input" name="name" type="text" value="{esc(user.name)}" required></label>
+          <div class="submit-row"><button type="submit">Save name</button></div>
+        </form>"""
+
+        # email_err_html is rendered above EITHER branch below (not just
+        # the request-form one) -- a rate-limit hit can occur on an
+        # account that already has a pending change (this handler's own
+        # `user` reflects state as of just before that blocked attempt),
+        # and the error would otherwise be silently dropped by the
+        # pending-change branch, which has no error slot of its own.
+        email_err_html = f'<p class="err">{esc(email_error)}</p>' if email_error else ""
+        if user.pending_email:
+            email_body = f"""{email_err_html}<div class="card">
+              <p>Email change pending: <b>{esc(user.email)}</b> &rarr; <b>{esc(user.pending_email)}</b></p>
+              <p class="hint">Check <b>{esc(user.pending_email)}</b> for a confirmation link
+                (expires {CONFIRM_TOKEN_TTL_HOURS}h after it was sent).</p>
+              <form method="post" action="/my/settings/email/cancel">
+                <div class="submit-row"><button type="submit">Cancel this change</button></div>
+              </form>
+            </div>"""
+        else:
+            email_body = f"""{email_err_html}<form method="post" action="/my/settings/email" class="card">
+              <label>Current email <input class="big-input" value="{esc(user.email)}" disabled></label>
+              <label>New email <input class="big-input" name="email" type="email" required></label>
+              <p class="hint">We'll email a confirmation link to the new address -- your login
+                email only changes once that link is clicked.</p>
+              <div class="submit-row"><button type="submit">Change email</button></div>
+            </form>"""
+
+        body = f"""
+        <h3>Name</h3>
+        {name_body}
+        <h3>Email</h3>
+        {email_body}
+        <p><a href="/my">Back to my bookings</a></p>"""
+        return "200 OK", [("Content-Type", "text/html")], page("Account settings", body, banner=banner)
+
+    def my_settings(self, method: str, environ):
+        if method != "GET":
+            return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
+        session = _get_session(environ)
+        if not session or session.get("kind") != "guest":
+            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+        user = self.store.find_user_by_id(session["user_id"])
+        if user is None:
+            # Stale session pointing at a since-deleted/erased account --
+            # same recovery as _session_banner_html's own stale-session
+            # handling: drop the dead cookie rather than 403ing forever.
+            SESSIONS.pop(session["_sid"], None)
+            return (
+                "302 Found",
+                [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))],
+                "",
+            )
+        return self._my_settings_page(environ, user)
+
+    def my_settings_name(self, method: str, environ):
+        if method != "POST":
+            return "302 Found", [("Location", "/my/settings")], ""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "guest":
+            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+        user = self.store.find_user_by_id(session["user_id"])
+        if user is None:
+            return "302 Found", [("Location", "/my")], ""
+        form = self._read_form(environ)
+        name = form.get("name", "").strip()
+        if not name:
+            return self._my_settings_page(environ, user, name_error="Name can't be empty.")
+        self.store.set_name(user.user_id, name)
+        return "302 Found", [("Location", "/my/settings")], ""
+
+    def my_settings_email(self, method: str, environ):
+        """Requests an email change -- rate-limited per user_id (see
+        email_change_limiter's own comment), since unlike /my/reset or
+        /my/signup this action is only reachable from an authenticated
+        session, so there's no anonymous-probing concern to key on
+        email/IP instead. Rejects a target email already in use by a
+        DIFFERENT account -- login emails are the account's own unique
+        key everywhere else in this app (find_user_by_email), so silently
+        allowing two accounts to fight over the same address would break
+        that assumption elsewhere (e.g. which account a future booking
+        under that email attaches to)."""
+        if method != "POST":
+            return "302 Found", [("Location", "/my/settings")], ""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "guest":
+            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+        user = self.store.find_user_by_id(session["user_id"])
+        if user is None:
+            return "302 Found", [("Location", "/my")], ""
+        form = self._read_form(environ)
+        new_email = form.get("email", "").strip().lower()
+        if not new_email or "@" not in new_email:
+            return self._my_settings_page(environ, user, email_error="Please enter a valid email address.")
+        if new_email == user.email.strip().lower():
+            return self._my_settings_page(environ, user, email_error="That's already your current email.")
+        other = self.store.find_user_by_email(new_email)
+        if other is not None and other.user_id != user.user_id:
+            return self._my_settings_page(
+                environ, user, email_error="That email is already in use by another account."
+            )
+        now = time.time()
+        key = f"email-change:{user.user_id}"
+        if not email_change_limiter.allow(key, now=now):
+            log.warning("rate limit blocked: email change for user %s", user.user_id)
+            return self._my_settings_page(environ, user, email_error="Too many attempts -- try again later.")
+        token = new_token()
+        self.store.set_pending_email(user.user_id, new_email, hash_token(token), now_iso())
+        self._send_email_change_emails(user, new_email, token)
+        return "302 Found", [("Location", "/my/settings")], ""
+
+    def my_settings_email_cancel(self, method: str, environ):
+        if method != "POST":
+            return "302 Found", [("Location", "/my/settings")], ""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "guest":
+            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+        self.store.clear_pending_email(session["user_id"])
+        return "302 Found", [("Location", "/my/settings")], ""
+
+    def my_confirm_email(self, method: str, token: str, environ):
+        """GET-preview/POST-consume landing page for a requested email
+        change (see my_settings_email() above) -- same shape and same
+        three-outcome ordering as my_confirm(): expired / superseded-by-
+        a-newer-request / generic invalid (see that method's own
+        docstring for why this order and wording). Deliberately does NOT
+        touch login/session state or password -- purely swaps which
+        email an account uses; can be confirmed from a completely
+        different browser/session than the one that requested it (e.g.
+        opening the new inbox on a different device)."""
+        token_hash = hash_token(token)
+        user = self.store.find_user_by_pending_email_token_hash(token_hash)
+        if user is not None and self._confirm_email_expired(user):
+            body = (f'<p>This link has expired -- email confirmation links are only valid for '
+                     f'{CONFIRM_TOKEN_TTL_HOURS} hours. Request the change again from '
+                     '<a href="/my/settings">Account settings</a>.</p>')
+            return "200 OK", [("Content-Type", "text/html")], page("Link expired", body)
+        if user is None:
+            superseded = self.store.find_user_by_prev_pending_email_token_hash(token_hash)
+            if superseded is not None:
+                body = ('<p>This link has been disabled because a newer email change request '
+                        'was already sent -- check your inbox for the latest email.</p>')
+                return "200 OK", [("Content-Type", "text/html")], page("Link replaced", body)
+            body = '<p>This link is invalid or has already been used.</p>'
+            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+
+        new_email = user.pending_email
+        if method == "POST":
+            old_email = user.email
+            updated = self.store.apply_pending_email(user.user_id)
+            if updated is None:
+                body = '<p>This link is invalid or has already been used.</p>'
+                return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+            self._send_email_change_confirmed_emails(old_email, new_email)
+            body = (f'<p>Your login email is now <b>{esc(new_email)}</b>.</p>'
+                    '<p><a href="/my/settings">Back to account settings</a></p>')
+            return "200 OK", [("Content-Type", "text/html")], page("Email confirmed", body)
+
+        body = (f'<p>Confirm changing your login email from <b>{esc(user.email)}</b> to '
+                f'<b>{esc(new_email)}</b>?</p>'
+                '<form method="post" class="card">'
+                '<div class="submit-row"><button type="submit">Confirm change</button></div>'
+                '</form>')
+        return "200 OK", [("Content-Type", "text/html")], page("Confirm email change", body)
 
     # -- /admin ---------------------------------------------------------------
 

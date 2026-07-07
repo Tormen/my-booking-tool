@@ -477,6 +477,223 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn(f'<a href="{self.settings.base_url}">', body)
 
 
+class MySettingsTest(unittest.TestCase):
+    """2026-07-10, the operator: a self-service /my/settings page to change name
+    (immediate) and login email (two-step, dual-address-notified --
+    see app/webapp.py's "-- /my/settings --" section for the full
+    rationale). Reuses SessionBannerTest's own App/Store construction and
+    _login_environ helper pattern."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings()
+        self.app = App(self.settings, self.store)
+        self.sent_emails = []
+
+        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None):
+            self.sent_emails.append((to, subject, body))
+
+        for target in ("app.webapp.send_mail",):
+            patcher = patch(target, side_effect=recorder)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _login_environ(self, email: str = "regular@example.org", name: str = "Regular") -> dict:
+        user = self.store.upsert_user_for_booking(email, name)
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        sid = webapp._new_session({"kind": "guest", "user_id": user.user_id})
+        return {"HTTP_COOKIE": f"session={sid}"}
+
+    @staticmethod
+    def _post_environ(environ: dict, form: dict) -> dict:
+        body_bytes = urlencode(form).encode()
+        return dict(environ, CONTENT_LENGTH=str(len(body_bytes)), **{"wsgi.input": io.BytesIO(body_bytes)})
+
+    # -- auth gating ----------------------------------------------------------
+
+    def test_settings_page_requires_login(self):
+        status, _headers, _body = self.app.my_settings("GET", {})
+        self.assertEqual(status, "403 Forbidden")
+
+    def test_settings_name_post_requires_login(self):
+        status, _headers, _body = self.app.my_settings_name("POST", self._post_environ({}, {"name": "X"}))
+        self.assertEqual(status, "403 Forbidden")
+
+    def test_settings_email_post_requires_login(self):
+        status, _headers, _body = self.app.my_settings_email(
+            "POST", self._post_environ({}, {"email": "x@example.org"})
+        )
+        self.assertEqual(status, "403 Forbidden")
+
+    # -- name change ------------------------------------------------------------
+
+    def test_settings_page_shows_current_name_and_email(self):
+        environ = self._login_environ("regular@example.org", "Regular")
+        _status, _headers, body = self.app.my_settings("GET", environ)
+        self.assertIn('value="Regular"', body)
+        self.assertIn("regular@example.org", body)
+
+    def test_name_change_takes_effect_immediately(self):
+        environ = self._login_environ("regular@example.org", "Regular")
+        status, headers, _body = self.app.my_settings_name(
+            "POST", self._post_environ(environ, {"name": "New Name"})
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my/settings")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.assertEqual(user.name, "New Name")
+
+    def test_blank_name_is_rejected(self):
+        environ = self._login_environ("regular@example.org", "Regular")
+        status, _headers, body = self.app.my_settings_name("POST", self._post_environ(environ, {"name": "  "}))
+        self.assertEqual(status, "200 OK")
+        self.assertIn("can&#x27;t be empty", body)
+        user = self.store.find_user_by_email("regular@example.org")
+        self.assertEqual(user.name, "Regular")
+
+    # -- email change: requesting -----------------------------------------------
+
+    def test_invalid_new_email_is_rejected(self):
+        environ = self._login_environ("regular@example.org")
+        _status, _headers, body = self.app.my_settings_email(
+            "POST", self._post_environ(environ, {"email": "not-an-email"})
+        )
+        self.assertIn("valid email", body)
+        self.assertEqual(self.sent_emails, [])
+
+    def test_same_as_current_email_is_rejected(self):
+        environ = self._login_environ("regular@example.org")
+        _status, _headers, body = self.app.my_settings_email(
+            "POST", self._post_environ(environ, {"email": "regular@example.org"})
+        )
+        self.assertIn("already your current email", body)
+        self.assertEqual(self.sent_emails, [])
+
+    def test_email_already_used_by_another_account_is_rejected(self):
+        self.store.upsert_user_for_booking("taken@example.org", "Someone Else")
+        environ = self._login_environ("regular@example.org")
+        _status, _headers, body = self.app.my_settings_email(
+            "POST", self._post_environ(environ, {"email": "taken@example.org"})
+        )
+        self.assertIn("already in use", body)
+        self.assertEqual(self.sent_emails, [])
+
+    def test_valid_email_change_request_sets_pending_and_emails_both_addresses(self):
+        environ = self._login_environ("regular@example.org")
+        status, headers, _body = self.app.my_settings_email(
+            "POST", self._post_environ(environ, {"email": "new@example.org"})
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my/settings")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.assertEqual(user.pending_email, "new@example.org")
+        self.assertEqual(user.email, "regular@example.org")  # not swapped yet
+        recipients = {to for to, _subj, _body in self.sent_emails}
+        self.assertEqual(recipients, {"new@example.org", "regular@example.org"})
+        new_body = next(b for to, _s, b in self.sent_emails if to == "new@example.org")
+        old_body = next(b for to, _s, b in self.sent_emails if to == "regular@example.org")
+        self.assertIn("/my/confirm-email/", new_body)  # only the new address gets the link
+        self.assertNotIn("/my/confirm-email/", old_body)
+        self.assertIn("new@example.org", old_body)  # old address is told what it's changing to
+
+    def test_settings_page_shows_pending_change_and_hides_request_form(self):
+        environ = self._login_environ("regular@example.org")
+        self.app.my_settings_email("POST", self._post_environ(environ, {"email": "new@example.org"}))
+        _status, _headers, body = self.app.my_settings("GET", environ)
+        self.assertIn("Email change pending", body)
+        self.assertIn("new@example.org", body)
+        self.assertNotIn('name="email" type="email" required', body)  # request form is gone
+
+    def test_email_change_rate_limited(self):
+        environ = self._login_environ("regular@example.org")
+        for i in range(5):
+            self.app.my_settings_email("POST", self._post_environ(environ, {"email": f"try{i}@example.org"}))
+        _status, _headers, body = self.app.my_settings_email(
+            "POST", self._post_environ(environ, {"email": "onemore@example.org"})
+        )
+        self.assertIn("Too many attempts", body)
+
+    def test_cancel_pending_change_clears_it(self):
+        environ = self._login_environ("regular@example.org")
+        self.app.my_settings_email("POST", self._post_environ(environ, {"email": "new@example.org"}))
+        status, headers, _body = self.app.my_settings_email_cancel("POST", environ)
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my/settings")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.assertEqual(user.pending_email, "")
+
+    def _request_email_change(self, environ, new_email: str) -> str:
+        """Requests a change and returns the plaintext confirm token
+        embedded in the email sent to the new address."""
+        self.app.my_settings_email("POST", self._post_environ(environ, {"email": new_email}))
+        new_body = next(b for to, _s, b in self.sent_emails if to == new_email)
+        return new_body.split("/my/confirm-email/", 1)[1].split("\n", 1)[0].strip()
+
+    # -- email change: confirming -----------------------------------------------
+
+    def test_confirm_email_get_previews_without_applying(self):
+        environ = self._login_environ("regular@example.org")
+        token = self._request_email_change(environ, "new@example.org")
+        _status, _headers, body = self.app.my_confirm_email("GET", token, {})
+        self.assertIn("regular@example.org", body)
+        self.assertIn("new@example.org", body)
+        user = self.store.find_user_by_email("regular@example.org")
+        self.assertEqual(user.email, "regular@example.org")  # unchanged by GET
+
+    def test_confirm_email_post_applies_change_and_emails_both_addresses(self):
+        environ = self._login_environ("regular@example.org")
+        token = self._request_email_change(environ, "new@example.org")
+        self.sent_emails.clear()
+        status, _headers, body = self.app.my_confirm_email("POST", token, {})
+        self.assertEqual(status, "200 OK")
+        self.assertIn("new@example.org", body)
+        self.assertIsNone(self.store.find_user_by_email("regular@example.org"))
+        updated = self.store.find_user_by_email("new@example.org")
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.pending_email, "")
+        recipients = {to for to, _s, _b in self.sent_emails}
+        self.assertEqual(recipients, {"new@example.org", "regular@example.org"})
+
+    def test_confirm_email_works_without_a_login_session(self):
+        # Deliberately confirmable from a different browser/device than
+        # the one that requested it -- no session cookie required.
+        environ = self._login_environ("regular@example.org")
+        token = self._request_email_change(environ, "new@example.org")
+        status, _headers, _body = self.app.my_confirm_email("POST", token, {})
+        self.assertEqual(status, "200 OK")
+
+    def test_confirm_email_token_cannot_be_reused(self):
+        environ = self._login_environ("regular@example.org")
+        token = self._request_email_change(environ, "new@example.org")
+        self.app.my_confirm_email("POST", token, {})
+        _status, _headers, body = self.app.my_confirm_email("POST", token, {})
+        self.assertIn("invalid or has already been used", body)
+
+    def test_confirm_email_invalid_token_shows_generic_message(self):
+        _status, _headers, body = self.app.my_confirm_email("GET", "bogus-token", {})
+        self.assertIn("invalid or has already been used", body)
+
+    def test_confirm_email_superseded_by_newer_request_shows_friendlier_message(self):
+        environ = self._login_environ("regular@example.org")
+        old_token = self._request_email_change(environ, "first@example.org")
+        self.sent_emails.clear()
+        self._request_email_change(environ, "second@example.org")
+        _status, _headers, body = self.app.my_confirm_email("GET", old_token, {})
+        self.assertIn("newer email change request", body)
+
+    def test_confirm_email_expired_token_shows_expiry_message(self):
+        environ = self._login_environ("regular@example.org")
+        token = self._request_email_change(environ, "new@example.org")
+        user = self.store.find_user_by_email("regular@example.org")
+        stale = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat(timespec="seconds")
+        self.store.set_pending_email(user.user_id, user.pending_email, user.pending_email_token_hash, stale)
+        _status, _headers, body = self.app.my_confirm_email("GET", token, {})
+        self.assertIn("expired", body)
+
+
 class MySessionStatusTest(unittest.TestCase):
     """GET /my/session (2026-07-09) -- the STATIC homepage's own JS calls
     this to ask "is this browser already logged in as a guest?" so it can
