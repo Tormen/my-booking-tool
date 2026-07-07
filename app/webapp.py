@@ -594,6 +594,18 @@ class App:
         # return -- see _session_banner_html's own docstring.
         banner = self._session_banner_html(environ)
 
+        # 2026-07-09, the operator (screenshots of /book + /my): "when you are
+        # logged in Name + email on booking page should be filled and
+        # greyed out or hidden". `logged_in_user`, when set, is threaded
+        # through every _book_page() render below so the name/email
+        # fields are always prefilled+readonly for an active guest
+        # session -- never re-blanked on an error-retry render either.
+        session = _get_session(environ)
+        logged_in_user = (
+            self.store.find_user_by_id(session["user_id"])
+            if session and session.get("kind") == "guest" else None
+        )
+
         def capacity_lookup(sn, d):
             return self.store.count_confirmed(sn, d.isoformat())
 
@@ -605,22 +617,43 @@ class App:
         if method == "POST":
             form = self._read_form(environ)
             if form.get("agree") != "on":
-                return self._book_page(course, occurrences, error="Please acknowledge the participation terms.", banner=banner)
+                return self._book_page(
+                    course, occurrences, error="Please acknowledge the participation terms.",
+                    banner=banner, logged_in_user=logged_in_user,
+                )
             occ_date = form.get("occurrence_date", "")
             occ = {o.date.isoformat(): o for o in occurrences}.get(occ_date)
             if occ is None:
-                return self._book_page(course, occurrences, error="That slot is no longer available.", banner=banner)
-            email, name = form.get("email", "").strip(), form.get("name", "").strip()
+                return self._book_page(
+                    course, occurrences, error="That slot is no longer available.",
+                    banner=banner, logged_in_user=logged_in_user,
+                )
+            # An active guest session always books under ITS OWN identity --
+            # the name/email fields are readonly client-side (see
+            # _book_page()) purely as a courtesy/clarity cue, but readonly
+            # is not a security boundary, so the server enforces this too:
+            # whatever the form submitted for name/email is ignored/
+            # overridden whenever logged_in_user is set, rather than trusted
+            # as-is. Also closes a possible confusion where a logged-in
+            # session could otherwise create a booking attributed to a
+            # DIFFERENT email while the banner still says "Logged in as X".
+            if logged_in_user is not None:
+                email, name = logged_in_user.email, logged_in_user.name
+            else:
+                email, name = form.get("email", "").strip(), form.get("name", "").strip()
             if not email or "@" not in email or not name:
-                return self._book_page(course, occurrences, error="Please fill in your name and a valid email.", banner=banner)
+                return self._book_page(
+                    course, occurrences, error="Please fill in your name and a valid email.",
+                    banner=banner, logged_in_user=logged_in_user,
+                )
 
             rejection = self._late_booking_rejection(occ, now)
             if rejection:
-                return self._book_page(course, occurrences, error=rejection, banner=banner)
+                return self._book_page(course, occurrences, error=rejection, banner=banner, logged_in_user=logged_in_user)
 
             guests, guest_error = self._parse_guest_entries(form, email)
             if guest_error:
-                return self._book_page(course, occurrences, error=guest_error, banner=banner)
+                return self._book_page(course, occurrences, error=guest_error, banner=banner, logged_in_user=logged_in_user)
 
             # No password is ever collected here -- upsert_user_for_booking
             # only ever touches `name`, leaving any existing account's
@@ -686,7 +719,7 @@ class App:
             )
             return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Almost there", body, banner=banner)
 
-        return self._book_page(course, occurrences, banner=banner)
+        return self._book_page(course, occurrences, banner=banner, logged_in_user=logged_in_user)
 
     def _booking_details_text(self, course, occ_date: str) -> str:
         """Thin wrapper around app.cancellation.booking_details_text (moved
@@ -942,13 +975,23 @@ class App:
         drops the "My bookings" link -- a link back to the exact page
         you're already looking at is dead weight, not a shortcut. Only
         my() passes this; /courses and /book (where "My bookings" is a
-        genuine link elsewhere) leave it at the default."""
+        genuine link elsewhere) leave it at the default.
+
+        2026-07-09, the operator (screenshots of /book + /my): "Make it so that
+        the top-bar is ALWAYS visible (except for index.html) either with
+        LOGIN or with the BAR." -- an anonymous visitor to /courses or
+        /book now gets a small "Login" banner instead of nothing at all,
+        same box/position the logged-in banner uses, so the bar is never
+        just... absent. /my's own anonymous view is deliberately NOT given
+        one here -- that page IS the Login/Sign up form already (see
+        _my_login_page()), so a "Login" banner sitting above a login form
+        would be redundant, not helpful."""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return ""
+            return self._anonymous_banner_html()
         user = self.store.find_user_by_id(session["user_id"])
         if user is None:
-            return ""
+            return self._anonymous_banner_html()
         my_bookings_link = "" if on_my_page else '<a href="/my">My bookings</a> &middot; '
         return (
             '<div class="session-banner">'
@@ -957,6 +1000,20 @@ class App:
             f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a> &middot; '
             '<form method="post" action="/my/logout">'
             '<button type="submit" class="link-button">Log out</button></form></span>'
+            "</div>"
+        )
+
+    def _anonymous_banner_html(self) -> str:
+        """The "not logged in" half of the always-visible top-bar (see
+        _session_banner_html()'s own docstring) -- same box, a plain Login
+        link instead of "Logged in as...". Also links to the homepage, same
+        as the logged-in banner does, so an anonymous visitor gets that
+        one-click way back too."""
+        return (
+            '<div class="session-banner">'
+            "<span>Not logged in</span>"
+            f'<span><a href="/my">Login</a> &middot; '
+            f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
             "</div>"
         )
 
@@ -1108,7 +1165,7 @@ class App:
             "if that's still reachable."
         )
 
-    def _book_page(self, course, occurrences, error: str | None = None, banner: str = ""):
+    def _book_page(self, course, occurrences, error: str | None = None, banner: str = "", logged_in_user=None):
         subtitle = _course_subtitle_html(course)
         # course.description is operator-authored (settings.toml, edited by
         # whoever runs this install), not guest-submitted -- unlike every
@@ -1145,6 +1202,33 @@ class App:
             first_label = "Join waitlist" if occurrences[0].is_full else self.settings.book_button_label
             note_html = f'<p class="note">{esc(note)}</p>' if (note := self._policy_note()) else ""
             err_html = f'<p class="err">{esc(error)}</p>' if error else ""
+            # 2026-07-09, the operator: "when you are logged in Name + email on
+            # booking page should be filled and greyed out or hidden" --
+            # prefilled+readonly (NOT disabled: a disabled input's value is
+            # never submitted at all, which would break the POST; readonly
+            # still submits it, just blocks editing) for an active guest
+            # session, reusing their own account name/email. The "first
+            # time booking?" hint is dropped in that case too -- it's about
+            # brand-new/unconfirmed emails, which can't apply to someone
+            # already logged in with a password. See book()'s own comment
+            # on why the server ALSO enforces this (readonly is client-side
+            # only, not a security boundary).
+            if logged_in_user is not None:
+                name_field = (
+                    f'<input class="big-input" name="name" value="{esc(logged_in_user.name)}" readonly required>'
+                )
+                email_field = (
+                    f'<input class="big-input" name="email" type="email" '
+                    f'value="{esc(logged_in_user.email)}" readonly required>'
+                )
+                first_time_hint = ""
+            else:
+                name_field = '<input class="big-input" name="name" required>'
+                email_field = '<input class="big-input" name="email" type="email" required>'
+                first_time_hint = (
+                    "<p class=\"hint\">First time booking with this email? We'll send a link to confirm your\n"
+                    "                account and set a password.</p>"
+                )
             body = f"""
             {subtitle}
             {desc_html}
@@ -1156,11 +1240,10 @@ class App:
               </label>
               <div class="selected-box">Selected date: <strong id="selected-date-text">{esc(occurrences[0].date.isoformat())}</strong></div>
               <label>Your name <span class="req">(required)</span>
-                <input class="big-input" name="name" required></label>
+                {name_field}</label>
               <label>Your email <span class="req">(required)</span>
-                <input class="big-input" name="email" type="email" required></label>
-              <p class="hint">First time booking with this email? We'll send a link to confirm your
-                account and set a password.</p>
+                {email_field}</label>
+              {first_time_hint}
               <div class="guests-section">
                 <div id="guest-rows"></div>
                 <button type="button" id="add-guest-btn" class="link-button">+ Add participant</button>

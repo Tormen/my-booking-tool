@@ -42,12 +42,13 @@ def page(title: str, body: str, banner: str = "") -> str:
 <title>{esc(title)}</title>
 <style>
 body{{font-family:sans-serif;max-width:640px;margin:2em auto;padding:0 1em;color:#222}}
-.session-banner{{display:flex;justify-content:space-between;align-items:center;gap:1em;
-  background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.5em 1em;
-  margin-bottom:1em;font-size:.9em}}
+.session-banner{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;
+  gap:.3em 1em;background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.5em 1em;
+  margin-bottom:1em;font-size:.9em;overflow-wrap:anywhere}}
 .session-banner form{{display:inline}}
 a{{color:#196B24}} .err{{color:#b00020}} .note{{color:#555;font-size:.9em}} .card{{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}}
 input,button,textarea{{font-size:1em;padding:.4em;margin:.2em 0}} button{{cursor:pointer}}
+input[readonly]{{background:#eee;color:#555;cursor:not-allowed}}
 label{{display:block;margin-top:.6em}}
 .subtitle{{color:#444;margin:-.4em 0 1em;font-size:1.2em;font-weight:500}}
 .req{{color:#b00020}}

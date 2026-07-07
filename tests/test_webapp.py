@@ -348,6 +348,12 @@ class SessionBannerTest(unittest.TestCase):
         sid = webapp._new_session({"kind": "guest", "user_id": user.user_id})
         return {"HTTP_COOKIE": f"session={sid}"}
 
+    def _occ_date(self) -> str:
+        occs = build_occurrences(
+            self.course, self.settings, datetime.now(timezone.utc), lambda sn, d: 0, lambda start, end: False,
+        )
+        return occs[0].date.isoformat()
+
     def test_courses_shows_banner_when_logged_in(self):
         environ = self._login_environ("regular@example.org")
         _status, _headers, body = self.app.courses("GET", environ)
@@ -359,9 +365,15 @@ class SessionBannerTest(unittest.TestCase):
         # shortcut here and must stay.
         self.assertIn(">My bookings<", body)
 
-    def test_courses_shows_no_banner_when_anonymous(self):
+    def test_courses_shows_login_banner_when_anonymous(self):
+        # 2026-07-09, the operator: "Make it so that the top-bar is ALWAYS visible
+        # (except for index.html) either with LOGIN or with the BAR." --
+        # used to render no banner at all when anonymous; now shows a
+        # "Login" link in the same box instead of nothing.
         _status, _headers, body = self.app.courses("GET", {})
-        self.assertNotIn('class="session-banner"', body)
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("Not logged in", body)
+        self.assertIn('<a href="/my">Login</a>', body)
 
     def test_book_form_shows_banner_when_logged_in(self):
         environ = self._login_environ("regular@example.org")
@@ -369,9 +381,80 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn('class="session-banner"', body)
         self.assertIn("regular@example.org", body)
 
-    def test_book_form_shows_no_banner_when_anonymous(self):
+    def test_book_form_shows_login_banner_when_anonymous(self):
         _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("Not logged in", body)
+        self.assertIn('<a href="/my">Login</a>', body)
+
+    def test_stale_session_pointing_at_a_deleted_user_shows_login_banner(self):
+        # A session cookie can outlive the account it points to (deleted
+        # via /my/delete-account, or erased) -- must fall back to the
+        # anonymous banner, not crash or show a blank top-bar.
+        sid = webapp._new_session({"kind": "guest", "user_id": "no-such-user-id"})
+        environ = {"HTTP_COOKIE": f"session={sid}"}
+        _status, _headers, body = self.app.courses("GET", environ)
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("Not logged in", body)
+
+    def test_my_page_anonymous_view_has_no_redundant_login_banner(self):
+        # Deliberately NOT given the anonymous "Login" banner -- this page
+        # already IS the Login/Sign up form (_my_login_page()), so a
+        # "Login" link banner above it would be redundant.
+        _status, _headers, body = self.app.my("GET", {})
         self.assertNotIn('class="session-banner"', body)
+        self.assertIn('id="my-tab-login"', body)
+
+    # -- 2026-07-09: booking-page name/email prefilled+locked when logged in --
+
+    def test_book_page_prefills_and_locks_name_email_when_logged_in(self):
+        environ = self._login_environ("regular@example.org")
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        self.assertIn('name="name" value="Regular" readonly required', body)
+        self.assertIn('name="email" type="email" value="regular@example.org" readonly required', body)
+        # Irrelevant once already logged in with a password.
+        self.assertNotIn("First time booking with this email?", body)
+
+    def test_book_page_fields_stay_editable_when_anonymous(self):
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn('<input class="big-input" name="name" required>', body)
+        self.assertIn('<input class="big-input" name="email" type="email" required>', body)
+        # Only the CSS selector "input[readonly]" (always present in the
+        # <style> block) should mention "readonly" here -- no actual input
+        # tag should have the attribute for an anonymous visitor.
+        self.assertNotIn('name="name" value=', body)
+        self.assertNotIn('name="email" type="email" value=', body)
+        self.assertIn("First time booking with this email?", body)
+
+    def test_book_page_error_retry_keeps_fields_locked_when_logged_in(self):
+        # the operator's fields must stay prefilled+readonly even on a re-render
+        # after a validation error -- not just the fresh GET.
+        environ = self._login_environ("regular@example.org")
+        form = {"occurrence_date": self._occ_date(), "name": "Regular", "email": "regular@example.org"}  # no agree
+        body_bytes = urlencode(form).encode()
+        post_environ = dict(environ, CONTENT_LENGTH=str(len(body_bytes)), **{"wsgi.input": io.BytesIO(body_bytes)})
+        _status, _headers, body = self.app.book("POST", "yoga-class-1", post_environ)
+        self.assertIn("acknowledge the participation terms", body)
+        self.assertIn('name="name" value="Regular" readonly required', body)
+        self.assertIn('name="email" type="email" value="regular@example.org" readonly required', body)
+
+    def test_logged_in_booking_ignores_submitted_email_and_uses_session_identity(self):
+        # readonly is client-side only -- the server must not trust a
+        # tampered submission over the session's own identity.
+        environ = self._login_environ("regular@example.org")
+        form = {
+            "occurrence_date": self._occ_date(), "name": "Someone Else", "email": "someone-else@example.org",
+            "agree": "on",
+        }
+        body_bytes = urlencode(form).encode()
+        post_environ = dict(environ, CONTENT_LENGTH=str(len(body_bytes)), **{"wsgi.input": io.BytesIO(body_bytes)})
+        _status, _headers, _body = self.app.book("POST", "yoga-class-1", post_environ)
+        self.assertIsNone(self.store.find_user_by_email("someone-else@example.org"))
+        regs = self.store.all_registrations()
+        self.assertEqual(len(regs), 1)
+        booked_user = self.store.find_user_by_id(regs[0].user_id)
+        self.assertEqual(booked_user.email, "regular@example.org")
+        self.assertEqual(booked_user.name, "Regular")
 
     def test_booking_result_page_also_shows_banner_when_logged_in(self):
         environ = self._login_environ("regular@example.org")
