@@ -164,9 +164,23 @@ def print_report(
     show(report["nginx_locations"])
     if any(level != "ok" and label.startswith("nginx location ")
            for label, level, _ in report["nginx_locations"]):
-        print_fn("   Add any missing block(s) from /usr/share/my-booking-tool/my-booking.conf.example")
-        print_fn("   to your existing vhost (not edited automatically -- see README.md \"Installing\"),")
-        print_fn("   then: sudo nginx -t && sudo systemctl reload nginx")
+        # If this checkout already has a real, complete personal vhost conf
+        # (site/nginx-locations.conf -- see check_nginx_conf_repo_file()
+        # just below), point at THAT instead of the bare generic packaged
+        # example: it's your own already-hardened file, not a from-scratch
+        # template to re-adapt (2026-07-10, the operator, after seeing exactly this
+        # hint fire while his own complete file sat unused in site/: "But
+        # YOU can prepare here the correct nginx-locations.conf to be
+        # complete already, or?").
+        if any(level == "ok" for _, level, _ in report["nginx_conf_repo_file"]):
+            print_fn(f"   Add any missing block(s) from this checkout's own, already-complete")
+            print_fn(f"   site/{cli_checks._NGINX_CONF_FILENAME} to your live vhost (not deployed")
+            print_fn("   automatically -- see README.md \"Installing\"), then:")
+            print_fn("   sudo nginx -t && sudo systemctl reload nginx")
+        else:
+            print_fn("   Add any missing block(s) from /usr/share/my-booking-tool/my-booking.conf.example")
+            print_fn("   to your existing vhost (not edited automatically -- see README.md \"Installing\"),")
+            print_fn("   then: sudo nginx -t && sudo systemctl reload nginx")
 
     print_fn("\n   Real, personal nginx vhost conf kept in this checkout's site/ dir (if any):")
     show(report["nginx_conf_repo_file"])
@@ -334,9 +348,21 @@ def interactive_setup(
     ]
     for label, level, detail in nginx_checks:
         print_fn(f"[{level}] {label}: {detail}")
+    repo_file_checks = cli_checks.check_nginx_conf_repo_file(home)
+    repo_file_ok = any(level == "ok" for _, level, _ in repo_file_checks)
     if missing_locations:
+        # Point at this checkout's own real, already-complete vhost conf
+        # (checked just below) instead of the bare generic packaged example
+        # when one exists -- it's already hardened and has every block this
+        # app needs, not a from-scratch template to re-adapt (2026-07-10,
+        # the operator, seeing this hint fire while his own complete file sat
+        # unused in site/: "But YOU can prepare here the correct
+        # nginx-locations.conf to be complete already, or?").
         print_fn("Add the missing location block(s) above from")
-        print_fn("  /usr/share/my-booking-tool/my-booking.conf.example")
+        if repo_file_ok:
+            print_fn(f"  this checkout's own site/{cli_checks._NGINX_CONF_FILENAME} (already complete)")
+        else:
+            print_fn("  /usr/share/my-booking-tool/my-booking.conf.example")
         print_fn("to your existing vhost (not automated -- this would mean")
         print_fn("guessing at and editing your hand-maintained nginx config).")
     if prompt("Run `nginx -t && systemctl reload nginx` now?"):
@@ -349,7 +375,7 @@ def interactive_setup(
     # never guesses at and edits your own hand-hardened vhost file for you,
     # it just surfaces whether it's missing required location blocks or a
     # leftover REPLACE-ME placeholder.
-    for label, level, detail in cli_checks.check_nginx_conf_repo_file(home):
+    for label, level, detail in repo_file_checks:
         if level == "ok":
             print_fn(f"[ok] {label}: {detail}")
         else:
@@ -376,15 +402,56 @@ def interactive_setup(
     if not nginx_conf_path:
         print_fn("[skip] [site].nginx_conf_path not configured -- not checked")
     else:
+        deployed = Path(nginx_conf_path)
+        # Nothing at the configured path yet? `nginx -T`'s own
+        # "# configuration file <path>:" markers can reveal this vhost is
+        # actually still deployed under a DIFFERENT (e.g. pre-rename)
+        # filename -- exactly the gap hit right after the
+        # site/booking.example.org.conf -> site/nginx-locations.conf rename: the operator
+        # still needed to `sudo mv` the real file, and until now there was
+        # nothing for this tool to point at, let alone do for him
+        # (2026-07-10: "the package installer can fix this (or my-bt
+        # setup -i can) ... please").
+        live_file = None
+        if not deployed.exists():
+            candidate = cli_checks._live_nginx_conf_file_for_host(raw)
+            if candidate is not None and candidate.exists() and candidate.resolve() != deployed.resolve():
+                live_file = candidate
+
         for label, level, detail in cli_checks.check_nginx_conf_deployed(raw):
             print_fn(f"[{level}] {label}: {detail}")
+
+        # Reconcile CONTENT first, against whichever file is actually live
+        # right now (the configured path if it exists, else the old-named
+        # one just detected above) -- still never auto-written, just the
+        # same vimdiff offer already used for .rpmnew merges and stale
+        # hand-authored static pages, so a location block that's in the
+        # checkout but was never deployed (e.g. /reinstate, /host-reinstate)
+        # gets caught regardless of what the live file happens to be named.
         source = cli_checks._resolve_nginx_conf_checkout_source(home)
-        deployed = Path(nginx_conf_path)
-        if source is not None and deployed.exists():
-            same = deployed.read_text(encoding="utf-8", errors="replace") == \
+        live_now = deployed if deployed.exists() else live_file
+        if source is not None and live_now is not None:
+            same = live_now.read_text(encoding="utf-8", errors="replace") == \
                 source.read_text(encoding="utf-8", errors="replace")
-            if not same and prompt(f"Open vimdiff {deployed} {source} now?"):
-                run(["vimdiff", str(deployed), str(source)])
+            if not same and prompt(f"Open vimdiff {live_now} {source} now?"):
+                run(["vimdiff", str(live_now), str(source)])
+
+        # Renaming into place is a separate, much lower-risk offer -- unlike
+        # the vimdiff above, it never touches a single byte of content, just
+        # the filename -- so it's offered regardless of whether that vimdiff
+        # ran/was accepted.
+        if live_file is not None:
+            if not is_root():
+                print_fn("(needs root to rename into place -- re-run `sudo my-bt setup -i`)")
+            elif prompt(f"Rename {live_file} to {deployed} now?"):
+                try:
+                    live_file.rename(deployed)
+                    print_fn(f"[ok] renamed {live_file} -> {deployed}")
+                    if prompt("Run `nginx -t && systemctl reload nginx` to pick it up now?"):
+                        run(["nginx", "-t"])
+                        run(["systemctl", "reload", "nginx"])
+                except OSError as exc:
+                    print_fn(f"[fail] could not rename {live_file}: {exc}")
 
     # 5. group membership
     print_fn("\n-- 5. my-booking group membership --")

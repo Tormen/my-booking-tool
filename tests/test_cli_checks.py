@@ -575,11 +575,35 @@ class CheckNginxConfDeployedTest(unittest.TestCase):
         self.assertEqual(cli_checks.check_nginx_conf_deployed({"site": {}}), [])
 
     def test_configured_but_missing_file_fails(self):
-        checks = cli_checks.check_nginx_conf_deployed(self._raw())
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=None):
+            checks = cli_checks.check_nginx_conf_deployed(self._raw())
         self.assertEqual(len(checks), 1)
         label, level, detail = checks[0]
         self.assertEqual(level, "fail")
         self.assertIn("not found", detail)
+
+    def test_missing_file_but_live_under_a_different_name_says_so(self):
+        old = Path(self._tmp.name) / "old-name.conf"
+        old.write_text("server { server_name x; }")
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
+            checks = cli_checks.check_nginx_conf_deployed(self._raw())
+        label, level, detail = checks[0]
+        self.assertEqual(level, "fail")
+        self.assertIn(str(old), detail)
+        self.assertIn("rename", detail)
+
+    def test_detected_live_file_that_doesnt_actually_exist_falls_back_to_plain_message(self):
+        # _live_nginx_conf_file_for_host() can only name a path parsed out of
+        # nginx -T's own dump -- it never checks that path still exists on
+        # disk itself, so this guards against recommending a rename from a
+        # file that's already gone too.
+        missing = Path(self._tmp.name) / "already-gone.conf"
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=missing):
+            checks = cli_checks.check_nginx_conf_deployed(self._raw())
+        label, level, detail = checks[0]
+        self.assertEqual(level, "fail")
+        self.assertIn("not found", detail)
+        self.assertNotIn("rename", detail)
 
     def test_all_locations_present_is_ok(self):
         self.conf_path.write_text(self._all_locations_text())
@@ -634,6 +658,67 @@ class ResolveNginxConfCheckoutSourceTest(unittest.TestCase):
         (self.home / "site" / "nginx-locations.conf.example").write_text("generic")
         result = cli_checks._resolve_nginx_conf_checkout_source(str(self.home))
         self.assertEqual(result, self.home / "site" / "nginx-locations.conf")
+
+
+class LiveNginxConfFileForHostTest(unittest.TestCase):
+    """`_live_nginx_conf_file_for_host` parses `nginx -T`'s own
+    "# configuration file <path>:" markers (one precedes every file it
+    dumps) to find which actual file the matching vhost currently comes
+    from -- used so `setup -i` can find/rename a vhost still deployed
+    under an old filename without being told what that old name is."""
+
+    def _raw(self, base_url="https://example.org"):
+        return {"site": {"base_url": base_url}}
+
+    def test_finds_the_file_marker_preceding_the_matching_block(self):
+        merged = """# configuration file /etc/nginx/nginx.conf:
+http {
+    include /etc/nginx/conf.d/*.conf;
+}
+# configuration file /etc/nginx/conf.d/other.conf:
+server {
+    server_name other.org;
+}
+# configuration file /etc/nginx/conf.d/example.org.conf:
+server {
+    server_name example.org;
+    listen 443 ssl;
+}
+"""
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            result = cli_checks._live_nginx_conf_file_for_host(self._raw())
+        self.assertEqual(result, Path("/etc/nginx/conf.d/example.org.conf"))
+
+    def test_no_matching_server_block_returns_none(self):
+        merged = """# configuration file /etc/nginx/conf.d/other.conf:
+server {
+    server_name other.org;
+}
+"""
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            result = cli_checks._live_nginx_conf_file_for_host(self._raw())
+        self.assertIsNone(result)
+
+    def test_no_preceding_marker_returns_none(self):
+        merged = "server {\n    server_name example.org;\n}\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            result = cli_checks._live_nginx_conf_file_for_host(self._raw())
+        self.assertIsNone(result)
+
+    def test_nginx_missing_returns_none(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            result = cli_checks._live_nginx_conf_file_for_host(self._raw())
+        self.assertIsNone(result)
+
+    def test_no_base_url_returns_none(self):
+        result = cli_checks._live_nginx_conf_file_for_host({"site": {}})
+        self.assertIsNone(result)
 
 
 class NginxRootForHostTest(unittest.TestCase):

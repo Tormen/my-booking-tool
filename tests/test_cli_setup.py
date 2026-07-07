@@ -124,6 +124,76 @@ class PrintReportTest(unittest.TestCase):
         self.assertTrue(any("all checks passed" in ln for ln in lines))
 
 
+class NginxLocationsHintTest(unittest.TestCase):
+    """When `nginx -T` is missing a required location block, the hint
+    for where to copy it from should point at THIS checkout's own real,
+    already-complete site/nginx-locations.conf when one exists, instead
+    of the bare generic packaged example -- 2026-07-10, the operator, after
+    seeing the generic hint fire while his own complete file sat unused
+    in site/: "But YOU can prepare here the correct nginx-locations.conf
+    to be complete already, or?" Both print_report() and
+    interactive_setup() share this logic, so both are covered here."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+
+    def _missing_location_checks(self):
+        return [("nginx location /admin", "warn", "missing from the live config")]
+
+    def test_print_report_points_at_repo_file_when_complete(self):
+        (self.home / "site" / "nginx-locations.conf").write_text("complete, hardened")
+        lines: list[str] = []
+        with patch("app.cli_checks.check_nginx_locations", return_value=self._missing_location_checks()), \
+             patch("app.cli_checks.check_nginx_conf_repo_file",
+                   return_value=[("nginx vhost conf (site/nginx-locations.conf)", "ok", "complete")]):
+            cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        text = "\n".join(lines)
+        self.assertIn("this checkout's own", text)
+        self.assertNotIn("/usr/share/my-booking-tool/my-booking.conf.example", text)
+
+    def test_print_report_falls_back_to_generic_example_when_no_repo_file(self):
+        lines: list[str] = []
+        with patch("app.cli_checks.check_nginx_locations", return_value=self._missing_location_checks()), \
+             patch("app.cli_checks.check_nginx_conf_repo_file",
+                   return_value=[("nginx vhost conf (site/nginx-locations.conf)", "warn", "none found yet")]):
+            cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("/usr/share/my-booking-tool/my-booking.conf.example" in ln for ln in lines))
+
+    def test_interactive_setup_points_at_repo_file_when_complete(self):
+        lines: list[str] = []
+        prompt = FakePrompts({}, default=False)
+        with patch("app.cli_checks.check_nginx_locations", return_value=self._missing_location_checks()), \
+             patch("app.cli_checks.check_nginx_conf_repo_file",
+                   return_value=[("nginx vhost conf (site/nginx-locations.conf)", "ok", "complete")]):
+            cli_setup.interactive_setup(
+                _raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lines.append,
+            )
+        text = "\n".join(lines)
+        self.assertIn("this checkout's own", text)
+        self.assertNotIn("/usr/share/my-booking-tool/my-booking.conf.example", text)
+
+    def test_interactive_setup_falls_back_to_generic_example_when_no_repo_file(self):
+        lines: list[str] = []
+        prompt = FakePrompts({}, default=False)
+        with patch("app.cli_checks.check_nginx_locations", return_value=self._missing_location_checks()), \
+             patch("app.cli_checks.check_nginx_conf_repo_file",
+                   return_value=[("nginx vhost conf (site/nginx-locations.conf)", "warn", "none found yet")]):
+            cli_setup.interactive_setup(
+                _raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lines.append,
+            )
+        self.assertTrue(any("/usr/share/my-booking-tool/my-booking.conf.example" in ln for ln in lines))
+
+
 class InteractiveSetupSecretsTest(unittest.TestCase):
     """Step 4 (nginx) is always asked unconditionally regardless of what
     these tests care about -- FakePrompts defaults it (and anything else
@@ -582,6 +652,82 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
             c[0] == "vimdiff" and str(self.home / "site" / "nginx-locations.conf.example") in c
             for c in calls
         ))
+
+    def test_not_deployed_but_live_under_old_name_offers_vimdiff_then_rename(self):
+        """2026-07-10: after the booking.example.org.conf -> nginx-locations.conf
+        rename, the operator's real server still had the file under the OLD name --
+        nothing was at nginx_conf_path yet, but nginx -T said the vhost was
+        still live from elsewhere. "the package installer can fix this (or
+        my-bt setup -i can) ... please" -- vimdiff to reconcile content
+        first, then a root-gated rename into place, then offer to reload."""
+        old = self.home / "old-etc" / "booking.example.org.conf"
+        old.parent.mkdir()
+        old.write_text("location /admin { } # old, missing /reinstate")
+        (self.home / "site" / "nginx-locations.conf").write_text("location /admin { } # checkout, complete")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"vimdiff": True, "Rename": True, "pick it up": True})
+        calls: list[list[str]] = []
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=calls.append, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        self.assertTrue(any(
+            c[0] == "vimdiff" and str(old) in c and
+            str(self.home / "site" / "nginx-locations.conf") in c
+            for c in calls
+        ))
+        self.assertFalse(old.exists())
+        self.assertTrue(self.deployed.exists())
+        self.assertEqual(self.deployed.read_text(), "location /admin { } # old, missing /reinstate")
+        self.assertTrue(any(c[:2] == ["nginx", "-t"] for c in calls))
+        self.assertTrue(any(c[:2] == ["systemctl", "reload"] for c in calls))
+
+    def test_not_deployed_but_live_under_old_name_non_root_never_renames(self):
+        old = self.home / "old-etc" / "booking.example.org.conf"
+        old.parent.mkdir()
+        old.write_text("location /admin { }")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({}, default=True)
+        calls: list[list[str]] = []
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=calls.append, is_root=lambda: False,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(prompt.asked_matching("Rename"), [])
+        self.assertTrue(old.exists())
+        self.assertFalse(self.deployed.exists())
+
+    def test_not_deployed_but_live_under_old_name_declining_leaves_both_alone(self):
+        old = self.home / "old-etc" / "booking.example.org.conf"
+        old.parent.mkdir()
+        old.write_text("location /admin { }")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"Rename": False})
+        calls: list[list[str]] = []
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=calls.append, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        self.assertTrue(old.exists())
+        self.assertFalse(self.deployed.exists())
+        self.assertEqual(calls, [])
+
+    def test_no_live_file_detected_never_offers_to_rename(self):
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({}, default=True)
+        with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=None):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(prompt.asked_matching("Rename"), [])
 
 
 class InteractiveSetupCaldavTest(unittest.TestCase):

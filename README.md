@@ -84,6 +84,18 @@ matters. `setup -i` also offers a `vimdiff` between it and this
 checkout's own `site/nginx-locations.conf(.example)` if the two differ.
 See `app/cli_checks.py::check_nginx_conf_deployed()`.
 
+Nothing at `nginx_conf_path` yet (e.g. right after renaming the setting to
+point at a new filename, before you've actually renamed the file on the
+real server to match)? `my-bt status`/`setup -i` parse `nginx -T`'s own
+"# configuration file `<path>`:" markers to find which file nginx is
+*actually* loading this vhost from right now, and say so instead of a
+dead-end "not found" -- `setup -i` then offers the same vimdiff against
+this checkout's copy (to reconcile content -- e.g. a location block added
+here but never deployed), followed by a root-gated rename into place and
+an offer to `nginx -t && systemctl reload nginx` to pick it up. Content is
+never rewritten automatically, only ever renamed once you've confirmed
+it's right. See `app/cli_checks.py::_live_nginx_conf_file_for_host()`.
+
 First time setting this up? Copy each `.example` file to its real name
 and fill it in:
 

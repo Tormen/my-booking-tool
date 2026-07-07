@@ -386,6 +386,12 @@ def check_nginx_conf_deployed(raw: dict) -> list[Check]:
         return []
     p = Path(path_str)
     if not p.exists():
+        live_file = _live_nginx_conf_file_for_host(raw)
+        if live_file is not None and live_file.exists() and live_file.resolve() != p.resolve():
+            return [(f"nginx vhost conf ({path_str})", "fail",
+                      f"configured but not found -- nginx currently loads this vhost from "
+                      f"{live_file} instead; rename it to match (`my-bt setup -i` can do this "
+                      "for you), or update [site].nginx_conf_path")]
         return [(f"nginx vhost conf ({path_str})", "fail",
                   "configured but not found -- check [site].nginx_conf_path")]
     text = p.read_text(encoding="utf-8", errors="replace")
@@ -477,6 +483,38 @@ def _matching_server_block(raw: dict, merged: str) -> str | None:
         if names and hostname in names.group(1).split():
             return block
     return None
+
+
+_CONF_FILE_MARKER_RE = re.compile(r"^# configuration file (\S+):\s*$", re.MULTILINE)
+
+
+def _live_nginx_conf_file_for_host(raw: dict) -> Path | None:
+    """Which actual file, right now, nginx says the vhost matching
+    [site].base_url's hostname is defined in -- parsed from `nginx -T`'s
+    own "# configuration file <path>:" markers, which precede every file
+    it dumps (including every conf.d/*.conf resolved via `include`, not
+    just nginx.conf itself). Lets `setup -i` notice a vhost that's still
+    deployed under an OLD filename and offer to rename it to match
+    [site].nginx_conf_path, without the operator ever having to tell this tool
+    what that old name is (2026-07-10: this exact gap after the
+    site/booking.example.org.conf -> site/nginx-locations.conf rename -- the real
+    server's file hadn't been renamed to match yet, and nginx_conf_path's
+    own check could only say "not found", not point at where it actually
+    still is). None if nginx/the vhost/its enclosing file marker can't be
+    determined at all."""
+    merged = _live_nginx_config(raw)
+    if merged is None:
+        return None
+    block = _matching_server_block(raw, merged)
+    if block is None:
+        return None
+    idx = merged.find(block)
+    if idx == -1:
+        return None
+    markers = list(_CONF_FILE_MARKER_RE.finditer(merged[:idx]))
+    if not markers:
+        return None
+    return Path(markers[-1].group(1))
 
 
 def _nginx_root_for_host(raw: dict) -> str | None:
