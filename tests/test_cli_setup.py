@@ -792,18 +792,34 @@ class InteractiveSetupWatchdogTest(unittest.TestCase):
         self.assertNotIn("nginx_access_log", Path(self.settings_path).read_text())
 
     @patch("app.cli_checks.check_watchdog_nginx_access", return_value=[])
-    def test_configured_value_differing_from_detected_warns_without_prompting(self, _access):
+    def test_configured_value_differing_from_detected_offers_to_update(self, _access):
         with patch("app.cli_checks._nginx_access_log_for_host", return_value=str(self.log_path)):
-            prompt = FakePrompts()
+            prompt = FakePrompts({"Update nginx_access_log": True})
             lines: list[str] = []
+            raw = _raw(watchdog={"nginx_access_log": "/some/stale/path.log"})
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lines.append,
+            )
+        self.assertEqual(len(prompt.asked_matching("Update nginx_access_log")), 1)
+        written = Path(self.settings_path).read_text()
+        self.assertIn(f'nginx_access_log = "{self.log_path}"', written)
+        self.assertNotIn("/some/stale/path.log", written)
+        self.assertEqual(raw["watchdog"]["nginx_access_log"], str(self.log_path))
+
+    @patch("app.cli_checks.check_watchdog_nginx_access", return_value=[])
+    def test_configured_value_differing_from_detected_declining_leaves_it_stale(self, _access):
+        with patch("app.cli_checks._nginx_access_log_for_host", return_value=str(self.log_path)):
+            prompt = FakePrompts({"Update nginx_access_log": False})
+            Path(self.settings_path).write_text('[watchdog]\nnginx_access_log = "/some/stale/path.log"\n')
             cli_setup.interactive_setup(
                 _raw(watchdog={"nginx_access_log": "/some/stale/path.log"}),
                 self.settings_path, str(self.home),
                 prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
-                print_fn=lines.append,
+                print_fn=lambda *_: None,
             )
-        self.assertEqual(prompt.asked_matching("Add nginx_access_log"), [])
-        self.assertTrue(any("stale" in ln for ln in lines))
+        self.assertIn("/some/stale/path.log", Path(self.settings_path).read_text())
 
 
 class InteractiveSetupDataDirGitTest(unittest.TestCase):
@@ -976,6 +992,17 @@ class AddNginxAccessLogSettingTest(unittest.TestCase):
         new_line_idx = text.index("nginx_access_log")
         enabled_idx = text.index("enabled = true")
         self.assertTrue(watchdog_idx < new_line_idx < enabled_idx)
+
+    def test_replaces_existing_value_in_place_instead_of_duplicating(self):
+        Path(self.settings_path).write_text(
+            "[watchdog]\nnginx_access_log = \"/some/stale/path.log\"\nwindow_minutes = 15\n"
+        )
+        cli_setup._add_nginx_access_log_setting(self.settings_path, "/var/log/nginx/access.log")
+        text = Path(self.settings_path).read_text()
+        self.assertIn('nginx_access_log = "/var/log/nginx/access.log"', text)
+        self.assertNotIn("/some/stale/path.log", text)
+        self.assertEqual(text.count("nginx_access_log"), 1)
+        self.assertIn("window_minutes = 15", text)
 
 
 if __name__ == "__main__":

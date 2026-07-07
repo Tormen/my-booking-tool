@@ -48,20 +48,28 @@ def _run_tolerant(cmd: list[str], print_fn: Callable[[str], None]) -> None:
 
 
 _WATCHDOG_HEADER_RE = re.compile(r"^\[watchdog\][ \t]*\r?\n", re.MULTILINE)
+_NGINX_ACCESS_LOG_LINE_RE = re.compile(r'^nginx_access_log[ \t]*=.*\r?\n', re.MULTILINE)
 
 
 def _add_nginx_access_log_setting(settings_path: str, value: str) -> None:
-    """Inserts `nginx_access_log = "<value>"` into settings.toml's
-    [watchdog] table (creating the table at the end of the file if it
-    doesn't exist yet). A plain text edit, not a parse-and-re-serialize
-    round-trip -- tomllib has no writer anyway, and re-emitting the whole
-    file from the parsed dict would silently drop every comment in this
-    hand-maintained file. Only ever called after confirming the key isn't
-    already set (see interactive_setup step 10), so this can't create a
-    duplicate key -- TOML doesn't allow one, and tomllib would refuse to
-    parse the result if it somehow happened."""
+    """Writes `nginx_access_log = "<value>"` into settings.toml's
+    [watchdog] table -- two distinct callers, both from interactive_setup
+    step 10: the "not configured yet" case (no existing line -- inserted
+    right after the [watchdog] header, creating the table at the end of
+    the file if it doesn't exist yet) and the "configured but stale" case
+    (nginx's live config has moved on -- the existing line is replaced in
+    place, keeping its original position rather than appending a
+    duplicate, which TOML wouldn't parse anyway). A plain text edit, not a
+    parse-and-re-serialize round-trip -- tomllib has no writer anyway, and
+    re-emitting the whole file from the parsed dict would silently drop
+    every comment in this hand-maintained file."""
     text = Path(settings_path).read_text(encoding="utf-8")
     line = f'nginx_access_log = "{value}"\n'
+    m = _NGINX_ACCESS_LOG_LINE_RE.search(text)
+    if m is not None:
+        text = text[:m.start()] + line + text[m.end():]
+        Path(settings_path).write_text(text, encoding="utf-8")
+        return
     m = _WATCHDOG_HEADER_RE.search(text)
     if m is None:
         if not text.endswith("\n"):
@@ -566,8 +574,15 @@ def interactive_setup(
                 print_fn(f"[fail] could not write {settings_path}: {exc}")
     elif configured and detected and Path(configured).resolve() != Path(detected).resolve():
         print_fn(f"[warn] settings.toml has nginx_access_log = {configured}, but nginx's live "
-                 f"config for this vhost logs to {detected} -- update settings.toml by hand "
-                 "if that's stale.")
+                 f"config for this vhost logs to {detected}.")
+        if prompt(f'Update nginx_access_log to "{detected}" in settings.toml now?'):
+            try:
+                _add_nginx_access_log_setting(settings_path, detected)
+                raw.setdefault("watchdog", {})["nginx_access_log"] = detected
+                configured = detected
+                print_fn(f"[ok] updated nginx_access_log in {settings_path}")
+            except OSError as exc:
+                print_fn(f"[fail] could not write {settings_path}: {exc}")
 
     watchdog_checks = cli_checks.check_watchdog_nginx_access(raw)
     if not watchdog_checks:

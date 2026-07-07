@@ -1364,8 +1364,9 @@ already use) for the vhost matching `[site].base_url`. Three outcomes:
 not configured but a real `access_log` was detected for this vhost --
 `setup --interactive` offers to write `nginx_access_log = "..."` into
 `settings.toml` for you; configured but it doesn't match what nginx is
-actually logging to -- flagged so you can update it by hand; or already
-matches -- nothing to do. This is a detect-and-*offer*, never a silent
+actually logging to -- `setup --interactive` offers to update it in place
+too (same prompt-and-write pattern, not just a manual-fix warning); or
+already matches -- nothing to do. This is a detect-and-*offer*, never a silent
 auto-enable: nginx's `log_format` can be customized, and the nginx-burst
 parser only understands the standard combined format, so silently
 turning the check on could give false confidence that it's monitoring
