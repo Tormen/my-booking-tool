@@ -804,7 +804,7 @@ class App:
         )
 
     def _send_reinstatement_emails(
-        self, course, occ_date: str, user, confirmed: bool, reinstated_by: str,
+        self, course, occ_date: str, user, confirmed: bool, reinstated_by: str, message: str = "",
     ) -> None:
         """Thin wrapper around app.cancellation.send_reinstatement_emails,
         same pattern/rationale as _send_cancellation_emails above. Builds a
@@ -819,7 +819,7 @@ class App:
             )
             ics_attachment = (ics_filename, ics_text, "PUBLISH")
         send_reinstatement_emails(
-            self.settings, course, occ_date, user, confirmed, reinstated_by,
+            self.settings, course, occ_date, user, confirmed, reinstated_by, message,
             ics_attachment=ics_attachment,
         )
 
@@ -1583,14 +1583,29 @@ class App:
                 # which time (WHEN) is in the future" -- offered here for
                 # any of the guest's OWN canceled rows whose occurrence
                 # hasn't happened yet (a past occurrence has nothing left
-                # to reinstate INTO). No confirm dialog -- unlike Cancel,
-                # this isn't destructive; worst case it's canceled again.
+                # to reinstate INTO). Same confirm-dialog-with-optional-
+                # message pattern as Cancel above (2026-07-10: "Reinstate
+                # should, LIKE CANCEL, also ask for a COMMENT to be sent
+                # with the email to the other") -- reuses the same
+                # _DIALOG_WIRING_SCRIPT already loaded on this page.
                 if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST) and (
                     date.fromisoformat(r.occurrence_date) >= today
                 ):
+                    reinstate_id = f"reinstate-{esc(r.registration_id)}"
                     actions += (
-                        f'<form method="post" action="/my/reinstate/{esc(r.registration_id)}" '
-                        'style="display:inline"><button type="submit">Reinstate</button></form>'
+                        f'<form method="post" action="/my/reinstate/{esc(r.registration_id)}" id="{reinstate_id}-form">'
+                        f'<button type="submit" class="confirm-dialog-btn" data-dialog="{reinstate_id}-dialog">'
+                        "Reinstate</button>"
+                        "</form>"
+                        f'<dialog id="{reinstate_id}-dialog" class="card">'
+                        f"<p><b>Are you sure?</b></p>"
+                        f"<p>Reinstate your booking for <b>{esc(title)}</b> on {esc(r.occurrence_date)}?</p>"
+                        f'<label>Optional message <textarea name="message" rows="2" class="big-input" '
+                        f'form="{reinstate_id}-form"></textarea></label>'
+                        '<div class="submit-row">'
+                        f'<button type="submit" form="{reinstate_id}-form">Confirm reinstatement</button> '
+                        f'<button type="button" class="dialog-close-btn" data-dialog="{reinstate_id}-dialog">Never mind</button>'
+                        "</div></dialog>"
                     )
                 return (
                     f"<tr><td>{esc(title)}</td><td>{esc(r.occurrence_date)}</td>"
@@ -2032,18 +2047,26 @@ class App:
     def my_reinstate(self, method: str, registration_id: str, environ):
         """Undo a cancellation for one of the guest's own bookings, as long
         as the occurrence is still in the future -- see my()'s own
-        `_row()` for the button that's gated the same way, and
-        Store.reinstate()'s docstring for what "undo" means here (same
+        `_row()` for the confirm-dialog button that's gated the same way,
+        and Store.reinstate()'s docstring for what "undo" means here (same
         occurrence, re-decided confirmed-vs-waitlisted from CURRENT
         capacity; never a move to a different date). The future-date check
         is re-done here, not just trusted from the page: my()'s button is
         already hidden for a past occurrence, but a crafted/replayed POST
-        could still hit this route directly."""
+        could still hit this route directly.
+
+        Optional `message` (2026-07-10, the operator: "Reinstate should, LIKE
+        CANCEL, also ask for a COMMENT to be sent with the email to the
+        other") is collected by the same dialog+textarea pattern Cancel
+        uses, and passed straight through to
+        _send_reinstatement_emails() -- see that function's docstring."""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
             return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
         reg = self.store.find_by_id(registration_id)
         if reg and reg.user_id == session["user_id"]:
+            form = self._read_form(environ)
+            message = sanitize_csv_field(form.get("message", "").strip())
             course = self.settings.course(reg.course_shortname)
             if course and date.fromisoformat(reg.occurrence_date) >= datetime.now(timezone.utc).date():
                 updated = self.store.reinstate(registration_id, course.capacity)
@@ -2055,7 +2078,7 @@ class App:
                     # _send_cancellation_emails above).
                     self._send_reinstatement_emails(
                         course, reg.occurrence_date, user,
-                        confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="guest",
+                        confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="guest", message=message,
                     )
         return "302 Found", [("Location", "/my")], ""
 
@@ -2527,7 +2550,7 @@ class App:
                     "</form>"
                     f'<dialog id="{cancel_id}-dialog" class="card">'
                     f"<p><b>Are you sure?</b></p>"
-                    f"<p>Cancel <b>{esc(user.name)}</b>'s booking for <b>{esc(title)}</b> "
+                    f"<p>Cancel <b>{esc(user.name)}</b> ({esc(user.email)})'s booking for <b>{esc(title)}</b> "
                     f"on {esc(r.occurrence_date)}? They'll be notified by email.</p>"
                     f'<label>Optional message to them <textarea name="message" rows="2" class="big-input" '
                     f'form="{cancel_id}-form"></textarea></label>'
@@ -2539,13 +2562,30 @@ class App:
                 # Reinstate ("undo the cancel"), host-side twin of my()'s
                 # own button -- 2026-07-10: "ah yes true! (accidental error
                 # for the admin could be use case!)". Same future-only
-                # gating, no confirm dialog (not destructive).
+                # gating, and (2026-07-10: "Reinstate should, LIKE CANCEL,
+                # also ask for a COMMENT to be sent with the email to the
+                # other") the same confirm-dialog-with-optional-message
+                # pattern as Cancel above.
                 if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST) and (
                     date.fromisoformat(r.occurrence_date) >= today
                 ):
+                    reinstate_id = f"admin-reinstate-{esc(r.registration_id)}"
                     actions += (
-                        f'<form method="post" action="/admin/reinstate/{esc(r.registration_id)}" '
-                        f'style="display:inline">{past_field}<button type="submit">Reinstate</button></form>'
+                        f'<form method="post" action="/admin/reinstate/{esc(r.registration_id)}" id="{reinstate_id}-form">'
+                        f'{past_field}'
+                        f'<button type="submit" class="confirm-dialog-btn" data-dialog="{reinstate_id}-dialog">'
+                        "Reinstate</button>"
+                        "</form>"
+                        f'<dialog id="{reinstate_id}-dialog" class="card">'
+                        f"<p><b>Are you sure?</b></p>"
+                        f"<p>Reinstate <b>{esc(user.name)}</b> ({esc(user.email)})'s booking for <b>{esc(title)}</b> "
+                        f"on {esc(r.occurrence_date)}? They'll be notified by email.</p>"
+                        f'<label>Optional message to them <textarea name="message" rows="2" class="big-input" '
+                        f'form="{reinstate_id}-form"></textarea></label>'
+                        '<div class="submit-row">'
+                        f'<button type="submit" form="{reinstate_id}-form">Confirm reinstatement</button> '
+                        f'<button type="button" class="dialog-close-btn" data-dialog="{reinstate_id}-dialog">Never mind</button>'
+                        "</div></dialog>"
                     )
                 # No separate "Merge history" button (2026-07-10) -- see the
                 # auto-merge pass at the top of this method's own comment:
@@ -2662,13 +2702,12 @@ class App:
         guest's booking, for the same "guest called/emailed after canceling
         by mistake" use case my_reinstate() covers for the guest's own
         self-service view (2026-07-10: "ah yes true! (accidental error for
-        the admin could be use case!)"). Deliberately no recap/reason
-        dialog first (unlike admin_cancel()'s GET confirmation page) --
-        reinstating isn't destructive the way canceling is, so a plain
-        one-click button (same as the admin table's other single-click
-        actions) was judged sufficient; worst case it's simply canceled
-        again. Preserves `past` the same way admin_cancel() does, so
-        reinstating from the "past" view's table doesn't bounce back to
+        the admin could be use case!)"). Same confirm-dialog-with-optional-
+        message pattern as admin_cancel() (2026-07-10: "Reinstate should,
+        LIKE CANCEL, also ask for a COMMENT to be sent with the email to
+        the other") -- see admin_overview()'s row rendering for the
+        dialog itself. Preserves `past` the same way admin_cancel() does,
+        so reinstating from the "past" view's table doesn't bounce back to
         the default upcoming-only view."""
         session = _get_session(environ)
         if not session or session.get("kind") != "admin":
@@ -2677,6 +2716,7 @@ class App:
         if reg is None:
             return "404 Not Found", [("Content-Type", "text/plain")], "not found"
         form = self._read_form(environ)
+        message = sanitize_csv_field(form.get("message", "").strip())
         course = self.settings.course(reg.course_shortname)
         if course and date.fromisoformat(reg.occurrence_date) >= datetime.now(timezone.utc).date():
             updated = self.store.reinstate(registration_id, course.capacity)
@@ -2685,7 +2725,7 @@ class App:
                 user = self.store.find_user_by_id(reg.user_id)
                 self._send_reinstatement_emails(
                     course, reg.occurrence_date, user,
-                    confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host",
+                    confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host", message=message,
                 )
         location = "/admin?past=1" if form.get("past") == "1" else "/admin"
         return "302 Found", [("Location", location)], ""

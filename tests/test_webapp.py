@@ -1883,6 +1883,10 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Are you sure?", body)
         self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{cancel_id}-form">', body)
         self.assertIn("Confirm cancellation", body)
+        # 2026-07-10, the operator: "Please add the email address in parenthesis
+        # behind the name here (and for reinstate)" -- lets the admin
+        # confirm WHICH account with that name they're about to act on.
+        self.assertIn("Regular</b> (regular@example.org)", body)
 
     # -- /admin/cancel: host-initiated, must also notify both sides --------
 
@@ -1968,12 +1972,49 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(f'<form method="post" action="/my/reinstate/{reg.registration_id}"', body)
         self.assertIn("Reinstate", body)
 
+    def test_my_bookings_reinstate_button_opens_dialog_with_message_field(self):
+        # 2026-07-10, the operator: "Reinstate should, LIKE CANCEL, also ask for a
+        # COMMENT to be sent with the email to the other."
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        _status, _headers, body = self.app.my("GET", environ)
+        reinstate_id = f"reinstate-{reg.registration_id}"
+        self.assertIn(f'<dialog id="{reinstate_id}-dialog" class="card">', body)
+        self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{reinstate_id}-form">', body)
+        self.assertIn("Confirm reinstatement", body)
+
     def test_my_bookings_table_has_no_reinstate_button_before_canceling(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         _status, _headers, body = self.app.my("GET", environ)
         self.assertNotIn("/my/reinstate/", body)
         self.assertNotIn(">Reinstate<", body)
+
+    def test_my_reinstate_includes_the_optional_comment_in_both_emails(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        self.sent_emails.clear()
+        self._post_with_session(
+            self.app.my_reinstate, (reg.registration_id,), {"message": "sorry, changed my mind"}, environ
+        )
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("Message: sorry, changed my mind", participant_mail)
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("Message: sorry, changed my mind", admin_mail)
+
+    def test_my_reinstate_without_a_comment_omits_the_message_line(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_reinstate, (reg.registration_id,), {"message": ""}, environ)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        self.assertNotIn("Message:", participant_mail)
 
     def test_my_reinstate_confirms_again_when_capacity_allows(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -2044,6 +2085,26 @@ class BookingFlowTest(unittest.TestCase):
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         self.assertIn(f'<form method="post" action="/admin/reinstate/{reg.registration_id}"', body)
+        reinstate_id = f"admin-reinstate-{reg.registration_id}"
+        self.assertIn(f'<dialog id="{reinstate_id}-dialog" class="card">', body)
+        self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{reinstate_id}-form">', body)
+        self.assertIn("Regular</b> (regular@example.org)", body)
+
+    def test_admin_reinstate_includes_the_optional_comment_in_both_emails(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        self.sent_emails.clear()
+        self._post_with_session(
+            self.app.admin_reinstate, (reg.registration_id,), {"message": "welcome back"}, admin_environ
+        )
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("Message: welcome back", participant_mail)
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("Message: welcome back", admin_mail)
 
     def test_admin_reinstate_confirms_again_and_notifies_both_sides(self):
         user, environ = self._login_as_guest("regular@example.org")

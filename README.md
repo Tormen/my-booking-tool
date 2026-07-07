@@ -345,6 +345,10 @@ registration back to confirmed (or waitlisted, if the class filled up in
 the meantime), re-checking capacity fresh at the moment you click it.
 Guests can only reinstate their own bookings; the admin can reinstate
 anyone's (handy when a guest cancels by mistake and asks you to fix it).
+Same confirm-dialog-with-optional-comment flow as Cancel -- whatever you
+type is emailed to the other side in a light-grey box, and the admin's
+own dialog shows the guest's email address next to their name so you can
+tell same-named guests apart before acting.
 No CLI equivalent yet.
 
 ### `my-bt status`

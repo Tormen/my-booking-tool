@@ -129,6 +129,25 @@ def intro_html(text: str) -> str:
     return f'<p style="font-size:1.25em;font-weight:bold;margin:0 0 .5em">{html.escape(text, quote=True)}</p>'
 
 
+def message_html(message: str) -> str:
+    """The optional free-text comment collected by Cancel's and Reinstate's
+    own confirm dialogs (2026-07-10, the operator: "Reinstate should, LIKE CANCEL,
+    also ask for a COMMENT to be sent with the email to the other" then
+    "the message from the comment field should always be displayed like
+    this: light grey background with the message") -- boxed the same way
+    course_recap_html() boxes the operator's own `description` (border +
+    radius + padding), but in a neutral light grey rather than that box's
+    cream (`#fdf8ef`), so a guest/host-typed comment reads as visually
+    distinct from the operator-authored course description. Blank message
+    renders nothing at all, same as the old plain-`<p>` version this
+    replaces -- every call site already only calls this when there IS a
+    message to show."""
+    return (
+        '<div style="background:#f2f2f2;border:1px solid #ddd;border-radius:8px;'
+        f'padding:.8em 1.2em;margin:.6em 0"><b>Message:</b> {html.escape(message, quote=True)}</div>'
+    )
+
+
 def html_email_body(inner_html: str) -> str:
     """Minimal, portable HTML shell (2026-07-09) every HTML email in this
     app is wrapped in -- no external stylesheet/JS, just a plain
@@ -179,7 +198,7 @@ def send_cancellation_emails(
     recap_html = course_recap_html(course, occ_date)
     subject = f"Canceled: {course.title} on {occ_date}"
     reason_block = f"\nMessage: {message}\n" if message else ""
-    reason_html = f"<p>Message: {html.escape(message, quote=True)}</p>" if message else ""
+    reason_html = message_html(message) if message else ""
     my_url = f"{settings.base_url}/my"
     if user:
         participant_who = "You" if canceled_by == "guest" else "The host"
@@ -210,7 +229,7 @@ def send_cancellation_emails(
 
 
 def send_reinstatement_emails(
-    settings: Settings, course: Course, occ_date: str, user, confirmed: bool, reinstated_by: str,
+    settings: Settings, course: Course, occ_date: str, user, confirmed: bool, reinstated_by: str, message: str,
     ics_attachment: tuple[str, str, str] | None = None,
 ) -> None:
     """The "undo a cancel" twin of send_cancellation_emails() above
@@ -230,6 +249,12 @@ def send_reinstatement_emails(
     comparison isn't worth the coupling. `reinstated_by` is "guest" or
     "host", same vocabulary as send_cancellation_emails's `canceled_by`.
 
+    `message` (2026-07-10, the operator: "Reinstate should, LIKE CANCEL, also ask
+    for a COMMENT to be sent with the email to the other [side]") is the
+    same optional free-text reason Cancel's own dialog collects --
+    included in both emails exactly like send_cancellation_emails's own
+    `reason_block`/`reason_html`, blank omits the line entirely.
+
     `ics_attachment`, like send_cancellation_emails's own, is built by the
     CALLER (app.calendar_sync.guest_invite_ics, only when `confirmed` is
     True -- a still-waitlisted reinstatement has no real calendar slot to
@@ -238,6 +263,8 @@ def send_reinstatement_emails(
     details = booking_details_text(course, occ_date)
     recap_html = course_recap_html(course, occ_date)
     subject = f"Reinstated: {course.title} on {occ_date}"
+    reason_block = f"\nMessage: {message}\n" if message else ""
+    reason_html = message_html(message) if message else ""
     my_url = f"{settings.base_url}/my"
     status_phrase = "you're confirmed again" if confirmed else "you're back on the waitlist"
     if user:
@@ -245,9 +272,9 @@ def send_reinstatement_emails(
         intro = f"{participant_who} reinstated this booking -- {status_phrase}:"
         send_mail(
             settings, user.email, subject,
-            f"{intro}\n\n{details}\nManage your bookings: {my_url}\n",
+            f"{intro}\n\n{details}\n{reason_block}Manage your bookings: {my_url}\n",
             html_body=html_email_body(
-                intro_html(intro) + f"{recap_html}"
+                intro_html(intro) + f"{recap_html}{reason_html}"
                 f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
             ),
             ics_attachment=ics_attachment,
@@ -256,6 +283,6 @@ def send_reinstatement_emails(
     admin_intro = f"{admin_who} reinstated this booking -- {status_phrase}:"
     send_mail(
         settings, settings.admin_email, subject,
-        f"{admin_intro}\n\n{details}\n",
-        html_body=html_email_body(intro_html(admin_intro) + recap_html),
+        f"{admin_intro}\n\n{details}\n{reason_block}",
+        html_body=html_email_body(intro_html(admin_intro) + f"{recap_html}{reason_html}"),
     )

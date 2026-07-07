@@ -10,7 +10,7 @@ their own rather than only ever asserting on giant end-to-end email
 bodies."""
 import unittest
 
-from app.cancellation import booking_details_text, course_recap_html, html_email_body, intro_html
+from app.cancellation import booking_details_text, course_recap_html, html_email_body, intro_html, message_html
 
 from .helpers import make_course
 
@@ -92,6 +92,23 @@ class IntroHtmlTest(unittest.TestCase):
         # name into the intro sentence (e.g. "Jane <jane@x.com> canceled
         # this booking:") -- this must not be a raw HTML-injection hole.
         rendered = intro_html('<script>alert(1)</script> canceled this booking:')
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
+
+
+class MessageHtmlTest(unittest.TestCase):
+    """2026-07-10, the operator: "the message from the comment field should
+    always be displayed like this: light grey background with the
+    message" -- shared by both send_cancellation_emails() and
+    send_reinstatement_emails()'s optional comment/reason."""
+
+    def test_has_a_light_grey_background_box(self):
+        rendered = message_html("running late, sorry")
+        self.assertIn("background:#f2f2f2", rendered)
+        self.assertIn("running late, sorry", rendered)
+
+    def test_escapes_a_guest_supplied_message(self):
+        rendered = message_html("<script>alert(1)</script>")
         self.assertNotIn("<script>alert(1)</script>", rendered)
         self.assertIn("&lt;script&gt;", rendered)
 
