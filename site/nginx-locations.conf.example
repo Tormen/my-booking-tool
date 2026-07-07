@@ -56,20 +56,24 @@ server {
     #     external scripts/images/frames) - everything is same-origin, so
     #     default-src 'self' is safe as the baseline for everything not
     #     called out below.
-    #   - FOUR distinct inline <script> blocks exist site-wide as of this
+    #   - FIVE distinct inline <script> blocks exist site-wide as of this
     #     app version: index.html's (same-origin fetch() to /my/session
     #     only), the booking-form validation script shared by all
     #     /book/<slug> pages, the sortable/filterable-table script shared
-    #     by /my and /admin's own tables, and the confirm-dialog wiring
-    #     script shared by /my (Cancel/Reinstate buttons) and /admin
-    #     (Cancel/Reinstate buttons). All four are allow-listed by exact
-    #     SHA-256 hash below instead of 'unsafe-inline', so any future/
-    #     injected inline script that isn't byte-identical to these four
-    #     is blocked outright. These four hashes match the app as shipped
-    #     in this repo right now -- if you ever hand-edit any of app's
-    #     inline scripts, regenerate the hashes or those pages' scripts
-    #     will silently stop working (this bit a real deployment once --
-    #     both /my's and /admin's confirm-dialogs went dead with no
+    #     by /my and /admin's own tables, the confirm-dialog wiring script
+    #     shared by /my (Cancel/Reinstate buttons) and /admin (Cancel/
+    #     Reinstate buttons), and the submit-feedback script appended to
+    #     EVERY page by app/templates.py::page() (2026-07-11 -- disables
+    #     every button and shows "Please wait..." the instant any form is
+    #     submitted, so a slow POST doesn't look like nothing happened and
+    #     can't be double-submitted from the UI). All five are allow-listed
+    #     by exact SHA-256 hash below instead of 'unsafe-inline', so any
+    #     future/injected inline script that isn't byte-identical to these
+    #     five is blocked outright. These five hashes match the app as
+    #     shipped in this repo right now -- if you ever hand-edit any of
+    #     app's inline scripts, regenerate the hashes or those pages'
+    #     scripts will silently stop working (this bit a real deployment
+    #     once -- both /my's and /admin's confirm-dialogs went dead with no
     #     visible error except a browser-console CSP violation).
     #   - style-src needs 'unsafe-inline': index.html's script injects new
     #     elements with inline style="..." at runtime (innerHTML), which a
@@ -80,7 +84,7 @@ server {
     #   - object-src/base-uri/form-action locked to 'none'/'self' as standard
     #     defense-in-depth; nothing in this app needs plugins, a <base> tag,
     #     or cross-origin form submission.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-xFleY/wB4EkZ6LnMDi/a2dUECRi9D3qVOXR0klJPpEg=' 'sha256-iNxXCkADirc/LTsyCSksXSFvFhKdlQdoS1GRTrLapLg=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-xFleY/wB4EkZ6LnMDi/a2dUECRi9D3qVOXR0klJPpEg=' 'sha256-iNxXCkADirc/LTsyCSksXSFvFhKdlQdoS1GRTrLapLg=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
 
     # HARDENING: modern security headers, same low-risk defense-in-depth as
     # the four above. This app never needs camera/mic/geolocation/payment

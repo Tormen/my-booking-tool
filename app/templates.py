@@ -9,8 +9,57 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
+# 2026-07-11, the operator (screenshot of a Cancel submission sitting at 2.05s in
+# devtools' Network tab): "(a) the buttons remain all clickable .. not sure
+# what would happen if you would fire again or click cancel finally... (b)
+# there is no indication that the button press was taken into consideration
+# and that the system is working on it (spinning wheel or so)." A cancel/
+# reinstate/booking POST is a plain (non-fetch) form submission followed by a
+# full-page redirect -- there's a real, sometimes multi-second gap between
+# the click and the new page replacing this one, during which the OLD page's
+# DOM (every button on it, not just the one just clicked) stays perfectly
+# interactive. Note this is UX-only, not a correctness fix: every mutating
+# route already treats a repeat submission as a safe no-op server-side (see
+# e.g. guest_cancel()'s "already guarded ... additionally closes a genuine
+# concurrent double-submit" comment) -- this just stops the page from
+# LOOKING like nothing happened, and stops a bored/impatient click from
+# doing anything at all while a submission is already in flight.
+# Deliberately global (page()-level, not opt-in per page like
+# _DIALOG_WIRING_SCRIPT) so every current and future form gets this for
+# free. Deliberately a plain constant with no interpolation, same reason
+# _SORTABLE_FILTERABLE_TABLE_SCRIPT/_DIALOG_WIRING_SCRIPT are (see
+# app/webapp.py) -- one exact string means one CSP script-src sha256 hash
+# covers it on every single page, forever, rather than only the first page
+# whose copy happened to get hashed. Adding this script means the CSP
+# script-src allow-list needs a FIFTH hash -- see
+# site/nginx-locations.conf.example's own comment on that.
+_SUBMIT_FEEDBACK_SCRIPT = """<script>
+(function() {
+  document.addEventListener("submit", function(ev) {
+    // Deferred one tick: a legacy onsubmit="confirm(...)" handler (kept
+    // only for browsers predating <dialog>/showModal, e.g. /my's
+    // delete-account form) calls preventDefault() synchronously during
+    // this same dispatch if the guest answers "No" -- checking
+    // ev.defaultPrevented only AFTER that has had a chance to run avoids
+    // leaving every button on the page stuck disabled with nothing
+    // actually submitted.
+    setTimeout(function() {
+      if (ev.defaultPrevented) return;
+      document.querySelectorAll("button").forEach(function(b) { b.disabled = true; });
+      if (ev.submitter) ev.submitter.textContent = "Please wait...";
+    }, 0);
+  });
+})();
+</script>"""
+
+
 def page(title: str, body: str, banner: str = "") -> str:
-    """`banner` (2026-07-06, see app/webapp.py's _session_banner_html) is
+    """Every page in the app gets `_SUBMIT_FEEDBACK_SCRIPT` appended
+    automatically (2026-07-11) -- see that constant's own docstring/comment
+    above for why (the operator: submissions with no feedback, buttons stayed
+    clickable during a slow one). No per-page opt-in needed or possible.
+
+    `banner` (2026-07-06, see app/webapp.py's _session_banner_html) is
     OPTIONAL, small, session-aware markup rendered above the page's own
     heading -- e.g. "Logged in as x@example.org - Logout" on /book and
     /courses when reached with an active guest session. Blank by default
@@ -96,4 +145,5 @@ th{{user-select:none}}
 {banner}
 <h1>{esc(title)}</h1>
 {body}
+{_SUBMIT_FEEDBACK_SCRIPT}
 </body></html>"""

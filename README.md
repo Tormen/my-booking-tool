@@ -425,6 +425,23 @@ ID, no login wall). **New nginx locations** (`/reinstate/`,
 `nginx/my-booking.conf`; `my-bt status` flags them if missing.
 No CLI equivalent yet.
 
+**Submission feedback (2026-07-11):** every form in the app -- Cancel,
+Reinstate, booking, account settings, delete-account, login/signup,
+all of it -- disables every button on the page and relabels the one you
+clicked "Please wait..." the instant it's submitted. This is a plain
+(non-AJAX) form POST followed by a full-page redirect, so there's a real
+gap (occasionally a couple of seconds, e.g. while cancellation emails are
+sent) between your click and the new page loading; without this, the old
+page's buttons stayed fully clickable the whole time with no sign
+anything had happened. It's a client-side courtesy, not the actual safety
+net -- every mutating route already treats a repeat submission as a safe
+no-op server-side -- but it stops a slow request from looking broken and
+stops an impatient second click from doing anything at all. One shared
+script (`app/templates.py::page()`) covers every current and future
+form automatically; see `site/nginx-locations.conf.example`'s CSP
+comment if you're hand-maintaining your own vhost, since this adds a
+fifth allow-listed inline-script hash.
+
 ### `my-bt status`
 
 A guided health check across the whole install -- run this first whenever
