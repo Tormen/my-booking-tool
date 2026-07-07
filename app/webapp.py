@@ -1094,6 +1094,7 @@ class App:
               </div>
               <label><input type="checkbox" name="agree" required> I acknowledge the
                 <a href="/terms.html" target="_blank">participation terms</a> (voluntary, at my own risk)
+                for myself and any guests I'm registering above
                 <span class="req">(required)</span>.</label>
               <div class="submit-row">
                 <button type="submit" id="book-submit">{esc(first_label)}</button>
