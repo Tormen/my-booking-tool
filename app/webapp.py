@@ -12,6 +12,8 @@
                                      the same response either way -- doesn't reveal
                                      whether an email is registered)
   POST     /my/cancel/<reg_id>      guest cancels one of their own bookings
+  POST     /my/reinstate/<reg_id>   guest undoes a cancellation of their own,
+                                     for an occurrence still in the future
   POST     /my/logout               guest logout
   POST     /my/delete-account       guest erases their own account (Art. 17)
   GET      /my/session               JSON {"logged_in": bool, "email": ...} for the
@@ -29,6 +31,9 @@
   GET      /admin                   admin overview (today+future by default)
   GET/POST /admin/cancel/<reg_id>   host cancels a registration, optional message
                                      (requires an admin login session)
+  POST     /admin/reinstate/<reg_id> host undoes a cancellation on any
+                                     registration, for an occurrence still
+                                     in the future (requires admin login)
   GET/POST /host-cancel/<reg_id>    same cancellation, but as a no-login "magic
                                      link" -- this is what the calendar event's
                                      own per-participant "cancel:" line links
@@ -69,6 +74,7 @@ from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import cancel_and_promote
 from .cancellation import (
     booking_details_text, course_recap_html, html_email_body, html_to_text, intro_html, send_cancellation_emails,
+    send_reinstatement_emails,
 )
 from .config import Settings
 from .emailer import _masked, send_mail
@@ -80,7 +86,8 @@ from .security import (
 )
 from .slots import build_occurrences
 from .storage import (
-    STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Registration, Store, User, now_iso,
+    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION,
+    STATUS_WAITLISTED, Registration, Store, User, now_iso,
 )
 from .templates import esc, page
 
@@ -560,6 +567,8 @@ class App:
             return self.my_confirm(method, m.group(1), environ)
         if m := re.fullmatch(r"/my/cancel/([0-9a-fA-F-]+)", path):
             return self.my_cancel(method, m.group(1), environ)
+        if m := re.fullmatch(r"/my/reinstate/([0-9a-fA-F-]+)", path):
+            return self.my_reinstate(method, m.group(1), environ)
         if path == "/my/logout":
             return self.my_logout(method, environ)
         if path == "/my/delete-account":
@@ -582,6 +591,8 @@ class App:
             return self.admin_overview(method, environ)
         if m := re.fullmatch(r"/admin/cancel/([0-9a-fA-F-]+)", path):
             return self.admin_cancel(method, m.group(1), environ)
+        if m := re.fullmatch(r"/admin/reinstate/([0-9a-fA-F-]+)", path):
+            return self.admin_reinstate(method, m.group(1), environ)
         if m := re.fullmatch(r"/host-cancel/([0-9a-fA-F-]+)", path):
             return self.host_cancel(method, m.group(1), environ)
         return "404 Not Found", [("Content-Type", "text/plain")], "not found"
@@ -790,6 +801,26 @@ class App:
         send_cancellation_emails(
             self.settings, course, occ_date, user, canceled_by, message,
             ics_attachment=(ics_filename, ics_text, "CANCEL"),
+        )
+
+    def _send_reinstatement_emails(
+        self, course, occ_date: str, user, confirmed: bool, reinstated_by: str,
+    ) -> None:
+        """Thin wrapper around app.cancellation.send_reinstatement_emails,
+        same pattern/rationale as _send_cancellation_emails above. Builds a
+        fresh PUBLISH .ics only when `confirmed` is True -- a still-
+        waitlisted reinstatement has no real slot to hand a calendar entry
+        for yet, matching the original booking flow's own rule (see
+        _send_booking_result_guest_email)."""
+        ics_attachment = None
+        if confirmed:
+            ics_filename, ics_text = calendar_sync.guest_invite_ics(
+                self.settings, course, date.fromisoformat(occ_date)
+            )
+            ics_attachment = (ics_filename, ics_text, "PUBLISH")
+        send_reinstatement_emails(
+            self.settings, course, occ_date, user, confirmed, reinstated_by,
+            ics_attachment=ics_attachment,
         )
 
     def _send_booking_result_guest_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
@@ -1547,6 +1578,20 @@ class App:
                     f'<button type="button" class="dialog-close-btn" data-dialog="{cancel_id}-dialog">Never mind</button>'
                     "</div></dialog>"
                 )
+                # Reinstate ("undo the cancel"): 2026-07-10, the operator: "there
+                # should be then a reschedule button for canceled meetings
+                # which time (WHEN) is in the future" -- offered here for
+                # any of the guest's OWN canceled rows whose occurrence
+                # hasn't happened yet (a past occurrence has nothing left
+                # to reinstate INTO). No confirm dialog -- unlike Cancel,
+                # this isn't destructive; worst case it's canceled again.
+                if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST) and (
+                    date.fromisoformat(r.occurrence_date) >= today
+                ):
+                    actions += (
+                        f'<form method="post" action="/my/reinstate/{esc(r.registration_id)}" '
+                        'style="display:inline"><button type="submit">Reinstate</button></form>'
+                    )
                 return (
                     f"<tr><td>{esc(title)}</td><td>{esc(r.occurrence_date)}</td>"
                     f"<td>{esc(time_range)}</td><td>{esc(location)}</td>"
@@ -1982,6 +2027,36 @@ class App:
                     # lets the real account owner notice a cancellation made by
                     # someone who got into their /my session but isn't them.
                     self._send_cancellation_emails(course, reg.occurrence_date, user, canceled_by="guest", message=message)
+        return "302 Found", [("Location", "/my")], ""
+
+    def my_reinstate(self, method: str, registration_id: str, environ):
+        """Undo a cancellation for one of the guest's own bookings, as long
+        as the occurrence is still in the future -- see my()'s own
+        `_row()` for the button that's gated the same way, and
+        Store.reinstate()'s docstring for what "undo" means here (same
+        occurrence, re-decided confirmed-vs-waitlisted from CURRENT
+        capacity; never a move to a different date). The future-date check
+        is re-done here, not just trusted from the page: my()'s button is
+        already hidden for a past occurrence, but a crafted/replayed POST
+        could still hit this route directly."""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "guest":
+            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+        reg = self.store.find_by_id(registration_id)
+        if reg and reg.user_id == session["user_id"]:
+            course = self.settings.course(reg.course_shortname)
+            if course and date.fromisoformat(reg.occurrence_date) >= datetime.now(timezone.utc).date():
+                updated = self.store.reinstate(registration_id, course.capacity)
+                if updated is not None:
+                    self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
+                    user = self.store.find_user_by_id(session["user_id"])
+                    # Both sides notified, always -- same standing default
+                    # as every other registration-status email (see
+                    # _send_cancellation_emails above).
+                    self._send_reinstatement_emails(
+                        course, reg.occurrence_date, user,
+                        confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="guest",
+                    )
         return "302 Found", [("Location", "/my")], ""
 
     def my_logout(self, method: str, environ):
@@ -2461,6 +2536,17 @@ class App:
                     f'<button type="button" class="dialog-close-btn" data-dialog="{cancel_id}-dialog">Never mind</button>'
                     "</div></dialog>"
                 )
+                # Reinstate ("undo the cancel"), host-side twin of my()'s
+                # own button -- 2026-07-10: "ah yes true! (accidental error
+                # for the admin could be use case!)". Same future-only
+                # gating, no confirm dialog (not destructive).
+                if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST) and (
+                    date.fromisoformat(r.occurrence_date) >= today
+                ):
+                    actions += (
+                        f'<form method="post" action="/admin/reinstate/{esc(r.registration_id)}" '
+                        f'style="display:inline">{past_field}<button type="submit">Reinstate</button></form>'
+                    )
                 # No separate "Merge history" button (2026-07-10) -- see the
                 # auto-merge pass at the top of this method's own comment:
                 # merging now happens automatically just by loading this
@@ -2570,6 +2656,39 @@ class App:
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Cancel registration", body)
+
+    def admin_reinstate(self, method: str, registration_id: str, environ):
+        """Host-side twin of my_reinstate() -- undoes a cancellation on ANY
+        guest's booking, for the same "guest called/emailed after canceling
+        by mistake" use case my_reinstate() covers for the guest's own
+        self-service view (2026-07-10: "ah yes true! (accidental error for
+        the admin could be use case!)"). Deliberately no recap/reason
+        dialog first (unlike admin_cancel()'s GET confirmation page) --
+        reinstating isn't destructive the way canceling is, so a plain
+        one-click button (same as the admin table's other single-click
+        actions) was judged sufficient; worst case it's simply canceled
+        again. Preserves `past` the same way admin_cancel() does, so
+        reinstating from the "past" view's table doesn't bounce back to
+        the default upcoming-only view."""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "admin":
+            return "302 Found", [("Location", "/admin/login")], ""
+        reg = self.store.find_by_id(registration_id)
+        if reg is None:
+            return "404 Not Found", [("Content-Type", "text/plain")], "not found"
+        form = self._read_form(environ)
+        course = self.settings.course(reg.course_shortname)
+        if course and date.fromisoformat(reg.occurrence_date) >= datetime.now(timezone.utc).date():
+            updated = self.store.reinstate(registration_id, course.capacity)
+            if updated is not None:
+                self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
+                user = self.store.find_user_by_id(reg.user_id)
+                self._send_reinstatement_emails(
+                    course, reg.occurrence_date, user,
+                    confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host",
+                )
+        location = "/admin?past=1" if form.get("past") == "1" else "/admin"
+        return "302 Found", [("Location", location)], ""
 
     def host_cancel(self, method: str, registration_id: str, environ):
         """A no-login "magic link" twin of admin_cancel() above, same

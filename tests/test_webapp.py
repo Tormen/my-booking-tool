@@ -11,10 +11,11 @@ from urllib.parse import urlencode
 from app import webapp
 from app.caldav_client import CalDAVClient, Response
 from app.erasure import erase_user_by_email
-from app.security import hash_admin_password, hash_secret, hash_token
+from app.security import hash_admin_password, hash_secret, hash_token, new_token
 from app.slots import Occurrence, build_occurrences
 from app.storage import (
-    STATUS_CANCELED_BY_GUEST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store,
+    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION,
+    STATUS_WAITLISTED, Store,
 )
 from app.webapp import App
 
@@ -1949,6 +1950,141 @@ class BookingFlowTest(unittest.TestCase):
         self.sent_emails.clear()
         self._post_with_session(self.app.admin_cancel, (reg.registration_id,), {"message": ""}, admin_environ)
         self.assertEqual(self.sent_emails, [])
+
+    # -- /my/reinstate + /admin/reinstate: undo a cancellation --------------
+    # 2026-07-10, the operator: "there should be then a reschedule button for
+    # canceled meetings which time (WHEN) is in the future" -- clarified in
+    # discussion that this means undoing the cancel for the SAME occurrence
+    # (not moving to a different one), offered both on the guest's own /my
+    # page and, per the operator's follow-up ("ah yes true! (accidental error for
+    # the admin could be use case!)"), on /admin too.
+
+    def test_my_bookings_table_shows_reinstate_button_for_a_future_canceled_booking(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn(f'<form method="post" action="/my/reinstate/{reg.registration_id}"', body)
+        self.assertIn("Reinstate", body)
+
+    def test_my_bookings_table_has_no_reinstate_button_before_canceling(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertNotIn("/my/reinstate/", body)
+        self.assertNotIn(">Reinstate<", body)
+
+    def test_my_reinstate_confirms_again_when_capacity_allows(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_GUEST)
+        self.sent_emails.clear()
+        status, headers, _body = self._post_with_session(
+            self.app.my_reinstate, (reg.registration_id,), {}, environ
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my")
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("regular@example.org", to_addrs)
+        self.assertIn("admin@example.org", to_addrs)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("You reinstated this booking", participant_mail)
+        self.assertIn("you're confirmed again", participant_mail)
+
+    def test_my_reinstate_waitlists_when_capacity_is_now_taken(self):
+        # self.settings' yoga-class-1 course has capacity=1 (see setUp).
+        user1, env1 = self._login_as_guest("first@example.org", name="First")
+        self._book("first@example.org", name="First")
+        user2, env2 = self._login_as_guest("second@example.org", name="Second")
+        self._book("second@example.org", name="Second")
+        reg1 = self.store.registrations_for_user(user1.user_id)[0]
+        reg2 = self.store.registrations_for_user(user2.user_id)[0]
+        self.assertEqual(reg1.status, STATUS_CONFIRMED)
+        self.assertEqual(reg2.status, STATUS_WAITLISTED)
+        # Canceling the confirmed spot auto-promotes the waitlisted guest.
+        self._post_with_session(self.app.my_cancel, (reg1.registration_id,), {"message": ""}, env1)
+        self.assertEqual(self.store.find_by_id(reg2.registration_id).status, STATUS_CONFIRMED)
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_reinstate, (reg1.registration_id,), {}, env1)
+        self.assertEqual(self.store.find_by_id(reg1.registration_id).status, STATUS_WAITLISTED)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "first@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("you're back on the waitlist", participant_mail)
+
+    def test_my_reinstate_ignores_someone_elses_registration(self):
+        owner, owner_environ = self._login_as_guest("owner@example.org")
+        self._book("owner@example.org", name="Owner")
+        reg = self.store.registrations_for_user(owner.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, owner_environ)
+        _other, other_environ = self._login_as_guest("other@example.org", name="Other")
+        self._post_with_session(self.app.my_reinstate, (reg.registration_id,), {}, other_environ)
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_GUEST)
+
+    def test_my_reinstate_does_nothing_for_a_past_occurrence(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        reg = self.store.add_registration("yoga-class-1", "2020-01-01", user.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        self._post_with_session(self.app.my_reinstate, (reg.registration_id,), {}, environ)
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_GUEST)
+
+    def test_admin_reinstate_requires_admin_session(self):
+        status, headers, _body = self.app.admin_reinstate("POST", "nonexistent-id", {"CONTENT_LENGTH": "0", "wsgi.input": io.BytesIO(b"")})
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin/login")
+
+    def test_admin_overview_shows_reinstate_button_for_future_canceled_row(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn(f'<form method="post" action="/admin/reinstate/{reg.registration_id}"', body)
+
+    def test_admin_reinstate_confirms_again_and_notifies_both_sides(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        self.sent_emails.clear()
+        status, headers, _body = self._post_with_session(
+            self.app.admin_reinstate, (reg.registration_id,), {}, admin_environ
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin")
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("The host reinstated this booking", participant_mail)
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Reinstated:"))
+        self.assertIn("You reinstated this booking", admin_mail)
+
+    def test_admin_reinstate_redirect_preserves_past_query_param(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        status, headers, _body = self._post_with_session(
+            self.app.admin_reinstate, (reg.registration_id,), {"past": "1"}, admin_environ
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin?past=1")
+
+    def test_admin_reinstate_does_nothing_for_a_past_occurrence(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        reg = self.store.add_registration("yoga-class-1", "2020-01-01", user.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        self._post_with_session(self.app.admin_reinstate, (reg.registration_id,), {}, admin_environ)
+        self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_HOST)
 
     # -- /host-cancel: no-login "magic link" from the calendar event -------
 

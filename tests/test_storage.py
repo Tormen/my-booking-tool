@@ -7,6 +7,8 @@ from pathlib import Path
 from app.security import hash_secret, hash_token, new_token
 from app.storage import (
     REG_FIELDS,
+    STATUS_CANCELED_BY_GUEST,
+    STATUS_CANCELED_BY_HOST,
     STATUS_CONFIRMED,
     STATUS_PENDING_CONFIRMATION,
     STATUS_WAITLISTED,
@@ -161,6 +163,64 @@ class RegistrationTest(StoreTestBase):
         )
         found = self.store.find_by_guest_token_hash(hash_token(token))
         self.assertEqual(found.registration_id, reg.registration_id)
+
+
+class ReinstateTest(StoreTestBase):
+    """2026-07-10: "undo the cancel" -- see Store.reinstate()'s own
+    docstring and app/webapp.py's my_reinstate()/admin_reinstate()."""
+
+    def test_reinstates_a_canceled_registration_back_to_confirmed(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        reg = self.store.add_registration("c", "2026-08-01", u.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        updated = self.store.reinstate(reg.registration_id, capacity=2)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated.status, STATUS_CONFIRMED)
+        self.assertEqual(updated.canceled_at, "")
+        self.assertEqual(updated.canceled_by, "")
+        self.assertEqual(self.store.count_confirmed("c", "2026-08-01"), 1)
+
+    def test_reinstates_to_waitlisted_when_capacity_is_now_full(self):
+        u1 = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        u2 = self.store.upsert_user_for_booking("b@b.com", "Bob")
+        reg = self.store.add_registration("c", "2026-08-01", u1.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        # Someone else took the freed-up (now the only) spot in the meantime.
+        self.store.add_registration_checking_capacity("c", "2026-08-01", u2.user_id, hash_token(new_token()), capacity=1)
+        updated = self.store.reinstate(reg.registration_id, capacity=1)
+        self.assertEqual(updated.status, STATUS_WAITLISTED)
+
+    def test_reinstating_something_not_canceled_is_a_no_op(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        reg = self.store.add_registration("c", "2026-08-01", u.user_id, hash_token(new_token()))
+        self.assertIsNone(self.store.reinstate(reg.registration_id, capacity=2))
+
+    def test_reinstating_twice_is_a_no_op_the_second_time(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        reg = self.store.add_registration("c", "2026-08-01", u.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        self.assertIsNotNone(self.store.reinstate(reg.registration_id, capacity=2))
+        self.assertIsNone(self.store.reinstate(reg.registration_id, capacity=2))
+
+    def test_reinstate_preserves_the_original_guest_cancel_token(self):
+        # So the guest's original booking-confirmation email's cancel link
+        # still works after a reinstate -- no need to mint/email a new one.
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        token = new_token()
+        reg = self.store.add_registration("c", "2026-08-01", u.user_id, hash_token(token))
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        self.store.reinstate(reg.registration_id, capacity=2)
+        found = self.store.find_by_guest_token_hash(hash_token(token))
+        self.assertEqual(found.registration_id, reg.registration_id)
+
+    def test_reinstates_a_host_canceled_registration_too(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        reg = self.store.add_registration("c", "2026-08-01", u.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
+        updated = self.store.reinstate(reg.registration_id, capacity=2)
+        self.assertEqual(updated.status, STATUS_CONFIRMED)
 
 
 class AddRegistrationCheckingCapacityTest(StoreTestBase):

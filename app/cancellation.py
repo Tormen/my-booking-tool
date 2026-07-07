@@ -207,3 +207,55 @@ def send_cancellation_emails(
         f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}",
         html_body=html_email_body(intro_html(f"{admin_who} canceled this booking:") + f"{recap_html}{reason_html}"),
     )
+
+
+def send_reinstatement_emails(
+    settings: Settings, course: Course, occ_date: str, user, confirmed: bool, reinstated_by: str,
+    ics_attachment: tuple[str, str, str] | None = None,
+) -> None:
+    """The "undo a cancel" twin of send_cancellation_emails() above
+    (2026-07-10, the operator: "there should be then a reschedule button for
+    canceled meetings which time (WHEN) is in the future"; clarified in
+    discussion that this means undoing the cancellation for the SAME
+    occurrence, not moving to a different one, and that both the guest's
+    own /my page and the host's /admin page should offer it). Same
+    notify-both-sides standing default as every other registration-status
+    email (see send_cancellation_emails's own docstring) -- whoever DIDN'T
+    click the button is the one most likely to be surprised by this.
+
+    `confirmed` is a plain bool (True = re-admitted straight to confirmed,
+    False = landed back on the waitlist) rather than one of
+    app.storage's STATUS_* strings, deliberately -- this module has no
+    other dependency on app.storage and importing just for this one
+    comparison isn't worth the coupling. `reinstated_by` is "guest" or
+    "host", same vocabulary as send_cancellation_emails's `canceled_by`.
+
+    `ics_attachment`, like send_cancellation_emails's own, is built by the
+    CALLER (app.calendar_sync.guest_invite_ics, only when `confirmed` is
+    True -- a still-waitlisted reinstatement has no real calendar slot to
+    hand out yet, same rule the original booking flow already follows) and
+    only ever attached to the participant's copy."""
+    details = booking_details_text(course, occ_date)
+    recap_html = course_recap_html(course, occ_date)
+    subject = f"Reinstated: {course.title} on {occ_date}"
+    my_url = f"{settings.base_url}/my"
+    status_phrase = "you're confirmed again" if confirmed else "you're back on the waitlist"
+    if user:
+        participant_who = "You" if reinstated_by == "guest" else "The host"
+        intro = f"{participant_who} reinstated this booking -- {status_phrase}:"
+        send_mail(
+            settings, user.email, subject,
+            f"{intro}\n\n{details}\nManage your bookings: {my_url}\n",
+            html_body=html_email_body(
+                intro_html(intro) + f"{recap_html}"
+                f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+            ),
+            ics_attachment=ics_attachment,
+        )
+    admin_who = "You" if reinstated_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
+    admin_intro = f"{admin_who} reinstated this booking -- {status_phrase}:"
+    send_mail(
+        settings, settings.admin_email, subject,
+        f"{admin_intro}\n\n{details}\n",
+        html_body=html_email_body(intro_html(admin_intro) + recap_html),
+    )

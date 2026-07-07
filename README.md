@@ -337,6 +337,16 @@ CalDAV dependency here by design, same reasoning as `my-bt erase`) -- use
 the web admin, or restart `my-booking.service` (which re-syncs lazily), if
 the calendar needs to reflect this immediately.
 
+**Undoing a cancellation:** both the guest's own `/my` page and the web
+admin's `/admin` overview show a "Reinstate" button on any canceled
+booking whose occurrence is still in the future (2026-07-10). It's an
+undo, not a reschedule to a different date -- it puts the SAME
+registration back to confirmed (or waitlisted, if the class filled up in
+the meantime), re-checking capacity fresh at the moment you click it.
+Guests can only reinstate their own bookings; the admin can reinstate
+anyone's (handy when a guest cancels by mistake and asks you to fix it).
+No CLI equivalent yet.
+
 ### `my-bt status`
 
 A guided health check across the whole install -- run this first whenever

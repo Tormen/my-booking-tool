@@ -657,6 +657,54 @@ class Store:
                 write(rows)
             return changed
 
+    def reinstate(self, registration_id: str, capacity: int) -> Registration | None:
+        """Undo a cancellation (2026-07-10, the operator: "there should be then a
+        reschedule button for canceled meetings which time (WHEN) is in the
+        future" -- clarified in discussion to mean "undo the cancel", not
+        move to a different occurrence). Only acts on a currently
+        CANCELED_BY_GUEST/CANCELED_BY_HOST row -- a no-op (returns None)
+        for anything else, e.g. a double-click/resubmit after the first
+        call already flipped it back to confirmed/waitlisted, or a stale
+        page showing a row someone else already reinstated/rebooked over.
+
+        Re-decides confirmed-vs-waitlisted from CURRENT capacity, in the
+        same single locked read-modify-write cycle as
+        add_registration_checking_capacity/confirm_pending_registration --
+        the class may have filled up (or emptied out) in the time since
+        this row was canceled, so this is a fresh admission decision, not
+        just flipping a flag back.
+
+        Deliberately does NOT touch `guest_cancel_token_hash`: cancel()
+        never clears it, so the ORIGINAL cancel link from this guest's very
+        first booking-confirmation email still works to cancel this
+        registration again after being reinstated -- no need to mint and
+        email out a new one. Also deliberately does NOT re-parent or affect
+        any other row sharing this row's party_id: reinstating, like
+        canceling, is a per-registration action (a party's members can
+        cancel independently; the same is true in reverse)."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            target = None
+            for row in rows:
+                if row["registration_id"] == registration_id and row["status"] in (
+                    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST,
+                ):
+                    target = row
+                    break
+            if target is None:
+                return None
+            confirmed = sum(
+                1 for r in rows
+                if r["course_shortname"] == target["course_shortname"]
+                and r["occurrence_date"] == target["occurrence_date"]
+                and r["status"] == STATUS_CONFIRMED
+            )
+            target["status"] = STATUS_WAITLISTED if confirmed >= capacity else STATUS_CONFIRMED
+            target["canceled_at"] = ""
+            target["canceled_by"] = ""
+            target["host_message"] = ""
+            write(rows)
+            return Registration(**target)
+
     def all_registrations(self) -> list[Registration]:
         with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return [Registration(**r) for r in rows]
