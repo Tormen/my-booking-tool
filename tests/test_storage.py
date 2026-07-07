@@ -565,6 +565,44 @@ class MergeArchivedRegistrationsTest(StoreTestBase):
         self.assertEqual(live_dates, {"2026-01-01", "2026-02-01"})
         self.assertEqual(self.store.read_registrations(scope="archived"), [])
 
+    def test_drops_an_archived_row_that_would_duplicate_a_live_one(self):
+        # 2026-07-10, the operator's own real bug: erase an account with a
+        # canceled booking for some course+date, rebook (and cancel again)
+        # that SAME course+date under a fresh account with the same email,
+        # then merge -- "it should not be possible to get 2 rows for the
+        # same course, same email and same slot/date... here the problem
+        # might be the ARCHIVE as the 2nd row was archived!" Confirmed:
+        # "for a FUTURE date its ok to remove the canceled archive row
+        # then when it is activated again" -- so the archived row is
+        # dropped, not duplicated, whenever the live account already has
+        # its own row for that exact course+date.
+        old = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.add_registration("c", "2026-01-01", old.user_id, hash_token(new_token()))
+        self.store.erase_user(old.user_id, "erased:x")
+
+        new = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.add_registration("c", "2026-01-01", new.user_id, hash_token(new_token()))
+
+        moved = self.store.merge_archived_registrations([old.user_id], new.user_id)
+        self.assertEqual(moved, 0)  # dropped, not moved
+        live_regs = self.store.registrations_for_user(new.user_id)
+        self.assertEqual(len(live_regs), 1)  # still just the one live row
+        self.assertEqual(self.store.read_registrations(scope="archived"), [])  # dropped, not left archived either
+
+    def test_non_conflicting_rows_still_move_even_when_one_is_dropped(self):
+        old = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.add_registration("c", "2026-01-01", old.user_id, hash_token(new_token()))  # will conflict
+        self.store.add_registration("c", "2026-02-01", old.user_id, hash_token(new_token()))  # won't conflict
+        self.store.erase_user(old.user_id, "erased:x")
+
+        new = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        self.store.add_registration("c", "2026-01-01", new.user_id, hash_token(new_token()))
+
+        moved = self.store.merge_archived_registrations([old.user_id], new.user_id)
+        self.assertEqual(moved, 1)  # only the non-conflicting one
+        live_dates = {r.occurrence_date for r in self.store.registrations_for_user(new.user_id)}
+        self.assertEqual(live_dates, {"2026-01-01", "2026-02-01"})
+
     def test_no_matching_archived_rows_returns_zero_and_touches_nothing(self):
         new = self.store.upsert_user_for_booking("guest@example.com", "Guest")
         moved = self.store.merge_archived_registrations(["no-such-user-id"], new.user_id)

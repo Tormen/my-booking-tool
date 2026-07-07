@@ -488,7 +488,22 @@ class Store:
         inserts the row in a single locked read-modify-write cycle -- unlike
         calling count_confirmed() then add_registration() as two separate
         operations, this closes the race where two people booking the last
-        spot at the same moment could both land as confirmed past capacity."""
+        spot at the same moment could both land as confirmed past capacity.
+
+        2026-07-10, the operator: "it should not be possible to get 2 rows for the
+        same course, same email and same slot/date... If I cancel: This is
+        canceled. If then I rebook, then it should update the canceled
+        booking, NOT add a 2nd one." -- app.webapp.App.book() already
+        rejects a rebooking attempt outright while an existing row is still
+        ACTIVE (see Store.has_active_registration), so by the time this is
+        called from there, any existing row for this exact
+        (course_shortname, occurrence_date, user_id) is guaranteed to be a
+        non-active (canceled) one -- but this method enforces the
+        invariant itself, unconditionally, rather than only relying on
+        that caller-side guard: if ANY row already exists for this exact
+        triple, it's updated in place (fresh status/registered_at/token,
+        cancellation fields cleared, party linkage cleared -- this method
+        is solo-booking only) instead of a new row ever being appended."""
         with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
             confirmed = sum(
                 1 for r in rows
@@ -497,6 +512,21 @@ class Store:
                 and r["status"] == STATUS_CONFIRMED
             )
             status = STATUS_WAITLISTED if confirmed >= capacity else STATUS_CONFIRMED
+            existing = next(
+                (r for r in rows
+                 if r["course_shortname"] == course_shortname
+                 and r["occurrence_date"] == occurrence_date
+                 and r["user_id"] == user_id),
+                None,
+            )
+            if existing is not None:
+                existing.update(
+                    status=status, registered_at=now_iso(), guest_cancel_token_hash=cancel_token_hash,
+                    canceled_at="", canceled_by="", host_message="",
+                    party_id="", invited_by_user_id="",
+                )
+                write(rows)
+                return Registration(**existing)
             reg = Registration(
                 registration_id=str(uuid.uuid4()),
                 course_shortname=course_shortname,
@@ -542,7 +572,17 @@ class Store:
         every guest they add by adding them, same trust model SimplyMeet.me
         used. Guests still get a real account (via
         Store.upsert_user_for_booking, called by the caller before this)
-        and can later set a password to manage their own booking via /my."""
+        and can later set a password to manage their own booking via /my.
+
+        2026-07-10, the operator: "it should not be possible to get 2 rows for the
+        same course, same email and same slot/date" -- same invariant
+        add_registration_checking_capacity now enforces, applied per party
+        member here too: if a member already has ANY row (typically a
+        canceled one, from booking-then-canceling-then-being-added-to-a-
+        new-party) for this exact course+date, that row is updated in
+        place (fresh status/registered_at/token, cancellation fields
+        cleared, party_id/invited_by_user_id updated to reflect THIS
+        party) instead of a second row ever being appended for them."""
         with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
             confirmed = sum(
                 1 for r in rows
@@ -555,6 +595,22 @@ class Store:
             leader_user_id = entries[0][0]
             created = []
             for i, (user_id, cancel_token_hash) in enumerate(entries):
+                invited_by_user_id = "" if i == 0 else leader_user_id
+                existing = next(
+                    (r for r in rows
+                     if r["course_shortname"] == course_shortname
+                     and r["occurrence_date"] == occurrence_date
+                     and r["user_id"] == user_id),
+                    None,
+                )
+                if existing is not None:
+                    existing.update(
+                        status=status, registered_at=now_iso(), guest_cancel_token_hash=cancel_token_hash,
+                        canceled_at="", canceled_by="", host_message="",
+                        party_id=party_id, invited_by_user_id=invited_by_user_id,
+                    )
+                    created.append(Registration(**existing))
+                    continue
                 reg = Registration(
                     registration_id=str(uuid.uuid4()),
                     course_shortname=course_shortname,
@@ -564,7 +620,7 @@ class Store:
                     registered_at=now_iso(),
                     guest_cancel_token_hash=cancel_token_hash,
                     party_id=party_id,
-                    invited_by_user_id="" if i == 0 else leader_user_id,
+                    invited_by_user_id=invited_by_user_id,
                 )
                 rows.append(asdict(reg))
                 created.append(reg)
@@ -976,8 +1032,32 @@ class Store:
             changed here (this method reattaches history, it doesn't
             re-evaluate booking state).
 
-        Returns the number of registration rows moved (0 if none matched --
-        the caller should treat that as "nothing to merge", not an error)."""
+        2026-07-10, the operator: this was the actual root cause of a real
+        duplicate-row report ("it should not be possible to get 2 rows for
+        the same course, same email and same slot/date... here the
+        problem might be the ARCHIVE as the 2nd row was archived!") -- this
+        method used to move every matching archived row into the live CSV
+        unconditionally, with no check for whether `into_user_id` ALREADY
+        had its own live row for that exact (course_shortname,
+        occurrence_date) -- e.g. an account gets erased with a canceled
+        booking for some date, a fresh account under the same email books
+        (and maybe cancels) that SAME date again, and later an admin merges
+        the old archived history back in: two rows for the same course+date
+        would land side by side. Fixed: any archived row whose
+        (course_shortname, occurrence_date) already has a live row under
+        `into_user_id` is simply DROPPED (never written to live, and
+        already removed from the archive in the first pass below) rather
+        than moved in -- the operator, asked to confirm: "for a FUTURE date its ok
+        to remove the canceled archive row then when it is activated
+        again" -- applied uniformly regardless of past/future, matching the
+        same unconditional invariant the two add_*_checking_capacity()
+        methods now enforce, rather than adding a date-dependent special
+        case for what's already a rare, admin-invoked operation.
+
+        Returns the number of registration rows actually moved into the
+        live CSV (0 if none matched, or if every match was dropped as a
+        duplicate -- the caller should treat either as "nothing to merge",
+        not an error)."""
         with _LockedCsv(self.archived_registrations_path, REG_FIELDS) as (rows, write):
             keep, moving = [], []
             for row in rows:
@@ -990,9 +1070,17 @@ class Store:
             row["user_id"] = into_user_id
 
         with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
-            rows.extend(moving)
+            live_course_dates = {
+                (r["course_shortname"], r["occurrence_date"])
+                for r in rows if r["user_id"] == into_user_id
+            }
+            to_move = [
+                row for row in moving
+                if (row["course_shortname"], row["occurrence_date"]) not in live_course_dates
+            ]
+            rows.extend(to_move)
             write(rows)
-        return len(moving)
+        return len(to_move)
 
     # -- reporting: live + archived, for the my-bt CLI -----------------------
 

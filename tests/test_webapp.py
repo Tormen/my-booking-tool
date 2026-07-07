@@ -2249,6 +2249,19 @@ class BookingFlowTest(unittest.TestCase):
         row_html = body[row_start:row_start + 400]
         self.assertIn("<td>1</td>", row_html)
 
+    def _other_occ_date(self) -> str:
+        """A second, distinct occurrence date for yoga-class-1 -- lets a
+        test book two genuinely different sessions instead of
+        (post 2026-07-10) colliding on the same course+date, which now
+        triggers the duplicate-row guard (see HasActiveRegistrationTest /
+        MergeArchivedRegistrationsTest)."""
+        course = self.settings.course("yoga-class-1")
+        occs = build_occurrences(
+            course, self.settings, datetime.now(timezone.utc),
+            lambda sn, d: 0, lambda start, end: False,
+        )
+        return occs[1].date.isoformat()
+
     def test_admin_overview_auto_merges_pre_erasure_registrations_on_load(self):
         # 2026-07-10, the operator: "the merge should be automatically done if you
         # also display the history in the /admin page" -- if an erased
@@ -2260,13 +2273,20 @@ class BookingFlowTest(unittest.TestCase):
         # -- no separate button/action needed, and no more display-only
         # "(incl. N pre-erasure)" annotation, since the count is now the
         # real thing rather than an estimate.
+        #
+        # Pre- and post-erasure bookings are for DIFFERENT occurrence dates
+        # here (2026-07-10 fix: merge_archived_registrations now drops a
+        # conflicting archived row instead of duplicating one for the SAME
+        # course+date -- see test_merge_drops_a_row_that_would_duplicate_
+        # the_live_account_below for that case specifically).
         email = "comeback-guest@example.org"
         user, environ = self._login_as_guest(email)
         self._book(email, name="ComebackGuest")
         erase_user_by_email(self.store, self.settings, email, today=date.fromisoformat(self.occ_date))
 
-        # Same email books again post-erasure -- brand-new live user_id.
-        self._book(email, name="ComebackGuest")
+        # Same email books again post-erasure, for a DIFFERENT date --
+        # brand-new live user_id.
+        self._book(email, name="ComebackGuest", occ_date=self._other_occ_date())
         live_user = self.store.find_user_by_email(email)
 
         admin_sid = webapp._new_session({"kind": "admin"})
@@ -2291,7 +2311,7 @@ class BookingFlowTest(unittest.TestCase):
         self._login_as_guest(email)
         self._book(email, name="ComebackGuest2")
         erase_user_by_email(self.store, self.settings, email, today=date.fromisoformat(self.occ_date))
-        self._book(email, name="ComebackGuest2")
+        self._book(email, name="ComebackGuest2", occ_date=self._other_occ_date())
         live_user = self.store.find_user_by_email(email)
 
         admin_sid = webapp._new_session({"kind": "admin"})
@@ -2301,6 +2321,33 @@ class BookingFlowTest(unittest.TestCase):
 
         self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 2)
         self.assertNotIn("[erased]", body)
+
+    def test_admin_overview_merge_drops_a_row_that_would_duplicate_the_live_account(self):
+        # 2026-07-10, the operator's own real bug report: erasing an account with
+        # a canceled booking for some date, then rebooking (and again
+        # canceling) that SAME date under a fresh account with the same
+        # email, then merging the old archived history back in used to
+        # leave TWO rows for the same course+date -- "it should not be
+        # possible to get 2 rows for the same course, same email and same
+        # slot/date... here the problem might be the ARCHIVE as the 2nd row
+        # was archived!" The archived row is now dropped on merge instead
+        # of duplicated whenever the live account already has its own row
+        # for that exact course+date.
+        email = "comeback-guest3@example.org"
+        self._login_as_guest(email)
+        self._book(email, name="ComebackGuest3")  # same self.occ_date both times
+        erase_user_by_email(self.store, self.settings, email, today=date.fromisoformat(self.occ_date))
+        self._book(email, name="ComebackGuest3")
+        live_user = self.store.find_user_by_email(email)
+
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+
+        # Only ONE row survives for this course+date -- not two.
+        regs = self.store.registrations_for_user(live_user.user_id)
+        self.assertEqual(len(regs), 1)
+        self.assertEqual(body.count(f"<td>{email}</td>"), 1)
 
     def test_admin_overview_cancel_button_opens_dialog_with_reason_field(self):
         user, environ = self._login_as_guest("regular@example.org")
