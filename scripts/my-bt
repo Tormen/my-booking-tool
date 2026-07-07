@@ -439,6 +439,72 @@ def cmd_test(args) -> None:
     sys.exit(1)
 
 
+def cmd_maintenance(args) -> None:
+    """`my-bt maintenance on|off|status [-m/--message TEXT]` -- sitewide
+    maintenance toggle (2026-07-10, the operator: "add my-bt commands to set /
+    unset a maintenance mode"). The actual state/rendering logic lives in
+    app/maintenance.py (see its own module docstring for the full design
+    -- a data-dir JSON flag file, not settings.toml, so it takes effect on
+    the very next request with no service restart).
+
+    `on` (optionally with -m/--message for something specific like
+    "back Monday") does two things: writes the flag file the running app
+    checks on every /courses and /book/<shortname> request (both then
+    show a 503 maintenance page instead of normal booking), AND directly
+    patches an idempotent, clearly-marked banner into the TOP of
+    site/index.html -- both this checkout's own copy (if present) and, if
+    [site].static_site_dir is configured, the live deployed copy there
+    too. index.html is hand-authored and never auto-copied otherwise (see
+    README.md "Static-site pages"), but maintenance mode needs to show up
+    immediately, not at the next manual copy, so this command writes
+    directly rather than just reporting a diff to reconcile by hand.
+
+    `off` reverses both. `status` only reports the current state --
+    touches nothing."""
+    from app import maintenance as app_maintenance
+
+    raw = app_config.load_raw_toml(args.settings)
+    admin_email = (raw or {}).get("site", {}).get("admin_email", "")
+    static_site_dir = (raw or {}).get("site", {}).get("static_site_dir")
+
+    if args.maintenance_command == "status":
+        state = app_maintenance.read_state(args.data_dir)
+        if state.enabled:
+            print(f"maintenance mode: ON (since {state.set_at})")
+            if state.message:
+                print(f"  message: {state.message}")
+        else:
+            print("maintenance mode: off")
+        return
+
+    targets = [Path(HOME) / "site" / "index.html"]
+    if static_site_dir:
+        targets.append(Path(static_site_dir) / "index.html")
+
+    enabling = args.maintenance_command == "on"
+    if enabling:
+        state = app_maintenance.enable(args.data_dir, message=args.message or "")
+        message = state.message
+    else:
+        app_maintenance.disable(args.data_dir)
+        message = ""
+
+    for t in targets:
+        if app_maintenance.apply_banner_to_file(t, enabling, admin_email, message):
+            action = "added to" if enabling else "removed from"
+            print(f"[ok] banner {action} {t}")
+        elif t.exists():
+            print(f"[ok] {t} already up to date")
+        else:
+            print(f"[skip] {t} does not exist")
+
+    if enabling:
+        print("maintenance mode: ON -- /courses and /book/<shortname> now show a maintenance "
+              "page. Run `my-bt maintenance off` to reopen bookings.")
+    else:
+        print("maintenance mode: off -- bookings are open again.")
+
+
 # -- status / setup --------------------------------------------------------------
 # The actual check/report/interactive-walkthrough logic lives in
 # app/cli_checks.py + app/cli_setup.py -- deliberately NOT here, so it's
@@ -509,6 +575,7 @@ def cmd_status(args) -> None:
     else:
         checks.append((f"data dir ({data_dir})", "ok", "exists and writable"))
     checks.extend(cli_checks.check_data_dir_git(data_dir))
+    checks.extend(cli_checks.check_maintenance_mode(data_dir))
 
     # -- configured log file, if any ---------------------------------------------
     log_file = app_config.peek_log_file(args.settings) if raw else None
@@ -722,6 +789,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("-m", "--message", help="optional message included in the cancellation emails")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_cancel)
+
+    sp = sub.add_parser(
+        "maintenance",
+        help="set/unset sitewide maintenance mode (blocks new bookings, banners index.html)",
+    )
+    sp.add_argument("maintenance_command", choices=["on", "off", "status"])
+    sp.add_argument("-m", "--message", help="optional message shown in the banner/booking pages (only used with 'on')")
+    sp.set_defaults(func=cmd_maintenance)
 
     sp = sub.add_parser("purge-retention", help="run the retention purge job now")
     sp.add_argument("--dry-run", action="store_true")

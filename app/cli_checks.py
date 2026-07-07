@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import site_render
+from . import maintenance, site_render
 from .caldav_client import CalDAVClient, HttpTransport
 
 Check = tuple[str, str, str]  # (label, "ok"|"warn"|"fail", detail)
@@ -75,6 +75,24 @@ def check_secrets(raw: dict) -> list[Check]:
 # `my-bt status`/`setup` stay responsive if the CalDAV server is slow or
 # unreachable -- this is a health check, not a real booking request.
 _CALDAV_CHECK_TIMEOUT = 5.0
+
+
+def check_maintenance_mode(data_dir: str | Path) -> list[Check]:
+    """Whether sitewide maintenance mode (`my-bt maintenance on/off`, see
+    app/maintenance.py) is currently ON -- reported as "warn", not silence,
+    even though it's a perfectly normal, deliberate state to be in: the
+    whole point is that leaving it on by accident shouldn't go unnoticed
+    for days the way a genuinely forgotten warning could (same reasoning
+    as every WARN in this module counting toward `status`/`setup`'s own
+    exit code -- see check_nginx_locations()'s neighboring history)."""
+    state = maintenance.read_state(data_dir)
+    if not state.enabled:
+        return [("maintenance mode", "ok", "off")]
+    detail = f"ON since {state.set_at}" if state.set_at else "ON"
+    if state.message:
+        detail += f' -- message: "{state.message}"'
+    detail += " -- `my-bt maintenance off` to reopen bookings"
+    return [("maintenance mode", "warn", detail)]
 
 
 def check_data_dir_git(data_dir: str | Path) -> list[Check]:

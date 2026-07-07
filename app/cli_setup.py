@@ -109,6 +109,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "watchdog_nginx_log_config": cli_checks.check_watchdog_nginx_access_log_config(raw),
         "watchdog_nginx_access": cli_checks.check_watchdog_nginx_access(raw),
         "data_dir_git": cli_checks.check_data_dir_git(data_dir),
+        "maintenance": cli_checks.check_maintenance_mode(data_dir),
     }
 
 
@@ -205,6 +206,9 @@ def print_report(
 
     print_fn("\n11. Data dir git snapshot (hourly auto-commit safety net):")
     show(report["data_dir_git"])
+
+    print_fn("\n12. Maintenance mode (`my-bt maintenance on/off/status`):")
+    show(report["maintenance"])
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 
@@ -625,6 +629,16 @@ def interactive_setup(
                 print_fn(f"[ok] initialized git repo at {data_dir_path} ({result.detail})")
             except OSError as exc:
                 print_fn(f"[fail] could not initialize git repo at {data_dir_path}: {exc}")
+
+    # 12. Maintenance mode -- informational only, same reasoning as CalDAV
+    # above: there's no safe "fix" to offer here (it's a deliberate toggle,
+    # not a misconfiguration), just surfacing whether it's currently ON so
+    # it doesn't stay on by accident, unnoticed, after a real maintenance
+    # window ends. Use `my-bt maintenance off` directly, not this
+    # walkthrough, to turn it off.
+    print_fn("\n-- 12. Maintenance mode --")
+    for label, level, detail in cli_checks.check_maintenance_mode(data_dir):
+        print_fn(f"[{level}] {label}: {detail}")
 
     # 2026-07-08, the operator: "would be better if 'Done' would reflect if there
     # were any problems." -- previously this was a flat "Done." no matter

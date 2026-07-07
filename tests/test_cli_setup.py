@@ -62,11 +62,11 @@ class PrintReportTest(unittest.TestCase):
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
-    def test_prints_all_eleven_numbered_steps(self):
+    def test_prints_all_twelve_numbered_steps(self):
         lines: list[str] = []
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         text = "\n".join(lines)
-        for n in range(1, 12):
+        for n in range(1, 13):
             self.assertIn(f"{n}.", text)
 
     def test_caldav_not_configured_shows_skip(self):

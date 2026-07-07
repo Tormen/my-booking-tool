@@ -8,7 +8,7 @@ from http import cookies
 from unittest.mock import patch
 from urllib.parse import urlencode
 
-from app import webapp
+from app import maintenance, webapp
 from app.caldav_client import CalDAVClient, Response
 from app.erasure import erase_user_by_email
 from app.security import hash_admin_password, hash_secret, hash_token, new_token
@@ -316,6 +316,67 @@ class CoursesPageTest(unittest.TestCase):
         app = App(make_settings(courses=(course,)), self.store)
         _status, _headers, body = app.courses("GET", {})
         self.assertIn('<div class="description"><b>Rich</b> text</div>', body)
+
+
+class MaintenanceModeTest(unittest.TestCase):
+    """`my-bt maintenance on` (see app/maintenance.py + scripts/my-bt) only
+    ever blocks the two routes index.html actually links to for NEW
+    bookings -- /courses and /book/<shortname> -- via a data-dir flag file
+    checked fresh on every request. Existing-booking routes (/my, /admin,
+    /cancel/, /reinstate/, /host-cancel/, /host-reinstate/) are
+    deliberately left untouched (2026-07-10 scope decision: the operator only
+    asked to gate "any booking URL (like the links on index.html)")."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def test_courses_page_shows_maintenance_message_when_enabled(self):
+        maintenance.enable(self.store.data_dir, message="Back Monday")
+        app = App(make_settings(admin_email="host@example.org"), self.store)
+        status, _headers, body = app.courses("GET", {})
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertIn("down for maintenance", body)
+        self.assertIn("Back Monday", body)
+        self.assertIn('<a href="mailto:host@example.org">', body)
+        self.assertIn("Teams", body)
+
+    def test_courses_page_is_normal_when_disabled(self):
+        app = App(make_settings(courses=(make_course(),)), self.store)
+        status, _headers, _body = app.courses("GET", {})
+        self.assertEqual(status, "200 OK")
+
+    def test_book_page_shows_maintenance_message_when_enabled(self):
+        maintenance.enable(self.store.data_dir, message="")
+        course = make_course(shortname="trier-sat-yoga")
+        app = App(make_settings(courses=(course,), admin_email="host@example.org"), self.store)
+        status, _headers, body = app.book("GET", "trier-sat-yoga", {})
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertIn("down for maintenance", body)
+
+    def test_book_page_maintenance_check_happens_before_course_lookup(self):
+        # Even an UNKNOWN shortname must show the maintenance message, not
+        # the normal 404 -- the guard is deliberately the very first thing
+        # book() does, before it even looks at settings.courses.
+        maintenance.enable(self.store.data_dir, message="")
+        app = App(make_settings(courses=()), self.store)
+        status, _headers, body = app.book("GET", "no-such-course", {})
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertIn("down for maintenance", body)
+
+    def test_book_page_post_is_also_blocked(self):
+        maintenance.enable(self.store.data_dir, message="")
+        course = make_course(shortname="trier-sat-yoga")
+        app = App(make_settings(courses=(course,)), self.store)
+        status, _headers, _body = app.book("POST", "trier-sat-yoga", {"CONTENT_LENGTH": "0", "wsgi.input": io.BytesIO(b"")})
+        self.assertEqual(status, "503 Service Unavailable")
+
+    def test_my_page_is_not_affected_by_maintenance_mode(self):
+        maintenance.enable(self.store.data_dir, message="down")
+        app = App(make_settings(), self.store)
+        status, _headers, _body = app.my("GET", {})
+        self.assertEqual(status, "200 OK")
 
 
 class SessionBannerTest(unittest.TestCase):

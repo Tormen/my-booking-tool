@@ -123,6 +123,7 @@ app/                        the application (stdlib-only Python package)
   retention.py              GDPR Art. 5(1)(e) purge job (the "cronjob")
   git_snapshot.py           hourly auto-commit of the data dir to its own git repo
   site_render.py            renders site/privacy.html -- see "Static-site pages"
+  maintenance.py            `my-bt maintenance on/off/status` -- see "Maintenance mode"
   cli_checks.py             `my-bt status`/`setup` health checks -- pure, unit-tested
   cli_setup.py              `my-bt setup`/`setup -i` report + walkthrough logic
   version.py                `my-bt --version` (package version + git commit)
@@ -313,6 +314,10 @@ my-bt merge --email guest@example.com --yes    # scripted/non-interactive
 my-bt cancel --registration-id <id>                          # asks for confirmation
 my-bt cancel --registration-id <id> --yes                    # scripted/non-interactive
 my-bt cancel --registration-id <id> -m "course canceled"     # optional message in the cancellation emails
+
+my-bt maintenance on [-m "back Monday"]  # block new bookings, banner site/index.html
+my-bt maintenance off                    # reopen bookings, remove the banner
+my-bt maintenance status                 # report current state, touches nothing
 
 my-bt purge-retention [--dry-run]       # same purge the nightly timer runs
 my-bt git-snapshot [--dry-run]          # commit data-dir changes now (same as the hourly timer)
@@ -962,6 +967,60 @@ ideally at the same time as each course's booking link starts pointing at
   symlinked into it) and, as root, offers to create the missing symlink --
   never to repoint `static_site_dir` itself, since that's a deliberate
   architectural choice this tool has no business overriding.
+
+## Maintenance mode (`my-bt maintenance on|off|status`) (2026-07-10)
+
+A sitewide toggle for planned downtime: "add my-bt commands to set/unset
+a maintenance mode ... a downtime warning right at the top of
+`index.html` ... and any booking URL (like the links on index.html)
+should result in a page version of this maintenance message."
+
+```
+my-bt maintenance on                    # enable, no custom message
+my-bt maintenance on -m "back Monday"   # enable with a custom message
+my-bt maintenance off                   # disable
+my-bt maintenance status                # report current state, changes nothing
+```
+
+State lives in a small JSON flag file in the data dir (`maintenance.json`),
+not `settings.toml` -- `settings.toml` is only read once at process
+startup (see `my-bt status`'s own settings-freshness check), so a setting
+there wouldn't take effect until a service restart, defeating the point
+of a quick toggle. This flag file is what both the running app and
+`my-bt` itself consult, so `on`/`off` take effect on the very next
+request, no restart needed.
+
+**What gets blocked:** only the two routes `index.html` actually links to
+for a NEW booking -- `/courses` and `/book/<shortname>` -- which show a
+503 page with the maintenance message instead of their normal content.
+Deliberately scoped narrowly: `/my`, `/admin`, `/cancel/<token>`,
+`/reinstate/<token>`, `/host-cancel/<reg_id>`, and `/host-reinstate/<reg_id>`
+are all left working as usual, since there's no reason viewing or
+canceling an EXISTING booking should be blocked just because new intake
+is paused. If you want a wider scope (e.g. `/my` too), that's a one-line
+change in `app/webapp.py` -- ask.
+
+**What gets written:** `on`/`off` also directly insert/remove an
+idempotent, clearly-marked banner (HTML comments delimit it, so re-running
+`on`/`off` any number of times never duplicates or corrupts it) right
+after `site/index.html`'s `<body>` tag -- both this checkout's own copy
+(if present) and, if `[site].static_site_dir` is configured, the live
+deployed copy there too. `index.html` is hand-authored and never
+auto-copied otherwise (see "Static-site pages" above), but maintenance
+needs to show up immediately, not at the next manual copy, so this is a
+deliberate exception: an explicit, dedicated command whose entire purpose
+is to touch these exact files, not a background auto-sync.
+
+**The message itself** (identical wording on the banner and on the
+503 booking pages): "This site is currently down for maintenance. Booking
+links won't work right now." plus your optional `-m/--message` text, plus
+a `mailto:` link to `[site].admin_email` and a note to reach out via
+Teams if you're a DBG Lux colleague.
+
+**Left on by accident?** `my-bt status`/`setup` report maintenance mode
+as a `warn` (not silence) whenever it's ON, specifically so it can't stay
+enabled for days after a real maintenance window ends without anyone
+noticing -- see `app/cli_checks.py::check_maintenance_mode`.
 
 ## Spots-left display (`[defaults]` in `settings.toml`)
 

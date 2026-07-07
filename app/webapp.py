@@ -83,6 +83,7 @@ from http import cookies
 from urllib.parse import parse_qs, urlparse
 
 from . import calendar_sync
+from . import maintenance
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import cancel_and_promote
 from .cancellation import (
@@ -623,6 +624,16 @@ class App:
         raw = environ["wsgi.input"].read(size).decode("utf-8") if size else ""
         return {k: v[0] for k, v in parse_qs(raw).items()}
 
+    # -- maintenance mode ------------------------------------------------------
+
+    def _maintenance_response(self, state: maintenance.MaintenanceState):
+        """503, not 200 -- correctly signals "temporarily unavailable" to
+        anything automated (monitoring, a bot) hitting a booking link while
+        `my-bt maintenance on` is active, without touching any other route's
+        status code."""
+        body = f'<div class="card">{maintenance.message_html(self.settings.admin_email, state.message)}</div>'
+        return "503 Service Unavailable", [("Content-Type", "text/html; charset=utf-8")], page("Maintenance", body)
+
     # -- /courses --------------------------------------------------------------
 
     def courses(self, method: str, environ):
@@ -636,6 +647,9 @@ class App:
         filter by it; every configured course is bookable via a direct
         /book/<shortname> link already, so hiding one here would just make
         it harder to find, not actually more private."""
+        maintenance_state = maintenance.read_state(self.store.data_dir)
+        if maintenance_state.enabled:
+            return self._maintenance_response(maintenance_state)
         banner = self._session_banner_html(environ)
         if not self.settings.courses:
             body = "<p>No courses are configured yet.</p>"
@@ -657,6 +671,9 @@ class App:
     # -- /book ---------------------------------------------------------------
 
     def book(self, method: str, shortname: str, environ):
+        maintenance_state = maintenance.read_state(self.store.data_dir)
+        if maintenance_state.enabled:
+            return self._maintenance_response(maintenance_state)
         course = self.settings.course(shortname)
         if course is None:
             return "404 Not Found", [("Content-Type", "text/plain")], "unknown course"

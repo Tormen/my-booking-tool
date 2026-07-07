@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import cli_checks, site_render
+from app import cli_checks, maintenance, site_render
 
 
 def _levels(checks):
@@ -1158,6 +1158,37 @@ class CheckDataDirGitTest(unittest.TestCase):
         checks = cli_checks.check_data_dir_git(self.data_dir)
         self.assertEqual(len(checks), 1)
         self.assertEqual(checks[0][1], "ok")
+
+
+class CheckMaintenanceModeTest(unittest.TestCase):
+    """Reported as "warn" (not silently "ok"/nothing) whenever maintenance
+    mode is ON -- deliberate, not a misconfiguration, but still something
+    that should be visible in `status`/`setup` so it can't stay on by
+    accident, unnoticed, after a real maintenance window ends."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = Path(self._tmp.name)
+
+    def test_off_is_ok(self):
+        checks = cli_checks.check_maintenance_mode(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "ok")
+
+    def test_on_warns_with_the_message_included(self):
+        maintenance.enable(self.data_dir, message="back Monday")
+        checks = cli_checks.check_maintenance_mode(self.data_dir)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("back Monday", detail)
+        self.assertIn("maintenance off", detail)
+
+    def test_on_without_a_message_still_warns(self):
+        maintenance.enable(self.data_dir)
+        checks = cli_checks.check_maintenance_mode(self.data_dir)
+        self.assertEqual(checks[0][1], "warn")
 
 
 class CheckCaldavCalendarsTest(unittest.TestCase):
