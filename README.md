@@ -928,6 +928,12 @@ that lists all your offerings instead of separate links per course.
 already reachable via a direct `/book/<shortname>` link regardless, so
 hiding one here would only make it harder to find, not more private.
 
+Course order on this page (2026-07-09) follows each `[[course]]`'s optional
+`order` key, ascending -- lower first, omitted defaults to 0. Leaving it
+unset everywhere keeps your existing `settings.toml`'s own course order
+exactly as before this existed (a tie falls back to file order, not a
+re-shuffle). See `settings.toml.example` for the field itself.
+
 ### Logged-in banner (`/courses`, `/book/<shortname>`, `/my`)
 
 All three pages (2026-07-06, and `/my` too as of 2026-07-09) show a small

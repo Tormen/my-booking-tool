@@ -36,6 +36,17 @@ class Course:
     # -- see time_range_label(). Set to "" explicitly to show no subtitle
     # at all, or to any other string to override the auto-derived one.
     subtitle: str | None = None
+    # Determines this course's position on /courses (2026-07-09, the operator:
+    # "add a sorting key ... allowing me to determine the ORDER of the
+    # courses"): sorted ascending, lowest first. Defaults to 0 for every
+    # course that doesn't set it, so an existing settings.toml with no
+    # `order` keys anywhere is unaffected -- load_settings()'s sort is
+    # stable, so a tie (e.g. everything left at the default 0) keeps each
+    # course's original position in the file, exactly as before this
+    # existed. Doesn't need to be unique or contiguous -- gaps (10, 20,
+    # 30) are a common, deliberately loose convention that leaves room to
+    # slot a new course in later without renumbering everything else.
+    order: int = 0
 
     WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
     WEEKDAY_LABELS = {
@@ -265,7 +276,7 @@ def load_settings(toml_path: str | Path) -> Settings:
     logging_cfg = raw.get("logging", {})
     watchdog = raw.get("watchdog", {})
 
-    courses = tuple(
+    courses = [
         Course(
             shortname=c["shortname"],
             title=c["title"],
@@ -278,13 +289,20 @@ def load_settings(toml_path: str | Path) -> Settings:
             language=c.get("language", "en"),
             description=c.get("description", ""),
             subtitle=c.get("subtitle"),
+            order=int(c.get("order", 0)),
         )
         for c in raw.get("course", [])
-    )
+    ]
 
     shortnames = [c.shortname for c in courses]
     if len(shortnames) != len(set(shortnames)):
         raise ValueError("duplicate course shortname in settings.toml")
+
+    # Stable sort (see Course.order's own docstring): every course left at
+    # the default order=0 keeps its original settings.toml position
+    # relative to every other order=0 course, so this is a no-op unless
+    # `order` is actually set somewhere.
+    courses = tuple(sorted(courses, key=lambda c: c.order))
 
     return Settings(
         timezone=site["timezone"],

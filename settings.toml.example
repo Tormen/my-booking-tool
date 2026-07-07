@@ -143,7 +143,13 @@ sshd_failure_threshold = 5
 # the booking page: omit it entirely to auto-show "<Weekday>s <from>h<mm> -
 # <till>h<mm> -- <location>" (e.g. "Saturdays 10h45 - 12h45 -- Ayur Yoga
 # Center Trier Nord", as below), set it to "" to show no subtitle at all,
-# or set it to any other string to override the auto-derived one.
+# or set it to any other string to override the auto-derived one. order
+# controls this course's position on /courses (sorted ascending, lowest
+# first) -- omit it entirely to just keep this file's own [[course]] order
+# (every omitted course defaults to 0 and ties are broken by file order, so
+# nothing changes unless you actually set order somewhere). Doesn't need to
+# be unique or contiguous -- spacing values out (10, 20, 30, ...) leaves
+# room to slot a new course in later without renumbering everything else.
 [[course]]
 shortname   = "example-monday-class"
 title       = "Example Class"
@@ -156,6 +162,7 @@ audience    = "public"
 language    = "en"
 description = "Example weekly class. Replace this with your own description."
 # subtitle  = "Mondays -- Example Community Center"
+order       = 10
 
 [[course]]
 shortname  = "example-thursday-class"
@@ -168,3 +175,4 @@ capacity   = 10
 audience   = "public"
 language   = "en"
 description = "Second example course, showing a course with different capacity/timing."
+order      = 20
