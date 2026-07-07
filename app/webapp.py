@@ -1719,7 +1719,7 @@ class App:
                 # showing a blank so the row is still identifiable.
                 course = self.settings.course(r.course_shortname)
                 title = course.title if course else r.course_shortname
-                time_range = course.time_range_label() if course else ""
+                time_range = course.weekday_time_range_label() if course else ""
                 location = course.location if course else ""
                 cancel_id = f"cancel-{esc(r.registration_id)}"
                 # Confirmed or waitlisted are the only cancelable states --

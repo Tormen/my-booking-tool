@@ -14,6 +14,8 @@ from pathlib import Path
 
 from app.config import load_settings
 
+from .helpers import make_course
+
 MINIMAL_HEADER = """
 [site]
 timezone = "Europe/Berlin"
@@ -120,6 +122,27 @@ capacity = 10
         # tie-b (order 5) first, then tie-a/tie-c (both order 10) in their
         # original relative file order -- stable sort, not re-shuffled.
         self.assertEqual([c.shortname for c in settings.courses], ["tie-b", "tie-a", "tie-c"])
+
+
+class WeekdayTimeRangeLabelTest(unittest.TestCase):
+    """Course.weekday_time_range_label() -- 2026-07-10, the operator: "add the
+    weekday to the TIME column (e.g. SAT 10h45-12h45)" on /my's bookings
+    table (app/webapp.py). Tighter than time_range_label() (no spaces
+    around the dash) -- deliberately a separate method rather than
+    changing time_range_label() itself, which the booking page subtitle
+    also uses with its own spaced style ("10h45 - 12h45")."""
+
+    def test_formats_weekday_and_compact_time_range(self):
+        course = make_course(weekday="sat", start_time="10:45", duration_minutes=120)
+        self.assertEqual(course.weekday_time_range_label(), "SAT 10h45-12h45")
+
+    def test_uppercases_the_stored_lowercase_weekday_code(self):
+        course = make_course(weekday="wed", start_time="17:15", duration_minutes=100)
+        self.assertEqual(course.weekday_time_range_label(), "WED 17h15-18h55")
+
+    def test_minutes_always_zero_padded(self):
+        course = make_course(weekday="fri", start_time="12:00", duration_minutes=60)
+        self.assertEqual(course.weekday_time_range_label(), "FRI 12h00-13h00")
 
 
 if __name__ == "__main__":

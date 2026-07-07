@@ -1707,7 +1707,10 @@ class BookingFlowTest(unittest.TestCase):
         self._book("regular@example.org", name="Regular")
         _status, _headers, body = self.app.my("GET", environ)
         self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
-        self.assertIn("17h15 - 18h55", body)
+        # 2026-07-10, the operator: "add the weekday to the TIME column (e.g. SAT
+        # 10h45-12h45)" -- weekday_time_range_label(), not time_range_label()
+        # (no spaces around the dash, and a leading 3-letter weekday code).
+        self.assertIn("WED 17h15-18h55", body)
         self.assertIn("Example Community Gym, Room 1", body)
         self.assertNotIn("yoga-class-1", body)
 

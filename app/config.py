@@ -94,6 +94,16 @@ class Course:
         booking page's subtitle line when Course.subtitle isn't set."""
         return f"{self._fmt_hm(*self.start_hm())} - {self._fmt_hm(*self.end_hm())}"
 
+    def weekday_time_range_label(self) -> str:
+        """e.g. "SAT 10h45-12h45" -- the 3-letter weekday code (already how
+        `weekday` is stored in settings.toml, just uppercased) plus a
+        TIGHTER time range than time_range_label() (no spaces around the
+        dash) -- used by /my's bookings table Time column, where several
+        rows of this need to fit in one narrow column at a glance
+        (2026-07-10, the operator: "add the weekday to the TIME column (e.g. SAT
+        10h45-12h45)")."""
+        return f"{self.weekday.upper()} {self._fmt_hm(*self.start_hm())}-{self._fmt_hm(*self.end_hm())}"
+
 
 @dataclass(frozen=True)
 class Settings:
