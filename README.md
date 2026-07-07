@@ -68,6 +68,18 @@ actually exists, and never auto-generate or edit it (rewriting a
 hand-hardened vhost would be worse than asking) -- see
 `app/cli_checks.py::check_nginx_conf_repo_file()`.
 
+Want an even stricter check against the file nginx is *actually* running
+with, not just this checkout's copy? Set `[site].nginx_conf_path` in your
+real `settings.toml` to the absolute path nginx loads it from on this box
+(e.g. `/etc/nginx/conf.d/booking.example.org.conf`). `my-bt status`/`setup` then
+read that exact file directly off disk (not `nginx -T`'s merged dump) and
+**hard-fail** -- not just warn -- if it's missing a required location
+block or still has a leftover `REPLACE-ME` marker, since configuring this
+path is a deliberate statement that the file is real and matters. `setup
+-i` also offers a `vimdiff` between it and this checkout's own
+`site/<name>(.example)` if the two differ. See
+`app/cli_checks.py::check_nginx_conf_deployed()`.
+
 First time setting this up? Copy each `.example` file to its real name
 and fill it in:
 

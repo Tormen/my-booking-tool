@@ -349,6 +349,70 @@ def check_nginx_conf_repo_file(home: str) -> list[Check]:
     return checks
 
 
+def check_nginx_conf_deployed(raw: dict) -> list[Check]:
+    """If `[site].nginx_conf_path` is configured, reads THAT exact file
+    directly off disk -- not `nginx -T`'s merged dump (check_nginx_locations()
+    above) and not a glob over this checkout's own site/*.conf
+    (check_nginx_conf_repo_file() above) -- and checks it has every
+    location block this app needs (_REQUIRED_NGINX_LOCATIONS) and no
+    leftover REPLACE-ME placeholder.
+
+    Reading the real path directly rather than `nginx -T` means this
+    works even without the nginx binary on PATH/reachable, and reflects
+    exactly the bytes nginx will load from this path the next time it's
+    reloaded -- the most authoritative source short of `nginx -T` itself.
+
+    Unlike every other optional check gated on a settings.toml path
+    ([site].static_site_dir, [watchdog].nginx_access_log, ...), a problem
+    found HERE is reported as "fail", not "warn" (2026-07-10, the operator:
+    "can actually check the correctness ... and then truly ERROR out in
+    case there is a problem") -- configuring this path at all is a
+    deliberate statement that this file is real and matters, so a gap in
+    it is treated as a hard failure, the same way a missing/broken secret
+    already is in check_secrets()."""
+    path_str = raw.get("site", {}).get("nginx_conf_path")
+    if not path_str:
+        return []
+    p = Path(path_str)
+    if not p.exists():
+        return [(f"nginx vhost conf ({path_str})", "fail",
+                  "configured but not found -- check [site].nginx_conf_path")]
+    text = p.read_text(encoding="utf-8", errors="replace")
+    problems = []
+    if _PLACEHOLDER_MARKER in text:
+        problems.append(f'still contains a "{_PLACEHOLDER_MARKER}" placeholder marker -- '
+                          "was the .example template deployed as-is?")
+    missing = [
+        path for path in _REQUIRED_NGINX_LOCATIONS
+        if not re.search(rf"^\s*location\s+(?:[=~^]+\*?\s+)?{re.escape(path)}\s*\{{", text, re.MULTILINE)
+    ]
+    if missing:
+        problems.append(f"missing location block(s) for {', '.join(missing)}")
+    if problems:
+        return [(f"nginx vhost conf ({path_str})", "fail", "; ".join(problems))]
+    return [(f"nginx vhost conf ({path_str})", "ok",
+              "has every required location block, no leftover placeholder marker")]
+
+
+def _resolve_nginx_conf_checkout_source(home: str, nginx_conf_path: str) -> Path | None:
+    """The checkout's own copy of the file deployed at `nginx_conf_path`
+    (matched by filename, since that name is whatever domain you run this
+    under, not something fixed) -- your real site/<name> if you keep one
+    there, falling back to the generic site/<name>.example. None if
+    neither exists, e.g. running against a server whose vhost was never
+    added to this checkout at all. Used only to offer a vimdiff in
+    `setup -i`, mirroring `_resolve_static_source`'s same real-then-.example
+    fallback for the static html pages."""
+    name = Path(nginx_conf_path).name
+    real = Path(home) / "site" / name
+    if real.exists():
+        return real
+    example = Path(home) / "site" / f"{name}.example"
+    if example.exists():
+        return example
+    return None
+
+
 def _iter_server_blocks(merged_config: str):
     """Yields the raw text of each top-level `server { ... }` block in a
     `nginx -T` dump. Depth-tracks braces rather than doing full parsing --

@@ -444,6 +444,104 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         self.assertFalse((nginx_root / "privacy.html").exists())
 
 
+class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
+    """[site].nginx_conf_path: read directly off disk (never via `nginx -T`
+    or a checkout glob), and -- unlike static_site_dir's own vimdiff offer
+    above -- never auto-writable, just an offer to reconcile against this
+    checkout's own site/<name>(.example) if the two differ."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+        self.deployed = self.home / "deployed" / "booking.example.org.conf"
+        self.deployed.parent.mkdir()
+
+    def test_not_configured_is_never_prompted(self):
+        prompt = FakePrompts({})
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("vimdiff"), [])
+
+    def test_no_checkout_source_is_never_prompted(self):
+        self.deployed.write_text("location /admin { }")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({}, default=True)
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("vimdiff"), [])
+
+    def test_matching_checkout_copy_is_never_prompted(self):
+        text = "location /admin { }"
+        self.deployed.write_text(text)
+        (self.home / "site" / "booking.example.org.conf").write_text(text)
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({}, default=True)
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("vimdiff"), [])
+
+    def test_accepting_opens_vimdiff_for_a_differing_copy(self):
+        self.deployed.write_text("location /admin { } # deployed")
+        (self.home / "site" / "booking.example.org.conf").write_text("location /admin { } # checkout")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"vimdiff": True})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertTrue(any(
+            c[0] == "vimdiff" and str(self.deployed) in c and str(self.home / "site" / "booking.example.org.conf") in c
+            for c in calls
+        ))
+        # Never auto-written -- vimdiff is what would actually reconcile it.
+        self.assertEqual(self.deployed.read_text(), "location /admin { } # deployed")
+
+    def test_declining_vimdiff_leaves_both_files_alone(self):
+        self.deployed.write_text("deployed version")
+        (self.home / "site" / "booking.example.org.conf").write_text("checkout version")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"vimdiff": False})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(calls, [])
+
+    def test_falls_back_to_example_when_no_real_checkout_copy(self):
+        self.deployed.write_text("deployed version")
+        (self.home / "site" / "booking.example.org.conf.example").write_text("generic template")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"vimdiff": True})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertTrue(any(
+            c[0] == "vimdiff" and str(self.home / "site" / "booking.example.org.conf.example") in c
+            for c in calls
+        ))
+
+
 class InteractiveSetupCaldavTest(unittest.TestCase):
     """Step 9 is informational only -- there's no safe auto-fix for a
     calendar-name mismatch, so unlike every other step here it never

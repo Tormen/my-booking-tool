@@ -547,6 +547,16 @@ def cmd_status(args) -> None:
     # source, in the checkout itself, before it's ever deployed/reloaded.
     checks.extend(cli_checks.check_nginx_conf_repo_file(HOME))
 
+    # -- real, DEPLOYED nginx vhost conf at [site].nginx_conf_path, if
+    # configured -- read directly off disk, not via `nginx -T`, so this
+    # works even without the nginx binary reachable. Unlike the checkout
+    # check above, a problem found here is reported as "fail": setting
+    # this path is a deliberate statement that this exact file is real
+    # and matters (2026-07-10, the operator: "truly ERROR out in case there is
+    # a problem").
+    if raw:
+        checks.extend(cli_checks.check_nginx_conf_deployed(raw))
+
     # -- report -------------------------------------------------------------------
     icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
     for label, level, detail in checks:

@@ -8,6 +8,19 @@ base_url    = "https://example.org"
 # with this file) and `my-bt setup -i` can regenerate it directly there.
 # Comment out / remove to skip that check entirely.
 static_site_dir = "/var/www/example.org"
+# Absolute path to the REAL, currently-deployed nginx vhost conf file for
+# this site -- wherever nginx actually loads it from on this box (e.g.
+# /etc/nginx/conf.d/<yourdomain>.conf), NOT this checkout's own
+# site/<yourdomain>.conf copy. When set, `my-bt status`/`setup` read THIS
+# exact file directly (not `nginx -T`'s merged dump -- works even without
+# the nginx binary, and reflects precisely what's on disk right now) to
+# confirm every location block this app needs is present and there's no
+# leftover REPLACE-ME placeholder, and `setup -i` offers a vimdiff against
+# this checkout's site/<yourdomain>.conf(.example) if the two differ.
+# Unlike static_site_dir above, a problem found here is a hard FAILURE, not
+# a warning -- setting this path is you telling us this file is real and
+# matters. Comment out / remove to skip this check entirely.
+# nginx_conf_path = "/etc/nginx/conf.d/example.org.conf"
 
 [calendar]
 caldav_url            = "https://dav.example.org/"

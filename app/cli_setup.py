@@ -100,6 +100,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "selinux": cli_checks.check_selinux(),
         "nginx_locations": cli_checks.check_nginx_locations(),
         "nginx_conf_repo_file": cli_checks.check_nginx_conf_repo_file(home),
+        "nginx_conf_deployed": cli_checks.check_nginx_conf_deployed(raw),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
@@ -149,6 +150,12 @@ def print_report(
 
     print_fn("\n   Real, personal nginx vhost conf kept in this checkout's site/ dir (if any):")
     show(report["nginx_conf_repo_file"])
+
+    print_fn("\n   Real, DEPLOYED nginx vhost conf ([site].nginx_conf_path, read directly off disk):")
+    if report["nginx_conf_deployed"]:
+        show(report["nginx_conf_deployed"])
+    else:
+        print_fn("   [SKIP] [site].nginx_conf_path not configured -- not checked")
 
     print_fn("\n5. my-booking group membership:")
     show(report["group"])
@@ -302,6 +309,33 @@ def interactive_setup(
             print_fn(f"[ok] {label}: {detail}")
         else:
             print_fn(f"[{level}] {label}: {detail}")
+
+    # Real, DEPLOYED nginx vhost conf at [site].nginx_conf_path, if
+    # configured -- read directly off disk (not `nginx -T`'s merged dump),
+    # so this reflects exactly what's on this box right now, and works
+    # even before nginx is reloaded or if the nginx binary isn't
+    # reachable at all. A configured-but-broken file here is a hard FAIL,
+    # not a warning (2026-07-10, the operator: "truly ERROR out in case there is
+    # a problem") -- unlike check_nginx_conf_repo_file() above, setting
+    # this path is a deliberate statement that this exact file matters.
+    # Still never auto-edited -- rewriting a hand-hardened vhost would be
+    # worse than asking -- but if this checkout has its own copy (real or
+    # .example, matched by filename) and it differs from what's actually
+    # deployed, offer the same vimdiff-to-reconcile pattern already used
+    # for .rpmnew merges and stale hand-authored static pages.
+    nginx_conf_path = raw.get("site", {}).get("nginx_conf_path")
+    if not nginx_conf_path:
+        print_fn("[skip] [site].nginx_conf_path not configured -- not checked")
+    else:
+        for label, level, detail in cli_checks.check_nginx_conf_deployed(raw):
+            print_fn(f"[{level}] {label}: {detail}")
+        source = cli_checks._resolve_nginx_conf_checkout_source(home, nginx_conf_path)
+        deployed = Path(nginx_conf_path)
+        if source is not None and deployed.exists():
+            same = deployed.read_text(encoding="utf-8", errors="replace") == \
+                source.read_text(encoding="utf-8", errors="replace")
+            if not same and prompt(f"Open vimdiff {deployed} {source} now?"):
+                run(["vimdiff", str(deployed), str(source)])
 
     # 5. group membership
     print_fn("\n-- 5. my-booking group membership --")
