@@ -557,7 +557,16 @@ def cmd_status(args) -> None:
               "then re-run `my-bt status`.")
         sys.exit(1)
     elif warns:
+        # 2026-07-10, the operator: "please make my-bt status FAIL in case of any
+        # warning so that this is more visible. because a missing location
+        # is a real (potential) problem." -- a WARN used to be purely
+        # cosmetic (exit 0), which let a real, actionable gap (e.g. a
+        # missing nginx `location` block, silently making a whole route
+        # unreachable through nginx) sail straight past `my-bt status &&
+        # <next step>` in a script/cron/CI context. Any warning now exits
+        # non-zero too, same as a FAIL -- only a fully clean report exits 0.
         print(f"{warns} warning(s), no hard failures -- worth a look above.")
+        sys.exit(1)
     else:
         print("all checks passed.")
 

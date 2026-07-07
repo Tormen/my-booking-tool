@@ -381,7 +381,12 @@ something seems off, or after any install/reinstall:
   `setup -i` offers to initialize one.
 
 Each line is `[OK]`/`[WARN]`/`[FAIL]` with a one-line fix where relevant;
-exits non-zero if anything is `[FAIL]`. Deliberately doesn't touch the
+**exits non-zero if anything is `[WARN]` or `[FAIL]`** (2026-07-10 --
+previously only a `[FAIL]` did, but a `[WARN]` can still be a real,
+actionable gap -- e.g. a missing nginx `location` block silently makes a
+whole route unreachable -- so `my-bt status && <next step>` in a script/
+cron/CI context now actually catches it instead of quietly continuing).
+Only a fully clean report exits 0. Deliberately doesn't touch the
 network/CalDAV (same reasoning as `erase` -- no CalDAV dependency by
 design), so it still works to narrow things down even if your CalDAV/SMTP
 provider itself is unreachable.
