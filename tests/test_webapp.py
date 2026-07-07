@@ -774,6 +774,29 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn("max-width:1000px", body)
         self.assertIn("table{border-collapse:collapse;width:100%}", body)
 
+    def test_no_text_renders_smaller_than_a_button_label(self):
+        # 2026-07-11, the operator: "nothing smaller than the current font-size
+        # of your button labels" -- button/input/textarea are the app's
+        # own 1em baseline (see below); no other rule may declare a
+        # font-size below that. A handful of previously-smaller elements
+        # (.session-banner/.note/.hint/.date-btn .d-date/.date-btn
+        # .d-spots/.sort-indicator/.hash-cell) now read as
+        # secondary/de-emphasized via font-style:italic instead of a
+        # smaller size ("making the smaller fonts italic instead -- as I
+        # had suggested to you before!").
+        _status, _headers, body = self.app.courses("GET", {})
+        style = body[body.index("<style>") : body.index("</style>")]
+        self.assertIn("input,button,textarea{font-size:1em", style)
+        for match in re.finditer(r"font-size:\s*(\.\d+)em", style):
+            self.fail(f"found a font-size below 1em: {match.group(0)!r}")
+        for selector in (
+            ".session-banner", ".note", ".hint", ".date-btn .d-date",
+            ".date-btn .d-spots", ".sort-indicator", ".hash-cell",
+        ):
+            rule = style[style.index(selector + "{") :]
+            rule = rule[: rule.index("}")]
+            self.assertIn("font-style:italic", rule, f"{selector} should be italic, not smaller")
+
     # -- 2026-07-09: booking-page name/email prefilled+locked when logged in --
 
     def test_book_page_prefills_and_locks_name_email_when_logged_in(self):

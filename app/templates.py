@@ -98,7 +98,22 @@ def page(title: str, body: str, banner: str = "") -> str:
     a <table> with no width of its own only ever shrinks to its content
     width regardless of how wide the surrounding body is, so /my's
     bookings table and /admin's overview table wouldn't actually have
-    gotten any wider just from the body change alone."""
+    gotten any wider just from the body change alone.
+
+    Font sizes are harmonized app-wide (2026-07-11, the operator: "nothing
+    smaller than the current font-size of your button labels" -- button
+    labels are `input,button,textarea{{font-size:1em}}` below, i.e. the
+    same as ordinary body text). Every rule that was previously SMALLER
+    than 1em (`.session-banner`, `.note`, `.hint`, `.date-btn .d-date`,
+    `.date-btn .d-spots`, `.sort-indicator`, `.hash-cell` -- all were
+    .8em-.95em) had its own font-size declaration dropped, so it now
+    inherits the same ambient 1em as everything else, and gained
+    `font-style:italic` instead (the operator, same round: "making the smaller
+    fonts italic instead -- as I had suggested to you before!") so these
+    still read visually as secondary/de-emphasized text without actually
+    being smaller than a button label. Deliberately scoped to the app
+    pages only, not site/index.html -- see that file's own top-of-file
+    comment for why its content (a raw Word paste) isn't touched here."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -107,23 +122,23 @@ def page(title: str, body: str, banner: str = "") -> str:
 body{{font-family:sans-serif;max-width:1000px;margin:2em auto;padding:0 1em;color:#222}}
 .session-banner{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;
   gap:.3em 1em;background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.5em 1em;
-  margin-bottom:1em;font-size:.9em;overflow-wrap:anywhere}}
+  margin-bottom:1em;overflow-wrap:anywhere;font-style:italic}}
 .session-banner form{{display:inline}}
-a{{color:#196B24}} .err{{color:#b00020}} .note{{color:#555;font-size:.9em}} .card{{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}}
+a{{color:#196B24}} .err{{color:#b00020}} .note{{color:#555;font-style:italic}} .card{{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}}
 input,button,textarea{{font-size:1em;padding:.4em;margin:.2em 0}} button{{cursor:pointer}}
 input[readonly]{{background:#eee;color:#555;cursor:not-allowed}}
 label{{display:block;margin-top:.6em}}
 .subtitle{{color:#444;margin:-.4em 0 1em;font-size:1.2em;font-weight:500}}
 .req{{color:#b00020}}
-.hint{{color:#555;font-size:.85em;margin:.1em 0 0}}
+.hint{{color:#555;margin:.1em 0 0;font-style:italic}}
 .big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em}}
 .dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5em;margin:.4em 0}}
 .date-btn{{position:relative;display:block}}
 .date-btn input{{position:absolute;opacity:0;width:1px;height:1px}}
 .date-btn span{{display:block}}
 .date-btn > span{{padding:.5em .8em;border:1px solid #ccc;border-radius:6px;cursor:pointer;text-align:center;line-height:1.3}}
-.date-btn .d-date{{font-size:.95em}}
-.date-btn .d-spots{{font-size:.85em;color:#666;margin-top:.1em}}
+.date-btn .d-date{{font-style:italic}}
+.date-btn .d-spots{{color:#666;margin-top:.1em;font-style:italic}}
 .date-btn input:checked + span{{background:#196B24;color:#fff;border-color:#196B24}}
 .date-btn input:checked + span .d-spots{{color:#dff0e2}}
 .date-btn input:focus-visible + span{{outline:2px solid #196B24;outline-offset:1px}}
@@ -143,8 +158,8 @@ button:disabled{{opacity:.5;cursor:not-allowed}}
 .table-tools{{margin-bottom:.6em}}
 table{{border-collapse:collapse;width:100%}}
 th{{user-select:none}}
-.sort-indicator{{font-size:.8em}}
-.hash-cell{{word-break:break-all;font-family:monospace;font-size:.85em}}
+.sort-indicator{{font-style:italic}}
+.hash-cell{{word-break:break-all;font-family:monospace;font-style:italic}}
 .course-card{{border:1px solid #ddd;border-radius:8px;padding:1em 1.2em;margin:1em 0}}
 .course-card h2{{margin:0 0 .2em;font-size:1.15em}}
 .tab-radio{{display:none}}
