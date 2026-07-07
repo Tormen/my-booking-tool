@@ -28,6 +28,21 @@ class BookingDetailsTextTest(unittest.TestCase):
         self.assertLess(details.index("What:"), details.index("When:"))
         self.assertLess(details.index("When:"), details.index("Where:"))
 
+    def test_message_sits_above_the_description_not_after_it(self):
+        # 2026-07-11, the operator (screenshot of a Reinstated email with "Message:
+        # you are on again" printed AFTER the whole course description):
+        # "please place the msg block ABOVE the description and if there is
+        # no message, leave it out."
+        course = make_course(description="Bring your own mat.")
+        details = booking_details_text(course, "2026-07-11", message="you are on again")
+        self.assertLess(details.index("Where:"), details.index("Message:"))
+        self.assertLess(details.index("Message:"), details.index("Bring your own mat."))
+
+    def test_no_message_omits_the_message_line_entirely(self):
+        course = make_course(description="Bring your own mat.")
+        details = booking_details_text(course, "2026-07-11")
+        self.assertNotIn("Message:", details)
+
 
 class CourseRecapHtmlTest(unittest.TestCase):
     def test_same_yoga_emoji_and_order_as_the_text_version(self):
@@ -65,6 +80,21 @@ class CourseRecapHtmlTest(unittest.TestCase):
         self.assertIn("A &amp; B Yoga", html)
         self.assertIn("&lt;Studio&gt;", html)
         self.assertNotIn("<Studio>", html)
+
+    def test_message_sits_above_the_description_not_after_it(self):
+        # See BookingDetailsTextTest's twin test above for the full the operator
+        # quote -- same fix, HTML side.
+        course = make_course(description="<p>Bring your own mat.</p>")
+        html = course_recap_html(course, "2026-07-11", message="you are on again")
+        self.assertLess(html.index("Where:"), html.index("Message:"))
+        self.assertLess(html.index("Message:"), html.index("Bring your own mat."))
+        self.assertIn("background:#f2f2f2", html)  # message_html()'s own box
+
+    def test_no_message_omits_the_message_box_entirely(self):
+        course = make_course(description="<p>Bring your own mat.</p>")
+        html = course_recap_html(course, "2026-07-11")
+        self.assertNotIn("Message:", html)
+        self.assertNotIn("background:#f2f2f2", html)
 
 
 class HtmlEmailBodyTest(unittest.TestCase):

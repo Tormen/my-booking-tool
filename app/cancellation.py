@@ -59,26 +59,39 @@ _WHEN_EMOJI = "\U0001F550"  # clock face
 _WHERE_EMOJI = "\U0001F4CD"  # round pushpin
 
 
-def booking_details_text(course: Course, occ_date: str) -> str:
-    """Shared What/When/Where(+description) block (the operator's requested
-    layout, 2026-07-05) for every guest email that tells them about one
-    specific confirmed/waitlisted spot -- used by every booking-related
-    email (booking confirmed/waitlisted, promoted-from-waitlist,
+def booking_details_text(course: Course, occ_date: str, message: str = "") -> str:
+    """Shared What/When/Where(+message)(+description) block (the operator's
+    requested layout, 2026-07-05) for every guest email that tells them
+    about one specific confirmed/waitlisted spot -- used by every booking-
+    related email (booking confirmed/waitlisted, promoted-from-waitlist,
     cancellation), so none of them can drift apart the way two of them did
     before this was pulled into one function. Description is repeated in
     full via html_to_text() -- this is the plain-text ALTERNATIVE part of
     the email (see emailer.send_mail's html_body param); course_recap_html()
-    below is the richer HTML twin most clients will actually render."""
+    below is the richer HTML twin most clients will actually render.
+
+    `message` (2026-07-11, the operator, screenshot of a Reinstated email showing
+    "Message: you are on again" printed AFTER the whole course description:
+    "please place the msg block ABOVE the description and if there is no
+    message, leave it out") is the optional free-text comment Cancel/
+    Reinstate's own dialogs collect -- ONLY these two callers pass it;
+    every other booking email (confirmed/waitlisted, promoted-from-
+    waitlist) has no such concept and simply never passes one, so this
+    stays a no-op for them, same as before this parameter existed. Blank
+    (the default) omits the line entirely, exactly like the old separate
+    `reason_block`/`reason_html` this replaces did in
+    send_cancellation_emails()/send_reinstatement_emails()."""
     details = (
         f"{_WHAT_EMOJI} What: {course.title}\n"
         f"{_WHEN_EMOJI} When: {occ_date} {course.time_range_label()}\n"
         f"{_WHERE_EMOJI} Where: {course.location}\n"
     )
+    message_block = f"\nMessage: {message}\n" if message else ""
     description_text = html_to_text(course.description) if course.description else ""
-    return details + (f"\n{description_text}\n" if description_text else "")
+    return details + message_block + (f"\n{description_text}\n" if description_text else "")
 
 
-def course_recap_html(course: Course, occ_date: str) -> str:
+def course_recap_html(course: Course, occ_date: str, message: str = "") -> str:
     """HTML twin of booking_details_text() above -- same What/When/Where
     emoji/ordering, plus the operator's own rich-HTML `description` in a
     boxed, background-colored block (2026-07-09, the operator: "format description
@@ -91,8 +104,16 @@ def course_recap_html(course: Course, occ_date: str) -> str:
     that reliably renders identically in both places. See
     app/webapp.py::_course_recap_html, a thin wrapper around this exact
     function, for the page-side call sites (booking confirmation, the
-    cancel-confirmation pages)."""
+    cancel-confirmation pages) -- none of which pass `message` (there's
+    nothing to show yet on a page asking the guest to type one).
+
+    `message` (2026-07-11, same request as booking_details_text()'s own
+    docstring above -- see that one for the full quote) is rendered via
+    message_html() and placed between the Where line and the description
+    box, i.e. ABOVE the description, not after it like the old separate
+    `reason_html` concatenation used to put it. Blank omits it entirely."""
     esc = lambda v: html.escape(str(v), quote=True)  # noqa: E731
+    message_block = message_html(message) if message else ""
     desc_html = (
         '<div style="background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;'
         f'padding:1em 1.2em;margin:.6em 0 0">{course.description}</div>'
@@ -103,6 +124,7 @@ def course_recap_html(course: Course, occ_date: str) -> str:
         f'<p style="margin:.3em 0"><b>{_WHAT_EMOJI} What:</b> {esc(course.title)}</p>'
         f'<p style="margin:.3em 0"><b>{_WHEN_EMOJI} When:</b> {esc(occ_date)} {esc(course.time_range_label())}</p>'
         f'<p style="margin:.3em 0"><b>{_WHERE_EMOJI} Where:</b> {esc(course.location)}</p>'
+        f"{message_block}"
         f"{desc_html}"
         "</div>"
     )
@@ -209,12 +231,16 @@ def send_cancellation_emails(
     already gets the authoritative update straight from CalDAV
     (calendar_sync.sync_occurrence), so a second, personal "delete this
     from your calendar" attachment on their own admin-copy email would be
-    redundant at best, confusing at worst."""
-    details = booking_details_text(course, occ_date)
-    recap_html = course_recap_html(course, occ_date)
+    redundant at best, confusing at worst.
+
+    `message`, if any, is threaded straight into booking_details_text()/
+    course_recap_html() (2026-07-11) rather than concatenated on
+    afterward -- see those two functions' own docstrings for why (the operator:
+    the old layout put "Message: ..." AFTER the whole course description;
+    it belongs ABOVE it instead, and should vanish entirely when blank)."""
+    details = booking_details_text(course, occ_date, message)
+    recap_html = course_recap_html(course, occ_date, message)
     subject = f"Canceled: {course.title} on {occ_date}"
-    reason_block = f"\nMessage: {message}\n" if message else ""
-    reason_html = message_html(message) if message else ""
     my_url = f"{settings.base_url}/my"
     host_reinstate_url = f"{settings.base_url}/host-reinstate/{registration_id}"
     if user:
@@ -235,24 +261,24 @@ def send_cancellation_emails(
             )
         send_mail(
             settings, user.email, subject,
-            f"{participant_who} canceled this booking:\n\n{details}\n{reason_block}"
+            f"{participant_who} canceled this booking:\n\n{details}\n"
             f"Manage your bookings: {my_url}\n"
             f"{reinstate_line}",
             html_body=html_email_body(
-                intro_html(f"{participant_who} canceled this booking:") + f"{recap_html}{reason_html}"
-                f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
-                f"{reinstate_line_html}"
+                intro_html(f"{participant_who} canceled this booking:") + recap_html
+                + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+                + reinstate_line_html
             ),
             ics_attachment=ics_attachment,
         )
     admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
     send_mail(
         settings, settings.admin_email, subject,
-        f"{admin_who} canceled this booking:\n\n{details}\n{reason_block}"
+        f"{admin_who} canceled this booking:\n\n{details}\n"
         f"Reinstate this booking: {host_reinstate_url}\n",
         html_body=html_email_body(
-            intro_html(f"{admin_who} canceled this booking:") + f"{recap_html}{reason_html}"
-            f'<p>Reinstate this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
+            intro_html(f"{admin_who} canceled this booking:") + recap_html
+            + f'<p>Reinstate this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
         ),
     )
 
@@ -280,20 +306,20 @@ def send_reinstatement_emails(
 
     `message` (2026-07-10, the operator: "Reinstate should, LIKE CANCEL, also ask
     for a COMMENT to be sent with the email to the other [side]") is the
-    same optional free-text reason Cancel's own dialog collects --
-    included in both emails exactly like send_cancellation_emails's own
-    `reason_block`/`reason_html`, blank omits the line entirely.
+    same optional free-text reason Cancel's own dialog collects -- threaded
+    straight into booking_details_text()/course_recap_html() (2026-07-11,
+    same as send_cancellation_emails's own -- see that function's
+    docstring and those two functions' own docstrings for why: it belongs
+    ABOVE the course description, not after it), blank omits it entirely.
 
     `ics_attachment`, like send_cancellation_emails's own, is built by the
     CALLER (app.calendar_sync.guest_invite_ics, only when `confirmed` is
     True -- a still-waitlisted reinstatement has no real calendar slot to
     hand out yet, same rule the original booking flow already follows) and
     only ever attached to the participant's copy."""
-    details = booking_details_text(course, occ_date)
-    recap_html = course_recap_html(course, occ_date)
+    details = booking_details_text(course, occ_date, message)
+    recap_html = course_recap_html(course, occ_date, message)
     subject = f"Reinstated: {course.title} on {occ_date}"
-    reason_block = f"\nMessage: {message}\n" if message else ""
-    reason_html = message_html(message) if message else ""
     my_url = f"{settings.base_url}/my"
     status_phrase = "you're confirmed again" if confirmed else "you're back on the waitlist"
     if user:
@@ -301,10 +327,10 @@ def send_reinstatement_emails(
         intro = f"{participant_who} reinstated this booking -- {status_phrase}:"
         send_mail(
             settings, user.email, subject,
-            f"{intro}\n\n{details}\n{reason_block}Manage your bookings: {my_url}\n",
+            f"{intro}\n\n{details}\nManage your bookings: {my_url}\n",
             html_body=html_email_body(
-                intro_html(intro) + f"{recap_html}{reason_html}"
-                f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+                intro_html(intro) + recap_html
+                + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
             ),
             ics_attachment=ics_attachment,
         )
@@ -312,6 +338,6 @@ def send_reinstatement_emails(
     admin_intro = f"{admin_who} reinstated this booking -- {status_phrase}:"
     send_mail(
         settings, settings.admin_email, subject,
-        f"{admin_intro}\n\n{details}\n{reason_block}",
-        html_body=html_email_body(intro_html(admin_intro) + f"{recap_html}{reason_html}"),
+        f"{admin_intro}\n\n{details}\n",
+        html_body=html_email_body(intro_html(admin_intro) + recap_html),
     )
