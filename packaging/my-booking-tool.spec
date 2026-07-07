@@ -70,7 +70,17 @@ else
 fi
 
 install -d %{buildroot}/usr/local/bin
-ln -sf /opt/my-booking/bin/my-bt %{buildroot}/usr/local/bin/my-bt
+# Relative target (../../../opt/my-booking/bin/my-bt -- /usr/local/bin is
+# 3 levels below /, same as /opt), not an absolute
+# /opt/my-booking/bin/my-bt one -- functionally identical once installed
+# (both resolve to the same file), but rpmbuild's own file-classification
+# pass warns "absolute symlink: /usr/local/bin/my-bt -> /opt/my-booking/
+# bin/my-bt" for a symlink whose target is an absolute in-buildroot path,
+# since that can break if the buildroot is ever relocated/chrooted
+# differently. A relative target is what every other RPM's /usr/local/bin
+# or /usr/bin symlink to a vendored binary normally uses, and avoids the
+# warning outright.
+ln -sf ../../../opt/my-booking/bin/my-bt %{buildroot}/usr/local/bin/my-bt
 
 install -d %{buildroot}%{_unitdir}
 install -m 644 systemd/my-booking.service %{buildroot}%{_unitdir}/

@@ -27,6 +27,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # invoking user's home explicitly, once, up front.
 RPMBUILD_DIR="${HOME:?HOME is not set}/rpmbuild"
 
+# 2026-07-10, the operator: running this via `sudo -u me /bin/sh .../build-rpm.sh`
+# from a root shell whose OWN cwd was /root inherits that /root cwd here
+# too (`sudo -u` drops privileges but does NOT chdir anywhere on its own,
+# unless run with `-H`/`--chdir`) -- "me" can't stat/access /root (700,
+# root-only), so nothing that actually NEEDS the cwd breaks, but `find`
+# (used below to prune old RPMs) tries to restore its starting directory
+# once it's done traversing and fails to, printing a harmless-but-
+# confusing "find: Failed to restore initial working directory: /root:
+# Permission denied" to stderr. Fixed at the source: explicitly cd into
+# this checkout (which "me" -- the user this script actually runs as --
+# always owns) before anything else runs, so no subprocess here ever
+# depends on whatever cwd the invoking shell happened to have.
+cd "$HERE"
+
 if ! command -v rpmbuild >/dev/null; then
   echo "rpmbuild not found. Run: sudo dnf install rpm-build rpmdevtools" >&2
   exit 1
