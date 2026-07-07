@@ -3,11 +3,13 @@
 # config for booking.example.org, anonymized (see "REPLACE-ME" markers below) --
 # a genuinely richer starting point than the bare nginx/my-booking.conf
 # (which is just the location blocks, no rate limiting/headers/CSP at
-# all). Copy this to site/REPLACE-ME-YOUR-DOMAIN.conf (untracked, same
-# convention as site/index.html vs. site/index.html.example -- see
-# README.md "Static-site pages"), replace every REPLACE-ME marker with
-# your own real values, then wire it into your nginx sites-enabled/
-# conf.d the normal way.
+# all). Copy this to site/nginx-locations.conf (untracked -- a FIXED
+# filename regardless of your own domain, same convention as every other
+# real-vs-.example pair in site/, e.g. site/index.html vs.
+# site/index.html.example -- see README.md "Static-site pages"), replace
+# every REPLACE-ME marker with your own real values, then wire it into
+# your nginx sites-enabled/conf.d the normal way (nginx doesn't care what
+# the file is called, only that it's included).
 #
 # We use a separate server statement for the HTTP->HTTPS redirect and NOT an
 # if-statement inside this block - see http://wiki.nginx.org/IfIsEvil

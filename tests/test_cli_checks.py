@@ -488,11 +488,13 @@ class CheckNginxLocationsTest(unittest.TestCase):
 
 class CheckNginxConfRepoFileTest(unittest.TestCase):
     """check_nginx_conf_repo_file() looks at a real, personal nginx vhost
-    conf file kept directly in this checkout's site/ dir (e.g.
-    site/booking.example.org.conf) -- a different mechanism from
-    CheckNginxLocationsTest above, which only ever inspects the LIVE,
-    already-deployed `nginx -T` output. This is the check meant to catch
-    the gap BEFORE that file is ever deployed/reloaded."""
+    conf file kept at the FIXED path site/nginx-locations.conf in this
+    checkout (2026-07-10: renamed from being named after the operator's own
+    domain so every real-vs-.example pair in site/ follows the same
+    convention) -- a different mechanism from CheckNginxLocationsTest
+    above, which only ever inspects the LIVE, already-deployed `nginx -T`
+    output. This is the check meant to catch the gap BEFORE that file is
+    ever deployed/reloaded."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -513,26 +515,26 @@ class CheckNginxConfRepoFileTest(unittest.TestCase):
         self.assertIn("no real, personal nginx vhost conf file", checks[0][2])
 
     def test_example_file_alone_does_not_count(self):
-        (self.home / "site" / "booking.example.org.conf.example").write_text(self._all_locations_text())
+        (self.home / "site" / "nginx-locations.conf.example").write_text(self._all_locations_text())
         checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
         self.assertEqual(len(checks), 1)
         self.assertEqual(checks[0][1], "warn")
         self.assertIn("no real, personal nginx vhost conf file", checks[0][2])
 
     def test_real_file_with_every_location_is_ok(self):
-        (self.home / "site" / "booking.example.org.conf").write_text(self._all_locations_text())
+        (self.home / "site" / "nginx-locations.conf").write_text(self._all_locations_text())
         checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
         self.assertEqual(len(checks), 1)
         label, level, detail = checks[0]
         self.assertEqual(level, "ok")
-        self.assertIn("site/booking.example.org.conf", label)
+        self.assertIn("site/nginx-locations.conf", label)
 
     def test_missing_location_warns_with_the_path_named(self):
         text = "\n".join(
             f"location {path} {{ proxy_pass http://127.0.0.1:8811; }}"
             for path in cli_checks._REQUIRED_NGINX_LOCATIONS if path != "/reinstate/"
         )
-        (self.home / "site" / "booking.example.org.conf").write_text(text)
+        (self.home / "site" / "nginx-locations.conf").write_text(text)
         checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
         label, level, detail = checks[0]
         self.assertEqual(level, "warn")
@@ -540,19 +542,11 @@ class CheckNginxConfRepoFileTest(unittest.TestCase):
 
     def test_leftover_replace_me_marker_warns(self):
         text = self._all_locations_text() + "\nserver_name REPLACE-ME-YOUR-DOMAIN;\n"
-        (self.home / "site" / "booking.example.org.conf").write_text(text)
+        (self.home / "site" / "nginx-locations.conf").write_text(text)
         checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
         label, level, detail = checks[0]
         self.assertEqual(level, "warn")
         self.assertIn("REPLACE-ME", detail)
-
-    def test_multiple_real_conf_files_are_each_reported(self):
-        (self.home / "site" / "booking.example.org.conf").write_text(self._all_locations_text())
-        (self.home / "site" / "other.example.org.conf").write_text("location /admin { }")
-        checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
-        levels = _levels(checks)
-        self.assertEqual(levels["nginx vhost conf (site/booking.example.org.conf)"], "ok")
-        self.assertEqual(levels["nginx vhost conf (site/other.example.org.conf)"], "warn")
 
 
 class CheckNginxConfDeployedTest(unittest.TestCase):
@@ -614,6 +608,12 @@ class CheckNginxConfDeployedTest(unittest.TestCase):
 
 
 class ResolveNginxConfCheckoutSourceTest(unittest.TestCase):
+    """2026-07-10: this no longer takes a nginx_conf_path argument at all --
+    the checkout side always uses the fixed site/nginx-locations.conf(.example)
+    name, completely independent of whatever the live deployed file is
+    called on the actual server (the operator's rename request: "all content in
+    site/ works the same")."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
@@ -621,31 +621,19 @@ class ResolveNginxConfCheckoutSourceTest(unittest.TestCase):
         (self.home / "site").mkdir()
 
     def test_no_match_at_all_returns_none(self):
-        result = cli_checks._resolve_nginx_conf_checkout_source(
-            str(self.home), "/etc/nginx/conf.d/booking.example.org.conf")
+        result = cli_checks._resolve_nginx_conf_checkout_source(str(self.home))
         self.assertIsNone(result)
 
     def test_falls_back_to_example(self):
-        (self.home / "site" / "booking.example.org.conf.example").write_text("generic")
-        result = cli_checks._resolve_nginx_conf_checkout_source(
-            str(self.home), "/etc/nginx/conf.d/booking.example.org.conf")
-        self.assertEqual(result, self.home / "site" / "booking.example.org.conf.example")
+        (self.home / "site" / "nginx-locations.conf.example").write_text("generic")
+        result = cli_checks._resolve_nginx_conf_checkout_source(str(self.home))
+        self.assertEqual(result, self.home / "site" / "nginx-locations.conf.example")
 
     def test_real_file_takes_precedence_over_example(self):
-        (self.home / "site" / "booking.example.org.conf").write_text("real")
-        (self.home / "site" / "booking.example.org.conf.example").write_text("generic")
-        result = cli_checks._resolve_nginx_conf_checkout_source(
-            str(self.home), "/etc/nginx/conf.d/booking.example.org.conf")
-        self.assertEqual(result, self.home / "site" / "booking.example.org.conf")
-
-    def test_matches_by_filename_not_full_path(self):
-        # The deployed path's directory (/etc/nginx/conf.d/) has nothing to
-        # do with where this checkout keeps its own copy -- only the
-        # filename itself is used to find the checkout counterpart.
-        (self.home / "site" / "other-domain.conf").write_text("real")
-        result = cli_checks._resolve_nginx_conf_checkout_source(
-            str(self.home), "/some/totally/different/path/other-domain.conf")
-        self.assertEqual(result, self.home / "site" / "other-domain.conf")
+        (self.home / "site" / "nginx-locations.conf").write_text("real")
+        (self.home / "site" / "nginx-locations.conf.example").write_text("generic")
+        result = cli_checks._resolve_nginx_conf_checkout_source(str(self.home))
+        self.assertEqual(result, self.home / "site" / "nginx-locations.conf")
 
 
 class NginxRootForHostTest(unittest.TestCase):

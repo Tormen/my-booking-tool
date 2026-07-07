@@ -47,38 +47,42 @@ The split:
 
 - `settings.toml.example`, `site/index.html.example`,
   `site/impressum.html.example`, `site/privacy.html.tmpl.example`,
-  `site/terms.html.example` -- generic, tracked in git, safe to publish.
-  Placeholder content throughout, marked with `REPLACE-ME`.
+  `site/terms.html.example`, `site/nginx-locations.conf.example` --
+  generic, tracked in git, safe to publish. Placeholder content
+  throughout, marked with `REPLACE-ME`.
 - `settings.toml`, `site/index.html`, `site/impressum.html`,
-  `site/privacy.html`, `site/privacy.html.tmpl`, `site/terms.html` -- your
-  own real, filled-in versions. **Gitignored on purpose**: if you already
-  have these (a real deployment), they are never overwritten, never
-  deleted, and never published -- by this repo's own `.gitignore`, by
-  `my-bt`, or by the RPM/install scripts. `%config(noreplace)` in the RPM
-  spec gives the same guarantee at the installed-system level for the two
-  of these (`settings.toml`, `site/privacy.html.tmpl`) that `my-bt` reads
-  at runtime -- see "Installing" below.
+  `site/privacy.html`, `site/privacy.html.tmpl`, `site/terms.html`,
+  `site/nginx-locations.conf` -- your own real, filled-in versions.
+  **Gitignored on purpose**: if you already have these (a real
+  deployment), they are never overwritten, never deleted, and never
+  published -- by this repo's own `.gitignore`, by `my-bt`, or by the
+  RPM/install scripts. `%config(noreplace)` in the RPM spec gives the
+  same guarantee at the installed-system level for the two of these
+  (`settings.toml`, `site/privacy.html.tmpl`) that `my-bt` reads at
+  runtime -- see "Installing" below.
 
-Same convention, one more pair: `site/booking.example.org.conf.example` (generic,
-tracked, `REPLACE-ME`-marked) vs. `site/booking.example.org.conf` (a real, hardened
-nginx vhost -- named after *your* domain, not a fixed filename, gitignored
-just like the files above). Unlike the others, this one is entirely
-optional: `my-bt setup`/`status` only report on it if a `site/*.conf` file
-actually exists, and never auto-generate or edit it (rewriting a
-hand-hardened vhost would be worse than asking) -- see
-`app/cli_checks.py::check_nginx_conf_repo_file()`.
+`site/nginx-locations.conf` is a real, hardened nginx vhost reference --
+a FIXED filename (2026-07-10: renamed from being named after the operator's own
+domain, specifically so every real-vs-`.example` pair in `site/` follows
+the exact same convention -- nginx itself doesn't care what the file on
+disk is called, only that it's included). Unlike the others, this one is
+entirely optional: `my-bt setup`/`status` only report on it if
+`site/nginx-locations.conf` actually exists, and never auto-generate or
+edit it (rewriting a hand-hardened vhost would be worse than asking) --
+see `app/cli_checks.py::check_nginx_conf_repo_file()`.
 
 Want an even stricter check against the file nginx is *actually* running
 with, not just this checkout's copy? Set `[site].nginx_conf_path` in your
 real `settings.toml` to the absolute path nginx loads it from on this box
-(e.g. `/etc/nginx/conf.d/booking.example.org.conf`). `my-bt status`/`setup` then
-read that exact file directly off disk (not `nginx -T`'s merged dump) and
-**hard-fail** -- not just warn -- if it's missing a required location
-block or still has a leftover `REPLACE-ME` marker, since configuring this
-path is a deliberate statement that the file is real and matters. `setup
--i` also offers a `vimdiff` between it and this checkout's own
-`site/<name>(.example)` if the two differ. See
-`app/cli_checks.py::check_nginx_conf_deployed()`.
+(it can be named anything there -- this checkout's own copy is always
+looked up by the fixed name above, regardless). `my-bt status`/`setup`
+then read that exact file directly off disk (not `nginx -T`'s merged
+dump) and **hard-fail** -- not just warn -- if it's missing a required
+location block or still has a leftover `REPLACE-ME` marker, since
+configuring this path is a deliberate statement that the file is real and
+matters. `setup -i` also offers a `vimdiff` between it and this
+checkout's own `site/nginx-locations.conf(.example)` if the two differ.
+See `app/cli_checks.py::check_nginx_conf_deployed()`.
 
 First time setting this up? Copy each `.example` file to its real name
 and fill it in:
@@ -235,9 +239,9 @@ full detail, for reference:
    nginx vhost config, then `nginx -t && systemctl reload nginx`. Want a
    fully hardened reference instead of bare location blocks (rate
    limiting, CSP/HSTS/Permissions-Policy headers, an optional admin-IP
-   allowlist)? `site/booking.example.org.conf.example` is a real production vhost,
-   anonymized -- see "Generic template vs. your real config" above for the
-   same real-vs-`.example` convention applied to `site/*.conf`.
+   allowlist)? `site/nginx-locations.conf.example` is a real production
+   vhost, anonymized -- see "Generic template vs. your real config" above
+   for the same real-vs-`.example` convention applied to it.
 4. `sudo usermod -aG my-booking <your-login>` so `my-bt` works without sudo.
 5. `sudo systemctl enable --now my-booking.service my-booking-retention.timer my-booking-watchdog.timer my-booking-git-snapshot.timer`
 6. If SELinux is enforcing (default on Fedora -- check `getenforce`):
@@ -464,8 +468,12 @@ without needing a real tty/root/systemd/rpm.
 
 Plain `my-bt setup` prints the list, annotating each item with whatever
 `status` would say about it, so a re-run after partial setup shows only
-what's actually left. Add `-i`/`--interactive` to be walked through it
-step by step and have `my-bt` perform what it safely can:
+what's actually left. It ends with the same rollup line `status` prints
+(`N problem(s), N warning(s)`, or `all checks passed`) and exits non-zero
+on any WARN or FAIL, same policy as `status` -- so `my-bt setup && <next
+step>` is a safe gate to script/cron against, not just a human-readable
+report. Add `-i`/`--interactive` to be walked through it step by step and
+have `my-bt` perform what it safely can:
 
 - Missing secrets: prompts and writes them (hidden input for passwords;
   offers to auto-generate `erasure_pepper`; reuses the same hashing as

@@ -116,7 +116,18 @@ def print_report(
     raw: dict, settings_path: str, home: str,
     print_fn: Callable[[str], None] = print,
     data_dir: str = "/var/lib/my-booking",
-) -> None:
+) -> tuple[int, int]:
+    """Prints the full setup report and returns (fails, warns) -- the same
+    two counts `cmd_status` in scripts/my-bt already computes from its own
+    flat `checks` list -- so plain `my-bt setup` (no `-i`) can exit
+    non-zero on either, exactly like `my-bt status` already does
+    (2026-07-10, the operator: "add that same summary-line + nonzero-exit
+    behavior to plain `my-bt setup`, for consistency with `status` and so
+    it's usable in a script/cron check too" -- "Yes please"). Before this,
+    plain `setup` always exited 0 and had no rollup line at all: every
+    check was individually marked [OK]/[WARN]/[FAIL], so a human reading
+    the whole report could tell, but there was nothing a script could
+    check."""
     report = build_report(raw, settings_path, home, data_dir)
 
     def show(checks: list[cli_checks.Check]) -> None:
@@ -196,6 +207,18 @@ def print_report(
     show(report["data_dir_git"])
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
+
+    all_checks = [c for group in report.values() for c in group]
+    fails = sum(1 for _, level, _ in all_checks if level == "fail")
+    warns = sum(1 for _, level, _ in all_checks if level == "warn")
+    if fails:
+        print_fn(f"\n{fails} problem(s), {warns} warning(s) -- fix the FAIL item(s) above, "
+                  "then re-run `my-bt setup` (or `my-bt status`).")
+    elif warns:
+        print_fn(f"\n{warns} warning(s), no hard failures -- worth a look above.")
+    else:
+        print_fn("\nall checks passed -- nothing left to do.")
+    return fails, warns
 
 
 def interactive_setup(
@@ -299,10 +322,10 @@ def interactive_setup(
         run(["systemctl", "reload", "nginx"])
 
     # Real, personal nginx vhost conf kept directly in this checkout's
-    # site/ dir (e.g. site/booking.example.org.conf) -- informational only, same
-    # reasoning as the CalDAV calendar checks below: this tool never
-    # guesses at and edits your own hand-hardened vhost file for you, it
-    # just surfaces whether it's missing required location blocks or a
+    # site/ dir at the fixed name site/nginx-locations.conf -- informational
+    # only, same reasoning as the CalDAV calendar checks below: this tool
+    # never guesses at and edits your own hand-hardened vhost file for you,
+    # it just surfaces whether it's missing required location blocks or a
     # leftover REPLACE-ME placeholder.
     for label, level, detail in cli_checks.check_nginx_conf_repo_file(home):
         if level == "ok":
@@ -322,14 +345,18 @@ def interactive_setup(
     # worse than asking -- but if this checkout has its own copy (real or
     # .example, matched by filename) and it differs from what's actually
     # deployed, offer the same vimdiff-to-reconcile pattern already used
-    # for .rpmnew merges and stale hand-authored static pages.
+    # for .rpmnew merges and stale hand-authored static pages. The checkout
+    # side is always the one fixed site/nginx-locations.conf(.example) --
+    # unrelated to whatever nginx_conf_path itself is named on the live
+    # server (2026-07-10, the operator: rename convention so "all content in
+    # site/ works the same").
     nginx_conf_path = raw.get("site", {}).get("nginx_conf_path")
     if not nginx_conf_path:
         print_fn("[skip] [site].nginx_conf_path not configured -- not checked")
     else:
         for label, level, detail in cli_checks.check_nginx_conf_deployed(raw):
             print_fn(f"[{level}] {label}: {detail}")
-        source = cli_checks._resolve_nginx_conf_checkout_source(home, nginx_conf_path)
+        source = cli_checks._resolve_nginx_conf_checkout_source(home)
         deployed = Path(nginx_conf_path)
         if source is not None and deployed.exists():
             same = deployed.read_text(encoding="utf-8", errors="replace") == \

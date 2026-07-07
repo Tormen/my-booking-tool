@@ -85,6 +85,44 @@ class PrintReportTest(unittest.TestCase):
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         self.assertTrue(any("SKIP" in ln and "static_site_dir" in ln for ln in lines))
 
+    def test_returned_counts_match_the_printed_report(self):
+        # 2026-07-10, the operator: wants plain `my-bt setup` scriptable the same
+        # way `status` already is -- print_report() now returns (fails,
+        # warns) so scripts/my-bt's cmd_setup can decide the exit code.
+        # Regardless of what this sandboxed test host's own systemd/
+        # SELinux/rpm state happens to be, the returned counts must always
+        # match what was actually printed.
+        lines: list[str] = []
+        fails, warns = cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        printed_fails = sum(1 for ln in lines if "[FAIL]" in ln)
+        printed_warns = sum(1 for ln in lines if "[WARN]" in ln)
+        self.assertEqual(fails, printed_fails)
+        self.assertEqual(warns, printed_warns)
+
+    def test_a_real_failure_is_reflected_in_the_returned_count_and_summary_line(self):
+        raw = _raw(calendar={"caldav_password_file": str(self.home / "nope")})
+        lines: list[str] = []
+        fails, warns = cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertGreaterEqual(fails, 1)
+        self.assertTrue(any(f"{fails} problem(s)" in ln for ln in lines))
+
+    def test_all_checks_passed_summary_when_nothing_to_report(self):
+        # Force a fully clean report by taking the REAL report's shape
+        # (every group key print_report() expects) and flattening every
+        # check to "ok" -- avoids depending on this sandboxed test host's
+        # own systemd/SELinux/group state actually being clean, which
+        # isn't something this test can control or should assume.
+        real_report = cli_setup.build_report(_raw(), self.settings_path, str(self.home))
+        all_ok_report = {
+            key: [(label, "ok", detail) for label, _, detail in checks]
+            for key, checks in real_report.items()
+        }
+        with patch.object(cli_setup, "build_report", return_value=all_ok_report):
+            lines: list[str] = []
+            fails, warns = cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertEqual((fails, warns), (0, 0))
+        self.assertTrue(any("all checks passed" in ln for ln in lines))
+
 
 class InteractiveSetupSecretsTest(unittest.TestCase):
     """Step 4 (nginx) is always asked unconditionally regardless of what
@@ -448,7 +486,11 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
     """[site].nginx_conf_path: read directly off disk (never via `nginx -T`
     or a checkout glob), and -- unlike static_site_dir's own vimdiff offer
     above -- never auto-writable, just an offer to reconcile against this
-    checkout's own site/<name>(.example) if the two differ."""
+    checkout's own FIXED site/nginx-locations.conf(.example) if the two
+    differ. The deployed file below is deliberately kept named
+    "booking.example.org.conf" (not "nginx-locations.conf") throughout this class,
+    to prove the checkout-side match no longer depends on nginx_conf_path's
+    own basename at all (2026-07-10 rename)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -484,7 +526,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
     def test_matching_checkout_copy_is_never_prompted(self):
         text = "location /admin { }"
         self.deployed.write_text(text)
-        (self.home / "site" / "booking.example.org.conf").write_text(text)
+        (self.home / "site" / "nginx-locations.conf").write_text(text)
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})
         prompt = FakePrompts({}, default=True)
         cli_setup.interactive_setup(
@@ -496,7 +538,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
 
     def test_accepting_opens_vimdiff_for_a_differing_copy(self):
         self.deployed.write_text("location /admin { } # deployed")
-        (self.home / "site" / "booking.example.org.conf").write_text("location /admin { } # checkout")
+        (self.home / "site" / "nginx-locations.conf").write_text("location /admin { } # checkout")
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})
         prompt = FakePrompts({"vimdiff": True})
         calls: list[list[str]] = []
@@ -506,7 +548,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
             print_fn=lambda *_: None,
         )
         self.assertTrue(any(
-            c[0] == "vimdiff" and str(self.deployed) in c and str(self.home / "site" / "booking.example.org.conf") in c
+            c[0] == "vimdiff" and str(self.deployed) in c and str(self.home / "site" / "nginx-locations.conf") in c
             for c in calls
         ))
         # Never auto-written -- vimdiff is what would actually reconcile it.
@@ -514,7 +556,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
 
     def test_declining_vimdiff_leaves_both_files_alone(self):
         self.deployed.write_text("deployed version")
-        (self.home / "site" / "booking.example.org.conf").write_text("checkout version")
+        (self.home / "site" / "nginx-locations.conf").write_text("checkout version")
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})
         prompt = FakePrompts({"vimdiff": False})
         calls: list[list[str]] = []
@@ -527,7 +569,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
 
     def test_falls_back_to_example_when_no_real_checkout_copy(self):
         self.deployed.write_text("deployed version")
-        (self.home / "site" / "booking.example.org.conf.example").write_text("generic template")
+        (self.home / "site" / "nginx-locations.conf.example").write_text("generic template")
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})
         prompt = FakePrompts({"vimdiff": True})
         calls: list[list[str]] = []
@@ -537,7 +579,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
             print_fn=lambda *_: None,
         )
         self.assertTrue(any(
-            c[0] == "vimdiff" and str(self.home / "site" / "booking.example.org.conf.example") in c
+            c[0] == "vimdiff" and str(self.home / "site" / "nginx-locations.conf.example") in c
             for c in calls
         ))
 

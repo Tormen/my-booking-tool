@@ -283,35 +283,32 @@ def check_nginx_locations() -> list[Check]:
     return checks
 
 
-def _repo_nginx_conf_files(home: str) -> list[Path]:
-    """Real, personal nginx vhost conf file(s) placed directly in this
-    checkout's site/ dir -- e.g. site/booking.example.org.conf, named after your own
-    domain, gitignored the same way site/index.html and friends are (see
-    .gitignore). Deliberately globs for "*.conf" rather than a single
-    hardcoded filename: the whole point of this convention is that the
-    filename is whatever domain *you* run this under, which my-bt can't
-    know in advance. Excludes *.conf.example, the generic tracked template
-    this ships (site/booking.example.org.conf.example is the operator's own real one,
-    anonymized -- see README.md)."""
-    site_dir = Path(home) / "site"
-    if not site_dir.is_dir():
-        return []
-    return sorted(p for p in site_dir.glob("*.conf") if not p.name.endswith(".conf.example"))
+# Fixed, generic filename for the (optional) real, hand-hardened nginx
+# vhost conf kept directly in this checkout's site/ dir -- see
+# site/nginx-locations.conf.example. 2026-07-10, the operator: "rename
+# booking.example.org.conf to nginx-locations.conf ... like this all content in
+# site/ works the same" -- every OTHER real-vs-.example pair in site/
+# (index.html, impressum.html, terms.html, privacy.html.tmpl) already uses
+# one fixed, domain-agnostic name; the nginx conf used to be the one
+# exception (named after the operator's own domain), which meant this module had
+# to glob for "*.conf" instead of just checking one known path. Fixed name
+# everywhere now -- no more globbing, no more guessing.
+_NGINX_CONF_FILENAME = "nginx-locations.conf"
 
 
 def check_nginx_conf_repo_file(home: str) -> list[Check]:
-    """Whether a real, filled-in nginx vhost conf file exists directly in
-    this checkout's site/ dir (see _repo_nginx_conf_files), and if so,
-    whether it still has every location block this app currently needs
+    """Whether a real, filled-in nginx vhost conf file exists at the fixed
+    site/nginx-locations.conf path in this checkout, and if so, whether it
+    still has every location block this app currently needs
     (_REQUIRED_NGINX_LOCATIONS) and no leftover REPLACE-ME placeholder.
 
     This exists to catch, at the SOURCE, the exact drift that actually
     happened 2026-07-10: a new route (/reinstate/, /host-reinstate/) was
     added to the app, and both nginx/my-booking.conf(.example) and
     check_nginx_locations()'s own required-list were updated for it -- but
-    the separate, real, hand-hardened site/booking.example.org.conf sitting in this
-    repo was NOT, and nothing caught that gap until the operator noticed it by
-    inspection. check_nginx_locations() above only ever looks at the LIVE,
+    the separate, real, hand-hardened nginx conf sitting in this repo was
+    NOT, and nothing caught that gap until the operator noticed it by inspection.
+    check_nginx_locations() above only ever looks at the LIVE,
     already-deployed `nginx -T` output, so it can't help BEFORE a stale
     file like this is actually deployed; this check looks at the file
     still sitting in the checkout, so it can catch the gap even before
@@ -321,32 +318,28 @@ def check_nginx_conf_repo_file(home: str) -> list[Check]:
     a from-scratch install legitimately has none until you've hardened
     one, same as [site].static_site_dir being optional elsewhere in this
     module."""
-    files = _repo_nginx_conf_files(home)
-    if not files:
-        return [("nginx vhost conf (site/*.conf)", "warn",
-                  "no real, personal nginx vhost conf file found in site/ yet -- copy "
-                  "site/booking.example.org.conf.example there (renamed for your own domain) as a "
-                  "hardened starting point, or nginx/my-booking.conf.example for a bare-bones one")]
-    checks: list[Check] = []
-    for f in files:
-        text = f.read_text(encoding="utf-8", errors="replace")
-        problems = []
-        if _PLACEHOLDER_MARKER in text:
-            problems.append(f'still contains a "{_PLACEHOLDER_MARKER}" placeholder marker -- '
-                              "copied from the .example without customizing it?")
-        missing = [
-            path for path in _REQUIRED_NGINX_LOCATIONS
-            if not re.search(rf"^\s*location\s+(?:[=~^]+\*?\s+)?{re.escape(path)}\s*\{{", text, re.MULTILINE)
-        ]
-        if missing:
-            problems.append(f"missing location block(s) for {', '.join(missing)} -- see "
-                              "nginx/my-booking.conf.example for the bare version to adapt")
-        if problems:
-            checks.append((f"nginx vhost conf (site/{f.name})", "warn", "; ".join(problems)))
-        else:
-            checks.append((f"nginx vhost conf (site/{f.name})", "ok",
-                            "has every required location block, no leftover placeholder marker"))
-    return checks
+    f = Path(home) / "site" / _NGINX_CONF_FILENAME
+    if not f.exists():
+        return [(f"nginx vhost conf (site/{_NGINX_CONF_FILENAME})", "warn",
+                  f"no real, personal nginx vhost conf file found yet -- copy "
+                  f"site/{_NGINX_CONF_FILENAME}.example there as a hardened starting "
+                  "point, or nginx/my-booking.conf.example for a bare-bones one")]
+    text = f.read_text(encoding="utf-8", errors="replace")
+    problems = []
+    if _PLACEHOLDER_MARKER in text:
+        problems.append(f'still contains a "{_PLACEHOLDER_MARKER}" placeholder marker -- '
+                          "copied from the .example without customizing it?")
+    missing = [
+        path for path in _REQUIRED_NGINX_LOCATIONS
+        if not re.search(rf"^\s*location\s+(?:[=~^]+\*?\s+)?{re.escape(path)}\s*\{{", text, re.MULTILINE)
+    ]
+    if missing:
+        problems.append(f"missing location block(s) for {', '.join(missing)} -- see "
+                          "nginx/my-booking.conf.example for the bare version to adapt")
+    if problems:
+        return [(f"nginx vhost conf (site/{_NGINX_CONF_FILENAME})", "warn", "; ".join(problems))]
+    return [(f"nginx vhost conf (site/{_NGINX_CONF_FILENAME})", "ok",
+              "has every required location block, no leftover placeholder marker")]
 
 
 def check_nginx_conf_deployed(raw: dict) -> list[Check]:
@@ -394,20 +387,22 @@ def check_nginx_conf_deployed(raw: dict) -> list[Check]:
               "has every required location block, no leftover placeholder marker")]
 
 
-def _resolve_nginx_conf_checkout_source(home: str, nginx_conf_path: str) -> Path | None:
-    """The checkout's own copy of the file deployed at `nginx_conf_path`
-    (matched by filename, since that name is whatever domain you run this
-    under, not something fixed) -- your real site/<name> if you keep one
-    there, falling back to the generic site/<name>.example. None if
-    neither exists, e.g. running against a server whose vhost was never
-    added to this checkout at all. Used only to offer a vimdiff in
-    `setup -i`, mirroring `_resolve_static_source`'s same real-then-.example
-    fallback for the static html pages."""
-    name = Path(nginx_conf_path).name
-    real = Path(home) / "site" / name
+def _resolve_nginx_conf_checkout_source(home: str) -> Path | None:
+    """This checkout's own copy of the nginx vhost conf, whatever's
+    actually deployed at [site].nginx_conf_path -- your real
+    site/nginx-locations.conf if you keep one there, falling back to the
+    generic site/nginx-locations.conf.example. None if neither exists,
+    e.g. running against a server whose vhost was never added to this
+    checkout at all. Used only to offer a vimdiff in `setup -i`, mirroring
+    `_resolve_static_source`'s same real-then-.example fallback for the
+    static html pages. Unlike an earlier version of this function, this NO
+    LONGER depends on nginx_conf_path's own basename -- the checkout side
+    always uses the one fixed filename (_NGINX_CONF_FILENAME), regardless
+    of what nginx_conf_path is called on the live server."""
+    real = Path(home) / "site" / _NGINX_CONF_FILENAME
     if real.exists():
         return real
-    example = Path(home) / "site" / f"{name}.example"
+    example = Path(home) / "site" / f"{_NGINX_CONF_FILENAME}.example"
     if example.exists():
         return example
     return None
