@@ -59,6 +59,15 @@ The split:
   of these (`settings.toml`, `site/privacy.html.tmpl`) that `my-bt` reads
   at runtime -- see "Installing" below.
 
+Same convention, one more pair: `site/booking.example.org.conf.example` (generic,
+tracked, `REPLACE-ME`-marked) vs. `site/booking.example.org.conf` (a real, hardened
+nginx vhost -- named after *your* domain, not a fixed filename, gitignored
+just like the files above). Unlike the others, this one is entirely
+optional: `my-bt setup`/`status` only report on it if a `site/*.conf` file
+actually exists, and never auto-generate or edit it (rewriting a
+hand-hardened vhost would be worse than asking) -- see
+`app/cli_checks.py::check_nginx_conf_repo_file()`.
+
 First time setting this up? Copy each `.example` file to its real name
 and fill it in:
 
@@ -211,7 +220,12 @@ full detail, for reference:
    package still surfaces instead of silently persisting across upgrades.
 3. Add the location blocks from
    `/usr/share/my-booking-tool/my-booking.conf.example` to your existing
-   nginx vhost config, then `nginx -t && systemctl reload nginx`.
+   nginx vhost config, then `nginx -t && systemctl reload nginx`. Want a
+   fully hardened reference instead of bare location blocks (rate
+   limiting, CSP/HSTS/Permissions-Policy headers, an optional admin-IP
+   allowlist)? `site/booking.example.org.conf.example` is a real production vhost,
+   anonymized -- see "Generic template vs. your real config" above for the
+   same real-vs-`.example` convention applied to `site/*.conf`.
 4. `sudo usermod -aG my-booking <your-login>` so `my-bt` works without sudo.
 5. `sudo systemctl enable --now my-booking.service my-booking-retention.timer my-booking-watchdog.timer my-booking-git-snapshot.timer`
 6. If SELinux is enforcing (default on Fedora -- check `getenforce`):

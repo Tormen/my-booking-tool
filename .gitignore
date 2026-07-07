@@ -10,6 +10,7 @@
 /site/privacy.html
 /site/privacy.html.tmpl
 /site/terms.html
+/site/booking.example.org.conf
 
 # Early drafts of the same real legal content above, kept locally for
 # history but not meant for the public template repo.

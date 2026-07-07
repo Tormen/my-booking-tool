@@ -1,0 +1,241 @@
+# REPLACE-ME-YOUR-DOMAIN - main site + proxied booking app.
+# HARDENED nginx vhost reference. This is the operator's own real, production
+# config for booking.example.org, anonymized (see "REPLACE-ME" markers below) --
+# a genuinely richer starting point than the bare nginx/my-booking.conf
+# (which is just the location blocks, no rate limiting/headers/CSP at
+# all). Copy this to site/REPLACE-ME-YOUR-DOMAIN.conf (untracked, same
+# convention as site/index.html vs. site/index.html.example -- see
+# README.md "Static-site pages"), replace every REPLACE-ME marker with
+# your own real values, then wire it into your nginx sites-enabled/
+# conf.d the normal way.
+#
+# We use a separate server statement for the HTTP->HTTPS redirect and NOT an
+# if-statement inside this block - see http://wiki.nginx.org/IfIsEvil
+# (The redirect server{} block further down still uses certbot's original
+# if-based idiom for host matching; that one's fine as-is, see note there.)
+
+server {
+    server_name REPLACE-ME-YOUR-DOMAIN;
+    root /var/www/REPLACE-ME-YOUR-DOMAIN/public_html;
+
+    access_log /var/log/nginx/REPLACE-ME-YOUR-DOMAIN.access.log;
+    error_log  /var/log/nginx/REPLACE-ME-YOUR-DOMAIN.error.log;
+
+    # REPLACE-ME: optional extra include(s) for your own distro/setup's
+    # generic hardening snippets, if you have any (e.g. Fedora's stock
+    # restrictions.conf). Not required by this app -- purely whatever
+    # else you already run on this box.
+
+    # HARDENING: however you manage your TLS cert (certbot, acme.sh, or
+    # your hosting provider's own automation) -- REPLACE-ME with your own
+    # cert paths.
+    listen 443 ssl;
+    http2 on;
+    ssl_certificate REPLACE-ME-/path/to/fullchain.pem;
+    ssl_certificate_key REPLACE-ME-/path/to/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    # HARDENING: OCSP stapling deliberately NOT enabled here -- Let's
+    # Encrypt fully retired their OCSP responder in August 2025, so certs
+    # issued since then carry no OCSP AIA URL at all; ssl_stapling would
+    # just log "no OCSP responder URL in the certificate" and do nothing.
+    # REPLACE-ME: if your CA still serves OCSP, add it back.
+
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # HARDENING: Content-Security-Policy, ENFORCED (not report-only).
+    # Built from an actual audit of every page this app serves (index,
+    # /courses, /book/*, /my, /terms, /privacy, /impressum, /admin/login):
+    #   - Zero external resources anywhere (no CDNs, no Google Fonts, no
+    #     external scripts/images/frames) - everything is same-origin, so
+    #     default-src 'self' is safe as the baseline for everything not
+    #     called out below.
+    #   - FOUR distinct inline <script> blocks exist site-wide as of this
+    #     app version: index.html's (same-origin fetch() to /my/session
+    #     only), the booking-form validation script shared by all
+    #     /book/<slug> pages, the sortable/filterable-table script shared
+    #     by /my and /admin's own tables, and the confirm-dialog wiring
+    #     script shared by /my (Cancel/Reinstate buttons) and /admin
+    #     (Cancel/Reinstate buttons). All four are allow-listed by exact
+    #     SHA-256 hash below instead of 'unsafe-inline', so any future/
+    #     injected inline script that isn't byte-identical to these four
+    #     is blocked outright. These four hashes match the app as shipped
+    #     in this repo right now -- if you ever hand-edit any of app's
+    #     inline scripts, regenerate the hashes or those pages' scripts
+    #     will silently stop working (this bit a real deployment once --
+    #     both /my's and /admin's confirm-dialogs went dead with no
+    #     visible error except a browser-console CSP violation).
+    #   - style-src needs 'unsafe-inline': index.html's script injects new
+    #     elements with inline style="..." at runtime (innerHTML), which a
+    #     hash/nonce can't cover since the content doesn't exist until the
+    #     page runs.
+    #   - img-src allows data: for any inline/base64 images; nothing else
+    #     external is used.
+    #   - object-src/base-uri/form-action locked to 'none'/'self' as standard
+    #     defense-in-depth; nothing in this app needs plugins, a <base> tag,
+    #     or cross-origin form submission.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-xFleY/wB4EkZ6LnMDi/a2dUECRi9D3qVOXR0klJPpEg=' 'sha256-iNxXCkADirc/LTsyCSksXSFvFhKdlQdoS1GRTrLapLg=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
+
+    # HARDENING: modern security headers, same low-risk defense-in-depth as
+    # the four above. This app never needs camera/mic/geolocation/payment
+    # APIs, and has no legitimate cross-origin window references, so both are
+    # safe to lock down fully rather than tune.
+    add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+
+    # HARDENING: rate limiting for the static homepage itself (index.html).
+    # Deliberately looser than the "booking" zone below - see nginx.conf for
+    # the rationale. This location has no other effect: root/index are still
+    # inherited from the server block above, so "/" is served exactly as
+    # before, just with a request cap per IP.
+    location = / {
+        limit_req zone=homepage burst=20 nodelay;
+        limit_conn perip 20;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    ############################################################
+    # Proxied booking app (Python, listening on 127.0.0.1:8811)
+    ############################################################
+    #
+    # SELinux (enforcing by default on Fedora): nginx runs as the confined
+    # httpd_t domain, which is NOT allowed to proxy_pass to an arbitrary local
+    # port by default. Without this, every request through these blocks 502s
+    # with an AVC denial (check `sudo ausearch -m avc -ts recent`), even though
+    # the app itself is running fine:
+    #   sudo setsebool -P httpd_can_network_connect on
+
+    location /courses {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    location /book/ {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    location /cancel/ {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    # the participant-facing counterpart to /cancel/ -- a canceled
+    # booking's confirmation/reminder emails link here so a guest can undo
+    # their own cancellation without logging in. Gated app-side by a
+    # fresh, single-purpose hashed token minted at cancellation time, same
+    # trust model as /cancel/'s own token -- same hardening (rate limit +
+    # per-IP connection cap) as every other proxied location here, nothing
+    # weaker.
+    location /reinstate/ {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    # the calendar invite's per-occurrence "cancel:" line (see
+    # app/calendar_sync.py) links here directly, so a host can cancel a
+    # booking straight from their calendar app without logging into /admin
+    # first. Gated app-side by registration_id being an unguessable uuid4,
+    # not a separate hashed token like /cancel/'s own guest link -- same
+    # hardening (rate limit + per-IP connection cap) as every other
+    # proxied location here, nothing weaker.
+    location /host-cancel/ {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    # the host-facing counterpart to /host-cancel/ -- the admin's own copy
+    # of a cancellation email (and /admin's Reinstate button) links here
+    # so a host can undo a cancellation straight from their inbox or their
+    # calendar app without logging in first. Gated app-side by
+    # registration_id being an unguessable uuid4, exactly the same trust
+    # model as /host-cancel/ -- same hardening (rate limit + per-IP
+    # connection cap) as every other proxied location here, nothing
+    # weaker.
+    location /host-reinstate/ {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    location /my {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    location /admin {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+
+        # HARDENING (optional but recommended): restrict /admin to your own
+        # known/dynamic IP(s), as defense-in-depth on top of the app's own
+        # password login. nginx's allow/deny directives only accept literal
+        # IPs/CIDRs, not hostnames -- REPLACE-ME: either hardcode your
+        # static IP(s)/CIDR here (`allow 203.0.113.0/24; deny all;`), or set
+        # up your own small script/cron job that resolves a dynamic-DNS
+        # hostname you control and rewrites an included allow/deny file
+        # (reloading nginx only if it actually changed and `nginx -t`
+        # still passes). Remove this whole block if you don't want IP
+        # restriction on /admin at all -- the app's own login still
+        # applies regardless.
+        #include global/admin-allow.conf;
+    }
+}
+
+# HTTP -> HTTPS redirect for REPLACE-ME-YOUR-DOMAIN. This still uses
+# certbot's original if-based idiom (left as-is, functionally fine and
+# it's the standard pattern certbot itself generates) even though the
+# comment at the top of this file says to avoid if-statements - that
+# guidance was about avoiding if's for routing logic in general, not this
+# specific narrow host-redirect case.
+server {
+    if ($host = REPLACE-ME-YOUR-DOMAIN) {
+        return 301 https://$host$request_uri;
+    }
+
+    server_name REPLACE-ME-YOUR-DOMAIN;
+    listen 80;
+    return 404;
+}

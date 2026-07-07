@@ -541,6 +541,12 @@ def cmd_status(args) -> None:
     # fine -- that carve-out was about CalDAV/SMTP reachability, not this.
     checks.extend(cli_checks.check_nginx_locations())
 
+    # -- real, personal nginx vhost conf file kept in this checkout's site/
+    # dir (e.g. site/booking.example.org.conf), if any -- catches the SAME kind of
+    # location-block gap as check_nginx_locations() above, but at the
+    # source, in the checkout itself, before it's ever deployed/reloaded.
+    checks.extend(cli_checks.check_nginx_conf_repo_file(HOME))
+
     # -- report -------------------------------------------------------------------
     icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
     for label, level, detail in checks:

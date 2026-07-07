@@ -486,6 +486,75 @@ class CheckNginxLocationsTest(unittest.TestCase):
         self.assertEqual(_levels(checks)["nginx location /my"], "warn")
 
 
+class CheckNginxConfRepoFileTest(unittest.TestCase):
+    """check_nginx_conf_repo_file() looks at a real, personal nginx vhost
+    conf file kept directly in this checkout's site/ dir (e.g.
+    site/booking.example.org.conf) -- a different mechanism from
+    CheckNginxLocationsTest above, which only ever inspects the LIVE,
+    already-deployed `nginx -T` output. This is the check meant to catch
+    the gap BEFORE that file is ever deployed/reloaded."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "checkout"
+        (self.home / "site").mkdir(parents=True)
+
+    def _all_locations_text(self) -> str:
+        return "\n".join(
+            f"location {path} {{ proxy_pass http://127.0.0.1:8811; }}"
+            for path in cli_checks._REQUIRED_NGINX_LOCATIONS
+        )
+
+    def test_no_conf_file_at_all_warns(self):
+        checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("no real, personal nginx vhost conf file", checks[0][2])
+
+    def test_example_file_alone_does_not_count(self):
+        (self.home / "site" / "booking.example.org.conf.example").write_text(self._all_locations_text())
+        checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("no real, personal nginx vhost conf file", checks[0][2])
+
+    def test_real_file_with_every_location_is_ok(self):
+        (self.home / "site" / "booking.example.org.conf").write_text(self._all_locations_text())
+        checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "ok")
+        self.assertIn("site/booking.example.org.conf", label)
+
+    def test_missing_location_warns_with_the_path_named(self):
+        text = "\n".join(
+            f"location {path} {{ proxy_pass http://127.0.0.1:8811; }}"
+            for path in cli_checks._REQUIRED_NGINX_LOCATIONS if path != "/reinstate/"
+        )
+        (self.home / "site" / "booking.example.org.conf").write_text(text)
+        checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("/reinstate/", detail)
+
+    def test_leftover_replace_me_marker_warns(self):
+        text = self._all_locations_text() + "\nserver_name REPLACE-ME-YOUR-DOMAIN;\n"
+        (self.home / "site" / "booking.example.org.conf").write_text(text)
+        checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("REPLACE-ME", detail)
+
+    def test_multiple_real_conf_files_are_each_reported(self):
+        (self.home / "site" / "booking.example.org.conf").write_text(self._all_locations_text())
+        (self.home / "site" / "other.example.org.conf").write_text("location /admin { }")
+        checks = cli_checks.check_nginx_conf_repo_file(str(self.home))
+        levels = _levels(checks)
+        self.assertEqual(levels["nginx vhost conf (site/booking.example.org.conf)"], "ok")
+        self.assertEqual(levels["nginx vhost conf (site/other.example.org.conf)"], "warn")
+
+
 class NginxRootForHostTest(unittest.TestCase):
     """`_nginx_root_for_host` isolates one `server { ... }` block's `root`
     out of a full `nginx -T` dump via brace-depth tracking -- these tests

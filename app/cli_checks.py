@@ -283,6 +283,72 @@ def check_nginx_locations() -> list[Check]:
     return checks
 
 
+def _repo_nginx_conf_files(home: str) -> list[Path]:
+    """Real, personal nginx vhost conf file(s) placed directly in this
+    checkout's site/ dir -- e.g. site/booking.example.org.conf, named after your own
+    domain, gitignored the same way site/index.html and friends are (see
+    .gitignore). Deliberately globs for "*.conf" rather than a single
+    hardcoded filename: the whole point of this convention is that the
+    filename is whatever domain *you* run this under, which my-bt can't
+    know in advance. Excludes *.conf.example, the generic tracked template
+    this ships (site/booking.example.org.conf.example is the operator's own real one,
+    anonymized -- see README.md)."""
+    site_dir = Path(home) / "site"
+    if not site_dir.is_dir():
+        return []
+    return sorted(p for p in site_dir.glob("*.conf") if not p.name.endswith(".conf.example"))
+
+
+def check_nginx_conf_repo_file(home: str) -> list[Check]:
+    """Whether a real, filled-in nginx vhost conf file exists directly in
+    this checkout's site/ dir (see _repo_nginx_conf_files), and if so,
+    whether it still has every location block this app currently needs
+    (_REQUIRED_NGINX_LOCATIONS) and no leftover REPLACE-ME placeholder.
+
+    This exists to catch, at the SOURCE, the exact drift that actually
+    happened 2026-07-10: a new route (/reinstate/, /host-reinstate/) was
+    added to the app, and both nginx/my-booking.conf(.example) and
+    check_nginx_locations()'s own required-list were updated for it -- but
+    the separate, real, hand-hardened site/booking.example.org.conf sitting in this
+    repo was NOT, and nothing caught that gap until the operator noticed it by
+    inspection. check_nginx_locations() above only ever looks at the LIVE,
+    already-deployed `nginx -T` output, so it can't help BEFORE a stale
+    file like this is actually deployed; this check looks at the file
+    still sitting in the checkout, so it can catch the gap even before
+    `nginx -t && systemctl reload nginx` runs.
+
+    Advisory only (warn, never fail) if no real conf file exists yet --
+    a from-scratch install legitimately has none until you've hardened
+    one, same as [site].static_site_dir being optional elsewhere in this
+    module."""
+    files = _repo_nginx_conf_files(home)
+    if not files:
+        return [("nginx vhost conf (site/*.conf)", "warn",
+                  "no real, personal nginx vhost conf file found in site/ yet -- copy "
+                  "site/booking.example.org.conf.example there (renamed for your own domain) as a "
+                  "hardened starting point, or nginx/my-booking.conf.example for a bare-bones one")]
+    checks: list[Check] = []
+    for f in files:
+        text = f.read_text(encoding="utf-8", errors="replace")
+        problems = []
+        if _PLACEHOLDER_MARKER in text:
+            problems.append(f'still contains a "{_PLACEHOLDER_MARKER}" placeholder marker -- '
+                              "copied from the .example without customizing it?")
+        missing = [
+            path for path in _REQUIRED_NGINX_LOCATIONS
+            if not re.search(rf"^\s*location\s+(?:[=~^]+\*?\s+)?{re.escape(path)}\s*\{{", text, re.MULTILINE)
+        ]
+        if missing:
+            problems.append(f"missing location block(s) for {', '.join(missing)} -- see "
+                              "nginx/my-booking.conf.example for the bare version to adapt")
+        if problems:
+            checks.append((f"nginx vhost conf (site/{f.name})", "warn", "; ".join(problems)))
+        else:
+            checks.append((f"nginx vhost conf (site/{f.name})", "ok",
+                            "has every required location block, no leftover placeholder marker"))
+    return checks
+
+
 def _iter_server_blocks(merged_config: str):
     """Yields the raw text of each top-level `server { ... }` block in a
     `nginx -T` dump. Depth-tracks braces rather than doing full parsing --

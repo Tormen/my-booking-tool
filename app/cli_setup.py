@@ -99,6 +99,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "settings_fresh": cli_checks.check_settings_fresh(settings_path),
         "selinux": cli_checks.check_selinux(),
         "nginx_locations": cli_checks.check_nginx_locations(),
+        "nginx_conf_repo_file": cli_checks.check_nginx_conf_repo_file(home),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
@@ -145,6 +146,9 @@ def print_report(
         print_fn("   Add any missing block(s) from /usr/share/my-booking-tool/my-booking.conf.example")
         print_fn("   to your existing vhost (not edited automatically -- see README.md \"Installing\"),")
         print_fn("   then: sudo nginx -t && sudo systemctl reload nginx")
+
+    print_fn("\n   Real, personal nginx vhost conf kept in this checkout's site/ dir (if any):")
+    show(report["nginx_conf_repo_file"])
 
     print_fn("\n5. my-booking group membership:")
     show(report["group"])
@@ -286,6 +290,18 @@ def interactive_setup(
     if prompt("Run `nginx -t && systemctl reload nginx` now?"):
         run(["nginx", "-t"])
         run(["systemctl", "reload", "nginx"])
+
+    # Real, personal nginx vhost conf kept directly in this checkout's
+    # site/ dir (e.g. site/booking.example.org.conf) -- informational only, same
+    # reasoning as the CalDAV calendar checks below: this tool never
+    # guesses at and edits your own hand-hardened vhost file for you, it
+    # just surfaces whether it's missing required location blocks or a
+    # leftover REPLACE-ME placeholder.
+    for label, level, detail in cli_checks.check_nginx_conf_repo_file(home):
+        if level == "ok":
+            print_fn(f"[ok] {label}: {detail}")
+        else:
+            print_fn(f"[{level}] {label}: {detail}")
 
     # 5. group membership
     print_fn("\n-- 5. my-booking group membership --")
