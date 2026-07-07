@@ -67,6 +67,9 @@ label{{display:block;margin-top:.6em}}
 .description{{background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;padding:1em 1.2em;margin:.8em 0}}
 .description ul,.description ol{{margin:.4em 0;padding-left:1.4em}}
 .description p:first-child{{margin-top:0}} .description p:last-child{{margin-bottom:0}}
+.course-recap{{background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:1em 1.2em;margin:1em 0}}
+.course-recap p{{margin:.3em 0}}
+.course-recap .description{{margin:.6em 0 0}}
 .guests-section{{margin-top:1.2em;padding-top:1em;border-top:1px solid #ddd}}
 .guest-row{{border:1px solid #ddd;border-radius:8px;padding:.8em 1em .6em;margin-bottom:.8em}}
 .guest-row label{{margin-top:.4em}} .guest-row label:first-child{{margin-top:0}}

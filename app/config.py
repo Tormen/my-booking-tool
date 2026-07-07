@@ -156,6 +156,13 @@ class Settings:
     # submitting the form actually does.
     book_button_label: str = "Book"
 
+    # Hard ceiling on how many "+ Add participant" guest rows the booking
+    # form offers, and how many guest_email_N/guest_name_N fields book()
+    # will ever look for on a submitted form -- see app/webapp.py's
+    # MAX_GUESTS docstring. 2026-07-09, the operator: "add a setting for the max
+    # number of guests ... default to 3" (was a fixed constant of 9 before).
+    max_guests: int = 3
+
     # A booking made under a not-yet-confirmed email (see
     # storage.STATUS_PENDING_CONFIRMATION and app/webapp.py::book) doesn't
     # hold a real spot or sync to the calendar until the guest clicks the
@@ -331,6 +338,7 @@ def load_settings(toml_path: str | Path) -> Settings:
         spots_left_offset=int(defaults.get("spots_left_offset", 0)),
         min_required_participants=int(defaults.get("min_required_participants", 1)),
         book_button_label=defaults.get("book_button_label", "Book"),
+        max_guests=int(defaults.get("max_guests", 3)),
         pending_confirmation_hours=int(defaults.get("pending_confirmation_hours", 48)),
         retention_months=int(privacy.get("retention_months", 24)),
         canceled_retention_months=int(privacy.get("canceled_retention_months", 6)),

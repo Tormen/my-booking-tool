@@ -98,11 +98,13 @@ CONFIRM_TOKEN_TTL_HOURS = 24
 
 # Guest bookings (2026-07, "+ Add participant" on the booking form, mirroring
 # SimplyMeet.me's own UX): a hard ceiling on how many guest rows book()
-# will ever look for (guest_email_0.. guest_email_{MAX_GUESTS-1}), so a
-# hand-crafted POST can't make it scan an unbounded number of form fields.
-# The form's own JS also stops offering "+ Add participant" once this many
-# rows exist -- see _book_page()'s guest-rows script.
-MAX_GUESTS = 9
+# will ever look for (guest_email_0.. guest_email_{settings.max_guests-1}),
+# so a hand-crafted POST can't make it scan an unbounded number of form
+# fields. The form's own JS also stops offering "+ Add participant" once
+# this many rows exist -- see _book_page()'s guest-rows script. Now a
+# configurable Settings.max_guests (2026-07-09, the operator: "add a setting for
+# the max number of guests ... default to 3" -- see settings.toml
+# [defaults].max_guests); this was a fixed constant of 9 before.
 
 # 2026-07-06: "/my should always show the past 3 courses they scheduled."
 # Upcoming bookings are always shown in full (there's rarely more than a
@@ -326,6 +328,24 @@ def _course_subtitle_html(course) -> str:
         else f"{course.weekday_label()}s {course.time_range_label()} -- {course.location}"
     )
     return f'<p class="subtitle">{esc(text)}</p>' if text else ""
+
+
+def _course_recap_html(course, occ_date: str) -> str:
+    """WHAT/WHERE/WHEN/description recap block for the booking-confirmation
+    pages (2026-07-09, the operator: "repeat here the WHAT, WHERE, WHEN and the
+    DESCRIPTION of the COURSE please") -- so a guest doesn't have to go
+    back to the booking page to recall where or when they're expected.
+    description is raw HTML, same as _book_page()/courses() (see their own
+    comments on why: operator-authored, not guest input)."""
+    desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
+    return (
+        '<div class="course-recap">'
+        f"<p><b>What:</b> {esc(course.title)}</p>"
+        f"<p><b>Where:</b> {esc(course.location)}</p>"
+        f"<p><b>When:</b> {esc(course.weekday_label())}, {esc(occ_date)}, {esc(course.time_range_label())}</p>"
+        f"{desc_html}"
+        "</div>"
+    )
 
 
 def _sortable_filterable_table_script(table_id: str) -> str:
@@ -627,7 +647,10 @@ class App:
                     else f"You're booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
                 )
                 return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
-                    "Booked!", f"<p>{msg} Check your email for confirmation and a cancel link.</p>", banner=banner
+                    "Booked!",
+                    f"<p>{msg}<br>{self._check_confirmation_text(environ)}</p>"
+                    + _course_recap_html(course, occ_date),
+                    banner=banner,
                 )
 
             # Brand-new or still-unconfirmed email: deliberately does NOT
@@ -747,8 +770,8 @@ class App:
         )
 
     def _parse_guest_entries(self, form: dict, leader_email: str) -> tuple[list[tuple[str, str]], str | None]:
-        """Reads guest_email_0/guest_name_0 .. guest_email_{MAX_GUESTS-1}/
-        guest_name_{MAX_GUESTS-1} off a submitted booking form (see
+        """Reads guest_email_0/guest_name_0 .. guest_email_{max_guests-1}/
+        guest_name_{max_guests-1} off a submitted booking form (see
         _book_page()'s "+ Add participant" rows) -- name is optional per
         guest, email is not (see _book_with_guests() for how a blank name
         is resolved). Returns (entries, error): entries is a list of
@@ -757,7 +780,7 @@ class App:
         entries should be ignored and the form re-shown with that error."""
         entries: list[tuple[str, str]] = []
         seen = {leader_email.strip().lower()}
-        for i in range(MAX_GUESTS):
+        for i in range(self.settings.max_guests):
             g_email = form.get(f"guest_email_{i}", "").strip()
             g_name = form.get(f"guest_name_{i}", "").strip()
             if not g_email:
@@ -853,7 +876,7 @@ class App:
             f"<p>{msg}</p><p>Everyone in the party -- including you -- got their own email with "
             "a personal cancel link and an invite to manage their booking via /my. "
             "Canceling is always individual: if someone in the party cancels later, "
-            "it only affects their own spot.</p>",
+            "it only affects their own spot.</p>" + _course_recap_html(course, occ_date),
             banner=banner,
         )
 
@@ -897,6 +920,18 @@ class App:
             '<button type="submit" class="link-button">Log out</button></form></span>'
             "</div>"
         )
+
+    def _check_confirmation_text(self, environ) -> str:
+        """The "Check ... for confirmation and a link in case you need to
+        cancel your booking" line on the single-booking confirmation page
+        (2026-07-09, the operator: "If they are logged in you should rather say:
+        Check My bookings (as link) and if they are NOT logged in keep
+        your current version about the email") -- someone already logged
+        in can just go straight to /my instead of digging through email."""
+        session = _get_session(environ)
+        if session and session.get("kind") == "guest":
+            return 'Check <a href="/my">My bookings</a> for confirmation and a link in case you need to cancel your booking.'
+        return "Check your email for confirmation and a link in case you need to cancel your booking."
 
     def _site_label(self) -> str:
         """A short, human name for this deployment to put in guest-facing
@@ -1125,7 +1160,7 @@ class App:
               var addGuestBtn = document.getElementById("add-guest-btn");
               var partyWarning = document.getElementById("party-warning");
               var guestIndex = 0;
-              var MAX_GUESTS = {MAX_GUESTS};
+              var MAX_GUESTS = {self.settings.max_guests};
 
               function guestRowCount() {{ return guestRowsEl ? guestRowsEl.children.length : 0; }}
 
@@ -1165,7 +1200,9 @@ class App:
                   updatePartyWarning();
                   refresh();
                 }});
-                row.querySelector('[name="guest_email_' + i + '"]').addEventListener("input", updatePartyWarning);
+                var guestEmailEl = row.querySelector('[name="guest_email_' + i + '"]');
+                guestEmailEl.addEventListener("input", function() {{ updatePartyWarning(); refresh(); }});
+                guestEmailEl.addEventListener("change", refresh);
                 if (guestRowCount() >= MAX_GUESTS && addGuestBtn) addGuestBtn.style.display = "none";
                 updatePartyWarning();
                 refresh();
@@ -1177,11 +1214,26 @@ class App:
                 return null;
               }}
               var bookLabel = form.dataset.bookLabel || "Book";
+              function guestRowsValid() {{
+                // the operator, 2026-07-09: "if a required field is empty the button
+                // should not be clickable. Here someone should either remove
+                // the empty participant first or provide an email at
+                // least." -- every currently-present guest row's required
+                // email must look valid, or the Book button stays disabled
+                // until it's filled in or the row is removed.
+                if (!guestRowsEl) return true;
+                var inputs = guestRowsEl.querySelectorAll('input[name^="guest_email_"]');
+                for (var i = 0; i < inputs.length; i++) {{
+                  if (inputs[i].value.indexOf("@") <= 0) return false;
+                }}
+                return true;
+              }}
               function refresh() {{
                 var r = currentRadio();
                 if (r && selText) selText.textContent = r.dataset.date;
                 if (r && submitBtn) submitBtn.textContent = r.dataset.full === "1" ? "Join waitlist" : bookLabel;
-                var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 && agreeEl.checked;
+                var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 && agreeEl.checked
+                  && guestRowsValid();
                 if (submitBtn) submitBtn.disabled = !ok;
                 updatePartyWarning();
               }}

@@ -53,6 +53,10 @@ show_spots_left = true
 # of this setting, since that label has to stay literally true to what
 # submitting the form actually does.
 book_button_label = "Book"
+# Max number of "+ Add participant" guest rows the booking form offers (and
+# the most guest_email_N/guest_name_N fields a submitted form's own POST
+# will ever be scanned for -- see app/webapp.py's MAX_GUESTS docstring).
+max_guests = 3
 # Displayed-only offset for A/B-testing whether perceived scarcity changes
 # booking behaviour. Positive = show fewer spots than really available
 # (more urgency), negative = show more, 0 = show the real number. This
