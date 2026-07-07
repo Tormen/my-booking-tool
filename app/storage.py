@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import csv
 import fcntl
+import logging
 import os
+import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass, asdict, fields
@@ -21,12 +23,14 @@ from typing import Iterable
 
 from .security import sanitize_csv_field
 
+log = logging.getLogger("my_booking.storage")
+
 USER_FIELDS = [
     "user_id", "email", "name", "password_hash", "password_salt",
     "confirm_token_hash", "confirm_token_created_at", "prev_confirm_token_hash",
     "created_at", "last_login_at",
     "pending_email", "pending_email_token_hash", "pending_email_token_created_at",
-    "prev_pending_email_token_hash",
+    "prev_pending_email_token_hash", "pending_email_cancel_token_hash",
 ]
 REG_FIELDS = [
     "registration_id", "course_shortname", "occurrence_date", "user_id", "status",
@@ -50,6 +54,30 @@ STATUS_PENDING_CONFIRMATION = "pending_confirmation"
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def format_display_timestamp(iso_str: str) -> str:
+    """Renders a now_iso()-produced (or any ISO-8601) timestamp for a human
+    to read, e.g. in the operator's own CalDAV event description
+    (calendar_sync.py's Participants table) or /admin's overview table.
+    2026-07-07, the operator (screenshot of that Participants table showing
+    "registered 2026-07-07T00:47:57+00:00"): "please use for TIMESTAMPS
+    wherever you currently have this format ... YYYY-MM-DD_HHMM.SS".
+
+    Deliberately display-only: the underlying CSV/storage value stays the
+    real ISO-8601 string untouched (registered_at/canceled_at as written by
+    now_iso() above) -- retention.py, watchdog.py, and migrate_simplymeet.py
+    all still parse that with datetime.fromisoformat() same as before. Falls
+    back to the raw string unchanged if it isn't valid ISO-8601 (e.g. an
+    empty canceled_at on a still-active registration), same "don't blow up
+    on a blank/legacy value" spirit as the rest of this module."""
+    if not iso_str:
+        return iso_str
+    try:
+        dt = datetime.fromisoformat(iso_str)
+    except ValueError:
+        return iso_str
+    return dt.strftime("%Y-%m-%d_%H%M.%S")
 
 
 @dataclass
@@ -101,6 +129,18 @@ class User:
     pending_email_token_hash: str = ""
     pending_email_token_created_at: str = ""
     prev_pending_email_token_hash: str = ""
+    # A SEPARATE token from pending_email_token_hash above (2026-07-11,
+    # the operator: "Please provide a link without login" -- the "notify the old
+    # address" email's cancel link pointed at /my/settings, login
+    # required). Deliberately its own field, not a reuse of the confirm
+    # token: the confirm token is only ever emailed to the NEW address and
+    # is good for COMPLETING the change, so handing that same secret to
+    # the OLD address's "cancel this" link would let whoever holds it
+    # complete the change instead of cancel it -- the exact opposite of
+    # what a cancel link is for. This one can only ever abort the pending
+    # change (see clear_pending_email/find_user_by_pending_email_cancel_token_hash),
+    # never confirm it.
+    pending_email_cancel_token_hash: str = ""
 
 
 @dataclass
@@ -134,6 +174,87 @@ class Registration:
     invited_by_user_id: str = ""
 
 
+def _git_commit_data_file(path: Path, message: str) -> None:
+    """Best-effort git commit of ONE CSV file (users.csv/registrations.csv/
+    an archived/*.csv), right after _LockedCsv writes it -- a per-write
+    companion to app/git_snapshot.py's existing HOURLY, whole-directory
+    snapshot (see that module's docstring and README.md "GDPR notes" ->
+    "Data dir git snapshot"). 2026-07-07, the operator: "after any change to any
+    of the CSV files: CUD ... please directly do a git commit ... Commit
+    message should state what changed without revealing personal data ...
+    as a safety net in case of ANY bugs" -- the hourly snapshot alone could
+    leave up to an hour of changes unrecovered if something went wrong
+    right after; this closes that gap with an immediate, per-operation
+    commit, while the hourly one keeps covering what this can't (anything
+    changed OUTSIDE the app, e.g. a manual CSV edit -- see
+    git_snapshot.py's own docstring).
+
+    Deliberately does NOT `git init` -- same reasoning as
+    app/git_snapshot.py's snapshot(): a fresh/uninitialized data dir must
+    never silently become a git repo just because a booking happened to
+    come in; that's `my-bt setup -i`'s job alone (see app/cli_setup.py's
+    "Data dir git snapshot" step), one single place that owns "how/when
+    this repo gets created". If `.git` isn't there yet, this is a silent
+    no-op -- not a failure, just "not opted in yet".
+
+    ONE repo covers the whole data directory (e.g. /var/lib/my-bookings):
+    users.csv/registrations.csv sit directly in it, and the two
+    archived/*.csv files (see Store.erase_user) sit one level below in
+    archived/ -- so this walks UP from `path` looking for that repo root
+    rather than assuming `path.parent` is always it.
+
+    The `-c user.email=...`/`-c user.name=...` passed inline on the commit
+    itself matches app/git_snapshot.py's own commit call exactly (same
+    identity string) -- belt-and-suspenders alongside whatever local repo
+    config `my-bt setup -i` already set, so this still works even if the
+    repo was somehow initialized by hand without ever setting those.
+
+    Every Store method that mutates a CSV passes its own short, generic
+    description (e.g. "cancel registration", "set password") as the
+    message -- never an email, name, or other guest-supplied value, per
+    the operator's own "without revealing personal data" instruction.
+
+    Deliberately swallows every failure (git not installed, repo somehow
+    unwritable, nothing staged because the rewrite was byte-identical,
+    etc.) -- this is an audit trail on top of the real write that already
+    succeeded via os.replace() above, not a required step; a booking or
+    cancellation must never fail just because this best-effort commit
+    couldn't complete. Genuine failures (git IS set up but errors out
+    anyway) are logged (WARNING) so they're still visible in `journalctl
+    -u my-booking.service`, same as any other unexpected condition in this
+    app -- but "no repo yet" is expected/normal and logs nothing."""
+    repo_dir = None
+    for ancestor in (path.parent, *path.parent.parents):
+        if (ancestor / ".git").is_dir():
+            repo_dir = ancestor
+            break
+    if repo_dir is None:
+        return  # not opted in yet (see my-bt setup -i) -- silent no-op, not a failure
+    rel_path = str(path.relative_to(repo_dir))
+    try:
+        subprocess.run(["git", "add", "--", rel_path], cwd=repo_dir, check=True, capture_output=True)
+        # Nothing actually changed (e.g. a write() that rewrote
+        # byte-identical content) -- skip rather than let `git commit`
+        # fail loudly with "nothing to commit".
+        staged_diff = subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "--", rel_path],
+            cwd=repo_dir, capture_output=True,
+        )
+        if staged_diff.returncode == 0:
+            return
+        subprocess.run(
+            [
+                "git",
+                "-c", "user.email=my-booking-tool <noreply@localhost>",
+                "-c", "user.name=my-booking-tool",
+                "commit", "-q", "-m", message, "--", rel_path,
+            ],
+            cwd=repo_dir, check=True, capture_output=True,
+        )
+    except Exception:
+        log.warning("git auto-commit failed for %s", rel_path, exc_info=True)
+
+
 class _LockedCsv:
     """Context manager: opens `path` for locked read-modify-write, creating it
     with a header if missing. Yields (rows: list[dict], write(rows)) where
@@ -154,6 +275,7 @@ class _LockedCsv:
         self.readonly = readonly
         self._fh = None
         self._to_write: list[dict] | None = None
+        self._commit_message: str | None = None
 
     def __enter__(self):
         if self.readonly:
@@ -176,15 +298,26 @@ class _LockedCsv:
         rows = list(reader)
         return rows, self._set_rows_to_write
 
-    def _set_rows_to_write(self, rows: list[dict]) -> None:
+    def _set_rows_to_write(self, rows: list[dict], message: str | None = None) -> None:
         if self.readonly:
             raise RuntimeError("_LockedCsv(readonly=True) must never call write()")
         self._to_write = rows
+        self._commit_message = message
 
     def __exit__(self, exc_type, exc, tb):
         try:
             if exc_type is None and self._to_write is not None:
                 self._atomic_write(self._to_write)
+                # 2026-07-07, the operator: "after any change to any of the CSV
+                # files: CUD ... please directly do a git commit ...
+                # Commit message should state what changed without
+                # revealing personal data ... as a safety net in case of
+                # ANY bugs" -- every successful write, from every Store
+                # method, gets committed here in ONE place rather than
+                # relying on each call site to remember to. Best-effort:
+                # see _git_commit_data_file's own docstring for why a git
+                # failure here must never surface as an app-breaking error.
+                _git_commit_data_file(self.path, self._commit_message or f"update {self.path.name}")
         finally:
             if self._fh is not None:
                 fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
@@ -261,7 +394,7 @@ class Store:
             for row in rows:
                 if row["email"].strip().lower() == email_norm:
                     row["name"] = name
-                    write(rows)
+                    write(rows, "update user name")
                     return User(**row)
             user = User(
                 user_id=str(uuid.uuid4()),
@@ -272,7 +405,7 @@ class Store:
                 created_at=now_iso(),
             )
             rows.append(asdict(user))
-            write(rows)
+            write(rows, "create user")
             return user
 
     def set_confirm_token(self, user_id: str, token_hash: str, created_at: str) -> None:
@@ -292,7 +425,7 @@ class Store:
                     row["prev_confirm_token_hash"] = row["confirm_token_hash"]
                     row["confirm_token_hash"] = token_hash
                     row["confirm_token_created_at"] = created_at
-                    write(rows)
+                    write(rows, "set confirm/reset token")
                     return
 
     def find_user_by_confirm_token_hash(self, token_hash: str) -> User | None:
@@ -335,7 +468,7 @@ class Store:
                     row["confirm_token_hash"] = ""
                     row["confirm_token_created_at"] = ""
                     row["prev_confirm_token_hash"] = ""
-                    write(rows)
+                    write(rows, "set password")
                     return
 
     def touch_login(self, user_id: str) -> None:
@@ -346,17 +479,20 @@ class Store:
                     row["last_login_at"] = now_iso()
                     changed = True
             if changed:
-                write(rows)
+                write(rows, "record login")
 
     def set_name(self, user_id: str, name: str) -> None:
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             for row in rows:
                 if row["user_id"] == user_id:
                     row["name"] = name
-                    write(rows)
+                    write(rows, "update user name")
                     return
 
-    def set_pending_email(self, user_id: str, pending_email: str, token_hash: str, created_at: str) -> None:
+    def set_pending_email(
+        self, user_id: str, pending_email: str, token_hash: str, created_at: str,
+        cancel_token_hash: str = "",
+    ) -> None:
         """Requests an email change -- see User.pending_email. Shifts any
         previously-outstanding pending-email token into
         prev_pending_email_token_hash first (same "tell them a newer link
@@ -365,7 +501,15 @@ class Store:
         outright: only one pending change can ever be outstanding at a
         time ("one active + one pending max"), so requesting a second
         change -- even to a different address -- simply replaces the
-        first rather than queuing alongside it."""
+        first rather than queuing alongside it.
+
+        `cancel_token_hash` (2026-07-11) is the hash of a SEPARATE,
+        freshly-minted token -- see User.pending_email_cancel_token_hash's
+        own docstring for why this can't just reuse `token_hash` -- that
+        the OLD address's own notification email uses for its no-login
+        "cancel this" link. Blank (the default) leaves it untouched,
+        purely so existing callers/tests that don't care about the cancel
+        link don't have to pass one."""
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             for row in rows:
                 if row["user_id"] == user_id:
@@ -373,23 +517,27 @@ class Store:
                     row["pending_email"] = pending_email
                     row["pending_email_token_hash"] = token_hash
                     row["pending_email_token_created_at"] = created_at
-                    write(rows)
+                    if cancel_token_hash:
+                        row["pending_email_cancel_token_hash"] = cancel_token_hash
+                    write(rows, "request email change")
                     return
 
     def clear_pending_email(self, user_id: str) -> None:
         """Aborts a pending email change (guest-initiated cancel from
-        /my/settings). Deliberately does NOT touch prev_pending_email_token_hash
-        -- an aborted change's token should read as a plain "invalid/already
-        used" link if somehow clicked afterward, not the friendlier
-        "superseded by a newer one" message, since nothing newer was ever
-        sent."""
+        /my/settings, or from the no-login /my/cancel-email-change/<token>
+        link -- see app.webapp.App.my_cancel_email_change). Deliberately
+        does NOT touch prev_pending_email_token_hash -- an aborted
+        change's token should read as a plain "invalid/already used" link
+        if somehow clicked afterward, not the friendlier "superseded by a
+        newer one" message, since nothing newer was ever sent."""
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             for row in rows:
                 if row["user_id"] == user_id:
                     row["pending_email"] = ""
                     row["pending_email_token_hash"] = ""
                     row["pending_email_token_created_at"] = ""
-                    write(rows)
+                    row["pending_email_cancel_token_hash"] = ""
+                    write(rows, "cancel pending email change")
                     return
 
     def find_user_by_pending_email_token_hash(self, token_hash: str) -> User | None:
@@ -413,6 +561,20 @@ class Store:
                     return User(**row)
         return None
 
+    def find_user_by_pending_email_cancel_token_hash(self, token_hash: str) -> User | None:
+        """See User.pending_email_cancel_token_hash's own docstring --
+        the no-login "cancel this pending email change" link's lookup,
+        deliberately separate from find_user_by_pending_email_token_hash
+        (the CONFIRM lookup) so possessing one token can never be used to
+        perform the other action."""
+        if not token_hash:
+            return None
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
+            for row in rows:
+                if row.get("pending_email_cancel_token_hash") and row.get("pending_email_cancel_token_hash") == token_hash:
+                    return User(**row)
+        return None
+
     def apply_pending_email(self, user_id: str) -> User | None:
         """Finalizes a confirmed email change: copies pending_email into
         the real email field and clears every pending_email_* field in
@@ -432,7 +594,8 @@ class Store:
                     row["pending_email"] = ""
                     row["pending_email_token_hash"] = ""
                     row["pending_email_token_created_at"] = ""
-                    write(rows)
+                    row["pending_email_cancel_token_hash"] = ""
+                    write(rows, "apply email change")
                     return User(**row)
         return None
 
@@ -473,7 +636,7 @@ class Store:
                 guest_cancel_token_hash=cancel_token_hash,
             )
             rows.append(asdict(reg))
-            write(rows)
+            write(rows, "add registration")
             return reg
 
     def add_registration_checking_capacity(
@@ -525,7 +688,7 @@ class Store:
                     canceled_at="", canceled_by="", host_message="",
                     party_id="", invited_by_user_id="",
                 )
-                write(rows)
+                write(rows, "rebook registration")
                 return Registration(**existing)
             reg = Registration(
                 registration_id=str(uuid.uuid4()),
@@ -537,7 +700,7 @@ class Store:
                 guest_cancel_token_hash=cancel_token_hash,
             )
             rows.append(asdict(reg))
-            write(rows)
+            write(rows, "add registration")
             return reg
 
     def add_party_registrations_checking_capacity(
@@ -624,7 +787,7 @@ class Store:
                 )
                 rows.append(asdict(reg))
                 created.append(reg)
-            write(rows)
+            write(rows, "add party registrations")
             return created
 
     def confirm_pending_registration(
@@ -659,7 +822,7 @@ class Store:
             )
             target["status"] = STATUS_WAITLISTED if confirmed >= capacity else STATUS_CONFIRMED
             target["guest_cancel_token_hash"] = cancel_token_hash
-            write(rows)
+            write(rows, "confirm pending registration")
             return Registration(**target)
 
     def registrations_for_occurrence(
@@ -700,6 +863,40 @@ class Store:
                 and r["occurrence_date"] == occurrence_date
                 and r["user_id"] == user_id
                 and r["status"] in (STATUS_CONFIRMED, STATUS_WAITLISTED)
+                for r in rows
+            )
+
+    def has_pending_registration(self, course_shortname: str, occurrence_date: str, user_id: str) -> bool:
+        """The STATUS_PENDING_CONFIRMATION twin of has_active_registration()
+        above (2026-07-11, the operator: "silent re-registration for unconfirmed
+        accounts" -- a still-unconfirmed guest re-submitting the /book form
+        for the exact same course+date, e.g. an accidental double-click or
+        a "did that even work?" retry, used to insert ANOTHER bare
+        add_registration() row every single time, with no dedup at all
+        (unlike add_registration_checking_capacity's explicit "one row per
+        course+date+user" upsert invariant for CONFIRMED bookings -- see
+        that method's own 2026-07-10 docstring). Every one of those extra
+        pending rows then got silently promoted together the moment the
+        guest finally clicked ANY ONE confirmation link and set a password
+        (see app.webapp.App.my_confirm's `pending` list, which has no
+        per-course+date dedup either) -- so a guest who retried 3 times
+        ended up CONFIRMED (or WAITLISTED) 3 times over for the same single
+        class, each a separate row/cancel-token/calendar invite, without
+        ever intending or noticing it.
+
+        Used by app.webapp.App.book()'s pending-confirmation branch as a
+        pre-check before add_registration(): if this returns True, the
+        confirmation email is still resent (that part was always the
+        deliberate, correct behavior -- see book()'s own comment) but no
+        new row is inserted, so re-submitting settles down to exactly one
+        pending row per course+date+user, same invariant confirmed
+        bookings already had."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
+            return any(
+                r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+                and r["user_id"] == user_id
+                and r["status"] == STATUS_PENDING_CONFIRMATION
                 for r in rows
             )
 
@@ -786,7 +983,7 @@ class Store:
                         row["guest_cancel_token_hash"] = reinstate_token_hash
                     changed = True
             if changed:
-                write(rows)
+                write(rows, "cancel registration")
             return changed
 
     def reinstate(self, registration_id: str, capacity: int) -> Registration | None:
@@ -834,7 +1031,7 @@ class Store:
             target["canceled_at"] = ""
             target["canceled_by"] = ""
             target["host_message"] = ""
-            write(rows)
+            write(rows, "reinstate registration")
             return Registration(**target)
 
     def all_registrations(self) -> list[Registration]:
@@ -844,7 +1041,7 @@ class Store:
     def replace_all_registrations(self, registrations: Iterable[Registration]) -> None:
         """Used by the retention job to rewrite the file after purging rows."""
         with _LockedCsv(self.registrations_path, REG_FIELDS) as (_rows, write):
-            write([asdict(r) for r in registrations])
+            write([asdict(r) for r in registrations], "purge retained registrations")
 
     # -- waitlist -------------------------------------------------------------
 
@@ -900,7 +1097,7 @@ class Store:
                 return None
             for row in front:
                 row["status"] = STATUS_CONFIRMED
-            write(rows)
+            write(rows, "promote from waitlist")
             return [Registration(**r) for r in front]
 
     def import_historical_registration(
@@ -962,7 +1159,7 @@ class Store:
                 host_message=host_message,
             )
             rows.append(asdict(reg))
-            write(rows)
+            write(rows, "import historical registration")
             return True
 
     # -- right to erasure (Art. 17 GDPR) -------------------------------------
@@ -992,22 +1189,22 @@ class Store:
                     keep.append(row)
             if archived_user_row is None:
                 return False
-            write(keep)
+            write(keep, "erase user")
 
         with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
             keep, moving = [], []
             for row in rows:
                 (moving if row["user_id"] == user_id else keep).append(row)
-            write(keep)
+            write(keep, "erase user registrations")
 
         with _LockedCsv(self.archived_users_path, USER_FIELDS) as (rows, write):
             rows.append(archived_user_row)
-            write(rows)
+            write(rows, "archive erased user")
 
         if moving:
             with _LockedCsv(self.archived_registrations_path, REG_FIELDS) as (rows, write):
                 rows.extend(moving)
-                write(rows)
+                write(rows, "archive erased user registrations")
         return True
 
     def merge_archived_registrations(self, archived_user_ids: list[str], into_user_id: str) -> int:
@@ -1064,7 +1261,7 @@ class Store:
                 (moving if row["user_id"] in archived_user_ids else keep).append(row)
             if not moving:
                 return 0
-            write(keep)
+            write(keep, "merge archived registrations (remove)")
 
         for row in moving:
             row["user_id"] = into_user_id
@@ -1079,7 +1276,7 @@ class Store:
                 if (row["course_shortname"], row["occurrence_date"]) not in live_course_dates
             ]
             rows.extend(to_move)
-            write(rows)
+            write(rows, "merge archived registrations (restore)")
         return len(to_move)
 
     # -- reporting: live + archived, for the my-bt CLI -----------------------

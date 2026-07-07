@@ -74,6 +74,20 @@ class CalDAVError(RuntimeError):
     pass
 
 
+class CalDAVConflictError(CalDAVError):
+    """HTTP 412 Precondition Failed on a PUT/DELETE with If-Match: the
+    ETag we read is already stale -- something else (typically another
+    near-simultaneous booking/cancellation/confirmation for the SAME
+    occurrence) modified this exact calendar event between our read and
+    our write. 2026-07-07, the operator (a real production 500 on /my/confirm,
+    "PUT ... -> HTTP 412: ... a newer version of the appointment already
+    exists"): a plain retry a few seconds later succeeded on its own, i.e.
+    genuinely transient -- see calendar_sync.sync_occurrence's own retry
+    loop, which is what this distinct exception type exists to let that
+    loop catch specifically, instead of treating every CalDAVError
+    (including a real, non-transient failure) as equally retryable."""
+
+
 class CalDAVClient:
     def __init__(self, base_url: str, username: str, password: str, transport=None):
         self.base_url = base_url.rstrip("/") + "/"
@@ -152,6 +166,8 @@ class CalDAVClient:
             headers["If-None-Match"] = "*"
             del headers["If-Match"]
         resp = self.transport("PUT", url, body=ics_text, extra_headers=headers)
+        if resp.status == 412:
+            raise CalDAVConflictError(f"PUT {url} -> HTTP 412: {resp.body[:200]}")
         if resp.status not in (200, 201, 204):
             raise CalDAVError(f"PUT {url} -> HTTP {resp.status}: {resp.body[:200]}")
         return resp.headers.get("etag", "")
@@ -160,6 +176,8 @@ class CalDAVClient:
         url = self._absolute(calendar_href) + f"{uid}.ics"
         headers = {"If-Match": etag} if etag else {}
         resp = self.transport("DELETE", url, extra_headers=headers)
+        if resp.status == 412:
+            raise CalDAVConflictError(f"DELETE {url} -> HTTP 412: {resp.body[:200]}")
         if resp.status not in (200, 204, 404):
             raise CalDAVError(f"DELETE {url} -> HTTP {resp.status}")
 

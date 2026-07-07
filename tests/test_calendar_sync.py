@@ -6,10 +6,13 @@ import tempfile
 import unittest
 from datetime import date
 
-from app.caldav_client import CalDAVClient, Response
-from app.calendar_sync import event_uid, guest_cancel_ics, guest_invite_ics, sync_occurrence
+from app.caldav_client import CalDAVClient, CalDAVConflictError, Response
+from app.calendar_sync import _SYNC_CONFLICT_MAX_ATTEMPTS, event_uid, guest_cancel_ics, guest_invite_ics, sync_occurrence
 from app.ics import parse_uid
-from app.storage import STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED, Store
+from app.storage import (
+    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED,
+    Store, format_display_timestamp,
+)
 
 from .helpers import make_course, make_settings
 
@@ -39,17 +42,27 @@ END:VCALENDAR
 
 
 class FakeTransport:
-    def __init__(self, report_body: str = EMPTY_REPORT):
+    def __init__(self, report_body: str = EMPTY_REPORT, conflicts_before_success: int = 0):
         self.calls = []
         self.report_body = report_body
+        # 2026-07-07, the operator (a real production 500 on /my/confirm,
+        # root-caused to a stale-ETag CalDAV 412): simulates that race --
+        # the first `conflicts_before_success` PUT/DELETE calls return 412
+        # Precondition Failed (a stale If-Match), then every one after
+        # that succeeds normally, same shape as the real incident (a
+        # same-second retry worked).
+        self.conflicts_before_success = conflicts_before_success
 
     def __call__(self, method, url, body="", extra_headers=None):
         self.calls.append((method, url, body, extra_headers or {}))
         if method == "REPORT":
             return Response(207, {}, self.report_body)
-        if method == "PUT":
-            return Response(201, {"etag": '"new"'}, "")
-        if method == "DELETE":
+        if method in ("PUT", "DELETE"):
+            if self.conflicts_before_success > 0:
+                self.conflicts_before_success -= 1
+                return Response(412, {}, '<D:error xmlns:D="DAV:"/>')
+            if method == "PUT":
+                return Response(201, {"etag": '"new"'}, "")
             return Response(204, {}, "")
         raise AssertionError(f"unexpected {method} {url}")
 
@@ -63,8 +76,8 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         self.settings = make_settings(courses=(self.course,), booking_calendar="Bookings")
         self.occ_date = date(2026, 8, 1)
 
-    def _sync(self, report_body: str = EMPTY_REPORT):
-        transport = FakeTransport(report_body)
+    def _sync(self, report_body: str = EMPTY_REPORT, conflicts_before_success: int = 0):
+        transport = FakeTransport(report_body, conflicts_before_success=conflicts_before_success)
         client = CalDAVClient(
             self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
             transport=transport,
@@ -103,11 +116,13 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         reloaded_wl = self.store.find_by_id(wl.registration_id)
         self.assertIn("Participants:", unfolded)
         self.assertIn(
-            f"- confirmed | Alice | alice@example.org | self | registered {reloaded.registered_at} |",
+            f"- confirmed | Alice | alice@example.org | self | "
+            f"registered {format_display_timestamp(reloaded.registered_at)} |",
             unfolded,
         )
         self.assertIn(
-            f"- waitlisted #1 | Bob | bob@example.org | self | registered {reloaded_wl.registered_at} |",
+            f"- waitlisted #1 | Bob | bob@example.org | self | "
+            f"registered {format_display_timestamp(reloaded_wl.registered_at)} |",
             unfolded,
         )
 
@@ -141,7 +156,7 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         self.assertTrue(canceled_reg.canceled_at)  # sanity: a timestamp was actually recorded
         self.assertIn("Canceled:", unfolded)
         self.assertIn("| Left | left@example.org | self |", unfolded)
-        self.assertIn(f"canceled {canceled_reg.canceled_at} by guest", unfolded)
+        self.assertIn(f"canceled {format_display_timestamp(canceled_reg.canceled_at)} by guest", unfolded)
         # Not double-counted as active: exactly one "- confirmed |" line
         # before the Canceled: section (the "stays" guest) -- the canceled
         # guest's line lives only in the Canceled: section, tagged
@@ -197,6 +212,52 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         self.assertIn("PUT", methods)
         self.assertNotIn("DELETE", methods)
 
+    # -- reminders (2026-07-07, the operator: "make the reminders (list) a setting.
+    # But default to NO reminders" for the trainer's own event) ------------
+
+    def test_operator_event_has_no_alarms_by_default(self):
+        self._add("stays@example.org", STATUS_CONFIRMED)
+        transport = self._sync()
+        put_body = [b for m, _u, b, _h in transport.calls if m == "PUT"][0]
+        self.assertNotIn("BEGIN:VALARM", put_body)
+
+    def test_operator_event_honors_a_configured_trainer_reminder(self):
+        self.settings = make_settings(
+            courses=(self.course,), booking_calendar="Bookings",
+            trainer_calendar_reminder_minutes=(30,),
+        )
+        self._add("stays@example.org", STATUS_CONFIRMED)
+        transport = self._sync()
+        put_body = [b for m, _u, b, _h in transport.calls if m == "PUT"][0].replace("\r\n ", "")
+        self.assertIn("BEGIN:VALARM", put_body)
+        self.assertIn("TRIGGER:-PT30M", put_body)
+
+    # -- stale-ETag conflict retry (2026-07-07, the operator: a real production
+    # 500 on /my/confirm, root-caused via journalctl to "PUT ... -> HTTP
+    # 412 ... a newer version of the appointment already exists" -- a
+    # same-second retry worked on its own, i.e. genuinely transient) ------
+
+    def test_put_conflict_is_retried_with_a_fresh_etag_and_succeeds(self):
+        self._add("stays@example.org", STATUS_CONFIRMED)
+        transport = self._sync(conflicts_before_success=1)  # doesn't raise
+        methods = [m for m, _u, _b, _h in transport.calls]
+        self.assertEqual(methods.count("PUT"), 2)
+        # One REPORT before the first attempt, one more to re-fetch a
+        # fresh ETag before the retry.
+        self.assertEqual(methods.count("REPORT"), 2)
+
+    def test_put_conflict_gives_up_after_max_attempts(self):
+        self._add("stays@example.org", STATUS_CONFIRMED)
+        with self.assertRaises(CalDAVConflictError):
+            self._sync(conflicts_before_success=_SYNC_CONFLICT_MAX_ATTEMPTS)
+
+    def test_delete_conflict_is_retried_with_a_fresh_etag_and_succeeds(self):
+        self._add("left@example.org", STATUS_CONFIRMED, cancel=True, canceled_by="guest")
+        uid = "example-org-yoga-class-1-2026-08-01@example.org"
+        transport = self._sync(report_body=_report_with_event(uid), conflicts_before_success=1)
+        methods = [m for m, _u, _b, _h in transport.calls]
+        self.assertEqual(methods.count("DELETE"), 2)
+
 
 class GuestInviteAndCancelIcsTest(unittest.TestCase):
     """2026-07-09, the operator: "Can you please attach a calendar invite also in
@@ -239,9 +300,22 @@ class GuestInviteAndCancelIcsTest(unittest.TestCase):
         _filename, ics_text = guest_cancel_ics(self.settings, self.course, date(2026, 8, 1))
         self.assertNotIn("BEGIN:VALARM", ics_text)
 
-    def test_invite_still_has_alarms(self):
+    def test_invite_defaults_to_exactly_one_reminder_1h_before(self):
+        # 2026-07-07, the operator: "The invites to the course participants should
+        # have reminder 1h before the meeting."
         _filename, ics_text = guest_invite_ics(self.settings, self.course, date(2026, 8, 1))
-        self.assertIn("BEGIN:VALARM", ics_text)
+        self.assertEqual(ics_text.count("BEGIN:VALARM"), 1)
+        self.assertIn("TRIGGER:-PT60M", ics_text)
+
+    def test_invite_honors_a_configured_guest_reminder(self):
+        settings = make_settings(
+            courses=(self.course,), base_url="https://example.org",
+            guest_calendar_reminder_minutes=(15, 60),
+        )
+        _filename, ics_text = guest_invite_ics(settings, self.course, date(2026, 8, 1))
+        self.assertEqual(ics_text.count("BEGIN:VALARM"), 2)
+        self.assertIn("TRIGGER:-PT15M", ics_text)
+        self.assertIn("TRIGGER:-PT60M", ics_text)
 
 
 if __name__ == "__main__":

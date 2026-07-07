@@ -7,6 +7,7 @@ one-shot-job pattern as app/retention.py.
 This is deliberately a coarse, sitewide, periodic heads-up -- NOT a
 replacement for either of the two finer-grained defenses that already
 exist:
+
   - app/security.py's RateLimiter (5 attempts/hour, per email or per IP)
     already blocks/slows a single attacker in real time; the watchdog
     only notices the aggregate pattern afterwards.
@@ -17,8 +18,13 @@ exist:
 
 Four independent signals, each optional (a None/0 threshold or missing
 log path skips that check silently):
+
   - nginx access log: one IP making an unusually large number of requests,
-    or with an unusually high 4xx/5xx share, within the window.
+    or with an unusually high 4xx/5xx share, within the window. When this
+    fires, the alert also confirms whether fail2ban has actually banned
+    that IP yet (see _read_fail2ban_banned_ips()) and includes a sample of
+    the actual requests, so the email is enough to judge the situation
+    without having to go grep the access log by hand.
   - the app's own log: a burst of rate-limiter rejections (login/reset),
     across all keys combined -- see the log.warning() calls in
     app/webapp.py at each login_limiter.allow() rejection.
@@ -55,6 +61,19 @@ log = logging.getLogger("my_booking.watchdog")
 # "error rate" but not a meaningful signal.
 _MIN_REQUESTS_FOR_ERROR_RATE = 20
 
+# Cap on how many sample "request -> status" lines we keep per offending
+# IP for the alert email -- enough to judge the pattern at a glance
+# without the email becoming a full log dump for a high-volume burst.
+_MAX_NGINX_SAMPLES_PER_IP = 20
+
+# Plain-text, one-IP-per-line file exported once a minute by root cron
+# (/usr/local/sbin/export-fail2ban-banned-ips.sh) via `fail2ban-client
+# status nginx-errors`. The watchdog service runs sandboxed
+# (ProtectSystem=strict, unprivileged my-booking user) and can't reach
+# fail2ban's own control socket directly, so this exported file is the
+# indirection that lets it confirm ban status without elevated privileges.
+_FAIL2BAN_BANNED_IPS_FILE = "/var/lib/my-booking/fail2ban-banned-ips.txt"
+
 # Matches the leading "%(asctime)s %(levelname)s ..." (or, in DEBUG mode,
 # "%(asctime)s %(levelname)s %(name)s: ...") produced by
 # app/logutil.py::configure_logging -- asctime's default format is
@@ -66,6 +85,7 @@ _APP_LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3
 _NGINX_LINE_RE = re.compile(
     r'^(?P<ip>\S+) \S+ \S+ \[(?P<time>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d{3})'
 )
+
 # e.g. "05/Jul/2026:14:32:10 +0200"
 _NGINX_TIME_FMT = "%d/%b/%Y:%H:%M:%S %z"
 
@@ -85,6 +105,27 @@ def _parse_nginx_timestamp(raw: str) -> datetime | None:
         return datetime.strptime(raw, _NGINX_TIME_FMT)
     except ValueError:
         return None
+
+
+def _read_fail2ban_banned_ips(path: str = _FAIL2BAN_BANNED_IPS_FILE) -> frozenset[str]:
+    """Reads the exported list of currently fail2ban-banned IPs (see
+    _FAIL2BAN_BANNED_IPS_FILE above). Missing/unreadable file is treated as
+    "nothing confirmed banned" rather than an error -- this is a
+    nice-to-have confirmation layered on top of the nginx burst check, not
+    a required signal, so a stale/absent export file should never itself
+    block the watchdog from running or alerting."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return frozenset(line.strip() for line in f if line.strip())
+    except OSError as exc:
+        log.warning("watchdog: could not read %s (%s); ban status will show as unconfirmed", path, exc)
+        return frozenset()
+
+
+def _format_nginx_samples(requests: list[str]) -> str:
+    if not requests:
+        return "  (no sample requests captured)"
+    return "\n".join(f"  - {r}" for r in requests)
 
 
 def check_pending_signup_burst(store: Store, settings: Settings, now: datetime | None = None) -> list[str]:
@@ -130,13 +171,19 @@ def check_app_log_rate_limit_blocks(
     return []
 
 
-def check_nginx_bursts(lines: Iterable[str], settings: Settings, now: datetime | None = None) -> list[str]:
+def check_nginx_bursts(
+    lines: Iterable[str],
+    settings: Settings,
+    now: datetime | None = None,
+    banned_ips: frozenset[str] = frozenset(),
+) -> list[str]:
     if not settings.watchdog_nginx_access_log:
         return []
     now = now or datetime.now(timezone.utc)
     since = now - timedelta(minutes=settings.watchdog_window_minutes)
     total: Counter[str] = Counter()
     errors: Counter[str] = Counter()
+    samples: dict[str, list[str]] = {}
     for line in lines:
         m = _NGINX_LINE_RE.match(line)
         if not m:
@@ -152,22 +199,33 @@ def check_nginx_bursts(lines: Iterable[str], settings: Settings, now: datetime |
         total[ip] += 1
         if m.group("status").startswith(("4", "5")):
             errors[ip] += 1
-
+        ip_samples = samples.setdefault(ip, [])
+        if len(ip_samples) < _MAX_NGINX_SAMPLES_PER_IP:
+            ip_samples.append(f'{m.group("request")} -> {m.group("status")}')
     alerts = []
     for ip, count in total.items():
+        reason = None
         if count >= settings.watchdog_nginx_request_threshold:
-            alerts.append(
+            reason = (
                 f"{ip} made {count} requests in the last {settings.watchdog_window_minutes} min "
                 f"(threshold {settings.watchdog_nginx_request_threshold})."
             )
         elif count >= _MIN_REQUESTS_FOR_ERROR_RATE:
             rate = errors[ip] / count
             if rate >= settings.watchdog_nginx_error_rate_threshold:
-                alerts.append(
+                reason = (
                     f"{ip}: {errors[ip]}/{count} requests ({rate:.0%}) were 4xx/5xx in the last "
                     f"{settings.watchdog_window_minutes} min (threshold "
                     f"{settings.watchdog_nginx_error_rate_threshold:.0%})."
                 )
+        if reason is None:
+            continue
+        ban_status = "already banned by fail2ban" if ip in banned_ips else "NOT currently banned by fail2ban"
+        alerts.append(
+            f"{reason} ({ban_status})\n"
+            f"  Sample requests (up to {_MAX_NGINX_SAMPLES_PER_IP}):\n"
+            f"{_format_nginx_samples(samples.get(ip, []))}"
+        )
     return alerts
 
 
@@ -196,6 +254,7 @@ def run_watchdog(
     nginx_log_lines: Iterable[str] = (),
     sshd_log_lines: Iterable[str] = (),
     now: datetime | None = None,
+    banned_ips: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Runs every enabled check, emails settings.admin_email ONE combined
     message if anything fired, and always returns the list of alert
@@ -207,9 +266,8 @@ def run_watchdog(
     alerts: list[str] = []
     alerts += check_pending_signup_burst(store, settings, now=now)
     alerts += check_app_log_rate_limit_blocks(app_log_lines, settings, now=now)
-    alerts += check_nginx_bursts(nginx_log_lines, settings, now=now)
+    alerts += check_nginx_bursts(nginx_log_lines, settings, now=now, banned_ips=banned_ips)
     alerts += check_sshd_failures(sshd_log_lines, settings)
-
     if alerts:
         body = "The my-booking-tool watchdog noticed the following in the last {} minutes:\n\n{}".format(
             settings.watchdog_window_minutes, "\n".join(f"- {a}" for a in alerts)
@@ -251,6 +309,7 @@ def _sshd_lines_since(window_minutes: int) -> list[str]:
 
 def main() -> None:  # pragma: no cover - exercised via systemd, not tests
     import argparse
+
     from .config import load_settings
     from .logutil import configure_logging
 
@@ -266,12 +325,14 @@ def main() -> None:  # pragma: no cover - exercised via systemd, not tests
     app_log_lines = _read_lines(settings.log_file)
     nginx_log_lines = _read_lines(settings.watchdog_nginx_access_log)
     sshd_log_lines = _sshd_lines_since(settings.watchdog_window_minutes) if settings.watchdog_sshd_failure_threshold > 0 else []
+    banned_ips = _read_fail2ban_banned_ips()
 
     run_watchdog(
         store, settings,
         app_log_lines=app_log_lines,
         nginx_log_lines=nginx_log_lines,
         sshd_log_lines=sshd_log_lines,
+        banned_ips=banned_ips,
     )
 
 

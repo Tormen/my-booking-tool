@@ -84,13 +84,27 @@ def page(title: str, body: str, banner: str = "") -> str:
     participant" together like a mini-card, so it reads as one group.
     See app/webapp.py's _book_page() guest-rows script, which is where
     .guest-row elements are actually created (client-side, one per "+ Add
-    participant" click)."""
+    participant" click).
+
+    body max-width is 1000px (2026-07-11, the operator, screenshot comparing the
+    STATIC homepage's own photo-backed content column against the much
+    narrower app pages: "Widen homepage table layout to match photo
+    width" -- clarified to mean every application page, not just
+    site/index.html's own table) -- matches site/index.html's own
+    `div.WordSection1{{max-width:1000px}}`, the container the homepage's
+    background photo fills, so every dynamic page (courses/book/my/admin)
+    now lines up with that same width instead of its own narrower
+    640px. `table{{width:100%}}` below is the other half of the same fix:
+    a <table> with no width of its own only ever shrinks to its content
+    width regardless of how wide the surrounding body is, so /my's
+    bookings table and /admin's overview table wouldn't actually have
+    gotten any wider just from the body change alone."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)}</title>
 <style>
-body{{font-family:sans-serif;max-width:640px;margin:2em auto;padding:0 1em;color:#222}}
+body{{font-family:sans-serif;max-width:1000px;margin:2em auto;padding:0 1em;color:#222}}
 .session-banner{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;
   gap:.3em 1em;background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.5em 1em;
   margin-bottom:1em;font-size:.9em;overflow-wrap:anywhere}}
@@ -127,7 +141,7 @@ button:disabled{{opacity:.5;cursor:not-allowed}}
 .link-button{{background:none;border:none;padding:0;margin:0;color:#196B24;text-decoration:underline;font:inherit;cursor:pointer}}
 .link-button:disabled{{color:#888;text-decoration:none;opacity:1}}
 .table-tools{{margin-bottom:.6em}}
-table{{border-collapse:collapse}}
+table{{border-collapse:collapse;width:100%}}
 th{{user-select:none}}
 .sort-indicator{{font-size:.8em}}
 .hash-cell{{word-break:break-all;font-family:monospace;font-size:.85em}}

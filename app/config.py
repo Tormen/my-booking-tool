@@ -137,6 +137,17 @@ class Settings:
 
     courses: tuple[Course, ...] = field(default_factory=tuple)
 
+    # Calendar-invite VALARM reminders (minutes before start) -- see
+    # ics.py::VEvent.alarms_minutes_before. 2026-07-07, the operator: "make the
+    # reminders (list) a setting. But default to NO reminders" for the
+    # TRAINER's own event (app/calendar_sync.py::sync_occurrence, the one
+    # PUT to the operator's CalDAV calendar), while course PARTICIPANTS'
+    # emailed invite (guest_invite_ics) should default to exactly one
+    # reminder, 1h before. Both configurable, in case that changes later;
+    # empty tuple = no VALARMs at all (matches VEvent's own default now).
+    trainer_calendar_reminder_minutes: tuple[int, ...] = ()
+    guest_calendar_reminder_minutes: tuple[int, ...] = (60,)
+
     # Optional: also write logs to this file (in addition to stdout/journal
     # -- see app/logutil.py). None (the default, and what a settings.toml
     # without a [logging] section gets) means stdout/journal only.
@@ -365,6 +376,8 @@ def load_settings(toml_path: str | Path) -> Settings:
         caldav_password=_read_secret(cal["caldav_password_file"]),
         booking_calendar=cal["booking_calendar"],
         conflict_calendars=tuple(cal.get("conflict_calendars", [])),
+        trainer_calendar_reminder_minutes=tuple(int(m) for m in cal.get("trainer_reminder_minutes", [])),
+        guest_calendar_reminder_minutes=tuple(int(m) for m in cal.get("guest_reminder_minutes", [60])),
         smtp_host=smtp["host"],
         smtp_port=int(smtp["port"]),
         smtp_username=smtp["username"],

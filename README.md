@@ -754,18 +754,36 @@ than necessary" principle it's built around. The nightly systemd timer
 enforces it; `my-bt purge-retention --dry-run` lets you preview what the next
 run would remove.
 
-**Data dir git snapshot** (`systemd/my-booking-git-snapshot.timer`, hourly):
-a separate git repository, rooted at `/var/lib/my-booking/.git` -- entirely
-independent of this project's own git checkout -- that `app/git_snapshot.py`
-commits to automatically, but only when something actually changed (`git
-add -A` then `git diff --cached --quiet` to check; no empty commits). This
-is a cheap, local, commit-per-change safety net on top of whatever off-box
-backup you already run (see "Known simplifications" below -- that's still
-your own job), useful for recovering from an accidental `my-bt erase`, a
-bad manual CSV edit, or a botched migration. `my-bt git-snapshot [--dry-run]`
-runs the same thing on demand; `my-bt setup -i` offers to initialize the
+**Data dir git snapshot** -- a separate git repository, rooted at
+`/var/lib/my-booking/.git` -- entirely independent of this project's own
+git checkout -- with TWO layers committing to it:
+
+- **Per-write** (2026-07-07, the operator: "after any change to any of the CSV
+  files: CUD ... please directly do a git commit ... Commit message
+  should state what changed without revealing personal data ... as a
+  safety net in case of ANY bugs"): every single Store method that
+  mutates users.csv/registrations.csv/an archived/*.csv commits that ONE
+  file immediately after writing it (`app/storage.py::_git_commit_data_file`),
+  with a short, specific, PII-free message (e.g. "cancel registration",
+  "set password" -- never an email or name). This is the primary safety
+  net now -- immediate, not up to an hour stale.
+- **Hourly** (`systemd/my-booking-git-snapshot.timer`): `app/git_snapshot.py`
+  additionally stages the WHOLE data dir (`git add -A`) and commits only if
+  something actually changed (`git diff --cached --quiet` to check; no
+  empty commits, generic "automatic snapshot: <timestamp>" message). This
+  catches anything the per-write layer above can't, by construction --
+  most importantly a manual/out-of-band CSV edit made outside the app.
+
+Both are a cheap, local safety net on top of whatever off-box backup you
+already run (see "Known simplifications" below -- that's still your own
+job), useful for recovering from an accidental `my-bt erase`, a bad manual
+CSV edit, or a botched migration. `my-bt git-snapshot [--dry-run]` runs the
+hourly layer's logic on demand; `my-bt setup -i` offers to initialize the
 repo (`git init`, a `.gitignore` excluding `*.tmp`, local `user.email`/
-`user.name`) if it isn't one yet.
+`user.name`) if it isn't one yet -- **the per-write layer deliberately
+never does this itself**, same "don't silently turn a data dir into a git
+repo" principle the hourly layer already followed: until `my-bt setup -i`
+(or a manual `git init`) has been run once, both layers are silent no-ops.
 
 **Compliance caveat, stated plainly: git commit history is immutable by
 default.** A snapshot committed *before* a guest's GDPR erasure still
@@ -1174,10 +1192,23 @@ All three pages (2026-07-06, and `/my` too as of 2026-07-09) show a small
 above their own heading when reached with an active `/my` guest session --
 e.g. after clicking "New booking" from `/my`. It also carries through to
 the booking result page ("Booked!"/"Almost there"/waitlisted). An
-anonymous visitor sees no banner at all -- these pages work perfectly well
-without ever logging in first; this is purely a courtesy cue plus a quick
+anonymous visitor to `/courses` or `/book/<shortname>` sees the same box
+with a plain "Login · booking.example.org" instead (2026-07-09, the operator: "Make it so
+that the top-bar is ALWAYS visible ... either with LOGIN or with the
+BAR" -- see `_anonymous_banner_html()`); these pages work perfectly well
+without ever logging in first, this is purely a courtesy cue plus a quick
 way back to `/my`, to the main site, or to log out for someone who arrived
-here already signed in. The "booking.example.org" link in the middle
+here already signed in.
+
+That "Login" link (2026-07-11, the operator: "Login link returns to originating
+page") carries a `?next=/courses` or `?next=/book/<shortname>` query
+param, so a successful login lands back on the exact page the guest
+clicked Login from instead of always on `/my`'s bookings list -- see
+`_safe_next_path()`'s own docstring for the allowlist this is validated
+against (both on the way in and again out of the login form's hidden
+field) before it's ever used in a redirect.
+
+The "booking.example.org" link in the middle
 (`settings.base_url`, labeled with the same hostname `_site_label()` uses
 elsewhere) was added 2026-07-09 (the operator: "allow in the banner to also go
 back to https://booking.example.org") -- this is a normal same-tab link, distinct
@@ -1201,6 +1232,15 @@ the marketing homepage short of editing the URL by hand (2026-07-10,
 the operator: "we miss a back to https://booking.example.org here") -- fixed with a plain
 "Back to `{yourdomain}`" link below the tabs, same wording the maintenance
 page's own back-link uses (see "Maintenance mode" above).
+
+Logging out (`POST /my/logout`, the one form every banner above shares)
+redirects to the homepage (`settings.base_url`), not `/my` (2026-07-11,
+the operator: "pressing logout should bring you back to https://booking.example.org").
+Since the same banner/logout form is shared by the homepage's own
+JS-rendered copy, `/courses`, `/book/<shortname>`, and `/my` itself, the
+old `/my` target was most jarring from the homepage -- logging out there
+used to jump straight into the app's `/my` login page instead of staying
+on the site you were just on. See `App.my_logout()` in `app/webapp.py`.
 
 ## Booking page layout (`/book/<shortname>`)
 

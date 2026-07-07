@@ -43,6 +43,14 @@ caldav_username       = "calendar@example.org"
 caldav_password_file  = "/etc/my-booking/secrets/caldav_password"
 booking_calendar      = "Bookings"
 conflict_calendars    = ["Calendar", "Bookings"]
+# Calendar-invite reminders (minutes before start). Optional -- omit either
+# line to get its default. trainer_reminder_minutes defaults to [] (no
+# reminder at all) for the operator's own synced calendar event;
+# guest_reminder_minutes defaults to [60] (one reminder, 1h before) for the
+# .ics attached to a participant's booking-confirmed email. Empty list =
+# no VALARMs.
+# trainer_reminder_minutes = []
+# guest_reminder_minutes   = [60]
 
 [smtp]
 host          = "smtp.example.org"

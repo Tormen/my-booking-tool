@@ -454,6 +454,9 @@ class MaintenanceScopeTest(unittest.TestCase):
     def test_my_confirm_email_is_blocked(self):
         self._blocked(self.app.my_confirm_email, "GET", "bogus-token", {})
 
+    def test_my_cancel_email_change_is_blocked(self):
+        self._blocked(self.app.my_cancel_email_change, "GET", "bogus-token", {})
+
     # -- deliberately NOT gated: the host's own tools, and inert endpoints --
 
     def test_admin_login_page_is_unaffected(self):
@@ -714,7 +717,9 @@ class SessionBannerTest(unittest.TestCase):
         _status, _headers, body = self.app.courses("GET", {})
         self.assertIn('class="session-banner"', body)
         self.assertIn("Not logged in", body)
-        self.assertIn('<a href="/my">Login</a>', body)
+        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # the link now carries ?next= back to this same page.
+        self.assertIn('<a href="/my?next=/courses">Login</a>', body)
 
     def test_book_form_shows_banner_when_logged_in(self):
         environ = self._login_environ("regular@example.org")
@@ -726,7 +731,9 @@ class SessionBannerTest(unittest.TestCase):
         _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
         self.assertIn('class="session-banner"', body)
         self.assertIn("Not logged in", body)
-        self.assertIn('<a href="/my">Login</a>', body)
+        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # the link now carries ?next= back to this same course's page.
+        self.assertIn('<a href="/my?next=/book/yoga-class-1">Login</a>', body)
 
     def test_stale_session_pointing_at_a_deleted_user_shows_login_banner(self):
         # A session cookie can outlive the account it points to (deleted
@@ -752,6 +759,20 @@ class SessionBannerTest(unittest.TestCase):
         # page (see the test above), so it needs its own explicit link.
         _status, _headers, body = self.app.my("GET", {})
         self.assertIn(f'<a href="{self.settings.base_url}">Back to example.org</a>', body)
+
+    def test_page_width_matches_the_homepage_photos_container(self):
+        # 2026-07-11, the operator (screenshot comparing the static homepage's own
+        # photo-backed content column against the much narrower app pages):
+        # "Widen homepage table layout to match photo width" -- clarified
+        # to mean every application page. site/index.html's own
+        # div.WordSection1 (the container its background photo fills) is
+        # max-width:1000px -- every dynamic page here now matches that,
+        # and tables stretch to fill it (a bare <table> has no width of
+        # its own otherwise, so widening the body alone wouldn't actually
+        # have widened /my's bookings table or /admin's overview table).
+        _status, _headers, body = self.app.courses("GET", {})
+        self.assertIn("max-width:1000px", body)
+        self.assertIn("table{border-collapse:collapse;width:100%}", body)
 
     # -- 2026-07-09: booking-page name/email prefilled+locked when logged in --
 
@@ -946,6 +967,11 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("/my/confirm-email/", new_body)  # only the new address gets the link
         self.assertNotIn("/my/confirm-email/", old_body)
         self.assertIn("new@example.org", old_body)  # old address is told what it's changing to
+        # 2026-07-11, the operator: "Please provide a link without login" -- the
+        # old address's own cancel link must not require a session.
+        self.assertIn("/my/cancel-email-change/", old_body)
+        self.assertNotIn("/my/settings", old_body)
+        self.assertNotIn("/my/cancel-email-change/", new_body)  # only the OLD address gets this one
 
     def test_settings_page_shows_pending_change_and_hides_request_form(self):
         environ = self._login_environ("regular@example.org")
@@ -990,6 +1016,8 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("new@example.org", body)
         user = self.store.find_user_by_email("regular@example.org")
         self.assertEqual(user.email, "regular@example.org")  # unchanged by GET
+        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_confirm_email_post_applies_change_and_emails_both_addresses(self):
         environ = self._login_environ("regular@example.org")
@@ -1024,6 +1052,19 @@ class MySettingsTest(unittest.TestCase):
         _status, _headers, body = self.app.my_confirm_email("GET", "bogus-token", {})
         self.assertIn("invalid or has already been used", body)
 
+    def test_confirm_email_post_invalidates_every_session_for_the_account(self):
+        # 2026-07-07, the operator: "Logout user before email is changed (so with
+        # its old email). Then redirect the user back to login page /my
+        # with the link please."
+        environ = self._login_environ("regular@example.org")
+        session_id = environ["HTTP_COOKIE"].split("session=", 1)[1]
+        self.assertIn(session_id, webapp.SESSIONS)
+        token = self._request_email_change(environ, "new@example.org")
+        _status, _headers, body = self.app.my_confirm_email("POST", token, {})
+        self.assertNotIn(session_id, webapp.SESSIONS)
+        self.assertIn('<a href="/my">log in</a>', body)
+        self.assertNotIn("/my/settings", body)
+
     def test_confirm_email_superseded_by_newer_request_shows_friendlier_message(self):
         environ = self._login_environ("regular@example.org")
         old_token = self._request_email_change(environ, "first@example.org")
@@ -1040,6 +1081,61 @@ class MySettingsTest(unittest.TestCase):
         self.store.set_pending_email(user.user_id, user.pending_email, user.pending_email_token_hash, stale)
         _status, _headers, body = self.app.my_confirm_email("GET", token, {})
         self.assertIn("expired", body)
+
+    # -- email change: canceling from the CURRENT (old) address's own
+    # no-login link (2026-07-11, the operator: "Please provide a link without
+    # login" -- the old address's notification email used to point at
+    # /my/settings, which needs a session) --------------------------------
+
+    def _request_cancel_token(self, environ, new_email: str) -> str:
+        """Requests a change and returns the plaintext CANCEL token
+        embedded in the notification email sent to the CURRENT (old)
+        address -- separate from _request_email_change's confirm token,
+        which goes to the new address instead."""
+        self.app.my_settings_email("POST", self._post_environ(environ, {"email": new_email}))
+        old_body = next(b for to, _s, b in self.sent_emails if to == "regular@example.org")
+        return old_body.split("/my/cancel-email-change/", 1)[1].split("\n", 1)[0].strip()
+
+    def test_cancel_email_change_get_previews_without_applying(self):
+        environ = self._login_environ("regular@example.org")
+        token = self._request_cancel_token(environ, "new@example.org")
+        _status, _headers, body = self.app.my_cancel_email_change("GET", token, {})
+        self.assertIn("regular@example.org", body)
+        self.assertIn("new@example.org", body)
+        user = self.store.find_user_by_email("regular@example.org")
+        self.assertEqual(user.pending_email, "new@example.org")  # unchanged by GET
+        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        self.assertIn('href="/" class="link-button">Never mind</a>', body)
+
+    def test_cancel_email_change_works_without_a_login_session(self):
+        environ = self._login_environ("regular@example.org")
+        token = self._request_cancel_token(environ, "new@example.org")
+        status, _headers, body = self.app.my_cancel_email_change("POST", token, {})
+        self.assertEqual(status, "200 OK")
+        self.assertIn("canceled", body)
+        user = self.store.find_user_by_email("regular@example.org")
+        self.assertEqual(user.pending_email, "")
+        self.assertEqual(user.email, "regular@example.org")
+
+    def test_cancel_email_change_token_cannot_be_reused(self):
+        environ = self._login_environ("regular@example.org")
+        token = self._request_cancel_token(environ, "new@example.org")
+        self.app.my_cancel_email_change("POST", token, {})
+        _status, _headers, body = self.app.my_cancel_email_change("POST", token, {})
+        self.assertIn("invalid or has already been used", body)
+
+    def test_cancel_email_change_invalid_token_shows_generic_message(self):
+        _status, _headers, body = self.app.my_cancel_email_change("GET", "bogus-token", {})
+        self.assertIn("invalid or has already been used", body)
+
+    def test_cancel_email_change_does_not_confirm_the_change(self):
+        # Sanity check that this link can only ABORT, never complete, the
+        # pending change -- see User.pending_email_cancel_token_hash's own
+        # docstring on why it's a separate token from the confirm one.
+        environ = self._login_environ("regular@example.org")
+        token = self._request_cancel_token(environ, "new@example.org")
+        self.app.my_cancel_email_change("POST", token, {})
+        self.assertIsNone(self.store.find_user_by_email("new@example.org"))
 
 
 class MySessionStatusTest(unittest.TestCase):
@@ -1234,6 +1330,7 @@ class BookingFlowTest(unittest.TestCase):
             course, self.settings, datetime.now(timezone.utc),
             lambda sn, d: 0, lambda start, end: False,
         )
+        self.occs = occs
         self.occ_date = occs[0].date.isoformat()
 
         recorder = lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body))
@@ -1289,6 +1386,17 @@ class BookingFlowTest(unittest.TestCase):
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertEqual(subjects, ["Confirm your example.org account"])
 
+    def test_almost_there_page_uses_the_same_recap_box_as_every_other_confirmation(self):
+        # 2026-07-07, the operator (comparing this page's old one-off "Your spot
+        # for X on Y" sentence against host-cancel/Booked!/cancel-
+        # confirmation's shared What/When/Where box): "The way you present
+        # 'one course instance' ... should be CONSISTENT EVERYWHERE."
+        _status, _headers, body = self._book("newguest@example.org")
+        self.assertIn("\U0001F9D8 What:", body)  # same emoji as _course_recap_html elsewhere
+        self.assertIn("\U0001F550 When:", body)
+        self.assertIn("\U0001F4CD Where:", body)
+        self.assertNotIn("Your spot for", body)
+
     def test_almost_there_resend_does_not_ask_for_email_again(self):
         # The guest just typed their email into the booking form -- the
         # resend control must carry it along as a hidden field, not send
@@ -1303,13 +1411,47 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn('<a href="/my/reset">', body)
         self.assertIn('action="/my/reset"', body)
 
-    def test_returning_unconfirmed_email_adds_another_pending_and_resends(self):
+    def test_returning_unconfirmed_email_resends_without_adding_a_second_pending_row(self):
+        # 2026-07-11, the operator: "silent re-registration for unconfirmed
+        # accounts" -- re-submitting the SAME course+date before
+        # confirming used to insert a brand-new pending row every time
+        # (see Store.has_pending_registration's own docstring for the
+        # multi-row-promoted-at-once consequence this closes). The resend
+        # itself is still deliberate/unconditional -- only the extra ROW
+        # is gone.
         self._book("newguest@example.org", occ_date=self.occ_date)
         self._book("newguest@example.org", name="Alice Again", occ_date=self.occ_date)
         user = self.store.find_user_by_email("newguest@example.org")
-        self.assertEqual(len(self.store.registrations_for_user(user.user_id)), 2)
+        self.assertEqual(len(self.store.registrations_for_user(user.user_id)), 1)
         subjects = [s for _, s, _ in self.sent_emails]
         self.assertEqual(subjects, ["Confirm your example.org account", "Confirm your example.org account"])
+
+    def test_returning_unconfirmed_email_for_a_different_date_still_adds_its_own_pending_row(self):
+        # The dedup key is (course, date, user) -- a genuinely different
+        # occurrence is a separate booking attempt, not a retry, and must
+        # still get its own pending row.
+        other_date = self.occs[1].date.isoformat()
+        self._book("newguest@example.org", occ_date=self.occ_date)
+        self._book("newguest@example.org", occ_date=other_date)
+        user = self.store.find_user_by_email("newguest@example.org")
+        self.assertEqual(len(self.store.registrations_for_user(user.user_id)), 2)
+
+    def test_confirming_after_multiple_resends_only_confirms_once(self):
+        # End-to-end guard: even before this fix, my_confirm() promoted
+        # EVERY pending row for the user with no per-course+date dedup of
+        # its own -- so without the storage-layer fix, 3 retries here
+        # would have landed as 3 separate CONFIRMED registrations for the
+        # exact same class.
+        self._book("newguest@example.org", occ_date=self.occ_date)
+        self._book("newguest@example.org", occ_date=self.occ_date)
+        self._book("newguest@example.org", occ_date=self.occ_date)
+        token = self._confirm_token_from_last_email()
+        self._post(self.app.my_confirm, (token,), {"password": "hunter22"})
+        user = self.store.find_user_by_email("newguest@example.org")
+        regs = self.store.registrations_for_user(user.user_id)
+        self.assertEqual(len(regs), 1)
+        self.assertEqual(regs[0].status, STATUS_CONFIRMED)
+        self.assertEqual(self.store.count_confirmed("yoga-class-1", self.occ_date), 1)
 
     # -- the account-hijack fix --------------------------------------------
 
@@ -1658,6 +1800,13 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(f"expires in {webapp.CONFIRM_TOKEN_TTL_HOURS} hours", body)
         self.assertIn("only the link in this latest email will work", body)
 
+    def test_confirm_email_opens_with_a_greeting_by_name(self):
+        # 2026-07-07, the operator (screenshot of this email): "please formulate
+        # the email a bit more nicer".
+        self._book("newguest@example.org", name="Alice")
+        _, _, body = self.sent_emails[-1]
+        self.assertTrue(body.startswith("Dear Alice,"))
+
     # -- my_reset: unified resend/forgot-password, never leaks existence ---
 
     def test_my_reset_same_response_whether_or_not_email_exists(self):
@@ -1840,6 +1989,59 @@ class BookingFlowTest(unittest.TestCase):
         self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))
         self.assertIn("Email and/or password did not match.", body)
 
+    # -- "Login link returns to originating page" (2026-07-11, the operator) ------
+
+    def test_login_page_get_carries_a_safe_next_into_a_hidden_field(self):
+        _status, _headers, body = self.app.my("GET", {"QUERY_STRING": "next=/book/yoga-class-1"})
+        card_start = body.index('<form method="post" action="/my" class="card">')
+        card_end = body.index("</form>", card_start)
+        self.assertIn(
+            '<input type="hidden" name="next" value="/book/yoga-class-1">', body[card_start:card_end]
+        )
+
+    def test_login_page_get_drops_an_unsafe_next(self):
+        _status, _headers, body = self.app.my("GET", {"QUERY_STRING": "next=https://evil.example/"})
+        self.assertNotIn('name="next"', body)
+
+    def test_login_page_get_with_no_next_omits_the_hidden_field(self):
+        _status, _headers, body = self.app.my("GET", {})
+        self.assertNotIn('name="next"', body)
+
+    def test_successful_login_redirects_to_the_safe_next_path(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        status, headers, _body = self._post(
+            self.app.my, (),
+            {"email": "regular@example.org", "password": "hunter22", "next": "/book/yoga-class-1"},
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/book/yoga-class-1")
+
+    def test_successful_login_with_no_next_still_lands_on_my(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        status, headers, _body = self._post(
+            self.app.my, (), {"email": "regular@example.org", "password": "hunter22"},
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my")
+
+    def test_successful_login_ignores_an_unsafe_next_and_lands_on_my(self):
+        # Same allowlist as the GET-side hidden-field check, re-applied
+        # here since a POST body is just as hand-editable as a URL -- see
+        # _safe_next_path()'s own docstring.
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        status, headers, _body = self._post(
+            self.app.my, (),
+            {"email": "regular@example.org", "password": "hunter22", "next": "https://evil.example/"},
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/my")
+
     def test_my_login_lockout_shows_a_disabled_button_with_a_live_countdown(self):
         # Same visible-countdown treatment as admin/login (2026-07-05) --
         # see AdminLoginRateLimitTest's equivalent test.
@@ -1868,6 +2070,68 @@ class BookingFlowTest(unittest.TestCase):
         sid = webapp._new_session({"kind": "guest", "user_id": user.user_id})
         return user, {"HTTP_COOKIE": f"session={sid}"}
 
+    # -- /book: hide dates the logged-in guest already holds a spot for
+    # (2026-07-11, the operator, pasted `my-bt list` output showing he was already
+    # `confirmed` for a date /book still offered): "If I am already booked
+    # + confirmed for a date this date should simply be hidden here for
+    # me." -----------------------------------------------------------------
+
+    def test_already_confirmed_date_is_hidden_from_the_picker_when_logged_in(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, user.user_id, "tok-hash", capacity=1
+        )
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        self.assertNotIn(f'value="{self.occ_date}"', body)
+
+    def test_already_waitlisted_date_is_also_hidden(self):
+        # has_active_registration() treats CONFIRMED and WAITLISTED alike --
+        # the picker must too.
+        user, environ = self._login_as_guest("regular@example.org")
+        # capacity=1 course: book someone else first so `user` lands on the
+        # waitlist, not confirmed.
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, "other-user-id", "tok-hash-other", capacity=1
+        )
+        reg = self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, user.user_id, "tok-hash", capacity=1
+        )
+        self.assertEqual(reg.status, STATUS_WAITLISTED)
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        self.assertNotIn(f'value="{self.occ_date}"', body)
+
+    def test_a_canceled_bookings_date_is_not_hidden(self):
+        # Only ACTIVE (confirmed/waitlisted) rows hide a date -- a
+        # canceled one must not block rebooking the same date.
+        user, environ = self._login_as_guest("regular@example.org")
+        reg = self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, user.user_id, "tok-hash", capacity=1
+        )
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        self.assertIn(f'value="{self.occ_date}"', body)
+
+    def test_anonymous_guest_still_sees_every_date(self):
+        # The filter only applies once we know WHO is asking -- an
+        # anonymous visitor has no "already booked" state to hide anything
+        # against.
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, user.user_id, "tok-hash", capacity=1
+        )
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn(f'value="{self.occ_date}"', body)
+
+    # -- /book: selected-date/radio mismatch on back/forward-cache restore
+    # (2026-07-11, the operator, "BUG: selected date!", screenshot showing a
+    # different date's radio highlighted than the "Selected date:" text
+    # read) -------------------------------------------------------------
+
+    def test_book_form_disables_autocomplete_and_reasserts_selection_on_pageshow(self):
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn('id="book-form" autocomplete="off"', body)
+        self.assertIn('window.addEventListener("pageshow", refresh);', body)
+
     def test_my_bookings_table_shows_title_time_location_not_shortname(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
@@ -1878,7 +2142,17 @@ class BookingFlowTest(unittest.TestCase):
         # (no spaces around the dash, and a leading 3-letter weekday code).
         self.assertIn("WED 17h15-18h55", body)
         self.assertIn("Example Community Gym, Room 1", body)
-        self.assertNotIn("yoga-class-1", body)
+        # The shortname legitimately appears once now, as the /book/<shortname>
+        # link target (2026-07-07, the operator: "make the 'Course' string a link to
+        # the course booking page") -- but never as the VISIBLE cell text,
+        # which must stay the human title.
+        self.assertNotIn(">yoga-class-1<", body)
+
+    def test_course_cell_links_to_its_own_booking_page(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn('<a href="/book/yoga-class-1">Dynamic Ashtanga Vinyasa Yoga</a>', body)
 
     def test_my_bookings_cancel_button_opens_dialog_with_reason_field(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -1943,14 +2217,20 @@ class BookingFlowTest(unittest.TestCase):
             body,
         )
 
-    def test_my_logout_clears_session_and_redirects_to_my(self):
+    def test_my_logout_clears_session_and_redirects_to_the_homepage(self):
+        # 2026-07-11, the operator: "pressing logout should bring you back to
+        # https://booking.example.org" -- used to redirect to "/my" instead, which
+        # was most jarring when the SAME logout form (shared with the
+        # static homepage's own JS-rendered banner) was triggered from
+        # there: it used to bounce you into the app's own /my login page
+        # rather than staying on the site you were just on.
         _user, environ = self._login_as_guest("regular@example.org")
         sid = cookies.SimpleCookie()
         sid.load(environ["HTTP_COOKIE"])
         session_id = sid["session"].value
         status, headers, _body = self.app.my_logout("POST", environ)
         self.assertEqual(status, "302 Found")
-        self.assertEqual(dict(headers)["Location"], "/my")
+        self.assertEqual(dict(headers)["Location"], self.settings.base_url)
         self.assertNotIn(session_id, webapp.SESSIONS)
         # session cookie is actually cleared, not just left alone
         set_cookie = dict(headers)["Set-Cookie"]
@@ -2093,6 +2373,18 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("What:</b>", body)
         self.assertIn("When:</b>", body)
         self.assertIn("Where:</b>", body)
+
+    def test_guest_cancel_confirm_page_has_a_never_mind_escape(self):
+        # 2026-07-11, the operator: "Check all other pages that you can reach
+        # with a direct link to have not just one submit button as well!"
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        confirmed_body = next(b for _, s2, b in self.sent_emails if s2.startswith("Booking confirmed:"))
+        token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
+        _status, _headers, body = self.app.guest_cancel("GET", token, {})
+        self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_guest_cancel_token_reuse_shows_invalid_and_sends_no_duplicate_emails(self):
         # 2026-07-10: guest_cancel() is naturally protected against replay
@@ -2642,6 +2934,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Example Community Gym, Room 1", body)
         self.assertIn('<textarea name="message" rows="2" class="big-input">', body)
         self.assertIn("Yes, reinstate it", body)
+        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_guest_reinstate_invalid_token_shows_invalid_message(self):
         _status, _headers, body = self.app.guest_reinstate("GET", "not-a-real-token", {})
@@ -2698,6 +2992,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("200", status)
         self.assertNotIn("/admin/login", status + str(_headers))
         self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
+        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_host_reinstate_invalid_id_shows_invalid_message(self):
         _status, _headers, body = self.app.host_reinstate("GET", "no-such-id", {})
@@ -2745,6 +3041,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("When:</b>", body)
         self.assertIn('<textarea name="message"', body)
         self.assertIn("Confirm cancellation", body)
+        # 2026-07-11, the operator (screenshot of this exact page): "please add a
+        # 'Never mind' button also here that brings you back to the homepage!"
+        self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_host_cancel_notifies_both_sides_with_reason(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -2951,6 +3250,33 @@ class AdminLoginRateLimitTest(unittest.TestCase):
         self.assertIn("btn.disabled = true;", body)
         self.assertIn("Log in", body)
 
+    def test_lockout_script_is_byte_stable_across_different_remaining_seconds(self):
+        # 2026-07-07, the operator (repeatable console CSP violation on /my's
+        # lockout screen, confirmed via two screenshots showing DIFFERENT
+        # hashes for what should be "the same" script): the countdown
+        # script used to interpolate `seconds` directly into the <script>
+        # text, so its hash changed every render and could never match a
+        # fixed CSP allow-list. The seconds value must now travel via a
+        # data-* attribute instead, so the <script> block itself never
+        # changes no matter how much lockout time is left.
+        import re
+
+        def lockout_script(body: str) -> str:
+            m = re.search(r"<script>\s*\(function\(\) \{\s*var btn = document\.querySelector\(\"\[data-lockout-btn\]\"\).*?</script>", body, re.DOTALL)
+            self.assertIsNotNone(m)
+            return m.group(0)
+
+        ip_a, ip_b = "203.0.113.6", "203.0.113.7"
+        for ip in (ip_a, ip_b):
+            for _ in range(5):
+                self._post("wrong", forwarded_for=ip)
+        body_a = self._post("wrong", forwarded_for=ip_a)
+        body_b = self._post("wrong", forwarded_for=ip_b)
+        self.assertEqual(lockout_script(body_a), lockout_script(body_b))
+        # But the actual remaining-seconds value is still server-computed
+        # and DOES reach the page, just via the button's data attribute.
+        self.assertIn("data-lockout-seconds=", body_a)
+
 
 class MyLoginAsAdminTest(unittest.TestCase):
     """2026-07-06: "/my should accept email: admin and the admin password
@@ -2971,8 +3297,10 @@ class MyLoginAsAdminTest(unittest.TestCase):
             webapp.login_limiter.reset(k)
         self.addCleanup(lambda: [webapp.login_limiter.reset(k) for k in self._keys])
 
-    def _post(self, email: str, password: str, *, forwarded_for: str | None = None):
+    def _post(self, email: str, password: str, *, forwarded_for: str | None = None, next_path: str | None = None):
         form = {"email": email, "password": password}
+        if next_path is not None:
+            form["next"] = next_path
         body = urlencode(form).encode()
         environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
         if forwarded_for is not None:
@@ -2986,6 +3314,17 @@ class MyLoginAsAdminTest(unittest.TestCase):
         self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
         sid = next(h[1] for h in headers if h[0] == "Set-Cookie").split("session=")[1].split(";")[0]
         self.assertEqual(webapp.SESSIONS[sid]["kind"], "admin")
+
+    def test_admin_login_via_my_ignores_next_and_still_goes_to_admin(self):
+        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # that's a GUEST-only affordance; the admin shortcut (email:
+        # "admin") must always land on /admin regardless of any next=
+        # a guest-facing page happened to attach to the login link.
+        status, headers, _body = self._post(
+            "admin", self.admin_password, forwarded_for="203.0.113.21", next_path="/courses",
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin")
 
     def test_admin_email_case_insensitive(self):
         status, _headers, _body = self._post("Admin", self.admin_password, forwarded_for="203.0.113.21")

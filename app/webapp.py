@@ -35,6 +35,12 @@
   GET/POST /my/confirm-email/<token>  finalize a requested email change --
                                      same GET-preview/POST-consume shape as
                                      /my/confirm/<token>, see my_confirm_email()
+  GET/POST /my/cancel-email-change/<token>  no-login "abort this pending
+                                     email change" link (linked from the
+                                     CURRENT address's own notification
+                                     email) -- a SEPARATE token from the one
+                                     above, see storage.User
+                                     .pending_email_cancel_token_hash
   GET/POST /admin/login             admin login
   GET      /admin                   admin overview (today+future by default)
   GET/POST /admin/cancel/<reg_id>   host cancels a registration, optional message
@@ -102,7 +108,7 @@ from .security import (
 from .slots import build_occurrences
 from .storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION,
-    STATUS_WAITLISTED, Registration, Store, User, now_iso,
+    STATUS_WAITLISTED, Registration, Store, User, format_display_timestamp, now_iso,
 )
 from .templates import esc, page
 
@@ -183,6 +189,33 @@ def _client_ip(environ: dict) -> str:
     if forwarded:
         return forwarded.split(",")[0].strip()
     return environ.get("REMOTE_ADDR", "unknown")
+
+
+_SAFE_NEXT_PATH_RE = re.compile(r"^/(courses|book/[A-Za-z0-9_-]+)$")
+
+
+def _safe_next_path(raw: str) -> str:
+    """Validates a `?next=` value before it's ever used in a redirect or
+    echoed into a hidden form field (2026-07-11, the operator: "Login link returns
+    to originating page" -- clicking the plain "Login" link shown on
+    /courses or /book/<shortname> for an anonymous visitor, see
+    _anonymous_banner_html(), should land back on that SAME page after a
+    successful login instead of always on /my's bookings list).
+
+    Deliberately an ALLOWLIST, not just "starts with a single /" -- an
+    open-redirect guard alone (blocking `//evil.com` or `https://...`)
+    would still let this become a probe for arbitrary internal paths
+    reachable only while logged in. The only two places this app ever
+    generates a `next=` value are /courses and /book/<shortname> (see
+    App.courses()/App.book() -- both pass their own path to
+    _session_banner_html()), so only those two shapes are ever considered
+    safe to redirect back to; anything else (missing, malformed, or
+    hand-edited in the URL bar) falls back to "" -- which every caller
+    below treats exactly like "no next path was given" (i.e. lands on
+    /my, the prior/default behavior)."""
+    if raw and _SAFE_NEXT_PATH_RE.fullmatch(raw):
+        return raw
+    return ""
 
 
 def _latest_logged_ip(path: str | None) -> str | None:
@@ -267,6 +300,23 @@ def _get_session(environ) -> dict | None:
     return None
 
 
+def _invalidate_all_sessions_for_user(user_id: str) -> None:
+    """Logs a guest out of EVERY active session (any browser/device), not
+    just the one making the current request -- used after a credential-
+    like change where an already-open old session should stop working
+    (2026-07-11, the operator, re: email-change confirmation: "Logout user
+    before email is changed (so with its old email)"). Sessions are
+    keyed by session_id, not user_id, so this is a linear scan of the
+    (small, in-memory -- see SESSIONS' own module comment) session store;
+    fine at this app's scale, same tradeoff SESSIONS itself already
+    accepts. A session dict for `user_id` is invalidated regardless of
+    whether it's a "guest" or (impossible in practice, but harmless if it
+    ever happened) some other kind sharing that same id value."""
+    stale = [sid for sid, data in SESSIONS.items() if data.get("user_id") == user_id]
+    for sid in stale:
+        SESSIONS.pop(sid, None)
+
+
 def _session_cookie_header(sid: str, clear: bool = False) -> str:
     parts = [f"session={sid if not clear else ''}", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"]
     if clear:
@@ -289,109 +339,93 @@ _RESEND_COOLDOWN_SECONDS = 60
 _RESEND_COOLDOWN_KEY = "mb_resend_until"
 
 
-def _resend_cooldown_script(button_id: str, label: str) -> str:
-    """For a form that's MEANT to navigate on submit (/my/reset's own
-    "Send me a link" form) -- just disables the button with a live
-    countdown if a cooldown from an earlier submit (on this page or the
-    "Almost there" page) is still running when the page loads."""
-    return f"""<script>
-    (function() {{
-      var btn = document.getElementById({json.dumps(button_id)});
-      if (!btn) return;
-      var label = {json.dumps(label)};
-      function tick() {{
-        var until = parseInt(localStorage.getItem({json.dumps(_RESEND_COOLDOWN_KEY)}) || "0", 10);
-        var left = Math.ceil((until - Date.now()) / 1000);
-        if (left > 0) {{
-          btn.disabled = true;
-          btn.textContent = label + " (" + left + "s)";
-          setTimeout(tick, 250);
-        }} else {{
-          btn.disabled = false;
-          btn.textContent = label;
-        }}
-      }}
-      tick();
-    }})();
-    </script>"""
+# 2026-07-07, the operator (repeatable console CSP violation on /my's lockout
+# screen, "maybe related?"): these three scripts used to be built as
+# f-strings interpolating a button id/label/seconds straight into the
+# <script> text, per call site. Every render therefore produced different
+# bytes -> a different sha256 hash -> never matched the fixed CSP
+# script-src allow-list, so the countdown/disable behavior has likely
+# never actually run in production. Fixed the same way the sortable-table
+# script was fixed earlier: these are now plain, non-interpolated
+# constants that read whatever they need from data-* attributes and from
+# the button's own already-rendered text, so ONE stable hash per script
+# covers every page/call site, forever. Callers now just add the right
+# data-* attribute(s) to their HTML and append the matching constant.
 
-
-def _resend_cooldown_inline_script(form_id: str, button_id: str, status_id: str, label: str) -> str:
-    """For the "Almost there" page's resend button specifically: submits
-    via fetch() instead of a real form navigation, so clicking it does
-    NOT take the guest to /my/reset's own page (confusing right after a
-    booking -- that page is branded "Forgot your password?", which this
-    guest never had one to forget). Falls back to a real (navigating)
-    form submit if fetch isn't available/JS is disabled -- landing on
-    /my/reset in that case is a worse experience than no JS at all, but
-    still gets the email sent, which matters more."""
-    return f"""<script>
-    (function() {{
-      var form = document.getElementById({json.dumps(form_id)});
-      var btn = document.getElementById({json.dumps(button_id)});
-      var status = document.getElementById({json.dumps(status_id)});
-      if (!form || !btn) return;
-      var label = {json.dumps(label)};
-      function tick() {{
-        var until = parseInt(localStorage.getItem({json.dumps(_RESEND_COOLDOWN_KEY)}) || "0", 10);
-        var left = Math.ceil((until - Date.now()) / 1000);
-        if (left > 0) {{
-          btn.disabled = true;
-          btn.textContent = label + " (" + left + "s)";
-          setTimeout(tick, 250);
-        }} else {{
-          btn.disabled = false;
-          btn.textContent = label;
-        }}
-      }}
-      form.addEventListener("submit", function(ev) {{
-        if (!window.fetch) return;  // no fetch: let the real submit go through
-        ev.preventDefault();
-        localStorage.setItem({json.dumps(_RESEND_COOLDOWN_KEY)}, String(Date.now() + {_RESEND_COOLDOWN_SECONDS} * 1000));
-        tick();
-        if (status) status.textContent = " Sending...";
-        fetch(form.action, {{method: "POST", body: new URLSearchParams(new FormData(form))}})
-          .then(function() {{ if (status) status.textContent = " Sent -- check your email."; }})
-          .catch(function() {{ if (status) status.textContent = " Couldn't send -- try again."; }});
-      }});
-      tick();
-    }})();
-    </script>"""
-
-
-def _lockout_countdown_script(seconds: float, button_id: str, label: str) -> str:
-    """Disables a login form's submit button and counts down from
-    `seconds` back to enabled -- `seconds` is the server-computed,
-    authoritative time left on login_limiter's lockout for this key (see
-    security.RateLimiter.retry_after), NOT a client guess. Unlike
-    _resend_cooldown_script/_resend_cooldown_inline_script above, this
-    needs no localStorage: the lockout state already lives server-side in
-    login_limiter, so every fresh page load (including a plain refresh)
-    already gets the true remaining time recomputed from scratch --
-    nothing to persist client-side across a reload. Re-enabling at 0 is
-    optimistic (a resubmit right at that instant is still re-checked
-    server-side and could show a fresh countdown if the clocks are a
-    touch off) -- exactly the same spirit as the resend cooldown above."""
-    return f"""<script>
-    (function() {{
-      var btn = document.getElementById({json.dumps(button_id)});
-      if (!btn) return;
-      var remaining = {int(seconds) + 1};
-      var original = {json.dumps(label)};
+_RESEND_COOLDOWN_SCRIPT = """<script>
+(function() {
+  var btn = document.querySelector("[data-resend-cooldown-btn]");
+  if (!btn) return;
+  var label = btn.textContent;
+  function tick() {
+    var until = parseInt(localStorage.getItem("mb_resend_until") || "0", 10);
+    var left = Math.ceil((until - Date.now()) / 1000);
+    if (left > 0) {
       btn.disabled = true;
-      function tick() {{
-        if (remaining <= 0) {{
-          btn.disabled = false;
-          btn.textContent = original;
-          return;
-        }}
-        btn.textContent = original + " (" + remaining + "s)";
-        remaining -= 1;
-        setTimeout(tick, 1000);
-      }}
-      tick();
-    }})();
-    </script>"""
+      btn.textContent = label + " (" + left + "s)";
+      setTimeout(tick, 250);
+    } else {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+  tick();
+})();
+</script>"""
+
+_RESEND_INLINE_COOLDOWN_SCRIPT = """<script>
+(function() {
+  var form = document.querySelector("[data-resend-inline-form]");
+  var btn = document.querySelector("[data-resend-inline-btn]");
+  var status = document.querySelector("[data-resend-inline-status]");
+  if (!form || !btn) return;
+  var label = btn.textContent;
+  function tick() {
+    var until = parseInt(localStorage.getItem("mb_resend_until") || "0", 10);
+    var left = Math.ceil((until - Date.now()) / 1000);
+    if (left > 0) {
+      btn.disabled = true;
+      btn.textContent = label + " (" + left + "s)";
+      setTimeout(tick, 250);
+    } else {
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  }
+  form.addEventListener("submit", function(ev) {
+    if (!window.fetch) return;  // no fetch: let the real submit go through
+    ev.preventDefault();
+    localStorage.setItem("mb_resend_until", String(Date.now() + 60 * 1000));
+    tick();
+    if (status) status.textContent = " Sending...";
+    fetch(form.action, {method: "POST", body: new URLSearchParams(new FormData(form))})
+      .then(function() { if (status) status.textContent = " Sent -- check your email."; })
+      .catch(function() { if (status) status.textContent = " Couldn't send -- try again."; });
+  });
+  tick();
+})();
+</script>"""
+
+_LOCKOUT_COUNTDOWN_SCRIPT = """<script>
+(function() {
+  var btn = document.querySelector("[data-lockout-btn]");
+  if (!btn) return;
+  var remaining = parseInt(btn.dataset.lockoutSeconds, 10) + 1;
+  var original = btn.textContent;
+  btn.disabled = true;
+  function tick() {
+    if (remaining <= 0) {
+      btn.disabled = false;
+      btn.textContent = original;
+      return;
+    }
+    btn.textContent = original + " (" + remaining + "s)";
+    remaining -= 1;
+    setTimeout(tick, 1000);
+  }
+  tick();
+})();
+</script>"""
 
 
 # Shared by every page with a confirm-dialog (<dialog class="card">) button:
@@ -665,6 +699,8 @@ class App:
             return self.my_settings_email_cancel(method, environ)
         if m := re.fullmatch(r"/my/confirm-email/([A-Za-z0-9_-]+)", path):
             return self.my_confirm_email(method, m.group(1), environ)
+        if m := re.fullmatch(r"/my/cancel-email-change/([A-Za-z0-9_-]+)", path):
+            return self.my_cancel_email_change(method, m.group(1), environ)
         if path == "/admin/login":
             return self.admin_login(method, environ)
         if path == "/admin":
@@ -770,7 +806,7 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
-        banner = self._session_banner_html(environ)
+        banner = self._session_banner_html(environ, next_path="/courses")
         if not self.settings.courses:
             body = "<p>No courses are configured yet.</p>"
         else:
@@ -801,7 +837,7 @@ class App:
         # Computed once per request and threaded through every response
         # this method (and its helpers _book_page/_book_with_guests) can
         # return -- see _session_banner_html's own docstring.
-        banner = self._session_banner_html(environ)
+        banner = self._session_banner_html(environ, next_path=f"/book/{shortname}")
 
         # 2026-07-09, the operator (screenshots of /book + /my): "when you are
         # logged in Name + email on booking page should be filled and
@@ -822,6 +858,28 @@ class App:
         occurrences = build_occurrences(
             course, self.settings, now, capacity_lookup, self._conflict_checker(exclude_own=True)
         )
+
+        # 2026-07-11, the operator (my-bt list showing he was already `confirmed`
+        # for 2026-07-11 while /book/trier-sat-yoga still offered that
+        # exact date as a pickable option): "If I am already booked +
+        # confirmed for a date this date should simply be hidden here for
+        # me" -- a logged-in guest who already holds an active (confirmed
+        # or waitlisted -- same definition Store.has_active_registration
+        # already uses for the double-booking guard below/entry #85) spot
+        # for a given occurrence never needs to see that date offered
+        # again; they'd only get bounced by that exact guard if they tried.
+        # Filtered here, once, right after occurrences is built, so both
+        # the GET render and every POST error-retry render below (which all
+        # reuse this same `occurrences` list) agree -- no separate
+        # threading needed. This is a display-only convenience on top of
+        # an already-enforced rule, not a new safety boundary: the
+        # has_active_registration() check further down still runs
+        # regardless, for the rare case of two tabs/a stale cached page.
+        if logged_in_user is not None:
+            occurrences = [
+                o for o in occurrences
+                if not self.store.has_active_registration(shortname, o.date.isoformat(), logged_in_user.user_id)
+            ]
 
         if method == "POST":
             form = self._read_form(environ)
@@ -946,26 +1004,40 @@ class App:
             # Brand-new or still-unconfirmed email: deliberately does NOT
             # hold a real spot or touch the calendar yet -- see
             # storage.STATUS_PENDING_CONFIRMATION's docstring. Re-sending
-            # the confirmation email on every such attempt (rather than
-            # trying to detect "they already have one pending") is
-            # deliberate: simpler, and it's exactly what a "resend" should
-            # do anyway.
-            self.store.add_registration(
-                shortname, occ_date, user.user_id, "", status=STATUS_PENDING_CONFIRMATION
-            )
+            # the confirmation email on every such attempt is deliberate --
+            # exactly what a "resend" should do -- but the pending ROW
+            # itself is now deduped per course+date+user (2026-07-11,
+            # the operator: "silent re-registration for unconfirmed accounts" --
+            # see Store.has_pending_registration's own docstring for the
+            # multi-row-promoted-at-once bug this closes): only the FIRST
+            # attempt for a given course+date inserts a row; every retry
+            # just resends the same email against the row already there.
+            if not self.store.has_pending_registration(shortname, occ_date, user.user_id):
+                self.store.add_registration(
+                    shortname, occ_date, user.user_id, "", status=STATUS_PENDING_CONFIRMATION
+                )
             self._send_confirm_email(user)
             resend_label = "Resend the confirmation email"
+            # 2026-07-07, the operator (comparing this page's plain-prose "Your spot
+            # for X on Y" line against the What/When/Where box shown on
+            # every other page/email referring to one course instance --
+            # host-cancel, Booked!, cancel/reinstate confirmations): "The way
+            # you present 'one course instance' ... should be CONSISTENT
+            # EVERYWHERE" -- so this now reuses the exact same
+            # _course_recap_html() block as those, instead of its own
+            # one-off sentence.
             body = (
                 f"<p>Almost there -- we've emailed <b>{esc(email)}</b> a link to confirm your account.</p>"
-                f"<p>Your spot for <b>{esc(course.title)}</b> on {esc(occ_date)} will only be reserved "
-                "for you,<br>once you click the link in the email and set a password."
+                "<p>Once you click the link in the email and set a password.</p>"
+                f"<p>Only then will your place in the course be reserved:"
                 f"{self._already_booked_guests_note(already_booked_guests)}</p>"
-                '<div class="hint">Didn\'t get it? '
-                '<form method="post" action="/my/reset" id="resend-form" style="display:inline">'
+                + _course_recap_html(course, occ_date)
+                + '<div class="hint">Didn\'t get it? '
+                '<form method="post" action="/my/reset" id="resend-form" data-resend-inline-form style="display:inline">'
                 f'<input type="hidden" name="email" value="{esc(email)}">'
-                f'<button type="submit" id="resend-btn" class="link-button">{esc(resend_label)}</button>'
-                '</form><span id="resend-status"></span>.</div>'
-                + _resend_cooldown_inline_script("resend-form", "resend-btn", "resend-status", resend_label)
+                f'<button type="submit" id="resend-btn" class="link-button" data-resend-inline-btn>{esc(resend_label)}</button>'
+                '</form><span id="resend-status" data-resend-inline-status></span>.</div>'
+                + _RESEND_INLINE_COOLDOWN_SCRIPT
             )
             return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Almost there", body, banner=banner)
 
@@ -1247,7 +1319,7 @@ class App:
             banner=banner,
         )
 
-    def _session_banner_html(self, environ, *, on_my_page: bool = False) -> str:
+    def _session_banner_html(self, environ, *, on_my_page: bool = False, next_path: str = "") -> str:
         """A small "Logged in as x@example.org - Logout" banner for the
         dynamic pages a logged-in guest might reach while browsing/booking
         (2026-07-06: "/my should have a 'new booking' button... but with a
@@ -1283,10 +1355,10 @@ class App:
         would be redundant, not helpful."""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return self._anonymous_banner_html()
+            return self._anonymous_banner_html(next_path)
         user = self.store.find_user_by_id(session["user_id"])
         if user is None:
-            return self._anonymous_banner_html()
+            return self._anonymous_banner_html(next_path)
         my_bookings_link = "" if on_my_page else '<a href="/my">My bookings</a> &middot; '
         return (
             '<div class="session-banner">'
@@ -1298,16 +1370,28 @@ class App:
             "</div>"
         )
 
-    def _anonymous_banner_html(self) -> str:
+    def _anonymous_banner_html(self, next_path: str = "") -> str:
         """The "not logged in" half of the always-visible top-bar (see
         _session_banner_html()'s own docstring) -- same box, a plain Login
         link instead of "Logged in as...". Also links to the homepage, same
         as the logged-in banner does, so an anonymous visitor gets that
-        one-click way back too."""
+        one-click way back too.
+
+        `next_path` (2026-07-11, the operator: "Login link returns to originating
+        page"), when given, is appended as `?next=<path>` on the Login
+        link -- my()'s login form/POST carries it through (see
+        _my_login_page()/App.my()) so a guest who clicks Login from
+        /courses or /book/<shortname> lands back on that same page after
+        a successful login, instead of always on /my's bookings list.
+        Already validated by the caller (_session_banner_html, via
+        App.courses()/App.book()) against _safe_next_path()'s allowlist --
+        this method just echoes it, trusting that check rather than
+        re-validating here too."""
+        next_qs = f"?next={esc(next_path)}" if next_path else ""
         return (
             '<div class="session-banner">'
             "<span>Not logged in</span>"
-            f'<span><a href="/my">Login</a> &middot; '
+            f'<span><a href="/my{next_qs}">Login</a> &middot; '
             f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
             "</div>"
         )
@@ -1383,13 +1467,19 @@ class App:
         subject = f"Confirm your {site} account" if first_time else f"Reset your {site} password"
         verb = (f"confirm your booking account on {site_url} and set a password"
                 if first_time else f"set a new password for your booking account on {site_url}")
+        # 2026-07-07, the operator (screenshot of this email): "please formulate the
+        # email a bit more nicer" -- added a "Dear <name>," greeting and a
+        # brief sign-off, same terse-but-warm register as every other
+        # guest-facing email, not a wall of bare instructions.
         send_mail(
             self.settings, user.email, subject,
-            f"Click below to {verb}:\n\n{confirm_url}\n\n"
+            f"Dear {user.name},\n\n"
+            f"Please click below to {verb}:\n\n{confirm_url}\n\n"
             f"This link expires in {CONFIRM_TOKEN_TTL_HOURS} hours. If you requested this more "
             "than once, only the link in this latest email will work -- any earlier one is "
             "no longer valid.\n\n"
-            "If you didn't request this, you can safely ignore this email.",
+            "If you didn't request this, you can safely ignore this email.\n\n"
+            f"Thanks,\n{site}",
         )
 
     def _late_booking_rejection(self, occ, now: datetime) -> str | None:
@@ -1529,7 +1619,8 @@ class App:
             {desc_html}
             {note_html}
             {err_html}
-            <form method="post" class="card" id="book-form" data-book-label="{esc(self.settings.book_button_label)}">
+            <form method="post" class="card" id="book-form" autocomplete="off"
+              data-book-label="{esc(self.settings.book_button_label)}">
               <label>Dates available
                 <div class="dates" role="radiogroup" aria-label="Dates available">{date_buttons}</div>
               </label>
@@ -1660,6 +1751,22 @@ class App:
                 el.addEventListener("change", refresh);
               }});
               refresh();
+              // 2026-07-11, the operator ("BUG: selected date!", screenshot showing
+              // the 2026-07-18 box highlighted/checked while "Selected
+              // date:" still read 2026-07-11): some browsers restore a
+              // PREVIOUSLY-checked radio button on reload/back-forward
+              // navigation on their own, independent of this script and
+              // AFTER it already ran once -- silently, with no "change"
+              // event, so refresh()'s one call above (which matched the
+              // server's own default, occurrences[0]) never gets to react
+              // to the browser's later override. autocomplete="off" on the
+              // form (above) stops most browsers from doing this restore at
+              // all; "pageshow" (fires on every render including a
+              // back/forward-cache restore, unlike "load") is a second,
+              // defensive line of the same fix, re-running refresh() at
+              // that point to guarantee the visible highlight and the
+              // "Selected date" text can never disagree, on any browser.
+              window.addEventListener("pageshow", refresh);
             }})();
             </script>"""
         return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(course.title, body, banner=banner)
@@ -1724,7 +1831,8 @@ class App:
             + """<form method="post" class="card">
           <label>Reason <span class="opt">(optional)</span>
             <textarea name="message" rows="2" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Yes, cancel it</button></div>
+          <div class="submit-row"><button type="submit">Yes, cancel it</button>
+            <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
@@ -1780,7 +1888,8 @@ class App:
             + """<form method="post" class="card">
           <label>Optional message <span class="opt">(optional)</span>
             <textarea name="message" rows="2" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Yes, reinstate it</button></div>
+          <div class="submit-row"><button type="submit">Yes, reinstate it</button>
+            <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Reinstate booking", body)
@@ -1851,6 +1960,13 @@ class App:
                 title = course.title if course else r.course_shortname
                 time_range = course.weekday_time_range_label() if course else ""
                 location = course.location if course else ""
+                # 2026-07-07, the operator: "Please make the 'Course' string a link
+                # to the course booking page." Only linkable if the course
+                # still exists in settings.toml (course is None for an old
+                # booking whose course was since removed -- nothing to link
+                # to in that case, same fallback as title/time_range/location
+                # above).
+                course_cell = f'<a href="/book/{esc(r.course_shortname)}">{esc(title)}</a>' if course else esc(title)
                 cancel_id = f"cancel-{esc(r.registration_id)}"
                 # Confirmed or waitlisted are the only cancelable states --
                 # this used to only allow CONFIRMED, which silently made it
@@ -1910,7 +2026,7 @@ class App:
                         "</div></dialog>"
                     )
                 return (
-                    f"<tr><td>{esc(title)}</td><td>{esc(r.occurrence_date)}</td>"
+                    f"<tr><td>{course_cell}</td><td>{esc(r.occurrence_date)}</td>"
                     f"<td>{esc(time_range)}</td><td>{esc(location)}</td>"
                     f"<td>{esc(r.status)}</td>"
                     f"<td>{actions}</td></tr>"
@@ -1972,6 +2088,11 @@ class App:
         if method == "POST":
             form = self._read_form(environ)
             email, password = form.get("email", "").strip(), form.get("password", "").strip()
+            # Carried along as a hidden field by _my_login_page()'s login
+            # form -- see _safe_next_path()'s own docstring for why this is
+            # re-validated here rather than trusted as-is (a POST body is
+            # just as hand-editable as a URL).
+            next_path = _safe_next_path(form.get("next", ""))
             now = time.time()
             if email.lower() == "admin":
                 # 2026-07-06: "/my should accept email: admin and the admin
@@ -1987,6 +2108,17 @@ class App:
                     lockout_seconds = login_limiter.retry_after(key, now=now)
                     log.warning("rate limit blocked: admin login from %s (via /my)", _client_ip(environ))
                 elif verify_admin_password(password, self.settings.admin_password_hash):
+                    # 2026-07-11, the operator ("Why do I get this error? I did
+                    # NOT several login attempts!"): a SUCCESSFUL login used
+                    # to still count against this same 5/hour budget (allow()
+                    # is called unconditionally above, before the password
+                    # is even checked) with nothing ever resetting it --
+                    # several perfectly legitimate logins within an hour
+                    # (exactly what testing/normal use looks like) could
+                    # exhaust it on their own, with no wrong password ever
+                    # entered. Only a WRONG password should cost anything
+                    # against this limiter; a right one clears the slate.
+                    login_limiter.reset(key)
                     sid = _new_session({"kind": "admin"})
                     return "302 Found", [("Location", "/admin"), ("Set-Cookie", _session_cookie_header(sid))], ""
                 else:
@@ -2007,11 +2139,26 @@ class App:
                     # account -- bail out before verify_secret rather than
                     # feeding it an empty hash/salt.
                     if user and user.password_hash and verify_secret(password, user.password_hash, user.password_salt):
+                        # See the admin branch's own 2026-07-11 comment above
+                        # -- a successful login shouldn't cost anything
+                        # against this budget, only a wrong password should.
+                        login_limiter.reset(key)
                         sid = _new_session({"kind": "guest", "user_id": user.user_id})
                         self.store.touch_login(user.user_id)
-                        return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header(sid))], ""
+                        # 2026-07-11, the operator: "Login link returns to
+                        # originating page" -- lands back on /courses or
+                        # /book/<shortname> if that's where the guest
+                        # clicked Login from, /my otherwise (unchanged
+                        # default).
+                        return (
+                            "302 Found",
+                            [("Location", next_path or "/my"), ("Set-Cookie", _session_cookie_header(sid))],
+                            "",
+                        )
                     error = "Email and/or password did not match."
-        return self._my_login_page(login_error=error, login_lockout_seconds=lockout_seconds)
+        else:
+            next_path = _safe_next_path(parse_qs(environ.get("QUERY_STRING", "")).get("next", [""])[0])
+        return self._my_login_page(login_error=error, login_lockout_seconds=lockout_seconds, next_path=next_path)
 
     def my_signup(self, method: str, environ):
         """POST target for /my's "Sign up" tab (2026-07-06, the operator: "let's
@@ -2070,6 +2217,7 @@ class App:
         signup_success: str | None = None,
         signup_lockout_seconds: float = 0.0,
         active_tab: str = "login",
+        next_path: str = "",
     ):
         """Renders /my's logged-out page: two CSS-only tabs (radio buttons
         + sibling selectors -- no JS needed to switch between them)
@@ -2093,14 +2241,23 @@ class App:
 
         login_err_html = f'<p class="err">{esc(login_error)}</p>' if login_error else ""
         login_label = "Login"
+        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # carried through as a hidden field so App.my()'s POST handler can
+        # redirect back to it on success; see _safe_next_path()'s own
+        # docstring for why this is re-validated server-side rather than
+        # trusted just because it round-tripped through this form.
+        next_field = f'<input type="hidden" name="next" value="{esc(next_path)}">' if next_path else ""
         login_body = f"""{login_err_html}<form method="post" action="/my" class="card">
+          {next_field}
           <label>Email <input class="big-input" name="email" type="text" required></label>
           <label>Password <input class="big-input" name="password" type="password" required></label>
-          <div class="submit-row"><button type="submit" id="my-login-btn">{esc(login_label)}</button></div>
+          <div class="submit-row"><button type="submit" id="my-login-btn"{
+              f' data-lockout-btn data-lockout-seconds="{int(login_lockout_seconds)}"' if login_lockout_seconds else ""
+            }>{esc(login_label)}</button></div>
         </form>
         <p><a href="/my/reset">Forgot your password, or still need to confirm your account?</a></p>"""
         if login_lockout_seconds:
-            login_body += _lockout_countdown_script(login_lockout_seconds, "my-login-btn", login_label)
+            login_body += _LOCKOUT_COUNTDOWN_SCRIPT
 
         if signup_success:
             # Boxed the same as the form it replaces (2026-07-06 fix: a
@@ -2119,10 +2276,12 @@ class App:
               <label>Name <input class="big-input" name="name" type="text" required></label>
               <label>Email <input class="big-input" name="email" type="email" required></label>
               <p class="hint">We'll email you a link to set your password.</p>
-              <div class="submit-row"><button type="submit" id="my-signup-btn">{esc(signup_label)}</button></div>
+              <div class="submit-row"><button type="submit" id="my-signup-btn"{
+                  f' data-lockout-btn data-lockout-seconds="{int(signup_lockout_seconds)}"' if signup_lockout_seconds else ""
+                }>{esc(signup_label)}</button></div>
             </form>"""
             if signup_lockout_seconds:
-                signup_body += _lockout_countdown_script(signup_lockout_seconds, "my-signup-btn", signup_label)
+                signup_body += _LOCKOUT_COUNTDOWN_SCRIPT
 
         body = f"""
         <div class="tabs">
@@ -2190,10 +2349,12 @@ class App:
         err_html = '<p class="err">Too many attempts -- try again later.</p>' if lockout_seconds else ""
         body = f"""{err_html}<form method="post" class="card" id="reset-form">
           <label>Email <input class="big-input" name="email" type="email" required></label>
-          <div class="submit-row"><button type="submit" id="reset-btn">{esc(reset_label)}</button></div>
-        </form>""" + _resend_cooldown_script("reset-btn", reset_label)
+          <div class="submit-row"><button type="submit" id="reset-btn" data-resend-cooldown-btn{
+              f' data-lockout-btn data-lockout-seconds="{int(lockout_seconds)}"' if lockout_seconds else ""
+            }>{esc(reset_label)}</button></div>
+        </form>""" + _RESEND_COOLDOWN_SCRIPT
         if lockout_seconds:
-            body += _lockout_countdown_script(lockout_seconds, "reset-btn", reset_label)
+            body += _LOCKOUT_COUNTDOWN_SCRIPT
         return "200 OK", [("Content-Type", "text/html")], page("Forgot your password?", body)
 
     def _set_password_form(self, token: str) -> str:
@@ -2423,10 +2584,24 @@ class App:
         # action, it's the opposite (a teardown), so blocking it during
         # maintenance would only leave a guest stuck "logged in" against
         # their wishes for no real benefit.
+        #
+        # Redirects to the homepage (settings.base_url), not "/my"
+        # (2026-07-11, the operator: "pressing logout should bring you back to
+        # https://booking.example.org"). This is the ONE logout form
+        # (_session_banner_html()'s own, action="/my/logout") shared by
+        # every page that shows it -- the static homepage's own JS-rendered
+        # copy (site/index.html), /courses, /book/<shortname>, and /my
+        # itself -- so the old "/my" target was most jarring from the
+        # homepage: logging out there used to jump straight into the app's
+        # /my login page instead of staying on the site you were just on.
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
             SESSIONS.pop(session["_sid"], None)
-        return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))], ""
+        return (
+            "302 Found",
+            [("Location", self.settings.base_url), ("Set-Cookie", _session_cookie_header("", clear=True))],
+            "",
+        )
 
     def my_delete_account(self, method: str, environ):
         guard = self._maintenance_guard(environ)
@@ -2519,34 +2694,61 @@ class App:
         created = datetime.fromisoformat(user.pending_email_token_created_at)
         return datetime.now(timezone.utc) - created > timedelta(hours=CONFIRM_TOKEN_TTL_HOURS)
 
-    def _send_email_change_emails(self, user, new_email: str, token: str) -> None:
+    def _send_email_change_emails(self, user, new_email: str, token: str, cancel_token: str) -> None:
         """Sent the moment a change is REQUESTED (not yet confirmed) -- one
         to the NEW address (the only one that can actually confirm, via
-        the link below) and one to the CURRENT address (informational
-        only, no link), so the real account owner notices if they didn't
-        request this themselves. Mirrors _send_confirm_email's tone/expiry
-        wording. See _send_email_change_confirmed_emails for the matching
-        final-confirmation pair, sent once the link below is actually
-        clicked (in my_confirm_email)."""
+        the link below) and one to the CURRENT address (a no-login
+        "cancel this" link, no way to confirm from there -- see below), so
+        the real account owner notices if they didn't want this. Mirrors
+        _send_confirm_email's tone/expiry wording. See
+        _send_email_change_confirmed_emails for the matching final-
+        confirmation pair, sent once the link below is actually clicked
+        (in my_confirm_email).
+
+        2026-07-11, the operator (screenshot of the current-address copy): "This
+        sentance is not nice to read. Yes the change was done from this
+        email... but the important info here is that the login should
+        change from test *TO* fred." -- the old wording ("from this
+        address to fred@example.org") made the reader work out that "this
+        address" meant their own inbox; both emails below now spell out
+        the FROM and TO addresses explicitly instead of leaning on a
+        self-reference, for the same reason on both copies.
+
+        Also (same round): "it is not relevant if the person did the
+        change... he/she could have asked someone... important is if they
+        are OK with this!" -- both emails used to ask "did YOU request
+        this" (implying only the account owner's own click counts), which
+        doesn't hold up if someone else made the change on their behalf,
+        with their knowledge, at their own ask. Reworded to ask whether the
+        change itself is welcome/expected, not who physically clicked
+        anything.
+
+        `cancel_token` (2026-07-11, same round: "Please provide a link
+        without login") is the plaintext of a token FRESHLY MINTED by the
+        caller (my_settings_email), separate from `token` above -- see
+        User.pending_email_cancel_token_hash's own docstring for why the
+        confirm token can't double as this one. Builds the current
+        address's own no-login `/my/cancel-email-change/<token>` link,
+        replacing the old `/my/settings` link that needed a session."""
         site = self._site_label()
         confirm_url = f"{self.settings.base_url}/my/confirm-email/{token}"
+        cancel_url = f"{self.settings.base_url}/my/cancel-email-change/{cancel_token}"
         send_mail(
             self.settings, new_email, f"Confirm your new email for your {site} account",
-            f"You requested to change the login email on your {site} booking account from "
-            f"{user.email} to this address.\n\nClick below to confirm:\n\n{confirm_url}\n\n"
-            f"This link expires in {CONFIRM_TOKEN_TTL_HOURS} hours. Once confirmed, this address "
+            f"Your {site} login is changing from {user.email} to {new_email}.\n\n"
+            f"Click below to confirm:\n\n{confirm_url}\n\n"
+            f"This link expires in {CONFIRM_TOKEN_TTL_HOURS} hours. Once confirmed, {new_email} "
             f"becomes your login email and {user.email} will no longer have access to this "
-            "account.\n\nIf you didn't request this, you can safely ignore this email -- nothing "
-            "changes unless this link is clicked.",
+            "account.\n\nIf you're not expecting this, you can safely ignore this email -- "
+            "nothing changes unless this link is clicked.",
         )
         send_mail(
             self.settings, user.email, f"Email change requested for your {site} account",
-            f"A request was made to change the login email on your {site} booking account from "
-            f"this address to {new_email}.\n\nIf you made this request, no action is needed here "
-            f"-- once {new_email} confirms via its own emailed link, this address will no longer "
-            "have access to the account.\n\nIf you didn't request this, log in and cancel the "
-            f"pending change under Account settings ({self.settings.base_url}/my/settings), or "
-            "contact us.",
+            f"Your {site} login is changing from {user.email} to {new_email}.\n\n"
+            "If you're OK with this, no action is needed here "
+            f"-- once {new_email} confirms via its own emailed link, {user.email} will no longer "
+            f"have access to the account.\n\nIf you're NOT OK with this, cancel it here (no login "
+            f"needed): {cancel_url}",
         )
 
     def _send_email_change_confirmed_emails(self, old_email: str, new_email: str) -> None:
@@ -2586,9 +2788,17 @@ class App:
         # pending-change branch, which has no error slot of its own.
         email_err_html = f'<p class="err">{esc(email_error)}</p>' if email_error else ""
         if user.pending_email:
+            # 2026-07-11, the operator (screenshot of this exact card): "Please use
+            # same font-size for both text lines above the button" -- the
+            # second line used to be class="hint" (smaller, grey -- see
+            # templates.py's .hint rule), which read as visually secondary
+            # to the first even though both are equally important status
+            # text here (not a hint/aside the way e.g. the "We'll email a
+            # confirmation link..." line in the OTHER branch below genuinely
+            # is). Plain <p>, same as the first line, for both now.
             email_body = f"""{email_err_html}<div class="card">
               <p>Email change pending: <b>{esc(user.email)}</b> &rarr; <b>{esc(user.pending_email)}</b></p>
-              <p class="hint">Check <b>{esc(user.pending_email)}</b> for a confirmation link
+              <p>Check <b>{esc(user.pending_email)}</b> for a confirmation link
                 (expires {CONFIRM_TOKEN_TTL_HOURS}h after it was sent).</p>
               <form method="post" action="/my/settings/email/cancel">
                 <div class="submit-row"><button type="submit">Cancel this change</button></div>
@@ -2691,8 +2901,12 @@ class App:
             log.warning("rate limit blocked: email change for user %s", user.user_id)
             return self._my_settings_page(environ, user, email_error="Too many attempts -- try again later.")
         token = new_token()
-        self.store.set_pending_email(user.user_id, new_email, hash_token(token), now_iso())
-        self._send_email_change_emails(user, new_email, token)
+        cancel_token = new_token()
+        self.store.set_pending_email(
+            user.user_id, new_email, hash_token(token), now_iso(),
+            cancel_token_hash=hash_token(cancel_token),
+        )
+        self._send_email_change_emails(user, new_email, token, cancel_token)
         return "302 Found", [("Location", "/my/settings")], ""
 
     def my_settings_email_cancel(self, method: str, environ):
@@ -2712,11 +2926,20 @@ class App:
         change (see my_settings_email() above) -- same shape and same
         three-outcome ordering as my_confirm(): expired / superseded-by-
         a-newer-request / generic invalid (see that method's own
-        docstring for why this order and wording). Deliberately does NOT
-        touch login/session state or password -- purely swaps which
-        email an account uses; can be confirmed from a completely
-        different browser/session than the one that requested it (e.g.
-        opening the new inbox on a different device)."""
+        docstring for why this order and wording). Never touches the
+        password -- purely swaps which email an account uses; can be
+        confirmed from a completely different browser/session than the
+        one that requested it (e.g. opening the new inbox on a different
+        device).
+
+        2026-07-07, the operator: "Logout user before email is changed (so with
+        its old email). Then redirect the user back to login page /my
+        with the link please." -- every session for this account (on
+        every device/browser, including whichever one is reading this
+        very "Email confirmed" page) is invalidated on a successful POST,
+        so the next thing anyone does with this account is log in fresh
+        under the NEW email -- no stale session left holding the old
+        identity. See _invalidate_all_sessions_for_user()."""
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
@@ -2743,17 +2966,79 @@ class App:
             if updated is None:
                 body = '<p>This link is invalid or has already been used.</p>'
                 return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+            # the operator: "Logout user before email is changed ... redirect the
+            # user back to login page /my" -- kills every session for this
+            # account (this browser included), so the link below has to be
+            # a fresh login, not a still-logged-in settings page.
+            _invalidate_all_sessions_for_user(user.user_id)
             self._send_email_change_confirmed_emails(old_email, new_email)
             body = (f'<p>Your login email is now <b>{esc(new_email)}</b>.</p>'
-                    '<p><a href="/my/settings">Back to account settings</a></p>')
+                    '<p>Please <a href="/my">log in</a> again with your new email.</p>')
             return "200 OK", [("Content-Type", "text/html")], page("Email confirmed", body)
 
-        body = (f'<p>Confirm changing your login email from <b>{esc(user.email)}</b> to '
+        # 2026-07-11, the operator (screenshot of this exact page): "3x Confirm is
+        # 1x too much. Please place the sentance within the box that
+        # surrounds the 'Confirm change' button and use the same font
+        # size as in the button. When you do, please remove the Confirm
+        # and simply ask: 'Change ... ?' instead" -- the page title
+        # ("Confirm email change") and the button ("Confirm change") each
+        # already say it once; the sentence no longer needs to say it a
+        # third time. Moved inside the same <form class="card"> the button
+        # lives in (a plain, unclassed <p> -- same 1em as the button, not
+        # a smaller/hint-styled aside), and reworded to state the change
+        # as a plain question instead of re-confirming it.
+        body = ('<form method="post" class="card">'
+                f'<p>Change your login email from <b>{esc(user.email)}</b> to '
                 f'<b>{esc(new_email)}</b>?</p>'
-                '<form method="post" class="card">'
-                '<div class="submit-row"><button type="submit">Confirm change</button></div>'
+                '<div class="submit-row"><button type="submit">Confirm change</button>'
+                '<a href="/" class="link-button">Never mind</a></div>'
                 '</form>')
         return "200 OK", [("Content-Type", "text/html")], page("Confirm email change", body)
+
+    def my_cancel_email_change(self, method: str, token: str, environ):
+        """No-login "cancel this pending email change" landing page,
+        linked from the CURRENT address's own notification email (see
+        _send_email_change_emails -- 2026-07-11, the operator: "Please provide a
+        link without login" -- that email's cancel action used to point
+        at /my/settings, which needs a session).
+
+        Gated by pending_email_cancel_token_hash, a token completely
+        separate from the one the NEW address gets to CONFIRM the change
+        (see User.pending_email_cancel_token_hash's own docstring for
+        why) -- so possessing this link can only ever abort the change,
+        never complete it. Same GET-preview/POST-consume shape as
+        guest_cancel()/guest_reinstate(): simply presenting an
+        unguessable link is the same trust model every other magic link
+        in this app already uses -- deliberately not the my_confirm_email()
+        three-way expired/superseded/invalid check above, since there's
+        no separate "superseded" state to distinguish here (a second
+        email-change request mints a whole new cancel token too, and the
+        old one -- like the old confirm token -- simply stops matching
+        anything, same as any other invalid link)."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
+        user = self.store.find_user_by_pending_email_cancel_token_hash(hash_token(token))
+        if user is None or not user.pending_email:
+            body = '<p>This link is invalid or has already been used.</p>'
+            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+        pending_email = user.pending_email
+        if method == "POST":
+            self.store.clear_pending_email(user.user_id)
+            body = (f'<p>The pending change to <b>{esc(pending_email)}</b> has been canceled. '
+                    f'Your login email is still <b>{esc(user.email)}</b>.</p>')
+            return "200 OK", [("Content-Type", "text/html")], page("Change canceled", body)
+        # Same 2026-07-11 fix as my_confirm_email()'s own page -- see that
+        # method's comment. Sentence moved inside the button's own box, and
+        # states the pending change as a plain fact instead of restating
+        # "Cancel" a third time (title + this sentence + button).
+        body = ('<form method="post" class="card">'
+                f'<p>Pending login email change: <b>{esc(user.email)}</b> &rarr; '
+                f'<b>{esc(pending_email)}</b></p>'
+                '<div class="submit-row"><button type="submit">Cancel this change</button>'
+                '<a href="/" class="link-button">Never mind</a></div>'
+                '</form>')
+        return "200 OK", [("Content-Type", "text/html")], page("Cancel email change", body)
 
     # -- /admin ---------------------------------------------------------------
 
@@ -2778,6 +3063,11 @@ class App:
                 # the watchdog (app/watchdog.py).
                 log.warning("rate limit blocked: admin login from %s", _client_ip(environ))
             elif verify_admin_password(password, self.settings.admin_password_hash):
+                # 2026-07-11: same fix as my()'s own admin/guest branches --
+                # a successful login shouldn't cost anything against this
+                # budget, only a wrong password should (see that method's
+                # own comment for the full incident this closes).
+                login_limiter.reset(key)
                 sid = _new_session({"kind": "admin"})
                 return "302 Found", [("Location", "/admin"), ("Set-Cookie", _session_cookie_header(sid))], ""
             else:
@@ -2786,10 +3076,12 @@ class App:
         login_label = "Log in"
         body = f"""{err_html}<form method="post" class="card">
           <label>Admin password <input class="big-input" name="password" type="password" required></label>
-          <div class="submit-row"><button type="submit" id="admin-login-btn">{esc(login_label)}</button></div>
+          <div class="submit-row"><button type="submit" id="admin-login-btn"{
+              f' data-lockout-btn data-lockout-seconds="{int(lockout_seconds)}"' if lockout_seconds else ""
+            }>{esc(login_label)}</button></div>
         </form>"""
         if lockout_seconds:
-            body += _lockout_countdown_script(lockout_seconds, "admin-login-btn", login_label)
+            body += _LOCKOUT_COUNTDOWN_SCRIPT
         return "200 OK", [("Content-Type", "text/html")], page("Admin login", body)
 
     def admin_overview(self, method: str, environ):
@@ -2978,7 +3270,7 @@ class App:
             rows.append(
                 f"<tr><td>{esc(r.status)}</td><td>{esc(r.course_shortname)}</td>"
                 f"<td>{esc(r.occurrence_date)}</td>{name_cell}{email_cell}"
-                f"<td>{esc(r.registered_at)}</td><td>{esc(times_cell)}</td>"
+                f"<td>{esc(format_display_timestamp(r.registered_at))}</td><td>{esc(times_cell)}</td>"
                 f"<td>{esc(party_cell)}</td>"
                 f"<td>{actions}</td></tr>"
             )
@@ -3154,6 +3446,17 @@ class App:
                     )
             return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
+        # 2026-07-11, the operator (screenshot of this exact page): "please add a
+        # 'Never mind' button also here that brings you back to the
+        # homepage! Check all other pages that you can reach with a direct
+        # link to have not just one submit button as well!" -- this is a
+        # standalone, no-login page (unlike the /my and /admin popup
+        # dialogs, which already have their own JS "Never mind" close
+        # button), so its escape hatch is a plain link back to "/" rather
+        # than a dialog-close. Same audit applied to guest_cancel(),
+        # guest_reinstate(), host_reinstate(), my_confirm_email(), and
+        # my_cancel_email_change() -- every other single-submit-button
+        # direct-link page in the app.
         body = (
             f"<p>Cancel <b>{esc(user.name if user else '(erased)')}</b> "
             f"({esc(user.email if user else '(erased)')})'s booking?</p>"
@@ -3161,7 +3464,8 @@ class App:
             + """<form method="post" class="card">
           <label>Reason <span class="opt">(optional)</span>
             <textarea name="message" rows="3" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Confirm cancellation</button></div>
+          <div class="submit-row"><button type="submit">Confirm cancellation</button>
+            <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
@@ -3213,7 +3517,8 @@ class App:
             + """<form method="post" class="card">
           <label>Optional message to them <span class="opt">(optional)</span>
             <textarea name="message" rows="3" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Confirm reinstatement</button></div>
+          <div class="submit-row"><button type="submit">Confirm reinstatement</button>
+            <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Reinstate booking", body)

@@ -11,18 +11,33 @@ production one) must never recognize each other's events as "our own".
 """
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from .caldav_client import CalDAVClient
+from .caldav_client import CalDAVClient, CalDAVConflictError
 from .cancellation import html_to_text
 from .config import Course, Settings
 from .ics import VEvent
 from .storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED,
-    Registration, Store, User,
+    Registration, Store, User, format_display_timestamp,
 )
+
+log = logging.getLogger("my_booking.calendar_sync")
+
+# 2026-07-07, the operator (a real production 500 on /my/confirm, root-caused via
+# journalctl to "PUT ... -> HTTP 412 ... a newer version of the appointment
+# already exists"): two near-simultaneous requests touching the SAME
+# occurrence (e.g. two guests booking/confirming for the same course+date
+# within a few seconds of each other) can each read this event's current
+# ETag, then race to PUT/DELETE it -- whichever loses gets a 412. A plain
+# retry a few seconds later succeeded on its own in that incident, i.e.
+# genuinely transient, so this many attempts (re-reading a fresh ETag each
+# time) is cheap insurance against exactly that, not a sign of a deeper
+# problem if it occasionally takes 2.
+_SYNC_CONFLICT_MAX_ATTEMPTS = 3
 
 
 def _self_or_guest(r: Registration, users_by_id: dict[str, User]) -> str:
@@ -111,16 +126,20 @@ def sync_occurrence(
     canceled = [r for r in regs if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST)]
     uid = event_uid(settings, course.shortname, occurrence_date)
 
-    existing = {
-        u: (ics, etag)
-        for u, ics, etag in client.query_events(
+    def current_etag() -> str | None:
+        """(Re-)reads this occurrence's own event's CURRENT ETag, fresh --
+        called once up front, and again by the retry loop below each time
+        a 412 shows the etag we had was already stale."""
+        for u, _ics, etag in client.query_events(
             calendar_href,
             datetime.combine(occurrence_date, datetime.min.time(), tzinfo=tz),
             datetime.combine(occurrence_date + timedelta(days=1), datetime.min.time(), tzinfo=tz),
-        )
-        if u == uid
-    }
-    etag = existing[uid][1] if uid in existing else None
+        ):
+            if u == uid:
+                return etag
+        return None
+
+    etag = current_etag()
 
     if not active:
         # No confirmed registrants -- delete the event even if there's a
@@ -128,8 +147,21 @@ def sync_occurrence(
         # is actually happening", not "someone is interested in it", so a
         # fully-waitlisted occurrence (0 confirmed) has no calendar entry
         # at all until/unless someone gets promoted into a confirmed spot.
-        if uid in existing:
-            client.delete_event(calendar_href, uid, etag)
+        if etag is not None:
+            for attempt in range(1, _SYNC_CONFLICT_MAX_ATTEMPTS + 1):
+                try:
+                    client.delete_event(calendar_href, uid, etag)
+                    break
+                except CalDAVConflictError:
+                    if attempt == _SYNC_CONFLICT_MAX_ATTEMPTS:
+                        raise
+                    log.warning(
+                        "stale ETag deleting calendar event %s (attempt %d/%d) -- retrying with a fresh one",
+                        uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS,
+                    )
+                    etag = current_etag()
+                    if etag is None:
+                        break  # someone else's concurrent change already removed it -- nothing left to do
         return
 
     start, end = occurrence_start_end(course, occurrence_date, tz)
@@ -154,14 +186,14 @@ def sync_occurrence(
             name, email = _name_email(r, users_by_id)
             lines.append(
                 f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
-                f"registered {r.registered_at} | "
+                f"registered {format_display_timestamp(r.registered_at)} | "
                 f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
             )
         for r in waiting:
             name, email = _name_email(r, users_by_id)
             lines.append(
                 f"- waitlisted #{waiting.index(r) + 1} | {name} | {email} | "
-                f"{_self_or_guest(r, users_by_id)} | registered {r.registered_at} | "
+                f"{_self_or_guest(r, users_by_id)} | registered {format_display_timestamp(r.registered_at)} | "
                 f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
             )
     if canceled:
@@ -178,7 +210,7 @@ def sync_occurrence(
             name, email = _name_email(r, users_by_id)
             lines.append(
                 f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
-                f"canceled {r.canceled_at} by {r.canceled_by} | "
+                f"canceled {format_display_timestamp(r.canceled_at)} by {r.canceled_by} | "
                 f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
             )
     summary = f"{course.title} ({len(active)}/{course.capacity}"
@@ -190,8 +222,20 @@ def sync_occurrence(
         location=course.location,
         start=start,
         end=end,
+        alarms_minutes_before=settings.trainer_calendar_reminder_minutes,
     )
-    client.put_event(calendar_href, uid, event.to_ics(), etag=etag)
+    for attempt in range(1, _SYNC_CONFLICT_MAX_ATTEMPTS + 1):
+        try:
+            client.put_event(calendar_href, uid, event.to_ics(), etag=etag)
+            return
+        except CalDAVConflictError:
+            if attempt == _SYNC_CONFLICT_MAX_ATTEMPTS:
+                raise
+            log.warning(
+                "stale ETag updating calendar event %s (attempt %d/%d) -- retrying with a fresh one",
+                uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS,
+            )
+            etag = current_etag()
 
 
 # -- Emailed guest invite/cancel attachments (2026-07-09, the operator: "Can you
@@ -238,6 +282,7 @@ def guest_invite_ics(settings: Settings, course: Course, occurrence_date: date) 
         start=start,
         end=end,
         method="PUBLISH",
+        alarms_minutes_before=settings.guest_calendar_reminder_minutes,
     )
     return f"{course.shortname}-{occurrence_date.isoformat()}.ics", event.to_ics()
 

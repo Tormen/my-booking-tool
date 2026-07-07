@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timezone
 
-from app.caldav_client import CalDAVClient, CalDAVError, Response
+from app.caldav_client import CalDAVClient, CalDAVConflictError, CalDAVError, Response
 
 
 class FakeTransport:
@@ -105,10 +105,30 @@ class CalDAVClientTest(unittest.TestCase):
 
     def test_put_event_error_status_raises(self):
         self.transport.script(
-            "PUT", "https://dav.mailbox.org/caldav/YogaBookings/", Response(412, {}, "conflict")
+            "PUT", "https://dav.mailbox.org/caldav/YogaBookings/", Response(500, {}, "server error")
         )
         with self.assertRaises(CalDAVError):
             self.client.put_event("/caldav/YogaBookings/", "some-uid", "ICS...", etag='"old"')
+
+    def test_put_event_412_raises_the_specific_conflict_subclass(self):
+        # 2026-07-07, the operator (a real production 500 on /my/confirm,
+        # root-caused to a stale-ETag CalDAV 412): calendar_sync.
+        # sync_occurrence's retry loop needs to catch THIS conflict case
+        # specifically (and re-fetch a fresh ETag), not every CalDAVError
+        # indiscriminately -- a genuine, non-transient failure should
+        # still propagate on the first attempt.
+        self.transport.script(
+            "PUT", "https://dav.mailbox.org/caldav/YogaBookings/", Response(412, {}, "conflict")
+        )
+        with self.assertRaises(CalDAVConflictError):
+            self.client.put_event("/caldav/YogaBookings/", "some-uid", "ICS...", etag='"old"')
+
+    def test_delete_event_412_raises_the_specific_conflict_subclass(self):
+        self.transport.script(
+            "DELETE", "https://dav.mailbox.org/caldav/YogaBookings/", Response(412, {}, "conflict")
+        )
+        with self.assertRaises(CalDAVConflictError):
+            self.client.delete_event("/caldav/YogaBookings/", "some-uid", etag='"old"')
 
     def test_delete_event_tolerates_404(self):
         self.transport.script(

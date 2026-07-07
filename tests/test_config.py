@@ -124,6 +124,54 @@ capacity = 10
         self.assertEqual([c.shortname for c in settings.courses], ["tie-b", "tie-a", "tie-c"])
 
 
+class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
+    """2026-07-07, the operator: "make the reminders (list) a setting. But default
+    to NO reminders" (trainer's own CalDAV event) / "invites to course
+    participants should have reminder 1h before" (guest_reminder_minutes)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.caldav_password_file = self.dir / "caldav_password"
+        self.smtp_password_file = self.dir / "smtp_password"
+        self.admin_password_hash_file = self.dir / "admin_password_hash"
+        self.erasure_pepper_file = self.dir / "erasure_pepper"
+        for p in (self.caldav_password_file, self.smtp_password_file, self.admin_password_hash_file):
+            p.write_text("secret")
+        self.erasure_pepper_file.write_text("00" * 32)
+
+    def _write(self, extra_calendar_lines: str = "") -> Path:
+        toml_path = self.dir / "settings.toml"
+        header = MINIMAL_HEADER.format(
+            caldav_password_file=self.caldav_password_file,
+            smtp_password_file=self.smtp_password_file,
+            admin_password_hash_file=self.admin_password_hash_file,
+            erasure_pepper_file=self.erasure_pepper_file,
+        )
+        # extra_calendar_lines gets appended right after the [calendar]
+        # section's own conflict_calendars line, still inside that table.
+        header = header.replace(
+            'conflict_calendars = ["Bookings"]',
+            'conflict_calendars = ["Bookings"]\n' + extra_calendar_lines,
+        )
+        toml_path.write_text(header)
+        return toml_path
+
+    def test_defaults_are_no_trainer_reminder_and_one_hour_guest_reminder(self):
+        settings = load_settings(self._write())
+        self.assertEqual(settings.trainer_calendar_reminder_minutes, ())
+        self.assertEqual(settings.guest_calendar_reminder_minutes, (60,))
+
+    def test_explicit_values_are_read_from_the_calendar_section(self):
+        toml_path = self._write(
+            "trainer_reminder_minutes = [30]\nguest_reminder_minutes = [15, 60]\n"
+        )
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.trainer_calendar_reminder_minutes, (30,))
+        self.assertEqual(settings.guest_calendar_reminder_minutes, (15, 60))
+
+
 class WeekdayTimeRangeLabelTest(unittest.TestCase):
     """Course.weekday_time_range_label() -- 2026-07-10, the operator: "add the
     weekday to the TIME column (e.g. SAT 10h45-12h45)" on /my's bookings

@@ -46,7 +46,15 @@ class VEvent:
     location: str
     start: datetime
     end: datetime
-    alarms_minutes_before: tuple[int, ...] = (24 * 60, 60)
+    # 2026-07-07, the operator: "make the reminders (list) a setting. But default
+    # to NO reminders" -- was (24*60, 60) (1 day + 1h before) for every
+    # caller by default; every real call site now passes its own explicit
+    # value from Settings (see app/config.py's
+    # trainer_calendar_reminder_minutes/guest_calendar_reminder_minutes),
+    # so this bare-class default only matters for a VEvent built without
+    # going through Settings at all (e.g. ad-hoc/test use) -- "no reminder"
+    # is the safer thing to default to in that case too.
+    alarms_minutes_before: tuple[int, ...] = ()
     # Added 2026-07-09 for the emailed guest invite/cancel attachments (see
     # app/calendar_sync.py::guest_invite_ics/guest_cancel_ics) -- all three
     # default to "off"/0/None so the CalDAV-stored event this class was

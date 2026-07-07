@@ -1,5 +1,6 @@
 import os
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from app.storage import (
     STATUS_WAITLISTED,
     Store,
     _LockedCsv,
+    format_display_timestamp,
 )
 
 
@@ -24,6 +26,98 @@ class StoreTestBase(unittest.TestCase):
 
     def tearDown(self):
         self._tmp.cleanup()
+
+
+class GitAutoCommitTest(StoreTestBase):
+    """2026-07-07, the operator: "after any change to any of the CSV files: CUD
+    ... please directly do a git commit ... Commit message should state
+    what changed without revealing personal data ... as a safety net in
+    case of ANY bugs." Every Store write goes through _LockedCsv, which is
+    where this is wired in (storage.py::_git_commit_data_file) -- so any
+    one mutating call is enough to exercise it.
+
+    Deliberately does NOT auto-`git init` -- same "opt in via `my-bt setup
+    -i` only" design as the existing hourly app/git_snapshot.py -- so every
+    test here except test_no_repo_yet_is_a_silent_noop starts by git-init'ing
+    the tmp data dir itself, the same one-time step setup -i performs on a
+    real deployment."""
+
+    def _init_repo(self) -> None:
+        subprocess.run(["git", "init", "-q"], cwd=self._tmp.name, check=True, capture_output=True)
+
+    def _log(self) -> list[str]:
+        out = subprocess.run(
+            ["git", "log", "--format=%s"], cwd=self._tmp.name, capture_output=True, text=True, check=True,
+        )
+        return out.stdout.splitlines()
+
+    def test_no_repo_yet_is_a_silent_noop(self):
+        # No `my-bt setup -i` run yet for this data dir -- a write must
+        # NOT silently turn it into a git repo (matches
+        # app/git_snapshot.py's own "not_a_repo" convention, which this is
+        # a per-write companion to).
+        self.assertFalse((Path(self._tmp.name) / ".git").exists())
+        self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.assertFalse((Path(self._tmp.name) / ".git").exists())
+
+    def test_write_creates_a_commit_with_a_descriptive_message(self):
+        self._init_repo()
+        self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.assertEqual(self._log(), ["create user"])
+
+    def test_commit_message_never_contains_the_email_or_name(self):
+        # The whole point: an admin/attacker with read access to `git log`
+        # must not be able to harvest guest emails/names from commit
+        # messages -- only from the (equally access-controlled) CSV
+        # content itself, same exposure as today.
+        self._init_repo()
+        self.store.upsert_user_for_booking("secret-guest@example.org", "Secret Name")
+        log_text = "\n".join(self._log())
+        self.assertNotIn("secret-guest@example.org", log_text)
+        self.assertNotIn("Secret Name", log_text)
+
+    def test_each_mutation_adds_its_own_commit(self):
+        self._init_repo()
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.store.set_name(user.user_id, "Renamed")
+        self.assertEqual(self._log(), ["update user name", "create user"])
+
+    def test_a_no_op_write_of_identical_content_adds_no_commit(self):
+        self._init_repo()
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        commits_after_create = len(self._log())
+        # Re-touching the exact same name is byte-identical on disk --
+        # nothing staged, so no new commit should appear.
+        self.store.set_name(user.user_id, "Guest")
+        self.assertEqual(len(self._log()), commits_after_create)
+
+    def test_registrations_csv_is_committed_separately_from_users_csv(self):
+        self._init_repo()
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.store.add_registration("yoga-class-1", "2026-08-01", user.user_id, "tok-hash")
+        out = subprocess.run(
+            ["git", "show", "--stat", "--format=", "HEAD"],
+            cwd=self._tmp.name, capture_output=True, text=True, check=True,
+        )
+        self.assertIn("registrations.csv", out.stdout)
+        self.assertNotIn("users.csv", out.stdout)
+
+    def test_archived_csvs_reuse_the_same_top_level_repo(self):
+        # archived/*.csv (see Store.erase_user) live one directory below
+        # users.csv/registrations.csv -- must NOT end up as a separate,
+        # nested git repo; a second .git should never appear under
+        # archived/.
+        self._init_repo()
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        from app.security import hash_email_for_erasure
+        hashed = hash_email_for_erasure("guest@example.org", b"\x00" * 32)
+        self.store.erase_user(user.user_id, hashed)
+        self.assertFalse((Path(self._tmp.name) / "archived" / ".git").exists())
+        out = subprocess.run(
+            ["git", "show", "--stat", "--format=", "HEAD"],
+            cwd=self._tmp.name, capture_output=True, text=True, check=True,
+        )
+        self.assertIn("archived", out.stdout)
 
 
 class UserTest(StoreTestBase):
@@ -132,6 +226,59 @@ class PendingEmailTest(StoreTestBase):
     def test_find_by_pending_email_token_blank_hash_never_matches(self):
         self.store.upsert_user_for_booking("a@b.com", "Alice")
         self.assertIsNone(self.store.find_user_by_pending_email_token_hash(""))
+
+    def test_cancel_token_is_separate_from_the_confirm_token(self):
+        # 2026-07-11, the operator: "Please provide a link without login" -- the
+        # cancel token must be its OWN secret, not a reuse of the confirm
+        # token, so possessing one can never be used to perform the other
+        # action (confirm vs. abort).
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(
+            u.user_id, "new@b.com", "confirm-hash", "2026-07-11T00:00:00+00:00",
+            cancel_token_hash="cancel-hash",
+        )
+        by_confirm = self.store.find_user_by_pending_email_token_hash("confirm-hash")
+        by_cancel = self.store.find_user_by_pending_email_cancel_token_hash("cancel-hash")
+        self.assertEqual(by_confirm.user_id, u.user_id)
+        self.assertEqual(by_cancel.user_id, u.user_id)
+        # Neither token satisfies the OTHER lookup.
+        self.assertIsNone(self.store.find_user_by_pending_email_cancel_token_hash("confirm-hash"))
+        self.assertIsNone(self.store.find_user_by_pending_email_token_hash("cancel-hash"))
+
+    def test_omitting_cancel_token_hash_leaves_any_existing_one_untouched(self):
+        # Blank cancel_token_hash (the default) is a no-op on that field --
+        # existing callers/tests that don't care about the cancel link
+        # shouldn't have their cancel token silently wiped.
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(
+            u.user_id, "new@b.com", "confirm-hash-1", "2026-07-11T00:00:00+00:00",
+            cancel_token_hash="cancel-hash-1",
+        )
+        self.store.set_pending_email(u.user_id, "second@b.com", "confirm-hash-2", "2026-07-11T01:00:00+00:00")
+        still_there = self.store.find_user_by_pending_email_cancel_token_hash("cancel-hash-1")
+        self.assertEqual(still_there.pending_email, "second@b.com")
+
+    def test_clear_pending_email_also_clears_the_cancel_token(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(
+            u.user_id, "new@b.com", "confirm-hash", "2026-07-11T00:00:00+00:00",
+            cancel_token_hash="cancel-hash",
+        )
+        self.store.clear_pending_email(u.user_id)
+        self.assertIsNone(self.store.find_user_by_pending_email_cancel_token_hash("cancel-hash"))
+
+    def test_apply_pending_email_also_clears_the_cancel_token(self):
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.store.set_pending_email(
+            u.user_id, "new@b.com", "confirm-hash", "2026-07-11T00:00:00+00:00",
+            cancel_token_hash="cancel-hash",
+        )
+        self.store.apply_pending_email(u.user_id)
+        self.assertIsNone(self.store.find_user_by_pending_email_cancel_token_hash("cancel-hash"))
+
+    def test_find_by_pending_email_cancel_token_blank_hash_never_matches(self):
+        self.store.upsert_user_for_booking("a@b.com", "Alice")
+        self.assertIsNone(self.store.find_user_by_pending_email_cancel_token_hash(""))
 
 
 class RegistrationTest(StoreTestBase):
@@ -357,6 +504,56 @@ class HasActiveRegistrationTest(StoreTestBase):
         u2 = self.store.upsert_user_for_booking("b@x.com", "B")
         self.store.add_registration_checking_capacity("c", "2026-01-01", u1.user_id, hash_token(new_token()), capacity=5)
         self.assertFalse(self.store.has_active_registration("c", "2026-01-01", u2.user_id))
+
+
+class HasPendingRegistrationTest(StoreTestBase):
+    """2026-07-11, the operator: "silent re-registration for unconfirmed accounts"
+    -- Store.has_pending_registration() is the STATUS_PENDING_CONFIRMATION
+    twin of has_active_registration() above, used by app.webapp.App.book()
+    to stop a retried booking attempt (before the guest ever clicks their
+    confirm link) from inserting a second pending row for the exact same
+    course+date+user -- see the method's own docstring for the
+    multi-row-promoted-at-once bug this closes."""
+
+    def test_false_when_user_has_no_registration_at_all(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.assertFalse(self.store.has_pending_registration("c", "2026-01-01", u.user_id))
+
+    def test_true_for_a_pending_confirmation_row(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.store.add_registration("c", "2026-01-01", u.user_id, "", status=STATUS_PENDING_CONFIRMATION)
+        self.assertTrue(self.store.has_pending_registration("c", "2026-01-01", u.user_id))
+
+    def test_false_for_a_confirmed_or_waitlisted_row(self):
+        # The active/pending checks are deliberately disjoint -- once a
+        # pending row is promoted (confirm_pending_registration), it's no
+        # longer "pending" and has_active_registration takes over instead.
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.store.add_registration_checking_capacity("c", "2026-01-01", u.user_id, hash_token(new_token()), capacity=5)
+        self.assertFalse(self.store.has_pending_registration("c", "2026-01-01", u.user_id))
+
+    def test_false_once_the_pending_row_is_promoted(self):
+        # A pending row can only leave STATUS_PENDING_CONFIRMATION by being
+        # promoted (Store.cancel() itself only ever acts on CONFIRMED/
+        # WAITLISTED rows, so there's no direct "cancel a pending row"
+        # path) -- confirm it here via confirm_pending_registration, same
+        # as my_confirm() does.
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        reg = self.store.add_registration("c", "2026-01-01", u.user_id, "", status=STATUS_PENDING_CONFIRMATION)
+        self.store.confirm_pending_registration(reg.registration_id, capacity=5, cancel_token_hash=hash_token(new_token()))
+        self.assertFalse(self.store.has_pending_registration("c", "2026-01-01", u.user_id))
+
+    def test_false_for_a_different_occurrence_date_or_course(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.store.add_registration("c", "2026-01-01", u.user_id, "", status=STATUS_PENDING_CONFIRMATION)
+        self.assertFalse(self.store.has_pending_registration("c", "2026-01-02", u.user_id))
+        self.assertFalse(self.store.has_pending_registration("other-course", "2026-01-01", u.user_id))
+
+    def test_false_for_a_different_user_at_the_same_slot(self):
+        u1 = self.store.upsert_user_for_booking("a@x.com", "A")
+        u2 = self.store.upsert_user_for_booking("b@x.com", "B")
+        self.store.add_registration("c", "2026-01-01", u1.user_id, "", status=STATUS_PENDING_CONFIRMATION)
+        self.assertFalse(self.store.has_pending_registration("c", "2026-01-01", u2.user_id))
 
 
 class ConfirmPendingRegistrationTest(StoreTestBase):
@@ -736,6 +933,23 @@ class CsvInjectionTest(StoreTestBase):
         self.store.upsert_user_for_booking("a@b.com", "=cmd|'/c calc'!A1")
         raw = Path(self.store.users_path).read_text()
         self.assertIn("'=cmd", raw)
+
+
+class FormatDisplayTimestampTest(unittest.TestCase):
+    """2026-07-07, the operator (screenshot of the operator's CalDAV event showing
+    "registered 2026-07-07T00:47:57+00:00"): "please use for TIMESTAMPS
+    wherever you currently have this format ... YYYY-MM-DD_HHMM.SS"."""
+
+    def test_formats_a_now_iso_style_timestamp(self):
+        self.assertEqual(format_display_timestamp("2026-07-07T00:47:57+00:00"), "2026-07-07_0047.57")
+
+    def test_blank_input_stays_blank(self):
+        # canceled_at is "" for any registration that was never canceled --
+        # must not raise or turn into some garbage rendering of "".
+        self.assertEqual(format_display_timestamp(""), "")
+
+    def test_unparseable_input_is_returned_unchanged(self):
+        self.assertEqual(format_display_timestamp("not-a-timestamp"), "not-a-timestamp")
 
 
 class LockedCsvReadonlyModeTest(unittest.TestCase):
