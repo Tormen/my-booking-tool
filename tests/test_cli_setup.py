@@ -901,14 +901,18 @@ class InteractiveSetupFinalSummaryTest(unittest.TestCase):
         Path(self.settings_path).write_text("x")
 
     def _run(self, report: dict) -> str:
+        text, _result = self._run_full(report)
+        return text
+
+    def _run_full(self, report: dict) -> tuple[str, tuple[int, int]]:
         lines: list[str] = []
         with patch.object(cli_setup, "build_report", return_value=report):
-            cli_setup.interactive_setup(
+            result = cli_setup.interactive_setup(
                 _raw(), self.settings_path, str(self.home),
                 prompt=FakePrompts(), run=lambda cmd: None, is_root=lambda: False,
                 print_fn=lines.append,
             )
-        return "\n".join(lines)
+        return "\n".join(lines), result
 
     def test_all_clear_says_all_checks_pass(self):
         text = self._run({"group": [("g", "ok", "fine")]})
@@ -924,6 +928,22 @@ class InteractiveSetupFinalSummaryTest(unittest.TestCase):
     def test_warnings_only_no_fails_still_flagged(self):
         text = self._run({"group": [("g", "warn", "not in group")]})
         self.assertIn("Done -- 0 problem(s), 1 warning(s) still need attention", text)
+
+    def test_returns_fails_and_warns_so_the_caller_can_exit_non_zero(self):
+        # Regression coverage for 2026-07-10: `my-bt setup -i && my-bt
+        # status` used to run `status` unconditionally, because
+        # interactive_setup() (unlike print_report()) never returned
+        # anything at all, so scripts/my-bt's cmd_setup had nothing to
+        # exit non-zero on for the -i branch specifically.
+        _text, result = self._run_full({
+            "secrets": [("secret: x", "fail", "missing")],
+            "group": [("g", "warn", "not in group")],
+        })
+        self.assertEqual(result, (1, 1))
+
+    def test_returns_zero_zero_when_all_clear(self):
+        _text, result = self._run_full({"group": [("g", "ok", "fine")]})
+        self.assertEqual(result, (0, 0))
 
 
 class AddNginxAccessLogSettingTest(unittest.TestCase):

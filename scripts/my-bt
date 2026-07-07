@@ -665,12 +665,15 @@ def cmd_setup(args) -> None:
     just always the full static list. Pass --interactive/-i to be walked
     through them one at a time and have my-bt perform what it safely can
     (most of it needs root, including regenerating the live static
-    privacy page if [site].static_site_dir is configured). Plain (non-
-    interactive) `setup` exits non-zero if any check comes back WARN or
-    FAIL -- same policy as `status` (2026-07-10, the operator: wants `setup`
-    scriptable/cron-checkable the same way `status` already is) -- so
-    `my-bt setup && <next step>` is a safe gate, not just a human-readable
-    report."""
+    privacy page if [site].static_site_dir is configured). Both plain and
+    `-i` exit non-zero if any check comes back WARN or FAIL (reflecting
+    the CURRENT state after whatever `-i` just fixed, not the state it
+    started at) -- same policy as `status` (2026-07-10, the operator: wants
+    `setup` scriptable/cron-checkable the same way `status` already is;
+    caught in practice the same day: `my-bt setup -i && my-bt status` ran
+    `status` unconditionally, because only the plain branch exited
+    non-zero at first) -- so `my-bt setup [-i] && <next step>` is a safe
+    gate either way, not just a human-readable report."""
     from app import cli_setup
 
     raw = app_config.load_raw_toml(args.settings)
@@ -678,11 +681,11 @@ def cmd_setup(args) -> None:
         print(f"error: {args.settings} not found -- install the package first", file=sys.stderr)
         sys.exit(1)
     if args.interactive:
-        cli_setup.interactive_setup(raw, args.settings, HOME, data_dir=args.data_dir)
+        fails, warns = cli_setup.interactive_setup(raw, args.settings, HOME, data_dir=args.data_dir)
     else:
         fails, warns = cli_setup.print_report(raw, args.settings, HOME, data_dir=args.data_dir)
-        if fails or warns:
-            sys.exit(1)
+    if fails or warns:
+        sys.exit(1)
 
 
 def build_parser() -> argparse.ArgumentParser:

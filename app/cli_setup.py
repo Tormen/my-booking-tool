@@ -236,7 +236,17 @@ def interactive_setup(
     is_root: Callable[[], bool] = _default_is_root,
     print_fn: Callable[[str], None] = print,
     data_dir: str = "/var/lib/my-booking",
-) -> None:
+) -> tuple[int, int]:
+    """Runs the interactive walkthrough and returns (fails, warns) -- the
+    same CURRENT-state counts (after whatever this walkthrough just fixed)
+    the closing "Done -- ..." line already prints -- so `cmd_setup` in
+    scripts/my-bt can exit non-zero when either is nonzero, exactly like
+    plain `setup` and `status` already do. Before this, `my-bt setup -i`
+    always exited 0 regardless of what its own closing line said, so
+    `my-bt setup -i && <next step>` silently ran `<next step>` even when
+    the walkthrough's own summary said "N problem(s) ... still need
+    attention" (hit in practice 2026-07-10: `my-bt setup -i && my-bt
+    status` ran status unconditionally)."""
     if run is None:
         run = lambda cmd: _run_tolerant(cmd, print_fn)  # noqa: E731
 
@@ -658,3 +668,4 @@ def interactive_setup(
                   "or re-run `my-bt status`).")
     else:
         print_fn("\nDone -- all checks pass now. Re-run `my-bt status` any time to re-check everything.")
+    return fails, warns

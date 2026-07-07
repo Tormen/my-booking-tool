@@ -477,8 +477,11 @@ what's actually left. It ends with the same rollup line `status` prints
 (`N problem(s), N warning(s)`, or `all checks passed`) and exits non-zero
 on any WARN or FAIL, same policy as `status` -- so `my-bt setup && <next
 step>` is a safe gate to script/cron against, not just a human-readable
-report. Add `-i`/`--interactive` to be walked through it step by step and
-have `my-bt` perform what it safely can:
+report. `-i`/`--interactive` gets the exact same exit-code behavior
+(reflecting the CURRENT state after whatever `-i` just fixed, not what it
+started at) -- `my-bt setup -i && <next step>` is just as safe to chain
+as the plain form. Add `-i`/`--interactive` to be walked through it step
+by step and have `my-bt` perform what it safely can:
 
 - Missing secrets: prompts and writes them (hidden input for passwords;
   offers to auto-generate `erasure_pepper`; reuses the same hashing as
