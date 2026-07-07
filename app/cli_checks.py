@@ -532,7 +532,28 @@ def _nginx_root_for_host(raw: dict) -> str | None:
     return root_match.group(1).strip() if root_match else None
 
 
-_ACCESS_LOG_RE = re.compile(r"^\s*access_log\s+(\S+)(?:\s+\S+)*\s*;", re.MULTILINE)
+_ACCESS_LOG_RE = re.compile(r"^[ \t]*access_log[ \t]+([^\s;]+)(?:[ \t]+[^\s;]+)*[ \t]*;", re.MULTILINE)
+# Real production bug, 2026-07-10: the previous version used `\s` (which
+# matches newlines too) for every gap AND let the path capture group itself
+# swallow a trailing `;` -- harmless as long as backtracking still found a
+# semicolon on the SAME line, which it always did in this module's own
+# tests (every fixture there has a log format name like "main" between the
+# path and the `;`, so the greedy path match stopped at the space before
+# it). the operator's real nginx-locations.conf has no format name --
+# `access_log /var/log/nginx/booking.example.org.access.log;` with the `;` directly
+# against the path -- so the path group greedily consumed the `;` too, and
+# rather than backtracking, `(?:\s+\S+)*` happily matched on into the NEXT
+# line's `error_log ...;` to find a semicolon to close the pattern with,
+# leaving the detected "path" as .../booking.example.org.access.log; (semicolon and
+# all). Silent for years because nothing ever WROTE this detected value
+# anywhere -- #78 (this same day) added the first code path that actually
+# persists it into settings.toml on accept, which is what turned this from
+# a latent bug into a real corrupted nginx_access_log setting in production
+# ("watchdog: nginx_access_log (.../booking.example.org.access.log;): configured but
+# doesn't exist"). Fixed by confining every gap to `[ \t]` (same line only,
+# same fix root_re/name_re already apply above) and excluding `;` from
+# every captured/skipped token outright, so the path itself can never
+# include one, regardless of what does or doesn't follow it on that line.
 
 
 def _strip_server_blocks(merged: str) -> str:

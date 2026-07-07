@@ -787,6 +787,32 @@ class NginxAccessLogForHostTest(unittest.TestCase):
             log = cli_checks._nginx_access_log_for_host(self._raw())
         self.assertEqual(log, "/var/log/nginx/example.access.log")
 
+    def test_no_log_format_name_does_not_swallow_the_semicolon(self):
+        """Real production bug, 2026-07-10: with no log-format name between
+        the path and the `;` (the operator's real nginx-locations.conf --
+        `access_log /var/log/nginx/booking.example.org.access.log;`), the old regex's
+        greedy `\\S+` path capture swallowed the `;` itself, then matched on
+        into the NEXT line's `error_log ...;` to find a semicolon to close
+        the pattern with -- so the "detected" path came out as
+        '.../access.log;' (semicolon included) instead of backtracking.
+        Silent for years until #78 (this same day) added the first code
+        path that actually WRITES this detected value into settings.toml on
+        accept, which is what turned it into a real corrupted
+        nginx_access_log setting in production."""
+        merged = """
+        server {
+            server_name booking.example.org;
+            access_log /var/log/nginx/booking.example.org.access.log;
+            error_log  /var/log/nginx/booking.example.org.error.log;
+        }
+        """
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            log = cli_checks._nginx_access_log_for_host(
+                {"site": {"base_url": "https://booking.example.org"}})
+        self.assertEqual(log, "/var/log/nginx/booking.example.org.access.log")
+
     def test_falls_back_to_http_level_directive(self):
         merged = """
         access_log /var/log/nginx/access.log combined;
