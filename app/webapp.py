@@ -694,9 +694,65 @@ class App:
         """503, not 200 -- correctly signals "temporarily unavailable" to
         anything automated (monitoring, a bot) hitting a booking link while
         `my-bt maintenance on` is active, without touching any other route's
-        status code."""
-        body = f'<div class="card">{maintenance.message_html(self.settings.admin_email, state.message)}</div>'
+        status code.
+
+        2026-07-10, the operator: "the maintenance page should have a back link or
+        button" -- now that this shows on every guest-facing route (see
+        _maintenance_guard), landing here for someone who followed an old
+        bookmark/email link left them with nowhere to go but the browser's
+        own Back button. Links to the marketing homepage (settings.base_url),
+        same "Back to {site}" wording _my_login_page() uses."""
+        body = (
+            f'<div class="card">{maintenance.message_html(self.settings.admin_email, state.message)}'
+            f'<p><a href="{esc(self.settings.base_url)}">Back to {esc(self._site_label())}</a></p></div>'
+        )
         return "503 Service Unavailable", [("Content-Type", "text/html; charset=utf-8")], page("Maintenance", body)
+
+    def _maintenance_guard(self, environ) -> tuple[str, list, str] | None:
+        """2026-07-10, the operator: "The maintenance banner should be displayed on
+        all pages. EXCEPT if the local excluded IP is recognized... else
+        everything works normally from this IP. But I did a test and I was
+        able to click on login and see the normal login page from an
+        external IP in maintenance mode. This should not be!" -- courses()
+        and book() originally had this check inlined, but ONLY those two
+        (see app/maintenance.py's now-outdated docstring, written the same
+        day: "existing-booking management (/my, /admin, /cancel/,
+        /reinstate/, /host-cancel/, /host-reinstate/) is deliberately left
+        untouched"). That narrower scope is exactly the bug the operator caught
+        via a real external-IP test -- /my's login form worked completely
+        normally for a non-bypass visitor.
+
+        Factored out here and now called from every GUEST-facing route
+        (courses, book, /cancel, /reinstate, and every /my/* endpoint) so
+        there's one single place deciding "does this visitor see the
+        maintenance page", instead of N separate inlined copies that can
+        silently drift apart exactly like this one did.
+
+        Deliberately NOT called from /admin/*, /host-cancel/<id>, or
+        /host-reinstate/<id> -- those are the HOST's own tools (the latter
+        two are unguessable-uuid4 "magic links" only ever emailed to
+        admin_email), and blocking the host's own ability to manage
+        bookings during a maintenance window they themselves declared would
+        be counterproductive, not safer. Also NOT called from
+        my_session_status() -- that's a read-only JSON status check (not a
+        page, and not a booking/management action) that the STATIC
+        homepage's own JS calls to swap its Login/Logout button; returning
+        an HTML maintenance page there would just break that JS's JSON
+        parsing for no real benefit, since nothing it does lets anyone
+        book or manage anything.
+
+        Returns the 503 response tuple to return immediately if this
+        visitor should be blocked, or None if the caller should proceed
+        normally (either maintenance is off, or this IP is the recognized
+        bypass -- see _maintenance_bypass_allowed for that check, which
+        this reuses unchanged)."""
+        state = maintenance.read_state(self.store.data_dir)
+        if state.enabled and not _maintenance_bypass_allowed(
+            _client_ip(environ), self.settings.maintenance_bypass_hostname,
+            self.settings.maintenance_bypass_ip_log,
+        ):
+            return self._maintenance_response(state)
+        return None
 
     # -- /courses --------------------------------------------------------------
 
@@ -711,12 +767,9 @@ class App:
         filter by it; every configured course is bookable via a direct
         /book/<shortname> link already, so hiding one here would just make
         it harder to find, not actually more private."""
-        maintenance_state = maintenance.read_state(self.store.data_dir)
-        if maintenance_state.enabled and not _maintenance_bypass_allowed(
-            _client_ip(environ), self.settings.maintenance_bypass_hostname,
-            self.settings.maintenance_bypass_ip_log,
-        ):
-            return self._maintenance_response(maintenance_state)
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         banner = self._session_banner_html(environ)
         if not self.settings.courses:
             body = "<p>No courses are configured yet.</p>"
@@ -738,12 +791,9 @@ class App:
     # -- /book ---------------------------------------------------------------
 
     def book(self, method: str, shortname: str, environ):
-        maintenance_state = maintenance.read_state(self.store.data_dir)
-        if maintenance_state.enabled and not _maintenance_bypass_allowed(
-            _client_ip(environ), self.settings.maintenance_bypass_hostname,
-            self.settings.maintenance_bypass_ip_log,
-        ):
-            return self._maintenance_response(maintenance_state)
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         course = self.settings.course(shortname)
         if course is None:
             return "404 Not Found", [("Content-Type", "text/plain")], "unknown course"
@@ -823,8 +873,48 @@ class App:
             # email's credential anymore.
             user = self.store.upsert_user_for_booking(email, name)
 
+            # 2026-07-10, the operator (screenshot of /my): "double booking
+            # possible?" -- yes, neither add_registration_checking_capacity
+            # nor add_party_registrations_checking_capacity ever checked
+            # whether the requesting user (or a guest being added) already
+            # held an active spot for this exact course+date, only
+            # aggregate capacity. See Store.has_active_registration's own
+            # docstring for why STATUS_PENDING_CONFIRMATION is deliberately
+            # excluded. Checked here, before branching into the solo vs.
+            # party path below, so both are covered by one check for the
+            # leader; guests get their own check further down since they
+            # aren't upserted (and so have no user_id yet) until
+            # _book_with_guests runs.
+            if self.store.has_active_registration(shortname, occ_date, user.user_id):
+                return self._book_page(
+                    course, occurrences,
+                    error="You're already booked for this session -- see /my to manage it.",
+                    banner=banner, logged_in_user=logged_in_user,
+                )
+
+            # 2026-07-10, the operator: "no we take their booking. if the main
+            # person already booked, then cannot book again." -- so unlike
+            # the leader (rejected above), a guest who already holds an
+            # active spot is NOT an error: their existing booking is simply
+            # kept as-is (not duplicated), and they're dropped from this
+            # party before it's admitted. See _book_with_guests's
+            # `already_booked` param for how the leader is told which
+            # guest(s) this happened to.
+            already_booked_guests = []
+            filtered_guests = []
+            for g_email, g_name in guests:
+                existing_guest = self.store.find_user_by_email(g_email)
+                if existing_guest and self.store.has_active_registration(shortname, occ_date, existing_guest.user_id):
+                    already_booked_guests.append(g_email)
+                else:
+                    filtered_guests.append((g_email, g_name))
+            guests = filtered_guests
+
             if guests:
-                return self._book_with_guests(course, shortname, occ_date, user, guests, banner=banner)
+                return self._book_with_guests(
+                    course, shortname, occ_date, user, guests, banner=banner,
+                    already_booked=already_booked_guests,
+                )
 
             if user.password_hash:
                 # Already-confirmed account: book instantly, exactly as
@@ -845,7 +935,7 @@ class App:
                     f"You're on the waitlist for <b>{esc(course.title)}</b> on {esc(occ_date)}."
                     if reg.status == STATUS_WAITLISTED
                     else f"You're booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
-                )
+                ) + self._already_booked_guests_note(already_booked_guests)
                 return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
                     "Booked!",
                     f"<p>{msg}<br>{self._check_confirmation_text(environ)}</p>"
@@ -868,7 +958,8 @@ class App:
             body = (
                 f"<p>Almost there -- we've emailed <b>{esc(email)}</b> a link to confirm your account.</p>"
                 f"<p>Your spot for <b>{esc(course.title)}</b> on {esc(occ_date)} will only be reserved "
-                "for you,<br>once you click the link in the email and set a password.</p>"
+                "for you,<br>once you click the link in the email and set a password."
+                f"{self._already_booked_guests_note(already_booked_guests)}</p>"
                 '<div class="hint">Didn\'t get it? '
                 '<form method="post" action="/my/reset" id="resend-form" style="display:inline">'
                 f'<input type="hidden" name="email" value="{esc(email)}">'
@@ -1022,6 +1113,20 @@ class App:
             f"{course.title} on {occ_date}.",
         )
 
+    def _already_booked_guests_note(self, already_booked: list[str]) -> str:
+        """2026-07-10, the operator: "no we take their booking" -- a guest already
+        holding an active spot for this session gets dropped from the party
+        rather than duplicated (see book()'s filtering just before it calls
+        _book_with_guests). This renders the one-line addendum telling
+        whoever submitted the form which guest(s) that happened to, so the
+        booking doesn't look like it silently ignored someone they listed.
+        Empty string (no addendum) when nobody was skipped."""
+        if not already_booked:
+            return ""
+        who = ", ".join(esc(e) for e in already_booked)
+        verb = "was" if len(already_booked) == 1 else "were"
+        return f" ({who} already {verb} booked for this session, so we kept their existing booking as-is.)"
+
     def _parse_guest_entries(self, form: dict, leader_email: str) -> tuple[list[tuple[str, str]], str | None]:
         """Reads guest_email_0/guest_name_0 .. guest_email_{max_guests-1}/
         guest_name_{max_guests-1} off a submitted booking form (see
@@ -1073,6 +1178,7 @@ class App:
 
     def _book_with_guests(
         self, course, shortname: str, occ_date: str, leader, guests: list[tuple[str, str]], banner: str = "",
+        already_booked: list[str] = (),
     ):
         """The atomic party-booking path -- taken whenever the booking form
         included at least one "+ Add participant" guest (see book()).
@@ -1089,7 +1195,14 @@ class App:
         already-existing account's real stored name is reused (never
         overwritten with a blank), and a genuinely brand-new guest with no
         name given falls back to the placeholder "Guest" rather than an
-        empty string (User.name has no blank default)."""
+        empty string (User.name has no blank default).
+
+        `already_booked` (2026-07-10, the operator: "no we take their booking")
+        lists any guest emails book() already filtered OUT of `guests`
+        because they held an active registration for this course+date --
+        purely informational, for the success message's addendum via
+        _already_booked_guests_note(); `guests` itself never contains
+        them, so no duplicate row is ever created here."""
         entries: list[tuple[str, str]] = []
         tokens: list[str] = []
         users = [leader]
@@ -1124,6 +1237,7 @@ class App:
             )
         else:
             msg = f"Your party of {party_size} is booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
+        msg += self._already_booked_guests_note(list(already_booked))
         return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
             "Booked!",
             f"<p>{msg}</p><p>Everyone in the party -- including you -- got their own email with "
@@ -1553,6 +1667,9 @@ class App:
     # -- /cancel/<token> (guest, from email) ---------------------------------
 
     def guest_cancel(self, method: str, token: str, environ):
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         reg = self.store.find_by_guest_token_hash(hash_token(token))
         if reg is None:
             return "404 Not Found", [("Content-Type", "text/html")], page("Not found", "<p>This link is invalid or already used.</p>")
@@ -1630,6 +1747,9 @@ class App:
         cancellation email it was sent in, and stops working the moment
         the booking is reinstated by ANY path (dialog or this link) or
         canceled again (a new cancellation mints yet another fresh one)."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         reg = self.store.find_canceled_by_guest_token_hash(hash_token(token))
         if reg is None:
             return "404 Not Found", [("Content-Type", "text/html")], page(
@@ -1695,7 +1815,17 @@ class App:
         sentence behind New bookings as we have https://booking.example.org in the
         top-bar") -- the banner's own homepage link (see
         _session_banner_html) covers it, in the same tab, alongside "My
-        bookings" and "Log out"."""
+        bookings" and "Log out".
+
+        2026-07-10, the operator: caught (via a real external-IP test) that this
+        page worked completely normally during maintenance mode -- see
+        _maintenance_guard()'s own docstring for the fix; this is the guard
+        that blocks it now, checked before even looking at the session, so
+        an already-logged-in guest sees the maintenance page too, not their
+        real bookings, unless they're the recognized bypass IP."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
             all_regs = self.store.registrations_for_user(session["user_id"])
@@ -1897,6 +2027,9 @@ class App:
         could dodge one by hitting the other), rather than silently
         overwriting that existing account's real name with whatever was
         just typed into this form."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         if method != "POST":
             return "302 Found", [("Location", "/my")], ""
         form = self._read_form(environ)
@@ -1944,7 +2077,17 @@ class App:
         (GET/POST login) and my_signup() (POST) render through this one
         function so the two tabs' markup can't drift apart, and so a
         failed submission re-opens on the SAME tab the guest was using
-        (via active_tab) instead of silently flipping back to Login."""
+        (via active_tab) instead of silently flipping back to Login.
+
+        2026-07-10, the operator (screenshot of /my's anonymous login page): "we
+        miss a back to https://booking.example.org here" -- this page deliberately
+        has no _session_banner_html() banner at all (see that method's own
+        docstring: a "Login" banner sitting above a login FORM would be
+        redundant), which meant it was the one page in the app with no way
+        back to the marketing homepage short of editing the URL by hand.
+        Fixed with a plain "Back to {site}" link, same wording convention
+        as the other "Back to ..." links already used elsewhere on /my
+        (e.g. my_settings()'s "Back to my bookings")."""
         login_checked = "checked" if active_tab == "login" else ""
         signup_checked = "checked" if active_tab == "signup" else ""
 
@@ -1991,7 +2134,8 @@ class App:
           </div>
           <div class="tab-panel" id="my-panel-login">{login_body}</div>
           <div class="tab-panel" id="my-panel-signup">{signup_body}</div>
-        </div>"""
+        </div>
+        <p><a href="{esc(self.settings.base_url)}">Back to {esc(self._site_label())}</a></p>"""
         return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
 
     def my_reset(self, method: str, environ):
@@ -2016,6 +2160,9 @@ class App:
         who's clicked the button more than once while waiting for the
         email to arrive.
         """
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         lockout_seconds = 0.0
         if method == "POST":
             form = self._read_form(environ)
@@ -2090,6 +2237,9 @@ class App:
           3. Not found anywhere -> generic "invalid or already used"
              message (garbage token, or already consumed to set a
              password)."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         token_hash = hash_token(token)
         user = self.store.find_user_by_confirm_token_hash(token_hash)
         if user is not None and self._confirm_token_expired(user):
@@ -2188,6 +2338,9 @@ class App:
         )
 
     def my_cancel(self, method: str, registration_id: str, environ):
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
             return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
@@ -2239,6 +2392,9 @@ class App:
         other") is collected by the same dialog+textarea pattern Cancel
         uses, and passed straight through to
         _send_reinstatement_emails() -- see that function's docstring."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
             return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
@@ -2262,12 +2418,20 @@ class App:
         return "302 Found", [("Location", "/my")], ""
 
     def my_logout(self, method: str, environ):
+        # Deliberately NOT behind _maintenance_guard -- same reasoning as
+        # my_session_status(): logging out isn't a booking or management
+        # action, it's the opposite (a teardown), so blocking it during
+        # maintenance would only leave a guest stuck "logged in" against
+        # their wishes for no real benefit.
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
             SESSIONS.pop(session["_sid"], None)
         return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))], ""
 
     def my_delete_account(self, method: str, environ):
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
             return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
@@ -2448,6 +2612,9 @@ class App:
         return "200 OK", [("Content-Type", "text/html")], page("Account settings", body, banner=banner)
 
     def my_settings(self, method: str, environ):
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         if method != "GET":
             return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
         session = _get_session(environ)
@@ -2467,6 +2634,9 @@ class App:
         return self._my_settings_page(environ, user)
 
     def my_settings_name(self, method: str, environ):
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         if method != "POST":
             return "302 Found", [("Location", "/my/settings")], ""
         session = _get_session(environ)
@@ -2493,6 +2663,9 @@ class App:
         allowing two accounts to fight over the same address would break
         that assumption elsewhere (e.g. which account a future booking
         under that email attaches to)."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         if method != "POST":
             return "302 Found", [("Location", "/my/settings")], ""
         session = _get_session(environ)
@@ -2523,6 +2696,9 @@ class App:
         return "302 Found", [("Location", "/my/settings")], ""
 
     def my_settings_email_cancel(self, method: str, environ):
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         if method != "POST":
             return "302 Found", [("Location", "/my/settings")], ""
         session = _get_session(environ)
@@ -2541,6 +2717,9 @@ class App:
         email an account uses; can be confirmed from a completely
         different browser/session than the one that requested it (e.g.
         opening the new inbox on a different device)."""
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
         token_hash = hash_token(token)
         user = self.store.find_user_by_pending_email_token_hash(token_hash)
         if user is not None and self._confirm_email_expired(user):

@@ -1,12 +1,33 @@
 """Sitewide maintenance mode: `my-bt maintenance on/off/status` (see
-scripts/my-bt). While ON, the running web app refuses to start any NEW
-booking (`/courses`, `/book/<shortname>` -- the two routes index.html
-actually links to) and shows a maintenance message instead; existing-
-booking management (`/my`, `/admin`, `/cancel/`, `/reinstate/`,
-`/host-cancel/`, `/host-reinstate/`) is deliberately left untouched --
-2026-07-10, the operator only asked to gate "any booking URL (like the links on
-index.html)", and there's no reason to also stop someone from viewing or
-canceling an EXISTING booking while new intake is paused.
+scripts/my-bt). While ON, the running web app blocks every guest-facing
+route -- /courses, /book/<shortname>, /cancel/<token>, /reinstate/<token>,
+and every /my/* endpoint (login, signup, reset, confirm, cancel, reinstate,
+settings, delete-account, ...) -- and shows a 503 maintenance page instead
+(see app/webapp.py::App._maintenance_guard, called from each of those).
+
+2026-07-10, the operator originally asked to gate only "any booking URL (like the
+links on index.html)" (courses/book), leaving existing-booking management
+(/my, /admin, /cancel/, /reinstate/, /host-cancel/, /host-reinstate/)
+untouched -- but then, the same day, caught via a real external-IP test
+that this left a real gap: "I was able to click on login and see the
+normal login page from an external IP in maintenance mode. This should
+not be!" The scope above is the corrected version: every GUEST-facing
+route is now gated, uniformly, via one shared check instead of N separate
+inlined copies.
+
+/admin/*, /host-cancel/<id>, and /host-reinstate/<id> are the one
+deliberate exception -- those are the HOST's own tools (the latter two are
+unguessable-uuid4 "magic links" only ever emailed to admin_email), and
+blocking the host's own ability to manage bookings during a maintenance
+window they themselves declared would be counterproductive.
+
+An IP bypass ([site].maintenance_bypass_hostname /
+maintenance_bypass_ip_log, see app/webapp.py::_maintenance_bypass_allowed)
+lets a recognized visitor (the operator's own dynamic-IP setup) use every gated
+route completely normally regardless of maintenance state -- the ONE
+exception is the static site/index.html) itself, which unavoidably shows
+the banner to every visitor (see below), since it's a plain file nginx
+serves with no per-visitor awareness at all.
 
 State lives in a small JSON flag file in the data dir, NOT settings.toml:
 settings.toml is read exactly once at process startup (see
@@ -15,13 +36,17 @@ wouldn't take effect until a service restart -- the whole point of a
 maintenance toggle is that it takes effect on the very next request.
 
 This module also renders the identical message as a banner that
-`my-bt maintenance on/off` inserts into / removes from the TOP of
-site/index.html (both this checkout's own copy and, if
-[site].static_site_dir is configured, the live deployed copy) -- unlike
-privacy.html, index.html is hand-authored and never auto-copied
-otherwise (see README.md "Static-site pages"), so a dedicated, idempotent
-insert/remove step is needed here specifically because maintenance mode
-needs to show up immediately, not at the next manual copy.
+`my-bt maintenance on/off` inserts into / removes from the TOP of the
+live, deployed index.html at [site].static_site_dir (2026-07-10, the operator:
+"the my-bt should not modify the package installed TEMPLATE folder site"
+-- this used to ALSO patch this checkout's own HOME/site/index.html, but
+that copy is a template/reference only, never what nginx actually serves;
+static_site_dir is the one real, live location, same as privacy.html/
+terms.html already treat it). index.html is hand-authored and never
+auto-copied otherwise (see README.md "Static-site pages"), so a dedicated,
+idempotent insert/remove step is needed here specifically because
+maintenance mode needs to show up immediately, not at the next manual
+copy.
 """
 from __future__ import annotations
 

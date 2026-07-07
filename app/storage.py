@@ -620,6 +620,33 @@ class Store:
         with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return [Registration(**r) for r in rows if r["user_id"] == user_id]
 
+    def has_active_registration(self, course_shortname: str, occurrence_date: str, user_id: str) -> bool:
+        """2026-07-10, the operator (screenshot of /my): "double booking possible?"
+        -- yes: add_registration_checking_capacity/
+        add_party_registrations_checking_capacity only ever checked
+        AGGREGATE capacity for a course+date, never whether THIS user
+        already holds a spot there. Used by app.webapp.App.book() and
+        _book_with_guests() as a pre-check before calling either of those,
+        to reject "you're already booked for this session" up front.
+
+        Deliberately CONFIRMED or WAITLISTED only, not
+        STATUS_PENDING_CONFIRMATION -- a brand-new guest re-submitting the
+        form before clicking their confirmation link is handled separately
+        and on purpose (see book()'s own comment on that branch: re-sending
+        the confirmation email on every attempt is intentional, not a bug).
+        A returning user already WAITLISTED for this session still counts
+        as "active" here too -- the operator confirmed he wants a second waitlist
+        attempt blocked the same as a second confirmed booking, not treated
+        as a way to grab a plus-one spot."""
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
+            return any(
+                r["course_shortname"] == course_shortname
+                and r["occurrence_date"] == occurrence_date
+                and r["user_id"] == user_id
+                and r["status"] in (STATUS_CONFIRMED, STATUS_WAITLISTED)
+                for r in rows
+            )
+
     def find_by_guest_token_hash(self, token_hash: str) -> Registration | None:
         with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             for r in rows:

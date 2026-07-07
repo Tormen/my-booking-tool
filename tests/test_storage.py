@@ -309,6 +309,56 @@ class AddRegistrationCheckingCapacityTest(StoreTestBase):
         self.assertEqual(waitlisted, 9)
 
 
+class HasActiveRegistrationTest(StoreTestBase):
+    """2026-07-10, the operator (screenshot of /my): "double booking possible?" --
+    Store.has_active_registration() is the pre-check app.webapp.App.book()
+    now runs before add_registration_checking_capacity/
+    add_party_registrations_checking_capacity, closing the gap where
+    neither of those ever checked whether the REQUESTING user already held
+    a spot, only aggregate capacity."""
+
+    def test_false_when_user_has_no_registration_at_all(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.assertFalse(self.store.has_active_registration("c", "2026-01-01", u.user_id))
+
+    def test_true_for_confirmed_registration(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.store.add_registration_checking_capacity("c", "2026-01-01", u.user_id, hash_token(new_token()), capacity=5)
+        self.assertTrue(self.store.has_active_registration("c", "2026-01-01", u.user_id))
+
+    def test_true_for_waitlisted_registration(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.store.add_registration_checking_capacity("c", "2026-01-01", u.user_id, hash_token(new_token()), capacity=0)
+        self.assertTrue(self.store.has_active_registration("c", "2026-01-01", u.user_id))
+
+    def test_false_for_pending_confirmation_only(self):
+        # Deliberately excluded -- see the method's own docstring: a
+        # brand-new guest re-submitting before clicking their confirm link
+        # is handled separately (book() resends on purpose), not a
+        # double-booking.
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.store.add_registration("c", "2026-01-01", u.user_id, "", status=STATUS_PENDING_CONFIRMATION)
+        self.assertFalse(self.store.has_active_registration("c", "2026-01-01", u.user_id))
+
+    def test_false_for_canceled_registration(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        reg = self.store.add_registration_checking_capacity("c", "2026-01-01", u.user_id, hash_token(new_token()), capacity=5)
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        self.assertFalse(self.store.has_active_registration("c", "2026-01-01", u.user_id))
+
+    def test_false_for_a_different_occurrence_date_or_course(self):
+        u = self.store.upsert_user_for_booking("a@x.com", "A")
+        self.store.add_registration_checking_capacity("c", "2026-01-01", u.user_id, hash_token(new_token()), capacity=5)
+        self.assertFalse(self.store.has_active_registration("c", "2026-01-02", u.user_id))
+        self.assertFalse(self.store.has_active_registration("other-course", "2026-01-01", u.user_id))
+
+    def test_false_for_a_different_user_at_the_same_slot(self):
+        u1 = self.store.upsert_user_for_booking("a@x.com", "A")
+        u2 = self.store.upsert_user_for_booking("b@x.com", "B")
+        self.store.add_registration_checking_capacity("c", "2026-01-01", u1.user_id, hash_token(new_token()), capacity=5)
+        self.assertFalse(self.store.has_active_registration("c", "2026-01-01", u2.user_id))
+
+
 class ConfirmPendingRegistrationTest(StoreTestBase):
     """STATUS_PENDING_CONFIRMATION rows are excluded from count_confirmed/
     add_registration_checking_capacity/promote_next_waitlisted simply by

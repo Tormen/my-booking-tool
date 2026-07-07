@@ -1020,26 +1020,52 @@ of a quick toggle. This flag file is what both the running app and
 `my-bt` itself consult, so `on`/`off` take effect on the very next
 request, no restart needed.
 
-**What gets blocked:** only the two routes `index.html` actually links to
-for a NEW booking -- `/courses` and `/book/<shortname>` -- which show a
-503 page with the maintenance message instead of their normal content.
-Deliberately scoped narrowly: `/my`, `/admin`, `/cancel/<token>`,
-`/reinstate/<token>`, `/host-cancel/<reg_id>`, and `/host-reinstate/<reg_id>`
-are all left working as usual, since there's no reason viewing or
-canceling an EXISTING booking should be blocked just because new intake
-is paused. If you want a wider scope (e.g. `/my` too), that's a one-line
-change in `app/webapp.py` -- ask.
+**What gets blocked:** every GUEST-facing route -- `/courses`,
+`/book/<shortname>`, `/cancel/<token>`, `/reinstate/<token>`, and every
+`/my/*` endpoint (login, signup, reset, confirm, cancel, reinstate,
+settings, delete-account, ...) -- via one shared check,
+`app/webapp.py::App._maintenance_guard`, called first thing by each of
+those. Originally scoped narrowly to just `/courses`/`/book/<shortname>`,
+widened the same day after the operator caught, via a real external-IP test,
+that `/my`'s login page still worked completely normally during
+maintenance: "I was able to click on login and see the normal login page
+... This should not be!"
+
+`/admin/*`, `/host-cancel/<reg_id>`, and `/host-reinstate/<reg_id>` are
+the one deliberate exception -- those are the HOST's own tools (the
+latter two are unguessable-uuid4 "magic links" only ever emailed to
+`admin_email`), and blocking the host's own ability to manage bookings
+during a maintenance window they themselves declared would be
+counterproductive. `/my/logout` and the JSON-only `/my/session` status
+check (polled by the static homepage's own JS) are also left unblocked --
+neither is a booking or management action, so gating them would only
+cause confusing side effects (a guest stuck "logged in" against their
+wishes, or a broken JSON parse) for no real benefit.
+
+Each blocked request gets the same 503 maintenance page, which includes
+a "Back to `{yourdomain}`" link (2026-07-10, the operator: "the maintenance page
+should have a back link or button") -- so clicking "Login" on the static
+homepage during maintenance either shows this page (with a way back) or,
+for the recognized bypass IP, works completely normally.
 
 **What gets written:** `on`/`off` also directly insert/remove an
 idempotent, clearly-marked banner (HTML comments delimit it, so re-running
 `on`/`off` any number of times never duplicates or corrupts it) right
-after `site/index.html`'s `<body>` tag -- both this checkout's own copy
-(if present) and, if `[site].static_site_dir` is configured, the live
-deployed copy there too. `index.html` is hand-authored and never
-auto-copied otherwise (see "Static-site pages" above), but maintenance
-needs to show up immediately, not at the next manual copy, so this is a
-deliberate exception: an explicit, dedicated command whose entire purpose
-is to touch these exact files, not a background auto-sync.
+after the LIVE, deployed `index.html`'s `<body>` tag, i.e. at
+`[site].static_site_dir` if configured. `index.html` is hand-authored and
+never auto-copied otherwise (see "Static-site pages" above), but
+maintenance needs to show up immediately, not at the next manual copy, so
+this is a deliberate exception: an explicit, dedicated command whose
+entire purpose is to touch this exact file, not a background auto-sync.
+If `static_site_dir` isn't configured, `on`/`off` still flip the flag file
+(the app-side gating above still works) but print a note that no banner
+was written anywhere. (2026-07-10, the operator: "the my-bt should not modify
+the package installed TEMPLATE folder site" -- this used to ALSO patch
+this checkout's own `HOME/site/index.html`, i.e. `/opt/my-booking/site/`
+on a stock install, but that copy is a template/reference only, never
+what nginx actually serves; `static_site_dir` is the one real, live
+location, same as `privacy.html`/`terms.html` already treat it -- see
+"Generic template vs. your real config" above.)
 
 **The message itself** (identical wording on the banner and on the
 503 booking pages): "This site is currently down for maintenance. Booking
@@ -1055,8 +1081,11 @@ noticing -- see `app/cli_checks.py::check_maintenance_mode`.
 **Bypassing it for yourself** (2026-07-10, the operator: "can the maintenance
 mode still let me access the site from ssh.example.net please?"): two
 optional, independent `[site]` settings let a matching request keep using
-`/courses`/`/book/<shortname>` normally even while everyone else is
-blocked --
+every gated route above normally even while everyone else is blocked (the
+one unavoidable exception is the static `index.html` banner itself --
+nginx serves that as a plain file with no per-visitor awareness, so it
+shows the banner to every visitor including a bypassed one; only the
+DYNAMIC pages behave differently for the bypass IP) --
 
 ```
 maintenance_bypass_hostname = "ssh.example.net"   # your own dynamic-DNS name
@@ -1147,6 +1176,14 @@ looking at a screenshot of `/my`'s own banner: "My bookings link on the my
 bookings page (in top-bar) :(". A link back to the exact page you're
 already looking at isn't a shortcut, just clutter -- `/courses` and
 `/book` still show it since it's a genuine link elsewhere from there.
+
+`/my`'s own ANONYMOUS view (the Login/Sign up form) deliberately shows no
+banner at all -- a "Login" banner sitting above a login form would be
+redundant. That left it as the one page in the app with no way back to
+the marketing homepage short of editing the URL by hand (2026-07-10,
+the operator: "we miss a back to https://booking.example.org here") -- fixed with a plain
+"Back to `{yourdomain}`" link below the tabs, same wording the maintenance
+page's own back-link uses (see "Maintenance mode" above).
 
 ## Booking page layout (`/book/<shortname>`)
 

@@ -176,6 +176,91 @@ class PartyValidationTest(GuestBookingTestBase):
         self.assertEqual(guest.name, "Real Name")
 
 
+class PartyDoubleBookingTest(GuestBookingTestBase):
+    """2026-07-10, the operator: "double booking possible?" then, on the leader-vs-
+    guest distinction: "no we take their booking. if the main person
+    already booked, then cannot book again." -- so the LEADER is rejected
+    outright if already active for this course+date, but an already-active
+    GUEST is silently dropped from the party (their existing booking is
+    kept, not duplicated) rather than blocking the whole party."""
+
+    def test_leader_already_booked_solo_is_rejected_entirely(self):
+        from app.security import hash_secret
+        leader = self.store.upsert_user_for_booking("leader@example.org", "Leader")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(leader.user_id, h, s)
+        self._book("leader@example.org", "Leader", [])  # solo, no guests -- fills their own spot
+        self.sent_emails.clear()
+        _status, _headers, body = self._book(
+            "leader@example.org", "Leader", [("guest@example.org", "Guest One")]
+        )
+        self.assertIn("already booked", body)
+        # Nothing new created for either the leader or the guest.
+        self.assertEqual(len(self.store.registrations_for_user(leader.user_id)), 1)
+        self.assertIsNone(self.store.find_user_by_email("guest@example.org"))
+        self.assertEqual(self.sent_emails, [])
+
+    def test_already_booked_guest_is_dropped_not_duplicated(self):
+        # guest@example.org already has an active booking for this session
+        # (say, booked solo earlier) -- leader now tries to add them again.
+        guest = self.store.upsert_user_for_booking("guest@example.org", "Guest One")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, guest.user_id, "irrelevant-hash", capacity=self.course.capacity
+        )
+        self.sent_emails.clear()
+        status, _headers, body = self._book(
+            "leader@example.org", "Leader", [("guest@example.org", "Guest One")]
+        )
+        self.assertIn("200", status)
+        self.assertIn("already", body)  # addendum note shown to the leader
+        # Only the leader's own row was added -- guest keeps their one, original row.
+        guest_regs = self.store.registrations_for_user(guest.user_id)
+        self.assertEqual(len(guest_regs), 1)
+        leader = self.store.find_user_by_email("leader@example.org")
+        self.assertEqual(len(self.store.registrations_for_user(leader.user_id)), 1)
+        # No party_id shared -- the leader books alone since their only
+        # requested guest got filtered out.
+        self.assertEqual(self.store.registrations_for_user(leader.user_id)[0].party_id, "")
+
+    def test_already_booked_guest_note_names_the_guest(self):
+        guest = self.store.upsert_user_for_booking("guest@example.org", "Guest One")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, guest.user_id, "irrelevant-hash", capacity=self.course.capacity
+        )
+        _status, _headers, body = self._book(
+            "leader@example.org", "Leader", [("guest@example.org", "Guest One")]
+        )
+        self.assertIn("guest@example.org", body)
+
+    def test_all_guests_already_booked_falls_back_to_solo_leader_booking(self):
+        # Only guest requested, and they're already booked -- leader still
+        # gets their own booking (not blocked just because their one guest
+        # got filtered out).
+        guest = self.store.upsert_user_for_booking("guest@example.org", "Guest One")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", self.occ_date, guest.user_id, "irrelevant-hash", capacity=self.course.capacity
+        )
+        status, _headers, body = self._book(
+            "leader@example.org", "Leader", [("guest@example.org", "Guest One")]
+        )
+        self.assertIn("200", status)
+        leader = self.store.find_user_by_email("leader@example.org")
+        self.assertIsNotNone(leader)
+        leader_regs = self.store.registrations_for_user(leader.user_id)
+        self.assertEqual(len(leader_regs), 1)
+
+    def test_a_brand_new_guest_is_unaffected_by_the_check(self):
+        # No pre-existing registration anywhere -- has_active_registration
+        # must not misfire for a guest email the store has never seen.
+        status, _headers, body = self._book(
+            "leader@example.org", "Leader", [("guest@example.org", "Guest One")]
+        )
+        self.assertIn("200", status)
+        self.assertNotIn("already", body)
+        regs = self.store.all_registrations()
+        self.assertEqual(len(regs), 2)
+
+
 class PartyEmailTest(GuestBookingTestBase):
     def test_each_member_gets_own_email_plus_one_combined_admin_email(self):
         self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])

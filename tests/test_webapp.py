@@ -319,13 +319,15 @@ class CoursesPageTest(unittest.TestCase):
 
 
 class MaintenanceModeTest(unittest.TestCase):
-    """`my-bt maintenance on` (see app/maintenance.py + scripts/my-bt) only
-    ever blocks the two routes index.html actually links to for NEW
-    bookings -- /courses and /book/<shortname> -- via a data-dir flag file
-    checked fresh on every request. Existing-booking routes (/my, /admin,
-    /cancel/, /reinstate/, /host-cancel/, /host-reinstate/) are
-    deliberately left untouched (2026-07-10 scope decision: the operator only
-    asked to gate "any booking URL (like the links on index.html)")."""
+    """`my-bt maintenance on` (see app/maintenance.py + scripts/my-bt) blocks
+    every GUEST-facing route via a data-dir flag file checked fresh on
+    every request (app.webapp.App._maintenance_guard). Originally scoped
+    to only /courses and /book/<shortname> (2026-07-10: the operator asked to gate
+    "any booking URL (like the links on index.html)"), widened the same
+    day after the operator caught, via a real external-IP test, that /my's login
+    page still worked completely normally: "This should not be!" -- see
+    MaintenanceScopeTest below for the full route-by-route coverage of the
+    corrected scope."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -372,11 +374,114 @@ class MaintenanceModeTest(unittest.TestCase):
         status, _headers, _body = app.book("POST", "trier-sat-yoga", {"CONTENT_LENGTH": "0", "wsgi.input": io.BytesIO(b"")})
         self.assertEqual(status, "503 Service Unavailable")
 
-    def test_my_page_is_not_affected_by_maintenance_mode(self):
+    def test_my_page_is_blocked_by_maintenance_mode(self):
+        # 2026-07-10, the operator, after testing this himself from an external
+        # IP: "I was able to click on login and see the normal login page
+        # ... This should not be!" -- /my used to be deliberately exempt;
+        # now it's gated exactly like /courses and /book (see
+        # _maintenance_guard's docstring for the corrected scope).
         maintenance.enable(self.store.data_dir, message="down")
         app = App(make_settings(), self.store)
-        status, _headers, _body = app.my("GET", {})
-        self.assertEqual(status, "200 OK")
+        status, _headers, body = app.my("GET", {})
+        self.assertEqual(status, "503 Service Unavailable")
+        self.assertIn("down for maintenance", body)
+
+    def test_maintenance_response_links_back_to_the_homepage(self):
+        # 2026-07-10, the operator: "the maintenance page should have a back link
+        # or button."
+        maintenance.enable(self.store.data_dir, message="down")
+        app = App(make_settings(), self.store)
+        _status, _headers, body = app.courses("GET", {})
+        self.assertIn(f'<a href="{app.settings.base_url}">Back to example.org</a>', body)
+
+
+class MaintenanceScopeTest(unittest.TestCase):
+    """2026-07-10: full route-by-route coverage of the corrected maintenance
+    scope (see _maintenance_guard's own docstring). Every one of these
+    calls uses deliberately-garbage input (bogus token/registration_id) --
+    same trick test_book_page_maintenance_check_happens_before_course_lookup
+    already established -- to prove the guard fires as the very FIRST
+    thing each handler does, before any real lookup, without needing a
+    fully realistic booking/session fixture per route."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        maintenance.enable(self.store.data_dir, message="down")
+        self.app = App(make_settings(), self.store)
+
+    def _blocked(self, fn, *args):
+        status, _headers, _body = fn(*args)
+        self.assertEqual(status, "503 Service Unavailable", f"{fn.__name__} was not blocked")
+
+    def test_guest_cancel_is_blocked(self):
+        self._blocked(self.app.guest_cancel, "GET", "bogus-token", {})
+
+    def test_guest_reinstate_is_blocked(self):
+        self._blocked(self.app.guest_reinstate, "GET", "bogus-token", {})
+
+    def test_my_signup_is_blocked(self):
+        self._blocked(self.app.my_signup, "POST", {})
+
+    def test_my_reset_is_blocked(self):
+        self._blocked(self.app.my_reset, "GET", {})
+
+    def test_my_confirm_is_blocked(self):
+        self._blocked(self.app.my_confirm, "GET", "bogus-token", {})
+
+    def test_my_cancel_is_blocked(self):
+        self._blocked(self.app.my_cancel, "POST", "bogus-reg-id", {})
+
+    def test_my_reinstate_is_blocked(self):
+        self._blocked(self.app.my_reinstate, "POST", "bogus-reg-id", {})
+
+    def test_my_delete_account_is_blocked(self):
+        self._blocked(self.app.my_delete_account, "POST", {})
+
+    def test_my_settings_is_blocked(self):
+        self._blocked(self.app.my_settings, "GET", {})
+
+    def test_my_settings_name_is_blocked(self):
+        self._blocked(self.app.my_settings_name, "POST", {})
+
+    def test_my_settings_email_is_blocked(self):
+        self._blocked(self.app.my_settings_email, "POST", {})
+
+    def test_my_settings_email_cancel_is_blocked(self):
+        self._blocked(self.app.my_settings_email_cancel, "POST", {})
+
+    def test_my_confirm_email_is_blocked(self):
+        self._blocked(self.app.my_confirm_email, "GET", "bogus-token", {})
+
+    # -- deliberately NOT gated: the host's own tools, and inert endpoints --
+
+    def test_admin_login_page_is_unaffected(self):
+        status, _headers, _body = self.app.admin_login("GET", {})
+        self.assertNotEqual(status, "503 Service Unavailable")
+
+    def test_host_cancel_is_unaffected(self):
+        status, _headers, _body = self.app.host_cancel("GET", "bogus-reg-id", {})
+        self.assertNotEqual(status, "503 Service Unavailable")
+        self.assertEqual(status, "404 Not Found")
+
+    def test_host_reinstate_is_unaffected(self):
+        status, _headers, _body = self.app.host_reinstate("GET", "bogus-reg-id", {})
+        self.assertNotEqual(status, "503 Service Unavailable")
+        self.assertEqual(status, "404 Not Found")
+
+    def test_my_logout_is_unaffected(self):
+        # Logging out isn't a booking/management action -- blocking it would
+        # only leave a guest stuck "logged in" against their wishes.
+        status, _headers, _body = self.app.my_logout("POST", {})
+        self.assertNotEqual(status, "503 Service Unavailable")
+
+    def test_my_session_status_is_unaffected(self):
+        # Read-only JSON status check the static homepage's own JS polls --
+        # gating it would just break that JS's JSON parsing for no benefit.
+        status, _headers, body = self.app.my_session_status("GET", {})
+        self.assertNotEqual(status, "503 Service Unavailable")
+        json.loads(body)  # still valid JSON, not an HTML maintenance page
 
 
 class MaintenanceBypassTest(unittest.TestCase):
@@ -640,6 +745,13 @@ class SessionBannerTest(unittest.TestCase):
         _status, _headers, body = self.app.my("GET", {})
         self.assertNotIn('class="session-banner"', body)
         self.assertIn('id="my-tab-login"', body)
+
+    def test_my_page_anonymous_view_still_links_back_to_the_homepage(self):
+        # 2026-07-10, the operator (screenshot of /my's login page): "we miss a
+        # back to https://booking.example.org here" -- no session-banner on this
+        # page (see the test above), so it needs its own explicit link.
+        _status, _headers, body = self.app.my("GET", {})
+        self.assertIn(f'<a href="{self.settings.base_url}">Back to example.org</a>', body)
 
     # -- 2026-07-09: booking-page name/email prefilled+locked when logged in --
 
@@ -1253,6 +1365,60 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(method, "PUBLISH")
         self.assertIn("METHOD:PUBLISH", ics_text)
         self.assertIn("Dynamic Ashtanga Vinyasa Yoga", ics_text)
+
+    # -- double-booking gap fix (2026-07-10, the operator: "double booking possible?") --
+
+    def test_confirmed_account_cannot_book_the_same_slot_twice(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        self.sent_emails.clear()
+        _status, _headers, body = self._book("regular@example.org", name="Regular")
+        self.assertIn("already booked", body)
+        regs = self.store.registrations_for_user(user.user_id)
+        self.assertEqual(len(regs), 1)  # no second row inserted
+        self.assertEqual(self.sent_emails, [])  # no re-notification either
+
+    def test_waitlisted_account_cannot_rebook_the_same_slot(self):
+        # the operator explicitly confirmed a second WAITLISTED attempt should be
+        # blocked too, not treated as a way to grab an extra spot.
+        for i in range(2):
+            user = self.store.upsert_user_for_booking(f"guest{i}@example.org", f"Guest{i}")
+            h, s = hash_secret("hunter22")
+            self.store.set_password(user.user_id, h, s)
+        self._book("guest0@example.org", name="Guest0")  # capacity=1, fills it
+        self._book("guest1@example.org", name="Guest1")  # waitlisted
+        guest1 = self.store.find_user_by_email("guest1@example.org")
+        self.sent_emails.clear()
+        _status, _headers, body = self._book("guest1@example.org", name="Guest1")
+        self.assertIn("already booked", body)
+        self.assertEqual(len(self.store.registrations_for_user(guest1.user_id)), 1)
+
+    def test_different_occurrence_date_is_still_allowed(self):
+        # Sanity check: the guard is per course+date, not per course.
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        course = self.settings.course("yoga-class-1")
+        occs = build_occurrences(
+            course, self.settings, datetime.now(timezone.utc),
+            lambda sn, d: 0, lambda start, end: False,
+        )
+        other_date = occs[1].date.isoformat()
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self._book("regular@example.org", name="Regular", occ_date=other_date)
+        self.assertIn("Booked!", body)
+        self.assertEqual(len(self.store.registrations_for_user(user.user_id)), 2)
+
+    def test_brand_new_pending_confirmation_still_allows_repeat_attempts(self):
+        # Regression guard: STATUS_PENDING_CONFIRMATION is deliberately
+        # excluded from the new check -- test_returning_unconfirmed_email_
+        # adds_another_pending_and_resends above must keep passing unchanged.
+        self._book("newguest@example.org")
+        _status, _headers, body = self._book("newguest@example.org", name="Alice Again")
+        self.assertNotIn("already booked", body)
+        self.assertIn("Almost there", body)
 
     def test_confirmed_account_waitlisted_when_full(self):
         for i in range(2):

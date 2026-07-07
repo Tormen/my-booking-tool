@@ -449,15 +449,21 @@ def cmd_maintenance(args) -> None:
 
     `on` (optionally with -m/--message for something specific like
     "back Monday") does two things: writes the flag file the running app
-    checks on every /courses and /book/<shortname> request (both then
-    show a 503 maintenance page instead of normal booking), AND directly
-    patches an idempotent, clearly-marked banner into the TOP of
-    site/index.html -- both this checkout's own copy (if present) and, if
-    [site].static_site_dir is configured, the live deployed copy there
-    too. index.html is hand-authored and never auto-copied otherwise (see
-    README.md "Static-site pages"), but maintenance mode needs to show up
-    immediately, not at the next manual copy, so this command writes
-    directly rather than just reporting a diff to reconcile by hand.
+    checks on every guarded request (see app/maintenance.py's own
+    docstring for exactly which routes that covers), AND directly patches
+    an idempotent, clearly-marked banner into the TOP of the live,
+    deployed index.html at [site].static_site_dir, if configured.
+
+    2026-07-10, the operator: "the my-bt should not modify the package installed
+    TEMPLATE folder site" -- this used to ALSO patch this checkout's own
+    HOME/site/index.html (the package's install location), but that copy
+    is a template/reference only (never what nginx actually serves, see
+    README.md "Static-site pages" and "Generic template vs. your real
+    config") -- [site].static_site_dir is the one real, live location, same
+    as privacy.html/terms.html already treat it, so that's the only file
+    this ever writes to now. If static_site_dir isn't configured, `on`/
+    `off` still flip the flag file (the app-side gating still works) but
+    print a note that no banner was written anywhere.
 
     `off` reverses both. `status` only reports the current state --
     touches nothing."""
@@ -477,9 +483,7 @@ def cmd_maintenance(args) -> None:
             print("maintenance mode: off")
         return
 
-    targets = [Path(HOME) / "site" / "index.html"]
-    if static_site_dir:
-        targets.append(Path(static_site_dir) / "index.html")
+    targets = [Path(static_site_dir) / "index.html"] if static_site_dir else []
 
     enabling = args.maintenance_command == "on"
     if enabling:
@@ -489,6 +493,8 @@ def cmd_maintenance(args) -> None:
         app_maintenance.disable(args.data_dir)
         message = ""
 
+    if not targets:
+        print("[site].static_site_dir not configured -- no live index.html to add/remove the banner from.")
     for t in targets:
         if app_maintenance.apply_banner_to_file(t, enabling, admin_email, message):
             action = "added to" if enabling else "removed from"
@@ -499,10 +505,10 @@ def cmd_maintenance(args) -> None:
             print(f"[skip] {t} does not exist")
 
     if enabling:
-        print("maintenance mode: ON -- /courses and /book/<shortname> now show a maintenance "
-              "page. Run `my-bt maintenance off` to reopen bookings.")
+        print("maintenance mode: ON -- guest-facing pages now show a maintenance page. "
+              "Run `my-bt maintenance off` to reopen the site.")
     else:
-        print("maintenance mode: off -- bookings are open again.")
+        print("maintenance mode: off -- the site is open again.")
 
 
 # -- status / setup --------------------------------------------------------------
