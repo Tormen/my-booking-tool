@@ -7,6 +7,7 @@ directly. See tests/test_cli_list.py.
 """
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from datetime import date, datetime
 
@@ -69,11 +70,42 @@ def compute_last_confirmed_course(rows: list[dict], today: date) -> dict[str, st
 # can also be used with my-bt cancel to cancel a booking? a bit like what
 # git does with its commit ids ... please add this shortened ID to my-bt
 # list (not to the web interface as there we have the cancel button)."
-# 8 hex chars of a uuid4's ~122 bits of entropy is effectively collision-free
-# at this app's scale (a handful of live registrations at a time) -- see
-# assign_short_ids's own docstring for what happens on the (practically
-# never) actual collision.
-SHORT_ID_LENGTH = 8
+#
+# 2026-07-08, the operator, looking at a real `my-bt list` full of ~23-char
+# "short" ids: "is there no way to have a shorter 'shorter ID'? ... I
+# said like git and there they have 6 chars I believe to reference the
+# commit". Root cause of the 23 chars: a live-registration universe isn't
+# ALWAYS fresh uuid4s -- migrated SimplyMeet.me registrations get a
+# deterministic registration_id, "simplymeet-<numeric id>" (see
+# app/migrate_simplymeet.py's REGISTRATION_ID_PREFIX), so hundreds of
+# them share the same long literal prefix (plus often-similar leading
+# digits in the numeric suffix too). The OLD scheme took a literal
+# prefix of the id itself, so it had to grow well past 8 chars just to
+# get past "simplymeet" and then past shared leading digits -- for a
+# uuid4 that's still "effectively collision-free" at 8 chars (~122 bits
+# of entropy), but that guarantee silently didn't hold for these
+# deterministic ids at all.
+#
+# Fixed by hashing the full id first (see _short_id_digest below) and
+# taking a prefix of THAT instead -- every character carries real,
+# uniform entropy this way regardless of what the underlying id looks
+# like, so 6 hex chars (~24 bits, matching git's own default abbreviation
+# length) is fine at this app's scale (a few hundred live registrations
+# at most): assign_short_ids's own collision-growth loop still extends it
+# for real if that scale ever changes enough to make 6 risky.
+SHORT_ID_LENGTH = 6
+
+
+def _short_id_digest(full_id: str) -> str:
+    """Turns any registration_id -- a random uuid4 OR a deterministic,
+    shared-prefix id like SimplyMeet-imported rows' "simplymeet-<n>" --
+    into a fixed-length hex string where every character is uniformly
+    likely, so a short PREFIX of this digest is genuinely collision-
+    resistant no matter what the real id's own structure looks like. Not
+    a security boundary (sha1, not keyed) -- purely for even, compact
+    display-only short ids; see assign_short_ids/resolve_short_id, the
+    only two callers."""
+    return hashlib.sha1(full_id.encode("utf-8")).hexdigest()
 
 
 def annotate_party_info(rows: list[dict], users_by_id: dict[str, dict]) -> list[dict]:
@@ -222,7 +254,7 @@ def build_clean_registration_view(
     default (2026-07-13, the operator: "the default command shows it cleaned up
     without technical ids... can you mimick the view of the
     web-interface?") -- Date, Id, Status, Course, Name, Email, Times
-    booked, Guests, plus Registered when `verbose` (see below). No
+    booked, plus Registered/Guests when `verbose` (see below). No
     registration_id/user_id/party_id/invited_by_user_id/token hashes --
     pass -r/--raw for the full raw CSV-column view instead (see
     scripts/my-bt's cmd_list).
@@ -239,6 +271,16 @@ def build_clean_registration_view(
     by occurrence_date by the caller (cmd_list) before this runs, so the
     added "date first" column reads top-to-bottom in the order it's
     sorted by.
+
+    2026-07-08, same day, the operator looking at a fresh `list` output: "the
+    'guests' here is additional fluff as any guest will have their own
+    line here, correct? if yes, then please also only show with -V" --
+    correct: every party member (leader AND each guest they bring) is
+    already its own row in `rows` (one registration = one row), so the
+    "guests"/party_label column is a convenience summary of something
+    that's already fully visible across the other rows, same spirit as
+    "registered". Now gated behind the SAME `verbose` flag as
+    "registered", not a separate one.
 
     ONE exception to "no ids" (2026-07-13, same day, the operator's very next
     message): a leading -- well, now second -- "id" column with a short,
@@ -278,7 +320,8 @@ def build_clean_registration_view(
         if verbose:
             row["registered"] = format_display_timestamp(r.get("registered_at", ""))
         row["times_booked"] = f"{upto_now_by_user.get(uid, 0)}/{total_by_user.get(uid, 0)}"
-        row["guests"] = r["party_label"]
+        if verbose:
+            row["guests"] = r["party_label"]
         out.append(row)
     return out
 
@@ -335,15 +378,21 @@ def build_clean_user_view(
     return out
 
 
-def assign_short_ids(full_ids: list[str], min_length: int = SHORT_ID_LENGTH) -> dict[str, str]:
-    """Git-style short ids for registration_id (a uuid4): a `min_length`-
-    char prefix of the id with its dashes stripped, e.g.
-    "a1b2c3d4-...-..." -> "a1b2c3d4". If that length collides for ANY two
-    ids in `full_ids` (astronomically unlikely at this app's scale -- see
-    SHORT_ID_LENGTH's own comment -- but checked for real, not assumed
-    away), the length grows by one for the WHOLE set and is rechecked,
-    exactly like `git log --abbrev-commit` picking one uniform length
-    rather than a different one per commit.
+def assign_short_ids(
+    full_ids: list[str], min_length: int = SHORT_ID_LENGTH, digest_fn=_short_id_digest,
+) -> dict[str, str]:
+    """Git-style short ids for registration_id: a `min_length`-char prefix
+    of `digest_fn(full_id)` (see _short_id_digest -- NOT a literal prefix
+    of the id itself, see that function's docstring for why). If that
+    length collides for ANY two ids in `full_ids` (checked for real, not
+    assumed away), the length grows by one for the WHOLE set and is
+    rechecked, exactly like `git log --abbrev-commit` picking one uniform
+    length rather than a different one per commit.
+
+    `digest_fn` defaults to the real hash and is only ever overridden by
+    tests (e.g. an identity function to test the growth mechanism in
+    isolation against hand-picked strings, since real sha1 output can't
+    be hand-crafted to collide).
 
     Pure function of the CURRENT `full_ids` list -- recomputed fresh by
     every caller (`my-bt list`'s clean view, `my-bt cancel`'s short-id
@@ -355,35 +404,44 @@ def assign_short_ids(full_ids: list[str], min_length: int = SHORT_ID_LENGTH) -> 
     stale/copy-pasted short id can never silently resolve to the WRONG
     row -- at worst it fails to resolve at all (not found / ambiguous) and
     `my-bt cancel` reports that plainly."""
-    stripped = {fid: fid.replace("-", "") for fid in full_ids}
+    digests = {fid: digest_fn(fid) for fid in full_ids}
     length = min_length
-    max_len = max((len(s) for s in stripped.values()), default=0)
+    max_len = max((len(s) for s in digests.values()), default=0)
     while length < max_len:
         prefixes: dict[str, int] = {}
-        for s in stripped.values():
+        for s in digests.values():
             prefixes[s[:length]] = prefixes.get(s[:length], 0) + 1
         if all(count == 1 for count in prefixes.values()):
             break
         length += 1
-    return {fid: s[:length] for fid, s in stripped.items()}
+    return {fid: s[:length] for fid, s in digests.items()}
 
 
-def resolve_short_id(short: str, full_ids: list[str]) -> tuple[str | None, list[str]]:
-    """Resolves a short (or even full) id typed by the operator against the
-    LIVE registration_id universe (`full_ids` -- see `my-bt cancel`'s own
+def resolve_short_id(
+    short: str, full_ids: list[str], digest_fn=_short_id_digest,
+) -> tuple[str | None, list[str]]:
+    """Resolves a short (or full) id typed by the operator against the LIVE
+    registration_id universe (`full_ids` -- see `my-bt cancel`'s own
     caller for why it's live-only: Store.find_by_id/cancel() only ever
-    operate on live rows anyway). Matches by prefix, dashes stripped on
-    both sides, so ANY unambiguous prefix length works, not just exactly
-    SHORT_ID_LENGTH characters -- same flexibility `git show <abbrev>`
-    gives, and forgiving of the id having grown longer since it was
-    displayed (see assign_short_ids's own docstring on when that happens).
+    operate on live rows anyway). Matches by prefix against
+    `digest_fn(fid)` (case-insensitive), so ANY unambiguous prefix length
+    works, not just exactly SHORT_ID_LENGTH characters -- same
+    flexibility `git show <abbrev>` gives, and forgiving of the id having
+    grown longer since it was displayed (see assign_short_ids's own
+    docstring on when that happens). Also accepts the literal FULL
+    registration_id (dashes optional, case-insensitive) as a direct
+    fallback match, for anyone pasting it from a raw CSV/API response
+    rather than from `my-bt list`'s own short id column.
 
     Returns (full_id, []) on exactly one match, (None, []) on no match,
     (None, matches) with 2+ candidates on an ambiguous prefix -- three
     distinct outcomes `my-bt cancel` reports differently (not found vs.
     "be more specific")."""
     needle = short.replace("-", "").lower()
-    matches = [fid for fid in full_ids if fid.replace("-", "").lower().startswith(needle)]
+    matches = [
+        fid for fid in full_ids
+        if digest_fn(fid).startswith(needle) or fid.replace("-", "").lower() == needle
+    ]
     if len(matches) == 1:
         return matches[0], []
     return None, matches

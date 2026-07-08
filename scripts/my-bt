@@ -139,12 +139,14 @@ def cmd_list(args) -> None:
     app.cli_list.build_clean_registration_view -- Times booked/Guests are
     the SAME shared helpers admin_overview() itself now calls, so the
     numbers/wording can't drift between the two), but Date leads (2026-
-    07-08, the operator: "put this as first column") and Registered is hidden
-    unless -V/--verbose is passed (same the operator message: "don't show when
-    they registered by default but only with my-bt list -V") -- default
-    columns: Date, Id, Status, Course, Name, Email, Times booked, Guests.
-    Rows are always sorted by occurrence_date (then course) regardless of
-    -V/-r/--format.
+    07-08, the operator: "put this as first column") and Registered/Guests are
+    both hidden unless -V/--verbose is passed (same the operator message: "don't
+    show when they registered by default but only with my-bt list -V";
+    Guests followed same day: "the 'guests' here is additional fluff as
+    any guest will have their own line here" -- true, each party member
+    is already its own row) -- default columns: Date, Id, Status, Course,
+    Name, Email, Times booked. Rows are always sorted by occurrence_date
+    (then course) regardless of -V/-r/--format.
 
     Pass -r/--raw for the original full raw-CSV-column view (every field
     Store.read_registrations returns, plus a "party" column -- see
@@ -1124,7 +1126,7 @@ def build_parser() -> argparse.ArgumentParser:
     raw_arg(sp, "list")
     sp.add_argument(
         "-V", "--verbose", action="store_true",
-        help="also show the 'registered' column (when each row signed up) -- hidden by default",
+        help="also show the 'registered' and 'guests' columns -- hidden by default",
     )
     sp.add_argument("--course", help="filter by course shortname")
     sp.add_argument(
@@ -1184,7 +1186,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = _add_subcommand(
         sub, "cancel",
-        "cancel one live registration (host-initiated, same as the web admin's cancel).",
+        "cancel by registration id (one booking), or by date (+course if ambiguous, every booking "
+        "for that occurrence) -- host-initiated, same as the web admin's cancel.",
         "Pass --date instead of --registration-id to cancel every live "
         "registration for one course occurrence at once.",
     )
