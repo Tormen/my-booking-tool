@@ -1276,14 +1276,19 @@ class LockedCsvWritePermissionsTest(unittest.TestCase):
             write([])
         self.assertEqual(stat.S_IMODE(os.stat(nested.parent).st_mode), 0o750)
 
-    def test_pre_existing_directory_mode_is_left_untouched(self):
-        # The directory already existed before this _LockedCsv call (e.g.
-        # an admin deliberately set something different on it already) --
-        # only FRESHLY created directories get the 0750 default applied.
+    def test_pre_existing_directory_is_also_self_healed_on_every_write(self):
+        # 2026-07-09, the operator: "my-bt needs to ensure that touching the files
+        # if my-bt is ran as root do not change permission or ownership
+        # under /var/lib for instance" -- a directory that was ALREADY
+        # there (e.g. created by an earlier root-run command, before this
+        # fix existed) must still get repaired on the next write, not just
+        # directories _LockedCsv happens to create fresh itself. Mode is
+        # unconditionally reset to 0750 on every write, not left as
+        # whatever it drifted to.
         os.chmod(self._tmp.name, 0o701)
         with _LockedCsv(self.path, REG_FIELDS) as (rows, write):
             write([])
-        self.assertEqual(stat.S_IMODE(os.stat(self._tmp.name).st_mode), 0o701)
+        self.assertEqual(stat.S_IMODE(os.stat(self._tmp.name).st_mode), 0o750)
 
 
 if __name__ == "__main__":

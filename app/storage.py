@@ -384,10 +384,17 @@ class _LockedCsv:
             rows = list(reader)
             return rows, self._set_rows_to_write
 
-        dir_existed = self.path.parent.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not dir_existed:
-            _secure_data_path(self.path.parent, mode=0o750)
+        # Unconditional, not just "if freshly created": 2026-07-09, the operator:
+        # "my-bt needs to ensure that touching the files if my-bt is ran as
+        # root do not change permission or ownership under /var/lib" -- a
+        # directory that was itself CREATED by an earlier root-run command
+        # (before this fix existed, or before some future bug reintroduces
+        # a root-run path) would otherwise never get repaired, since the
+        # "only on creation" check would see it as already-existing forever
+        # after that. Re-applying on every write is cheap (two syscalls)
+        # and idempotent, so there's no reason to special-case it.
+        _secure_data_path(self.path.parent, mode=0o750)
         if not self.path.exists():
             self.path.touch()
             _secure_data_path(self.path)
