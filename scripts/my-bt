@@ -821,12 +821,27 @@ def cmd_cancel(args) -> None:
         return
 
     if not args.yes:
+        # 2026-07-09, the operator: "Please present the booking in the form like
+        # show (for the fields you line up here in 1 line). and then ask
+        # below that: Cancel ? - Type 'yes' to confirm:" -- same vertical
+        # key : value layout _print_single_row_kv gives `show`'s own
+        # single-entity results, for the same reason: illegible crammed
+        # into one line, easy to read stacked. Just the fields that were
+        # already in that one line (not the full raw row show's own
+        # registration view prints -- token hashes/party ids aren't
+        # useful in a quick confirmation prompt).
         user = store.find_user_by_id(reg.user_id)
         who = f"{user.name} <{user.email}>" if user else "(unknown attendee)"
-        confirm = input(
-            f"Cancel {who}'s {reg.course_shortname} booking on {reg.occurrence_date} "
-            f"(registration {reg_id})? Type 'yes' to confirm: "
+        _print_single_row_kv(
+            {
+                "attendee": who,
+                "course": reg.course_shortname,
+                "date": reg.occurrence_date,
+                "registration": reg_id,
+            },
+            "table",
         )
+        confirm = input("Cancel? Type 'yes' to confirm: ")
         if confirm.strip().lower() != "yes":
             print("aborted")
             return
