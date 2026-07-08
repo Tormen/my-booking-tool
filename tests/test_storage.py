@@ -839,6 +839,60 @@ class MergeArchivedRegistrationsTest(StoreTestBase):
         self.assertEqual(remaining_archived[0]["user_id"], old2.user_id)
 
 
+class RenameCourseShortnameTest(StoreTestBase):
+    """Store.rename_course_shortname -- the CSV-row side of `my-bt admin
+    rename-course` (2026-07-08, the operator: "rename lux-wed-mindfulness to
+    lux-wed-mind ... provide a command to migrate the existing data").
+    Does NOT touch settings.toml or the calendar -- see
+    app.calendar_sync.resync_after_course_rename for the calendar side."""
+
+    def test_renames_live_rows(self):
+        user = self.store.upsert_user_for_booking("a@example.com", "A")
+        self.store.add_registration("old-name", "2026-01-01", user.user_id, hash_token(new_token()))
+        changed = self.store.rename_course_shortname("old-name", "new-name")
+        self.assertEqual(changed, 1)
+        self.assertEqual(self.store.read_registrations(scope="live")[0]["course_shortname"], "new-name")
+
+    def test_renames_archived_rows_too(self):
+        user = self.store.upsert_user_for_booking("a@example.com", "A")
+        self.store.add_registration("old-name", "2026-01-01", user.user_id, hash_token(new_token()))
+        self.store.erase_user(user.user_id, "erased:x")
+
+        changed = self.store.rename_course_shortname("old-name", "new-name")
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(self.store.read_registrations(scope="archived")[0]["course_shortname"], "new-name")
+
+    def test_live_and_archived_both_counted(self):
+        live_user = self.store.upsert_user_for_booking("live@example.com", "Live")
+        self.store.add_registration("old-name", "2026-01-01", live_user.user_id, hash_token(new_token()))
+        archived_user = self.store.upsert_user_for_booking("gone@example.com", "Gone")
+        self.store.add_registration("old-name", "2026-02-01", archived_user.user_id, hash_token(new_token()))
+        self.store.erase_user(archived_user.user_id, "erased:x")
+
+        changed = self.store.rename_course_shortname("old-name", "new-name")
+        self.assertEqual(changed, 2)
+
+    def test_other_courses_are_not_touched(self):
+        user = self.store.upsert_user_for_booking("a@example.com", "A")
+        self.store.add_registration("other-course", "2026-01-01", user.user_id, hash_token(new_token()))
+        changed = self.store.rename_course_shortname("old-name", "new-name")
+        self.assertEqual(changed, 0)
+        self.assertEqual(self.store.read_registrations(scope="live")[0]["course_shortname"], "other-course")
+
+    def test_no_matching_rows_is_a_safe_no_op(self):
+        self.assertEqual(self.store.rename_course_shortname("old-name", "new-name"), 0)
+
+    def test_registration_id_and_other_fields_preserved(self):
+        user = self.store.upsert_user_for_booking("a@example.com", "A")
+        reg = self.store.add_registration("old-name", "2026-01-01", user.user_id, hash_token(new_token()))
+        self.store.rename_course_shortname("old-name", "new-name")
+        row = self.store.read_registrations(scope="live")[0]
+        self.assertEqual(row["registration_id"], reg.registration_id)
+        self.assertEqual(row["user_id"], user.user_id)
+        self.assertEqual(row["occurrence_date"], "2026-01-01")
+
+
 class ImportHistoricalRegistrationTest(StoreTestBase):
     """Store.import_historical_registration -- backs the one-off SimplyMeet.me
     migration (app/migrate_simplymeet.py). Unlike add_registration(), the

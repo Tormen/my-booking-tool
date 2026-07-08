@@ -254,6 +254,75 @@ def sync_occurrence(
             etag = current_etag()
 
 
+def resync_after_course_rename(
+    client: CalDAVClient,
+    calendar_href: str,
+    store: Store,
+    settings: Settings,
+    old_shortname: str,
+    new_shortname: str,
+    today: date | None = None,
+) -> int:
+    """After a course's shortname changes (see Store.rename_course_
+    shortname for the registrations.csv side of that -- run this AFTER
+    that, once settings.toml already has `new_shortname`), every future
+    occurrence that already had a live calendar event is still sitting
+    on the calendar under the OLD event_uid: the shortname is baked
+    directly into the uid (see event_uid's own docstring), and nothing
+    will ever again compute that old uid to find and remove it, since
+    sync_occurrence() always derives uid from the course's CURRENT
+    shortname. Left alone, the NEXT booking/cancellation on that
+    occurrence would silently create a second, fresh event under the new
+    uid while the stale one keeps sitting there forever, unrecognized and
+    never cleaned up -- a real duplicate on the operator's actual calendar,
+    2026-07-08: "rename lux-wed-mindfulness to lux-wed-mind ... provide a
+    command to migrate the existing data".
+
+    For each occurrence_date (today or later) that has at least one
+    CONFIRMED registration under `new_shortname` (i.e. would currently
+    have a live calendar entry, per sync_occurrence's own "0 confirmed --
+    no calendar entry at all" rule): looks up the OLD uid's event in that
+    day's window and deletes it if found, then calls sync_occurrence()
+    to (re)create it cleanly under the new uid in one step. A day with
+    nothing confirmed is skipped entirely -- it never had a calendar
+    event to begin with.
+
+    Returns how many occurrences were touched this way."""
+    today = today or date.today()
+    course = settings.course(new_shortname)
+    if course is None:
+        raise ValueError(
+            f"no course with shortname {new_shortname!r} in settings.toml -- "
+            "update settings.toml's [[course]] shortname BEFORE running this"
+        )
+
+    tz = ZoneInfo(settings.timezone)
+    today_iso = today.isoformat()
+    rows = store.read_registrations(scope="live")
+    dates = sorted({
+        r["occurrence_date"] for r in rows
+        if r["course_shortname"] == new_shortname
+        and r["status"] == STATUS_CONFIRMED
+        and r["occurrence_date"] >= today_iso
+    })
+
+    fixed = 0
+    for d_iso in dates:
+        occ_date = date.fromisoformat(d_iso)
+        old_uid = event_uid(settings, old_shortname, occ_date)
+        for uid, _ics, etag in client.query_events(
+            calendar_href,
+            datetime.combine(occ_date, datetime.min.time(), tzinfo=tz),
+            datetime.combine(occ_date + timedelta(days=1), datetime.min.time(), tzinfo=tz),
+        ):
+            if uid == old_uid:
+                client.delete_event(calendar_href, uid, etag)
+                break
+        sync_occurrence(client, calendar_href, store, settings, course, occ_date)
+        fixed += 1
+    return fixed
+
+
 # -- Emailed guest invite/cancel attachments (2026-07-09, the operator: "Can you
 # please attach a calendar invite also in the email that is sent to the
 # participant?") ------------------------------------------------------------

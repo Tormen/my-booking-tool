@@ -7,7 +7,10 @@ import unittest
 from datetime import date
 
 from app.caldav_client import CalDAVClient, CalDAVConflictError, Response
-from app.calendar_sync import _SYNC_CONFLICT_MAX_ATTEMPTS, event_uid, guest_cancel_ics, guest_invite_ics, sync_occurrence
+from app.calendar_sync import (
+    _SYNC_CONFLICT_MAX_ATTEMPTS, event_uid, guest_cancel_ics, guest_invite_ics,
+    resync_after_course_rename, sync_occurrence,
+)
 from app.ics import parse_uid
 from app.storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED,
@@ -275,6 +278,129 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         transport = self._sync(report_body=_report_with_event(uid), conflicts_before_success=1)
         methods = [m for m, _u, _b, _h in transport.calls]
         self.assertEqual(methods.count("DELETE"), 2)
+
+
+class ResyncAfterCourseRenameTest(unittest.TestCase):
+    """2026-07-08, the operator: "rename lux-wed-mindfulness to lux-wed-mind ...
+    provide a command to migrate the existing data" -- event_uid() bakes
+    the course_shortname directly into the calendar event's UID, so a
+    renamed course's already-synced future occurrences would otherwise be
+    orphaned under their OLD uid forever, with a fresh duplicate created
+    under the new one the next time anything calls sync_occurrence(). See
+    calendar_sync.py's own docstring for the full mechanism -- these tests
+    assume Store.rename_course_shortname has ALREADY run (registrations.csv
+    rows are under `new_shortname` by the time resync_after_course_rename
+    itself is called, same sequencing `my-bt admin rename-course` uses)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.new_course = make_course(shortname="lux-wed-mind", title="Mindfulness", capacity=20)
+        self.settings = make_settings(courses=(self.new_course,), booking_calendar="Bookings", base_url="https://example.org")
+        self.today = date(2026, 7, 8)
+
+    def _client(self, report_body: str = EMPTY_REPORT):
+        transport = FakeTransport(report_body)
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=transport,
+        )
+        return client, transport
+
+    def _confirm(self, email: str, occurrence_date: str, course: str = "lux-wed-mind") -> None:
+        user = self.store.upsert_user_for_booking(email, email.split("@")[0].title())
+        self.store.add_registration(course, occurrence_date, user.user_id, "tok-hash", status=STATUS_CONFIRMED)
+
+    def test_deletes_old_uid_event_and_recreates_under_new_uid(self):
+        self._confirm("alice@example.org", "2026-07-10")
+        old_uid = event_uid(self.settings, "lux-wed-mindfulness", date(2026, 7, 10))
+        client, transport = self._client(report_body=_report_with_event(old_uid))
+
+        fixed = resync_after_course_rename(
+            client, "/caldav/Bookings/", self.store, self.settings,
+            "lux-wed-mindfulness", "lux-wed-mind", today=self.today,
+        )
+
+        self.assertEqual(fixed, 1)
+        methods = [m for m, _u, _b, _h in transport.calls]
+        self.assertIn("DELETE", methods)
+        self.assertIn("PUT", methods)
+        deleted_urls = [u for m, u, _b, _h in transport.calls if m == "DELETE"]
+        self.assertTrue(any(old_uid in u for u in deleted_urls))
+
+    def test_no_old_event_found_still_creates_the_new_one(self):
+        self._confirm("alice@example.org", "2026-07-10")
+        client, transport = self._client()  # empty REPORT -- nothing to delete
+
+        fixed = resync_after_course_rename(
+            client, "/caldav/Bookings/", self.store, self.settings,
+            "lux-wed-mindfulness", "lux-wed-mind", today=self.today,
+        )
+
+        self.assertEqual(fixed, 1)
+        methods = [m for m, _u, _b, _h in transport.calls]
+        self.assertNotIn("DELETE", methods)
+        self.assertIn("PUT", methods)
+
+    def test_dates_with_nothing_confirmed_are_skipped(self):
+        # A waitlisted-only occurrence never had a calendar event in the
+        # first place (sync_occurrence's own "0 confirmed -- no entry"
+        # rule) -- resync must not touch it at all.
+        user = self.store.upsert_user_for_booking("wl@example.org", "Waity")
+        self.store.add_registration("lux-wed-mind", "2026-07-10", user.user_id, "tok-hash", status=STATUS_WAITLISTED)
+        client, transport = self._client()
+
+        fixed = resync_after_course_rename(
+            client, "/caldav/Bookings/", self.store, self.settings,
+            "lux-wed-mindfulness", "lux-wed-mind", today=self.today,
+        )
+
+        self.assertEqual(fixed, 0)
+        self.assertEqual(transport.calls, [])
+
+    def test_past_occurrences_are_not_touched(self):
+        self._confirm("alice@example.org", "2026-07-01")  # before self.today
+        client, transport = self._client()
+
+        fixed = resync_after_course_rename(
+            client, "/caldav/Bookings/", self.store, self.settings,
+            "lux-wed-mindfulness", "lux-wed-mind", today=self.today,
+        )
+
+        self.assertEqual(fixed, 0)
+        self.assertEqual(transport.calls, [])
+
+    def test_today_itself_is_touched(self):
+        self._confirm("alice@example.org", self.today.isoformat())
+        client, transport = self._client()
+
+        fixed = resync_after_course_rename(
+            client, "/caldav/Bookings/", self.store, self.settings,
+            "lux-wed-mindfulness", "lux-wed-mind", today=self.today,
+        )
+
+        self.assertEqual(fixed, 1)
+
+    def test_multiple_occurrences_all_fixed(self):
+        self._confirm("alice@example.org", "2026-07-10")
+        self._confirm("bob@example.org", "2026-07-17")
+        client, transport = self._client()
+
+        fixed = resync_after_course_rename(
+            client, "/caldav/Bookings/", self.store, self.settings,
+            "lux-wed-mindfulness", "lux-wed-mind", today=self.today,
+        )
+
+        self.assertEqual(fixed, 2)
+
+    def test_raises_if_new_shortname_not_in_settings(self):
+        client, _transport = self._client()
+        with self.assertRaises(ValueError):
+            resync_after_course_rename(
+                client, "/caldav/Bookings/", self.store, self.settings,
+                "lux-wed-mindfulness", "no-such-course", today=self.today,
+            )
 
 
 class GuestInviteAndCancelIcsTest(unittest.TestCase):

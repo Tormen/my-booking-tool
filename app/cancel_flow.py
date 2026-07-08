@@ -97,13 +97,17 @@ def build_caldav_client(settings: Settings) -> CalDAVClient:
     return CalDAVClient(settings.caldav_url, settings.caldav_username, settings.caldav_password)
 
 
-def _calendar_href(caldav: CalDAVClient, settings: Settings) -> str:
+def calendar_href(caldav: CalDAVClient, settings: Settings) -> str:
     """One-off equivalent of App._href(settings.booking_calendar): a single
     PROPFIND, then look up the configured booking calendar's href. App
     itself caches list_calendars() per-process (see App._calendars) since it
     serves many requests; a standalone call here (one cancellation, then
     done) has no such long-lived process to cache across, so it simply
-    fetches fresh every time."""
+    fetches fresh every time.
+
+    2026-07-08: made public (was `_calendar_href`) so
+    app.calendar_sync.resync_after_course_rename can reuse it too, rather
+    than a second copy of this same PROPFIND-then-lookup logic."""
     calendars = caldav.list_calendars()
     if settings.booking_calendar not in calendars:
         raise CalDAVError(
@@ -217,7 +221,7 @@ def cancel_and_promote(
     if sync_fn is not None:
         sync_fn(course_shortname, occurrence_date_str)
         return
-    href = _calendar_href(caldav, settings)
+    href = calendar_href(caldav, settings)
     calendar_sync.sync_occurrence(caldav, href, store, settings, course, date.fromisoformat(occurrence_date_str))
 
 
@@ -310,7 +314,7 @@ def cancel_occurrence(
         if sync_fn is not None:
             sync_fn(course_shortname, occurrence_date_str)
         elif caldav is not None:
-            href = _calendar_href(caldav, settings)
+            href = calendar_href(caldav, settings)
             calendar_sync.sync_occurrence(
                 caldav, href, store, settings, course, date.fromisoformat(occurrence_date_str)
             )

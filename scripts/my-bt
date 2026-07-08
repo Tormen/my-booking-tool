@@ -28,6 +28,7 @@ HOME = os.environ.get("MY_BOOKING_HOME", "/opt/my-booking")
 sys.path.insert(0, HOME)
 
 try:
+    from app import calendar_sync as app_calendar_sync
     from app import cancel_flow as app_cancel_flow
     from app import cli_cancel as app_cli_cancel
     from app import cli_history as app_cli_history
@@ -563,6 +564,64 @@ def cmd_dearchive(args) -> None:
     print(f"merged {result.moved_count} registration(s) into {live_user.user_id}:")
     for r in sorted(result.moved_registrations, key=lambda r: (r["occurrence_date"], r["course_shortname"])):
         print(f"  {r['occurrence_date']}  {r['course_shortname']}  ({r['status']})")
+
+
+def cmd_admin_rename_course(args) -> None:
+    """`my-bt admin rename-course --from OLD --to NEW` -- migrates
+    existing data after a course's shortname changes in settings.toml
+    (2026-07-08, the operator: "rename lux-wed-mindfulness to lux-wed-mind ...
+    provide a command to migrate the existing data AFTER I installed
+    this change"). Run this AFTER settings.toml already has --to as a
+    real [[course]] shortname -- this command does NOT edit
+    settings.toml itself.
+
+    Two things happen, in order:
+    1. Every registration row (live + archived) with course_shortname
+       --from is rewritten to --to (Store.rename_course_shortname).
+    2. Any upcoming occurrence that already had a live calendar event
+       under the OLD shortname gets that stale event deleted and a
+       fresh one created under the NEW shortname
+       (app.calendar_sync.resync_after_course_rename) -- renaming
+       changes the calendar event's UID (the shortname is baked
+       directly into it, see event_uid's own docstring), so skipping
+       this step would leave a duplicate, orphaned event sitting on the
+       calendar for every such occurrence forever, alongside a fresh one
+       the next booking/cancellation would silently create under the
+       new UID.
+
+    Has a real CalDAV/network dependency for step 2 and can fail/take
+    longer if the CalDAV server is unreachable -- step 1 (the CSV
+    migration) has already completed by that point regardless, so a
+    step-2 failure is safe to just retry (Store.rename_course_shortname
+    is a no-op the second time, since no rows are left under --from)."""
+    settings = app_config.load_settings(args.settings)
+    if settings.course(args.to) is None:
+        print(
+            f"error: no course with shortname {args.to!r} in settings.toml -- "
+            "update settings.toml's [[course]] shortname to --to BEFORE running this",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if settings.course(args.from_) is not None:
+        print(
+            f"error: settings.toml still has a course with shortname {args.from_!r} -- "
+            "finish renaming it to --to in settings.toml first",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    store = _store(args)
+    changed = store.rename_course_shortname(args.from_, args.to)
+    print(f"{changed} registration row(s) migrated from {args.from_!r} to {args.to!r}")
+    if changed == 0:
+        return
+
+    caldav = app_cancel_flow.build_caldav_client(settings)
+    href = app_cancel_flow.calendar_href(caldav, settings)
+    fixed = app_calendar_sync.resync_after_course_rename(
+        caldav, href, store, settings, args.from_, args.to, today=date.today(),
+    )
+    print(f"{fixed} upcoming occurrence(s) had their calendar event moved to the new calendar UID")
 
 
 def _cmd_cancel_occurrence(args, settings, store) -> None:
@@ -1432,6 +1491,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--email", required=True, help="the guest's CURRENT (live) login email")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_dearchive)
+
+    sp = _add_subcommand(
+        admin_sub, "rename-course",
+        "migrate registrations.csv + the calendar after renaming a course's shortname in settings.toml.",
+        "Run AFTER settings.toml already has --to as a real [[course]] shortname -- "
+        "this command does not edit settings.toml itself.",
+    )
+    sp.add_argument("--from", dest="from_", required=True, help="the OLD course shortname (must no longer be in settings.toml)")
+    sp.add_argument("--to", required=True, help="the NEW course shortname (must already be in settings.toml)")
+    sp.set_defaults(func=cmd_admin_rename_course)
 
     sp = _add_subcommand(
         admin_sub, "maintenance",

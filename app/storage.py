@@ -1331,6 +1331,40 @@ class Store:
             write(rows, "merge archived registrations (restore)")
         return len(to_move)
 
+    def rename_course_shortname(self, old_shortname: str, new_shortname: str) -> int:
+        """Rewrites `course_shortname` from `old_shortname` to
+        `new_shortname` on every registration row -- live AND archived --
+        e.g. after renaming a course in settings.toml (2026-07-08, the operator:
+        "rename lux-wed-mindfulness to lux-wed-mind ... provide a command
+        to migrate the existing data AFTER I installed this change").
+
+        Deliberately does NOT touch settings.toml itself (a one-line
+        manual edit, not a bulk data operation) and does NOT touch the
+        calendar -- see app.calendar_sync.resync_after_course_rename for
+        that, a genuinely separate concern: renaming changes this
+        course's calendar event UID (see event_uid's own docstring, the
+        shortname is baked directly into it), so any already-synced
+        future occurrence needs its OLD-uid event explicitly cleaned up
+        too, or it's left orphaned on the calendar forever alongside a
+        fresh one under the new uid.
+
+        Returns the total number of rows changed, live + archived
+        combined (0 if `old_shortname` matched nothing in either file --
+        the caller should treat that as "nothing to migrate", not an
+        error, e.g. if this is re-run after already succeeding once)."""
+        changed = 0
+        for path in (self.registrations_path, self.archived_registrations_path):
+            with _LockedCsv(path, REG_FIELDS) as (rows, write):
+                n = 0
+                for row in rows:
+                    if row["course_shortname"] == old_shortname:
+                        row["course_shortname"] = new_shortname
+                        n += 1
+                if n:
+                    write(rows, f"rename course {old_shortname!r} -> {new_shortname!r}")
+                changed += n
+        return changed
+
     # -- reporting: live + archived, for the my-bt CLI -----------------------
 
     def read_users(self, scope: str = "all") -> list[dict]:
