@@ -86,6 +86,33 @@ class CheckSecretsTest(unittest.TestCase):
         self.assertEqual(_levels(checks)["secret: erasure_pepper"], "ok")
 
 
+class SummarizeProblemsTest(unittest.TestCase):
+    """2026-07-08, the operator: 'please repeat all warnings at the end of setup
+    and status explicitly.' summarize_problems() is the shared formatter
+    `my-bt admin health`/plain `my-bt admin setup`/`my-bt admin setup -i`
+    all use to repeat every non-ok check right before their own final
+    pass/fail summary line."""
+
+    def test_ok_checks_are_dropped(self):
+        checks = [("a", "ok", "fine"), ("b", "ok", "")]
+        self.assertEqual(cli_checks.summarize_problems(checks), [])
+
+    def test_warn_and_fail_are_kept_in_order_with_detail(self):
+        checks = [
+            ("a", "ok", "fine"),
+            ("b", "warn", "needs a look"),
+            ("c", "fail", "broken"),
+        ]
+        self.assertEqual(
+            cli_checks.summarize_problems(checks),
+            ["[WARN] b -- needs a look", "[FAIL] c -- broken"],
+        )
+
+    def test_blank_detail_has_no_trailing_dash(self):
+        checks = [("a", "warn", "")]
+        self.assertEqual(cli_checks.summarize_problems(checks), ["[WARN] a"])
+
+
 class CheckRpmnewTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

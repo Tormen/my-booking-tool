@@ -272,6 +272,11 @@ def print_report(
     all_checks = [c for group in report.values() for c in group]
     fails = sum(1 for _, level, _ in all_checks if level == "fail")
     warns = sum(1 for _, level, _ in all_checks if level == "warn")
+    problems = cli_checks.summarize_problems(all_checks)
+    if problems:
+        print_fn("\nWarnings/failures, repeated from above:")
+        for line in problems:
+            print_fn(f"   {line}")
     if fails:
         print_fn(f"\n{fails} problem(s), {warns} warning(s) -- fix the FAIL item(s) above, "
                   "then re-run `my-bt setup` (or `my-bt status`).")
@@ -843,6 +848,11 @@ def interactive_setup(
     final_checks = [c for group in build_report(raw, settings_path, home, data_dir).values() for c in group]
     fails = sum(1 for _, level, _ in final_checks if level == "fail")
     warns = sum(1 for _, level, _ in final_checks if level == "warn")
+    problems = cli_checks.summarize_problems(final_checks)
+    if problems:
+        print_fn("\nStill need attention, repeated from above:")
+        for line in problems:
+            print_fn(f"   {line}")
     if fails or warns:
         print_fn(f"\nDone -- {fails} problem(s), {warns} warning(s) still need attention (see above, "
                   "or re-run `my-bt status`).")

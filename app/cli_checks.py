@@ -29,6 +29,26 @@ from .caldav_client import CalDAVClient, HttpTransport
 Check = tuple[str, str, str]  # (label, "ok"|"warn"|"fail", detail)
 
 
+def summarize_problems(checks: list[Check]) -> list[str]:
+    """Formats every non-"ok" check as a printable "[LEVEL] label -- detail"
+    line, in original order -- everything else is dropped.
+
+    2026-07-08, the operator: "please repeat all warnings at the end of setup and
+    status explicitly." `my-bt admin health`/plain `my-bt admin setup`/
+    `my-bt admin setup -i` each print a dozen-plus numbered sections of
+    checks, then only a bare count ("2 warning(s), no hard failures") at
+    the very end -- by the time you've scrolled to the bottom, the actual
+    WARN/FAIL lines from section 2 are long gone above the fold, so you
+    have to scroll all the way back up to find them again. Shared here
+    (not duplicated three times) so all three end with the same repeated
+    list, right before their own final pass/fail summary line."""
+    return [
+        f"[{level.upper()}] {label}" + (f" -- {detail}" if detail else "")
+        for label, level, detail in checks
+        if level != "ok"
+    ]
+
+
 def secret_file_map(raw: dict) -> dict[str, str | None]:
     return {
         "caldav_password": raw.get("calendar", {}).get("caldav_password_file"),

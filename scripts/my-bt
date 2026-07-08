@@ -878,6 +878,16 @@ def cmd_admin_health(args) -> None:
             line += f" -- {detail}"
         print(line)
 
+    # 2026-07-08, the operator: "please repeat all warnings at the end of setup
+    # and status explicitly" -- by the bottom of a long report the actual
+    # WARN/FAIL lines are long since scrolled past; repeat just those,
+    # together, right before the final pass/fail summary below.
+    problems = cli_checks.summarize_problems(checks)
+    if problems:
+        print("\nWarnings/failures, repeated from above:")
+        for line in problems:
+            print(f"   {line}")
+
     print()
     if fails:
         print(f"{fails} problem(s), {warns} warning(s) -- fix the FAIL item(s) above, "

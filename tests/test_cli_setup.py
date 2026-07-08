@@ -92,10 +92,17 @@ class PrintReportTest(unittest.TestCase):
         # Regardless of what this sandboxed test host's own systemd/
         # SELinux/rpm state happens to be, the returned counts must always
         # match what was actually printed.
+        #
+        # 2026-07-08: only counts the ORIGINAL per-section printout, not
+        # the "Warnings/failures, repeated from above" block added the
+        # same day -- that block deliberately reprints each [WARN]/[FAIL]
+        # line a second time, so counting the whole output would double
+        # every count and always fail regardless of correctness.
         lines: list[str] = []
         fails, warns = cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
-        printed_fails = sum(1 for ln in lines if "[FAIL]" in ln)
-        printed_warns = sum(1 for ln in lines if "[WARN]" in ln)
+        original_lines = "\n".join(lines).split("Warnings/failures, repeated from above:")[0].splitlines()
+        printed_fails = sum(1 for ln in original_lines if "[FAIL]" in ln)
+        printed_warns = sum(1 for ln in original_lines if "[WARN]" in ln)
         self.assertEqual(fails, printed_fails)
         self.assertEqual(warns, printed_warns)
 
@@ -105,6 +112,30 @@ class PrintReportTest(unittest.TestCase):
         fails, warns = cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
         self.assertGreaterEqual(fails, 1)
         self.assertTrue(any(f"{fails} problem(s)" in ln for ln in lines))
+
+    def test_repeats_every_warning_and_failure_at_the_end(self):
+        # 2026-07-08, the operator: "please repeat all warnings at the end of
+        # setup and status explicitly" -- a real FAIL (missing secret)
+        # must reappear, verbatim, in a repeated block after all twelve
+        # numbered steps, not just once wherever it first printed.
+        raw = _raw(calendar={"caldav_password_file": str(self.home / "nope")})
+        lines: list[str] = []
+        cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
+        text = "\n".join(lines)
+        repeated_section = text.split("Warnings/failures, repeated from above:")[1]
+        self.assertIn("caldav_password", repeated_section)
+        self.assertIn("FAIL", repeated_section)
+
+    def test_no_repeated_section_when_report_is_clean(self):
+        real_report = cli_setup.build_report(_raw(), self.settings_path, str(self.home))
+        all_ok_report = {
+            key: [(label, "ok", detail) for label, _, detail in checks]
+            for key, checks in real_report.items()
+        }
+        with patch.object(cli_setup, "build_report", return_value=all_ok_report):
+            lines: list[str] = []
+            cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertFalse(any("repeated from above" in ln for ln in lines))
 
     def test_all_checks_passed_summary_when_nothing_to_report(self):
         # Force a fully clean report by taking the REAL report's shape
@@ -1178,6 +1209,23 @@ class InteractiveSetupFinalSummaryTest(unittest.TestCase):
     def test_warnings_only_no_fails_still_flagged(self):
         text = self._run({"group": [("g", "warn", "not in group")]})
         self.assertIn("Done -- 0 problem(s), 1 warning(s) still need attention", text)
+
+    def test_repeats_every_warning_and_failure_before_the_done_line(self):
+        # 2026-07-08, the operator: "please repeat all warnings at the end of
+        # setup and status explicitly" -- same treatment as plain
+        # print_report() above, for the interactive walkthrough's own
+        # closing summary.
+        text = self._run({
+            "secrets": [("secret: x", "fail", "missing")],
+            "group": [("g", "warn", "not in group")],
+        })
+        repeated_section = text.split("Still need attention, repeated from above:")[1]
+        self.assertIn("[FAIL] secret: x -- missing", repeated_section)
+        self.assertIn("[WARN] g -- not in group", repeated_section)
+
+    def test_no_repeated_section_when_all_clear(self):
+        text = self._run({"group": [("g", "ok", "fine")]})
+        self.assertNotIn("repeated from above", text)
 
     def test_returns_fails_and_warns_so_the_caller_can_exit_non_zero(self):
         # Regression coverage for 2026-07-10: `my-bt setup -i && my-bt
