@@ -47,5 +47,35 @@ class SubmitFeedbackScriptTest(unittest.TestCase):
         self.assertIn("if (ev.defaultPrevented) return;", _SUBMIT_FEEDBACK_SCRIPT)
 
 
+class PageFaviconTest(unittest.TestCase):
+    """2026-07-08, the operator (screenshot of /admin/login with a browser-console
+    404 for /favicon.ico, comparing it against site/index.html which
+    explicitly declares favicon <link> tags under /favicon/): page() --
+    every dynamically-rendered page (courses/book/my/admin/admin-login
+    alike) -- had NO <link rel="icon"> of its own. Absent one, a browser
+    falls back to its own implicit default probe of /favicon.ico at the
+    site root, which 404s since the real files live under /favicon/ (see
+    nginx-locations.conf's root /var/www/booking.example.org/public_html -- static,
+    unmatched paths like /favicon/* fall through to that root and are
+    served directly, so a root-relative link resolves correctly from any
+    app page regardless of host)."""
+
+    def test_page_declares_the_same_favicon_set_as_index_html(self):
+        html = page("Some title", "<p>body</p>")
+        self.assertIn('<link rel="icon" type="image/png" href="/favicon/favicon-96x96.png" sizes="96x96">', html)
+        self.assertIn('<link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">', html)
+        self.assertIn('<link rel="shortcut icon" href="/favicon/favicon.ico">', html)
+        self.assertIn('<link rel="apple-touch-icon" sizes="180x180" href="/favicon/apple-touch-icon.png">', html)
+        self.assertIn('<link rel="manifest" href="/favicon/site.webmanifest">', html)
+
+    def test_favicon_links_are_root_relative_not_domain_absolute(self):
+        # Deliberately NOT hardcoding booking.example.org (unlike site/index.html's
+        # own Word-pasted absolute URLs) -- app/templates.py has no
+        # business knowing its own domain, and doesn't need to: same-origin
+        # root-relative links work regardless of host.
+        html = page("Some title", "<p>body</p>")
+        self.assertNotIn("https://", html.split("<style>")[0])
+
+
 if __name__ == "__main__":
     unittest.main()
