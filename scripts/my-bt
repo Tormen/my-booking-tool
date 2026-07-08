@@ -218,10 +218,20 @@ def cmd_list(args) -> None:
 def cmd_users(args) -> None:
     """`my-bt users` -- list guest accounts across live/archived/all.
 
-    2026-07-13: default output is a compact, readable view (name, email,
-    joined, last login) -- see app.cli_list.build_clean_user_view. Pass
-    -r/--raw for every raw column (password/token hashes and all --
-    pin_hash/pin_salt are still stripped either way, see below)."""
+    2026-07-13: default output is a compact, readable view -- see
+    app.cli_list.build_clean_user_view. Pass -r/--raw for every raw
+    column (password/token hashes and all -- pin_hash/pin_salt are still
+    stripped either way, see below).
+
+    2026-07-08, the operator: "please have name joined last_login last_course
+    email" (email now last, not 2nd), "last_course = last confirmed
+    course" (new column, computed from ALL registrations regardless of
+    this command's own --live/--archive scope -- see
+    app.cli_list.compute_last_confirmed_course), "please only make email
+    as wide as needed!" (erased users' hashed email is now shown as
+    "[erased]" instead of the raw ~70-char hash), and "please only use
+    YYYY-MM-DD for the columns and only with -V show also the
+    timestamp" -- see -V/--verbose below."""
     store = _store(args)
     rows = store.read_users(scope=args.scope)
     if args.email:
@@ -229,7 +239,10 @@ def cmd_users(args) -> None:
         rows = [r for r in rows if needle in r["email"].lower()]
     rows = [{k: v for k, v in r.items() if k not in ("pin_hash", "pin_salt")} for r in rows]
     if not args.raw:
-        rows = app_cli_list.build_clean_user_view(rows)
+        last_course = app_cli_list.compute_last_confirmed_course(
+            store.read_registrations(scope="all"), date.today(),
+        )
+        rows = app_cli_list.build_clean_user_view(rows, last_course_by_user=last_course, verbose=args.verbose)
     _print_rows(rows, args.format)
 
 
@@ -1144,6 +1157,10 @@ def build_parser() -> argparse.ArgumentParser:
     scope_args(sp)
     format_arg(sp)
     raw_arg(sp, "users")
+    sp.add_argument(
+        "-V", "--verbose", action="store_true",
+        help="show full joined/last_login timestamps (date_HHMM.SS) instead of just YYYY-MM-DD",
+    )
     sp.add_argument("--email", help="filter by (partial, case-insensitive) email")
     sp.set_defaults(func=cmd_users)
 

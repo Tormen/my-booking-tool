@@ -4,8 +4,8 @@ from datetime import date
 
 from app.cli_list import (
     annotate_admin_party_label, annotate_party_info, assign_short_ids, build_clean_registration_view,
-    build_clean_user_view, compute_times_booked_counts, filter_by_date, merge_archived_for_display,
-    resolve_short_id,
+    build_clean_user_view, compute_last_confirmed_course, compute_times_booked_counts, filter_by_date,
+    merge_archived_for_display, resolve_short_id,
 )
 from app.security import hash_email_for_erasure, hash_token, new_token
 from app.storage import Store
@@ -234,15 +234,36 @@ class BuildCleanRegistrationViewTest(unittest.TestCase):
 
 
 class BuildCleanUserViewTest(unittest.TestCase):
-    def test_shows_name_email_joined_last_login(self):
-        rows = [{
+    def setUp(self):
+        self.row = {
             "user_id": "u1", "name": "Ada", "email": "ada@example.com",
             "created_at": "2026-01-01T00:00:00", "last_login_at": "2026-07-01T09:30:00",
-        }]
-        result = build_clean_user_view(rows)
+        }
+
+    def test_shows_name_email_joined_last_login(self):
+        result = build_clean_user_view([self.row])
         self.assertEqual(result[0]["name"], "Ada")
         self.assertEqual(result[0]["email"], "ada@example.com")
         self.assertEqual(result[0]["joined"], "2026-01-01")
+        self.assertEqual(result[0]["last_login"], "2026-07-01")
+
+    def test_column_order_is_name_joined_last_login_last_course_email(self):
+        # 2026-07-08, the operator: "please have name joined last_login
+        # last_course email".
+        result = build_clean_user_view([self.row])
+        self.assertEqual(list(result[0].keys()), ["name", "joined", "last_login", "last_course", "email"])
+
+    def test_dates_are_date_only_by_default_even_with_a_real_time_of_day(self):
+        # 2026-07-08, the operator: "please only use YYYY-MM-DD for the columns
+        # and only with -V show also the timestamp" -- unlike the
+        # shared format_display_timestamp(), no time-of-day leaks through
+        # here even when last_login_at isn't exactly midnight.
+        result = build_clean_user_view([self.row])
+        self.assertEqual(result[0]["last_login"], "2026-07-01")
+
+    def test_verbose_shows_full_timestamp(self):
+        result = build_clean_user_view([self.row], verbose=True)
+        self.assertEqual(result[0]["joined"], "2026-01-01")  # midnight -- date only either way
         self.assertEqual(result[0]["last_login"], "2026-07-01_0930.00")
 
     def test_never_logged_in_shows_placeholder(self):
@@ -254,6 +275,65 @@ class BuildCleanUserViewTest(unittest.TestCase):
         rows = [{"user_id": "u1", "name": "Ada", "email": "ada@example.com"}]
         result = build_clean_user_view(rows)
         self.assertNotIn("user_id", result[0])
+
+    def test_last_course_populated_from_lookup(self):
+        result = build_clean_user_view([self.row], last_course_by_user={"u1": "yoga-class-1"})
+        self.assertEqual(result[0]["last_course"], "yoga-class-1")
+
+    def test_last_course_blank_when_absent_from_lookup(self):
+        result = build_clean_user_view([self.row], last_course_by_user={})
+        self.assertEqual(result[0]["last_course"], "")
+
+    def test_erased_email_hash_shown_as_placeholder(self):
+        # 2026-07-08, the operator: "please only make email as wide as needed!"
+        # -- root cause was an erased user's ~70-char hashed email
+        # (app.security.hash_email_for_erasure) being shown in full.
+        row = {**self.row, "email": hash_email_for_erasure("ada@example.com", b"pepper"), "name": "[erased]"}
+        result = build_clean_user_view([row])
+        self.assertEqual(result[0]["email"], "[erased]")
+
+    def test_ordinary_email_unaffected(self):
+        result = build_clean_user_view([self.row])
+        self.assertEqual(result[0]["email"], "ada@example.com")
+
+
+class ComputeLastConfirmedCourseTest(unittest.TestCase):
+    def setUp(self):
+        self.today = date(2026, 7, 8)
+
+    def _reg(self, user_id: str, course: str, occurrence_date: str, status: str = "confirmed") -> dict:
+        return {"user_id": user_id, "course_shortname": course, "occurrence_date": occurrence_date, "status": status}
+
+    def test_picks_most_recent_confirmed_occurrence_today_or_earlier(self):
+        rows = [
+            self._reg("u1", "yoga-class-1", "2026-06-01"),
+            self._reg("u1", "yoga-class-2", "2026-07-08"),  # today -- counts
+            self._reg("u1", "yoga-class-3", "2026-07-09"),  # tomorrow -- excluded
+        ]
+        result = compute_last_confirmed_course(rows, today=self.today)
+        self.assertEqual(result["u1"], "yoga-class-2")
+
+    def test_ignores_non_confirmed_statuses(self):
+        rows = [
+            self._reg("u1", "yoga-class-1", "2026-07-01"),
+            self._reg("u1", "yoga-class-2", "2026-07-05", status="canceled_by_guest"),
+        ]
+        result = compute_last_confirmed_course(rows, today=self.today)
+        self.assertEqual(result["u1"], "yoga-class-1")
+
+    def test_no_qualifying_row_absent_from_result(self):
+        rows = [self._reg("u1", "yoga-class-1", "2026-07-20")]  # future only
+        result = compute_last_confirmed_course(rows, today=self.today)
+        self.assertNotIn("u1", result)
+
+    def test_separate_users_kept_separate(self):
+        rows = [
+            self._reg("u1", "yoga-class-1", "2026-07-01"),
+            self._reg("u2", "yoga-class-2", "2026-07-02"),
+        ]
+        result = compute_last_confirmed_course(rows, today=self.today)
+        self.assertEqual(result["u1"], "yoga-class-1")
+        self.assertEqual(result["u2"], "yoga-class-2")
 
 
 class AssignShortIdsTest(unittest.TestCase):

@@ -8,10 +8,62 @@ directly. See tests/test_cli_list.py.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date
+from datetime import date, datetime
 
 from .erasure import find_archived_user_ids_for_email
+from .security import is_erased_email
 from .storage import format_display_timestamp, status_label
+
+
+def _format_display_date(iso_str: str) -> str:
+    """Date-only rendering of a now_iso()-produced (or any ISO-8601)
+    timestamp -- YYYY-MM-DD, no time-of-day, ever. 2026-07-08, the operator,
+    looking at `my-bt users`'s joined/last_login columns: "please only
+    use YYYY-MM-DD for the columns and only with -V show also the
+    timestamp" -- unlike format_display_timestamp() (which still shows
+    the time-of-day when it isn't exactly midnight), this ALWAYS drops
+    it; the full timestamp is only ever shown when the caller explicitly
+    asks for verbose output (see build_clean_user_view's own `verbose`
+    param). Falls back to the raw string unchanged if it isn't valid
+    ISO-8601, same as format_display_timestamp()."""
+    if not iso_str:
+        return iso_str
+    try:
+        return datetime.fromisoformat(iso_str).strftime("%Y-%m-%d")
+    except ValueError:
+        return iso_str
+
+
+def compute_last_confirmed_course(rows: list[dict], today: date) -> dict[str, str]:
+    """For each user_id, the course_shortname of their most recent
+    CONFIRMED registration with occurrence_date today-or-earlier ("today
+    counts as already happened", same convention as
+    compute_times_booked_counts/app.cli_stats.compute_last_and_next_
+    slot). 2026-07-08, the operator: "please have name joined last_login
+    last_course email ... last_course = last confirmed course" -- a new
+    column on `my-bt users`'s clean view.
+
+    `rows` should be ALL registrations regardless of the users list's
+    own --live/--archive/--all scope (e.g. Store.read_registrations(
+    scope="all")) -- an archived (erased) user's own row still belongs to
+    that same user_id, so their last_course should still resolve.
+
+    A user_id with no qualifying (confirmed, today-or-earlier) row at
+    all is simply absent from the result -- caller treats that as a
+    blank column, same as every other "nothing to show" case here."""
+    best_date_by_user: dict[str, str] = {}
+    course_by_user: dict[str, str] = {}
+    today_iso = today.isoformat()
+    for r in rows:
+        if r["status"] != "confirmed":
+            continue
+        occ = r["occurrence_date"]
+        if occ > today_iso:
+            continue
+        if occ >= best_date_by_user.get(r["user_id"], ""):
+            best_date_by_user[r["user_id"]] = occ
+            course_by_user[r["user_id"]] = r["course_shortname"]
+    return course_by_user
 
 # 2026-07-13, the operator: "would it be possible that my-bt lists a short-id that
 # can also be used with my-bt cancel to cancel a booking? a bit like what
@@ -231,22 +283,54 @@ def build_clean_registration_view(
     return out
 
 
-def build_clean_user_view(rows: list[dict]) -> list[dict]:
+def build_clean_user_view(
+    rows: list[dict], last_course_by_user: dict[str, str] | None = None, verbose: bool = False,
+) -> list[dict]:
     """Builds the compact, human-readable rows `my-bt users` shows by
     default (2026-07-13, same "clean by default, -r/--raw for the full
-    table" request as `my-bt list` above) -- name, email, when they
-    joined, and when they last logged in, with no user_id or any of the
-    token/hash columns (password_hash/salt, confirm_token_hash,
-    pending_email_*, ... -- see User's own dataclass in app/storage.py for
-    the full raw list). pin_hash/pin_salt were already stripped upstream
-    by cmd_users before this ever runs, same as -r/--raw still does."""
+    table" request as `my-bt list` above) -- name, when they joined, when
+    they last logged in, their last confirmed course, and email (in that
+    order), with no user_id or any of the token/hash columns
+    (password_hash/salt, confirm_token_hash, pending_email_*, ... -- see
+    User's own dataclass in app/storage.py for the full raw list).
+    pin_hash/pin_salt were already stripped upstream by cmd_users before
+    this ever runs, same as -r/--raw still does.
+
+    2026-07-08, the operator, re-ordering + two more changes in the same
+    message:
+    - "please have name joined last_login last_course email" -- email
+      moves from 2nd to LAST; new "last_course" column added (see
+      compute_last_confirmed_course -- pass its result as
+      `last_course_by_user`; a user_id absent from that dict, e.g. no
+      confirmed history yet, gets a blank cell).
+    - "please only make email as wide as needed!" -- root cause of the
+      column being far wider than any real email: an ERASED (archived)
+      user's "email" field is a long keyed HMAC hash (see
+      app/security.py's hash_email_for_erasure, "erased:<64 hex chars>"),
+      shown here in full. Detected via is_erased_email() and rendered as
+      "[erased]" instead -- matching "name"'s own existing "[erased]"
+      placeholder for the same rows -- so the column is only ever as wide
+      as a real display value needs.
+    - "please only use YYYY-MM-DD for the columns and only with -V show
+      also the timestamp" -- joined/last_login are date-only
+      (_format_display_date) unless `verbose=True` (scripts/my-bt's
+      cmd_users wires this to a new -V/--verbose flag, same "more detail
+      on top of the summary" axis as `list -V`/`gdpr-retention -V`), in
+      which case the full format_display_timestamp() rendering (date, or
+      date_HHMM.SS when there's a real time-of-day) is used instead."""
+    last_course_by_user = last_course_by_user or {}
+    fmt = format_display_timestamp if verbose else _format_display_date
     out = []
     for r in rows:
+        email = r.get("email", "")
+        if is_erased_email(email):
+            email = "[erased]"
         out.append({
             "name": r.get("name", ""),
-            "email": r.get("email", ""),
-            "joined": format_display_timestamp(r.get("created_at", "")),
-            "last_login": format_display_timestamp(r.get("last_login_at", "")) or "(never)",
+            "joined": fmt(r.get("created_at", "")),
+            "last_login": fmt(r.get("last_login_at", "")) or "(never)",
+            "last_course": last_course_by_user.get(r.get("user_id", ""), ""),
+            "email": email,
         })
     return out
 
