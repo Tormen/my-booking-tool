@@ -1,10 +1,16 @@
+import tempfile
 import unittest
 from datetime import date
 
 from app.cli_list import (
     annotate_admin_party_label, annotate_party_info, assign_short_ids, build_clean_registration_view,
-    build_clean_user_view, compute_times_booked_counts, filter_by_date, resolve_short_id,
+    build_clean_user_view, compute_times_booked_counts, filter_by_date, merge_archived_for_display,
+    resolve_short_id,
 )
+from app.security import hash_email_for_erasure, hash_token, new_token
+from app.storage import Store
+
+from .helpers import make_settings
 
 
 def _row(occurrence_date: str) -> dict:
@@ -285,6 +291,72 @@ class ResolveShortIdTest(unittest.TestCase):
     def test_case_insensitive(self):
         resolved, _candidates = resolve_short_id("A1B2C3D4", self.ids)
         self.assertEqual(resolved, self.ids[0])
+
+
+class MergeArchivedForDisplayTest(unittest.TestCase):
+    """Read-only equivalent of `my-bt admin dearchive` -- see
+    merge_archived_for_display's own docstring. 2026-07-13, the operator: "/admin
+    should [be] non-mutating" -- this is what both `my-bt list --all`/
+    `--past` and admin_overview() now call instead of actually rewriting
+    the CSVs on every load."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings()
+
+    def _erase(self, email: str) -> tuple[str, str]:
+        """Same erasure simulation as tests/test_cli_history.py's own
+        helper: creates a user with one booking, then erases them for
+        real (hashing with this test's own erasure_pepper)."""
+        user = self.store.upsert_user_for_booking(email, "Guest")
+        reg = self.store.add_registration("c", "2026-01-01", user.user_id, hash_token(new_token()))
+        hashed = hash_email_for_erasure(user.email, self.settings.erasure_pepper)
+        self.store.erase_user(user.user_id, hashed)
+        return user.user_id, reg.registration_id
+
+    def test_relabels_archived_row_onto_the_live_rebooked_user(self):
+        old_id, reg_id = self._erase("guest@example.com")
+        new_user = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+
+        archived = self.store.read_registrations(scope="archived")
+        result = merge_archived_for_display(self.store, self.settings, [new_user.__dict__], archived)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["registration_id"], reg_id)
+        self.assertEqual(result[0]["user_id"], new_user.user_id)
+        self.assertNotEqual(result[0]["user_id"], old_id)
+
+    def test_does_not_write_to_disk(self):
+        self._erase("guest@example.com")
+        new_user = self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        archived_before = self.store.read_registrations(scope="archived")
+
+        merge_archived_for_display(self.store, self.settings, [new_user.__dict__], archived_before)
+
+        # Still there, untouched, on disk -- a real merge (`dearchive`)
+        # would have removed it from the archived CSV entirely.
+        self.assertEqual(self.store.read_registrations(scope="archived"), archived_before)
+
+    def test_no_matching_live_user_leaves_row_unchanged(self):
+        old_id, reg_id = self._erase("guest@example.com")
+        archived = self.store.read_registrations(scope="archived")
+
+        # No live rebook at all -- nobody to relabel onto.
+        result = merge_archived_for_display(self.store, self.settings, [], archived)
+
+        self.assertEqual(result[0]["registration_id"], reg_id)
+        self.assertEqual(result[0]["user_id"], old_id)
+
+    def test_unrelated_live_user_does_not_claim_someone_elses_history(self):
+        self._erase("guest@example.com")
+        other_user = self.store.upsert_user_for_booking("other@example.com", "Other")
+        archived = self.store.read_registrations(scope="archived")
+
+        result = merge_archived_for_display(self.store, self.settings, [other_user.__dict__], archived)
+
+        self.assertNotEqual(result[0]["user_id"], other_user.user_id)
 
 
 if __name__ == "__main__":

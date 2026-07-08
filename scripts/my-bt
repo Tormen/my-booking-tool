@@ -120,13 +120,22 @@ class _Tee:
 # -- subcommands --------------------------------------------------------------
 
 def cmd_list(args) -> None:
-    """`my-bt list` -- query registrations across live/archived/all.
+    """`my-bt list` -- query registrations. Default: today + future, live
+    only. --all: every date, live + archived (any live user's pre-erasure
+    archived history is merged in on the fly here -- see
+    app.cli_list.merge_archived_for_display -- WITHOUT writing anything
+    to disk; use `my-bt admin dearchive` to actually persist a merge).
+    --past: same merge, occurrence_date strictly before today only.
+
+    2026-07-13: this is also what `my-bt history` used to be for (dropped
+    -- folded in here instead): `list --all --email x@y.com` shows a
+    guest's full history, live and pre-erasure combined, the same "N
+    (incl. M pre-erasure)" merge /admin's overview shows.
 
     2026-07-13, the operator: "the default command shows it cleant up without
-    technical ids to ideally have a compact readable output ... for my-bt
-    list: can you mimick the view of the web-interface?" -- default output
-    now matches /admin's own table exactly: Status, Course, Date, Name,
-    Email, Registered, Times booked, Guests (see
+    technical ids ... can you mimick the view of the web-interface?" --
+    default output matches /admin's own table exactly: Status, Course,
+    Date, Name, Email, Registered, Times booked, Guests (see
     app.cli_list.build_clean_registration_view -- Times booked/Guests are
     the SAME shared helpers admin_overview() itself now calls, so the
     numbers/wording can't drift between the two).
@@ -137,8 +146,28 @@ def cmd_list(args) -> None:
     from the clean view's "Guests" column, left unchanged for anyone
     already scripting against -r's output)."""
     store = _store(args)
-    rows = store.read_registrations(scope=args.scope)
+    settings = app_config.load_settings(args.settings)
+    live_regs = store.read_registrations(scope="live")
     users = {u["user_id"]: u for u in store.read_users(scope="all")}
+
+    # Archived pre-erasure history, merged onto the live user_id it
+    # belongs to (display-only -- see merge_archived_for_display's own
+    # docstring). Computed unconditionally, same as admin_overview()'s own
+    # all_regs: Times booked's TOTAL must reflect a guest's true lifetime
+    # count even when the rows actually displayed are narrowed to
+    # today+future.
+    archived_merged = app_cli_list.merge_archived_for_display(
+        store, settings, store.read_users(scope="live"), store.read_registrations(scope="archived")
+    )
+    all_rows_for_totals = live_regs + archived_merged
+
+    today_iso = date.today().isoformat()
+    if args.all:
+        rows = all_rows_for_totals
+    elif args.past:
+        rows = [r for r in all_rows_for_totals if r["occurrence_date"] < today_iso]
+    else:
+        rows = [r for r in live_regs if r["occurrence_date"] >= today_iso]
 
     if args.year:
         args.from_ = args.from_ or f"{args.year}-01-01"
@@ -151,7 +180,6 @@ def cmd_list(args) -> None:
         rows = [r for r in rows if r["user_id"] == args.user_id]
     if args.from_ or args.to:
         rows = [r for r in rows if _in_range(r["occurrence_date"], args.from_, args.to)]
-    rows = app_cli_list.filter_by_date(rows, upcoming=args.upcoming, past=args.past)
     if args.email:
         needle = args.email.strip().lower()
         rows = [
@@ -166,20 +194,13 @@ def cmd_list(args) -> None:
         _print_rows(rows, args.format)
         return
 
-    # Times booked totals are always computed over the FULL live+archived
-    # set, same as /admin's own admin_overview() -- independent of
-    # whatever --scope/--course/--status/etc. narrowed the displayed
-    # `rows` down to, so e.g. `my-bt list --course foo` still shows each
-    # guest's TRUE overall times-booked count, not just their count
-    # within this one course.
-    all_rows_for_totals = store.read_registrations(scope="all")
     # Short ids (2026-07-13, the operator: "a bit like what git does with its
     # commit ids") are only ever assigned over LIVE registrations -- the
     # same universe `my-bt cancel`'s short-id resolution searches (see
     # cmd_cancel), since only a live row can actually be canceled by one.
-    # An archived row shown in this same `list` output (default scope is
-    # live+archived, see scope_args) just gets a blank "id" cell.
-    live_ids = [r["registration_id"] for r in store.read_registrations(scope="live")]
+    # An archived row shown in this same `list` output (--all/--past)
+    # just gets a blank "id" cell.
+    live_ids = [r["registration_id"] for r in live_regs]
     short_ids = app_cli_list.assign_short_ids(live_ids)
     clean = app_cli_list.build_clean_registration_view(
         rows, users, all_rows_for_totals, date.today(), short_ids_by_reg_id=short_ids
@@ -280,60 +301,18 @@ def cmd_erase(args) -> None:
     print("erased" if ok else "no such user (nothing to erase)")
 
 
-def cmd_history(args) -> None:
-    """`my-bt history --email ...` -- read-only. Shows a live guest's own
-    registrations plus (separately labeled) any pre-erasure registrations
-    still parked under an old, archived (erased) identity that shares the
-    same email hash -- the same "N (incl. M pre-erasure)" merge the admin
-    overview shows on the web, computed the same way (see
-    app.cli_history.build_history / app.erasure.find_archived_user_ids_for_email).
-    Nothing on disk is read-modify-written; this never moves anything --
-    see `my-bt merge` for the mutating equivalent."""
-    settings = app_config.load_settings(args.settings)
-    store = _store(args)
-    result = app_cli_history.build_history(store, settings, args.email)
+def cmd_dearchive(args) -> None:
+    """`my-bt admin dearchive --email ...` -- permanently moves a guest's
+    pre-erasure registrations (parked under an old, erased identity
+    sharing this email's hash) onto their current live account, so they
+    show up as normal history everywhere from then on (not just in
+    `list`'s own on-the-fly merged view). Explicit and one-shot -- nothing
+    is ever moved as a side effect of anything else.
 
-    if result.live_user is None:
-        print(f"no live account with that email ({args.email})")
-        return
-
-    print(f"live user: {result.live_user.user_id} <{result.live_user.email}>")
-    print()
-    users = {u["user_id"]: u for u in store.read_users(scope="all")}
-    print(f"live registrations ({result.live_times_booked}):")
-    _print_rows(app_cli_list.annotate_party_info(result.live_registrations, users), args.format)
-
-    print()
-    if result.archived_times_booked:
-        print(f"archived (pre-erasure) registrations ({result.archived_times_booked}), "
-              f"from archived user_id(s) {', '.join(result.archived_user_ids)}:")
-        _print_rows(result.archived_registrations, args.format)
-    else:
-        print("no archived (pre-erasure) history for this email")
-
-    print()
-    if result.archived_times_booked:
-        print(f"times booked: {result.combined_times_booked} "
-              f"(incl. {result.archived_times_booked} pre-erasure)")
-    else:
-        print(f"times booked: {result.combined_times_booked}")
-
-
-def cmd_merge(args) -> None:
-    """`my-bt merge --email ...` -- explicit, admin-invoked action that
-    moves a guest's pre-erasure registration history (parked under an old,
-    archived/erased user_id sharing this email's hash) onto their CURRENT
-    live user_id, so it shows up as their own history going forward. This
-    is deliberately a separate, deliberate action from `my-bt erase` (same
-    "explicit CLI command the admin chooses to run" pattern) -- nothing is
-    ever merged/restored automatically as a side effect of anything else.
-
-    Does NOT touch the archived user row itself: that old identity's name
-    stays "[erased]" and email stays the hash, forever -- only the
-    registration rows move (they never held name/email, only a user_id
-    foreign key, so re-parenting them doesn't restore anything sensitive).
-    See app.storage.Store.merge_archived_registrations's docstring for the
-    exact boundary."""
+    The old, archived identity itself is untouched: its name stays
+    "[erased]" and email stays the hash forever -- only the registration
+    rows (which never held name/email, just a user_id) move. Renamed from
+    `my-bt merge` 2026-07-13 (moved under `admin`, same behavior)."""
     if not args.yes:
         confirm = input(
             f"Merge pre-erasure booking history into the live account for {args.email}? "
@@ -363,6 +342,51 @@ def cmd_merge(args) -> None:
     print(f"merged {result.moved_count} registration(s) into {live_user.user_id}:")
     for r in sorted(result.moved_registrations, key=lambda r: (r["occurrence_date"], r["course_shortname"])):
         print(f"  {r['occurrence_date']}  {r['course_shortname']}  ({r['status']})")
+
+
+def _cmd_cancel_occurrence(args, settings, store) -> None:
+    """`my-bt cancel --date ...` -- the mass-cancel branch factored out of
+    cmd_cancel() so that function's own docstring/single-row logic stays
+    readable. Auto-detects --course from the date's own live cancelable
+    registrations when not given (see cmd_cancel's own docstring for why
+    that's the common case), then runs the exact same
+    app.cancel_flow.cancel_occurrence every other "cancel the entire
+    session" path (the /admin checkbox, /host-cancel-occurrence) uses."""
+    course_shortname, candidates = app_cli_cancel.resolve_course_shortname_for_date(store, args.date, args.course)
+    if course_shortname is None:
+        if candidates:
+            print(f"ambiguous course for {args.date} -- {len(candidates)} courses have live registrations:")
+            for c in candidates:
+                print(f"  {c}")
+            print("pass --course to pick one.")
+        else:
+            print(f"no live registrations found on {args.date} -- nothing to cancel")
+        return
+
+    participants = app_cancel_flow.find_cancelable_registrations_for_occurrence(store, course_shortname, args.date)
+    if not participants:
+        print(f"no live registrations for {course_shortname} on {args.date} -- nothing to cancel")
+        return
+
+    if not args.yes:
+        print(f"About to cancel EVERY registration for {course_shortname} on {args.date}:")
+        for r in participants:
+            user = store.find_user_by_id(r.user_id)
+            who = f"{user.name} <{user.email}>" if user else "(unknown guest)"
+            print(f"  {who} ({r.status})")
+        confirm = input(f"{len(participants)} participant(s) will be notified. Type 'yes' to confirm: ")
+        if confirm.strip().lower() != "yes":
+            print("aborted")
+            return
+
+    caldav = app_cancel_flow.build_caldav_client(settings)
+    result = app_cancel_flow.cancel_occurrence(
+        store, settings, caldav, course_shortname, args.date, message=args.message or "",
+    )
+    print(f"canceled {len(result.canceled)} registration(s) for {course_shortname} on {args.date}:")
+    for c in result.canceled:
+        who = f"{c.user_name} <{c.user_email}>" if c.user_email else "(unknown guest)"
+        print(f"  {who}: {c.status_before} -> canceled_by_host")
 
 
 def cmd_cancel(args) -> None:
@@ -395,9 +419,25 @@ def cmd_cancel(args) -> None:
     tried as a full id first (the exact same store.find_by_id() lookup as
     before, so nothing changes for any existing script passing a full
     id), and only resolved as a short-id prefix against the LIVE
-    registration set if that exact lookup comes back empty."""
+    registration set if that exact lookup comes back empty.
+
+    2026-07-13, the operator: "cancel entire course" -- `--date YYYY-MM-DD`
+    (mutually exclusive with --registration-id) cancels EVERY live
+    confirmed/waitlisted/pending-confirmation registration for one
+    occurrence at once, via app.cancel_flow.cancel_occurrence -- the same
+    function behind the web admin's /admin checkbox and the no-login
+    `/host-cancel-occurrence/<course>/<date>` magic link, so all three
+    paths share one implementation. --course is optional ("as usually a
+    single date for me holds a single course"): auto-detected from that
+    date's live cancelable registrations if omitted, erroring with the
+    list of candidates if more than one course actually has a booking on
+    that date."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
+
+    if args.date:
+        _cmd_cancel_occurrence(args, settings, store)
+        return
 
     reg_id = args.registration_id
     reg = store.find_by_id(reg_id)
@@ -416,7 +456,10 @@ def cmd_cancel(args) -> None:
     if reg is None:
         print(f"no registration with id {args.registration_id}")
         return
-    if reg.status not in ("confirmed", "waitlisted"):
+    # 2026-07-13: pending_confirmation (a guest who hasn't yet clicked their
+    # account-confirmation email link) is cancelable too now -- see
+    # Store.cancel()'s own docstring on why this used to be a real gap.
+    if reg.status not in ("confirmed", "waitlisted", "pending_confirmation"):
         print(f"registration {reg_id} is not cancelable (status is already {reg.status!r})")
         return
 
@@ -446,19 +489,47 @@ def cmd_cancel(args) -> None:
     print(f"  notified: {'yes (both participant and admin emailed)' if result.emailed else 'no (course no longer configured in settings.toml)'}")
 
 
-def cmd_purge_retention(args) -> None:
-    """`my-bt purge-retention` -- manually run the same purge the systemd
-    timer runs nightly (see systemd/my-booking-retention.timer)."""
+def cmd_gdpr_retention(args) -> None:
+    """`my-bt gdpr-retention` -- shows what WOULD be purged under the
+    current GDPR storage-limitation policy (app/retention.py's own
+    docstring has the three separate clocks: 24mo after occurrence,
+    6mo after cancellation, 48h for an abandoned pending-confirmation
+    signup) -- counts only by default, or every matching row with
+    -V/--verbose. Read-only; nothing is deleted here.
+
+    2026-07-13, the operator: renamed from `my-bt purge-retention` and split into
+    a status-by-default/explicit-action shape ("this shows then by
+    default the status of the data in terms of GDPR... and the command
+    will get a purge subcommand that would then do the purge"). Run
+    `my-bt gdpr-retention purge` to actually delete them -- there's
+    already a nightly systemd timer doing this automatically (see
+    systemd/my-booking-retention.timer), this is just the on-demand/
+    inspect-first equivalent."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
-    if args.dry_run:
-        today = date.today()
-        would_purge = sum(
-            1 for r in store.all_registrations()
-            if app_retention.should_purge(r, today, settings)
-        )
-        print(f"would purge {would_purge} row(s) (dry run, nothing changed)")
-        return
+    today = date.today()
+    matches = [r for r in store.all_registrations() if app_retention.should_purge(r, today, settings)]
+    print(f"{len(matches)} row(s) would be purged (run `my-bt gdpr-retention purge` to actually delete them)")
+    if args.verbose and matches:
+        rows = [
+            {
+                "registration_id": r.registration_id, "course": r.course_shortname,
+                "date": r.occurrence_date, "status": r.status,
+                "registered_at": r.registered_at, "canceled_at": r.canceled_at,
+            }
+            for r in matches
+        ]
+        _print_rows(rows, args.format)
+
+
+def cmd_gdpr_retention_purge(args) -> None:
+    """`my-bt gdpr-retention purge` -- actually deletes every row past its
+    GDPR retention window (see app/retention.py). Same job the nightly
+    systemd timer runs (systemd/my-booking-retention.timer) -- this just
+    runs it on demand. See `my-bt gdpr-retention` (no subcommand) to
+    inspect what this would do first, without changing anything."""
+    settings = app_config.load_settings(args.settings)
+    store = _store(args)
     purged = app_retention.run_purge(store, settings)
     print(f"purged {purged} row(s)")
 
@@ -490,27 +561,6 @@ def cmd_git_snapshot(args) -> None:
 
     result = app_git_snapshot.snapshot(data_dir)
     print(result.detail)
-
-
-def cmd_test(args) -> None:
-    """`my-bt test` -- run the project's unit test suite (python3 -m unittest)."""
-    import subprocess
-
-    repo_root = args.repo_root or os.path.dirname(HOME.rstrip("/"))
-    # HOME is normally /opt/my-booking with no tests/ alongside it in a
-    # from-package install; --repo-root lets you point at a checkout that
-    # does have tests/ (e.g. before building the RPM).
-    candidates = [args.repo_root] if args.repo_root else [HOME, os.getcwd()]
-    for candidate in candidates:
-        if candidate and os.path.isdir(os.path.join(candidate, "tests")):
-            print(f"running tests from {candidate}")
-            result = subprocess.run(
-                [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", ".", "-v"],
-                cwd=candidate,
-            )
-            sys.exit(result.returncode)
-    print("no tests/ directory found -- pass --repo-root /path/to/checkout", file=sys.stderr)
-    sys.exit(1)
 
 
 def cmd_maintenance(args) -> None:
@@ -664,51 +714,60 @@ def _print_live_status(payload: dict) -> None:
 # before (see git history for how that used to go wrong).
 
 def cmd_status(args) -> None:
-    """`my-bt status` -- by default, prints a short summary: whether the
-    live process is actually up and answering requests (queried directly
-    over HTTP on its own loopback port -- see _query_internal_status),
-    whether maintenance mode is on (highlighted if so), and who's
-    currently logged in (any unexpired session -- 2026-07-13, the operator:
-    "logged in means: unexpired sessions" -- with since-when-connected
-    and their current/last-loaded page+timestamp, both read straight out
-    of the live process's own in-memory SESSIONS dict, see
-    app/webapp.py::internal_status). Exactly what the operator asked for
-    2026-07-13: "please make current output of status appear when called
-    with -V / --verbose" -- so pass -V/--verbose for the full, original,
-    much longer per-check report this docstring describes below (every
-    static config/secrets/systemd/SELinux/nginx check `status` has always
-    run) IN ADDITION to the summary above. The summary alone answers "is
-    everything OK right now" fast; -V is for actually diagnosing a
-    problem the summary flagged.
+    """`my-bt status` -- quick, live-only summary: whether the process is
+    actually up and answering requests right now (queried directly over
+    HTTP on its own loopback port -- see _query_internal_status), whether
+    maintenance mode is on (highlighted if so), and who's currently
+    logged in (any unexpired session -- 2026-07-13, the operator: "logged in
+    means: unexpired sessions" -- with since-when-connected and their
+    current/last-loaded page+timestamp, read straight out of the live
+    process's own in-memory SESSIONS dict, see
+    app/webapp.py::internal_status).
 
-    -V/--verbose's static checks cover: settings.toml (plus
-    any pending settings.toml.rpmnew / privacy.html.tmpl.rpmnew merge and
-    a package-wide `rpm -V` integrity check), secrets (existence,
+    2026-07-13, the operator: originally this command also had a -V/--verbose
+    flag that additionally printed a long settings/secrets/systemd/
+    SELinux/nginx install-health report -- moved out into its own command,
+    `my-bt admin health`, instead ("status as discussed (but the -V is now:
+    admin health)"). Keeps `status` fast and purely about "is it alive
+    right now"; `admin health` is for actually diagnosing an install
+    problem."""
+    payload, error = _query_internal_status(args.internal_url)
+    if error:
+        print(f"live process: NOT RESPONDING -- {error}")
+        sys.exit(1)
+    _print_live_status(payload)
+
+
+def cmd_admin_health(args) -> None:
+    """`my-bt admin health` -- full install-health diagnostic: settings.toml
+    (plus any pending settings.toml.rpmnew / privacy.html.tmpl.rpmnew merge
+    and a package-wide `rpm -V` integrity check), secrets (existence,
     permissions, and -- for admin_password_hash / erasure_pepper --
     whether the content looks right), the data dir (writable, git-snapshot
     protected, AND -- 2026-07-08, real incident: see
     cli_checks.check_data_dir_ownership's own docstring -- every *.csv in
     it actually OWNED by the my-booking service user, checked via
-    os.stat() rather than os.access() specifically so running `status`
-    itself as root, a completely normal thing to do here, can't mask a
-    real ownership problem), the configured log
-    file (if any), my-booking group membership, systemd units, whether
-    settings.toml has been edited since the service last (re)started
-    (it's only read once at startup -- an edit made after that isn't
-    live yet, even though the file itself is already correct), SELinux,
-    whether every nginx `location` block this app needs is present in
-    the live config (2026-07-06 -- previously only `setup -i` checked
-    this, so `status` could report "all checks passed" while a route
-    was silently unreachable through nginx), and (if
-    [site].static_site_dir is configured) whether the live
-    deployed privacy.html still matches this settings.toml, plus whether
-    any of the live site/*.html pages still contain a leftover REPLACE-ME
-    or unsubstituted ${...} placeholder (i.e. the generic template got
-    published without being customized -- see
-    app/cli_checks.py::check_static_site_compliance). Deliberately no
-    network/CalDAV check here, same reasoning as `erase` -- this CLI has
-    no CalDAV dependency by design, so it still works to diagnose things
-    even if the CalDAV/SMTP provider itself is unreachable."""
+    os.stat() rather than os.access() specifically so running this itself
+    as root, a completely normal thing to do here, can't mask a real
+    ownership problem), the configured log file (if any), my-booking
+    group membership, systemd units, whether settings.toml has been
+    edited since the service last (re)started (it's only read once at
+    startup -- an edit made after that isn't live yet, even though the
+    file itself is already correct), SELinux, whether every nginx
+    `location` block this app needs is present in the live config, and
+    (if [site].static_site_dir is configured) whether the live deployed
+    privacy.html still matches this settings.toml, plus whether any of
+    the live site/*.html pages still contain a leftover REPLACE-ME or
+    unsubstituted ${...} placeholder. Deliberately no network/CalDAV
+    check here, same reasoning as `erase` -- this CLI has no CalDAV
+    dependency by design, so it still works to diagnose things even if
+    the CalDAV/SMTP provider itself is unreachable.
+
+    2026-07-13: this is what plain `my-bt status` used to print (first
+    unconditionally, then behind -V/--verbose) -- split out into its own
+    command so `status` stays a fast "is it alive" check and this stays
+    the slower, deeper "what's wrong with the install" one. See `my-bt
+    status` for the live-process/session-list summary instead."""
     from app import cli_checks, cli_setup
 
     checks: list[cli_checks.Check] = []
@@ -811,57 +870,18 @@ def cmd_status(args) -> None:
 
     fails = sum(1 for _, level, _ in checks if level == "fail")
     warns = sum(1 for _, level, _ in checks if level == "warn")
-    oks = sum(1 for _, level, _ in checks if level == "ok")
 
-    # -- default (non-verbose) summary ---------------------------------------------
-    # 2026-07-13, the operator's exact spec for what `status` shows by default: (1)
-    # is the server up/running/working -- a summary of what -V's full report
-    # below shows in detail, (2) maintenance mode, highlighted if ON, (3)
-    # who's logged in (unexpired sessions, since-when, current/last page +
-    # timestamp -- queried live off the running process, see
-    # _query_internal_status/app/webapp.py::internal_status), (4) "anything
-    # else you deem useful" -- version + the live process's own clock, folded
-    # into _print_live_status.
-    if fails:
-        static_summary = f"FAIL -- {fails} problem(s), {warns} warning(s) among {len(checks)} static checks"
-    elif warns:
-        static_summary = f"WARN -- {warns} warning(s) among {len(checks)} static checks"
-    else:
-        static_summary = f"OK -- {oks} static checks passed"
-    print(f"static config/install checks: {static_summary}" +
-          ("" if args.verbose else " (run `my-bt status -V` for the full per-item report)"))
-
-    payload, error = _query_internal_status(args.internal_url)
-    if error:
-        print(f"live process: NOT RESPONDING -- {error}")
-    else:
-        _print_live_status(payload)
-
-    # -- full per-check report, -V/--verbose only ------------------------------------
-    # 2026-07-13, the operator: "please make current output of status appear when
-    # called with -V / --verbose" -- this is that original output, unchanged,
-    # just no longer printed by default.
-    if args.verbose:
-        print()
-        print("-- full check report " + "-" * 58)
-        icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
-        for label, level, detail in checks:
-            line = f"[{icon[level]}] {label}"
-            if detail:
-                line += f" -- {detail}"
-            print(line)
+    icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
+    for label, level, detail in checks:
+        line = f"[{icon[level]}] {label}"
+        if detail:
+            line += f" -- {detail}"
+        print(line)
 
     print()
-    if fails or error:
-        detail_hint = "" if args.verbose else " (run with -V for detail)"
-        bits = []
-        if fails:
-            bits.append(f"{fails} problem(s){detail_hint} -- fix the FAIL item(s) above")
-        if warns:
-            bits.append(f"{warns} warning(s){detail_hint if not fails else ''}")
-        if error:
-            bits.append("the live process isn't responding")
-        print(", ".join(bits) + ". Re-run `my-bt status`" + ("" if args.verbose else " -V") + " once fixed.")
+    if fails:
+        print(f"{fails} problem(s), {warns} warning(s) -- fix the FAIL item(s) above, "
+              "then re-run `my-bt admin health`.")
         sys.exit(1)
     elif warns:
         # 2026-07-10, the operator: "please make my-bt status FAIL in case of any
@@ -869,11 +889,10 @@ def cmd_status(args) -> None:
         # is a real (potential) problem." -- a WARN used to be purely
         # cosmetic (exit 0), which let a real, actionable gap (e.g. a
         # missing nginx `location` block, silently making a whole route
-        # unreachable through nginx) sail straight past `my-bt status &&
+        # unreachable through nginx) sail straight past `my-bt admin health &&
         # <next step>` in a script/cron/CI context. Any warning now exits
         # non-zero too, same as a FAIL -- only a fully clean report exits 0.
-        print(f"{warns} warning(s), no hard failures -- worth a look" +
-              (" above" if args.verbose else " with `my-bt status -V`") + ".")
+        print(f"{warns} warning(s), no hard failures -- worth a look above.")
         sys.exit(1)
     else:
         print("all checks passed.")
@@ -958,12 +977,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     def scope_args(sp):
         g = sp.add_mutually_exclusive_group()
-        g.add_argument("--live", dest="scope", action="store_const", const="live")
-        g.add_argument("--archive", "--archived", dest="scope", action="store_const", const="archived")
+        g.add_argument(
+            "--live", dest="scope", action="store_const", const="live",
+            help="only live rows (data/registrations.csv or users.csv) -- default is live+archived combined",
+        )
+        g.add_argument(
+            "--archive", "--archived", dest="scope", action="store_const", const="archived",
+            help="only archived rows (data/archived/*.csv -- what GDPR erasure moves rows into, "
+                 "see `my-bt erase`), as-is, no merge onto any live account (see `my-bt list --all` for that)",
+        )
         sp.set_defaults(scope="all")
 
     def format_arg(sp):
-        sp.add_argument("--format", choices=["table", "csv", "json"], default="table")
+        sp.add_argument(
+            "--format", choices=["table", "csv", "json"], default="table",
+            help="output format (default: table)",
+        )
 
     def raw_arg(sp, what: str):
         # 2026-07-13, the operator: "--raw or -r always shows the TABLE for users
@@ -984,25 +1013,34 @@ def build_parser() -> argparse.ArgumentParser:
                  f"cleaned-up {what} view",
         )
 
-    sp = sub.add_parser("list", help="query registrations (live + archived by default)")
-    scope_args(sp)
+    sp = sub.add_parser(
+        "list",
+        help="query registrations -- default: today+future, live only "
+             "(see --all/--past for more, incl. archived pre-erasure history)",
+    )
     format_arg(sp)
     raw_arg(sp, "list")
     sp.add_argument("--course", help="filter by course shortname")
-    sp.add_argument("--status", choices=["confirmed", "waitlisted", "canceled_by_guest", "canceled_by_host"])
+    sp.add_argument(
+        "--status", choices=["confirmed", "waitlisted", "canceled_by_guest", "canceled_by_host"],
+        help="filter to one status",
+    )
     sp.add_argument("--email", help="filter by (partial, case-insensitive) guest email")
-    sp.add_argument("--user-id")
+    sp.add_argument("--user-id", help="filter to one exact user_id")
     sp.add_argument("--year", type=int, help="shorthand for --from YYYY-01-01 --to YYYY-12-31")
     sp.add_argument("--from", dest="from_", help="occurrence_date >= YYYY-MM-DD")
     sp.add_argument("--to", help="occurrence_date <= YYYY-MM-DD")
-    date_filter = sp.add_mutually_exclusive_group()
-    date_filter.add_argument(
-        "--upcoming", action="store_true",
-        help="only today-or-future occurrence_date (same cutoff as /admin's default view)",
+    date_scope = sp.add_mutually_exclusive_group()
+    date_scope.add_argument(
+        "--all", action="store_true",
+        help="every date, live + archived -- a live user's pre-erasure archived history is merged in "
+             "on the fly (nothing is written to disk, see `my-bt admin dearchive` to persist that); "
+             "this is also what `my-bt history` used to be for (dropped 2026-07-13, folded in here: "
+             "`list --all --email x@y.com` shows a guest's full combined history)",
     )
-    date_filter.add_argument(
+    date_scope.add_argument(
         "--past", action="store_true",
-        help="only occurrence_date strictly before today",
+        help="same as --all, but occurrence_date strictly before today only",
     )
     sp.set_defaults(func=cmd_list)
 
@@ -1015,77 +1053,51 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("show", help="show one registration by id")
     format_arg(sp)
-    sp.add_argument("registration_id")
+    sp.add_argument("registration_id", help="full registration id (see `my-bt list` for short ids and full ids)")
     sp.set_defaults(func=cmd_show)
 
     sp = sub.add_parser("stats", help="counts per course/status")
     scope_args(sp)
     format_arg(sp)
-    sp.add_argument("--year", type=int)
+    sp.add_argument("--year", type=int, help="restrict to one year (occurrence_date starts with this year)")
     sp.set_defaults(func=cmd_stats)
-
-    sp = sub.add_parser("hash-password", help="generate admin_password_hash (prompts, hidden input)")
-    sp.set_defaults(func=cmd_hash_password)
-
-    sp = sub.add_parser("erase", help="manually erase a guest's data (GDPR Art. 17)")
-    sp.add_argument("--email", required=True)
-    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    sp.set_defaults(func=cmd_erase)
-
-    sp = sub.add_parser(
-        "history",
-        help="show a guest's live + pre-erasure registration history (read-only)",
-    )
-    sp.add_argument("--email", required=True)
-    format_arg(sp)
-    sp.set_defaults(func=cmd_history)
-
-    sp = sub.add_parser(
-        "merge",
-        help="merge a guest's pre-erasure registration history onto their live account",
-    )
-    sp.add_argument("--email", required=True)
-    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    sp.set_defaults(func=cmd_merge)
 
     sp = sub.add_parser(
         "cancel",
         help="cancel one live registration (host-initiated, same as the web admin's cancel)",
     )
-    sp.add_argument("--registration-id", required=True)
+    id_group = sp.add_mutually_exclusive_group(required=True)
+    id_group.add_argument(
+        "--registration-id",
+        help="full or short (see `my-bt list`'s own 'id' column) id of the one registration to cancel",
+    )
+    id_group.add_argument(
+        "--date", help="cancel EVERY live registration for this occurrence (YYYY-MM-DD) -- pair with "
+                        "--course if more than one course is ever booked on the same date",
+    )
+    sp.add_argument("--course", help="course shortname, only used (and only needed if ambiguous) with --date")
     sp.add_argument("-m", "--message", help="optional message included in the cancellation emails")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_cancel)
 
     sp = sub.add_parser(
-        "maintenance",
-        help="set/unset sitewide maintenance mode (blocks new bookings, banners index.html)",
+        "gdpr-retention",
+        help="GDPR storage-limitation status: what would be purged, and when (see `purge` to act on it)",
     )
-    sp.add_argument("maintenance_command", choices=["on", "off", "status"])
-    sp.add_argument("-m", "--message", help="optional message shown in the banner/booking pages (only used with 'on')")
-    sp.set_defaults(func=cmd_maintenance)
-
-    sp = sub.add_parser("purge-retention", help="run the retention purge job now")
-    sp.add_argument("--dry-run", action="store_true")
-    sp.set_defaults(func=cmd_purge_retention)
-
-    sp = sub.add_parser("git-snapshot", help="commit any data-dir changes now (same as the hourly timer)")
-    sp.add_argument("--dry-run", action="store_true", help="report what would be committed, without staging/committing")
-    sp.set_defaults(func=cmd_git_snapshot)
-
-    sp = sub.add_parser("test", help="run the unit test suite")
-    sp.add_argument("--repo-root", help="checkout containing tests/ (default: auto-detect)")
-    sp.set_defaults(func=cmd_test)
+    sp.add_argument(
+        "-V", "--verbose", action="store_true",
+        help="also list every row that would be purged, not just the count",
+    )
+    format_arg(sp)
+    sp.set_defaults(func=cmd_gdpr_retention)
+    gdpr_sub = sp.add_subparsers(dest="gdpr_command")
+    gp = gdpr_sub.add_parser("purge", help="actually delete every row past its retention window")
+    gp.set_defaults(func=cmd_gdpr_retention_purge)
 
     sp = sub.add_parser(
         "status",
         help="live server summary: up/running, maintenance mode, logged-in users "
-             "(-V for the full settings/secrets/systemd/SELinux/nginx check report)",
-    )
-    sp.add_argument(
-        "-V", "--verbose", action="store_true",
-        help="also print the full per-item check report (settings/secrets/systemd/SELinux/"
-             "nginx/...) -- this is what plain `status` used to print unconditionally",
+             "(see `my-bt admin health` for the full settings/secrets/systemd/SELinux/nginx report)",
     )
     sp.add_argument(
         "--internal-url", default=DEFAULT_INTERNAL_URL,
@@ -1095,13 +1107,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("setup", help="show (or --interactive: be walked through) post-install setup steps")
+    # -- admin: heavier/riskier site-administration actions, grouped under
+    # one namespace (2026-07-13, the operator's own restructuring proposal) --
+    # rarely-needed-day-to-day commands live here instead of cluttering
+    # the top level next to `list`/`status`/`cancel`, which you reach for
+    # far more often.
+    admin_sp = sub.add_parser("admin", help="site-administration commands (setup, secrets, GDPR erasure, ...)")
+    admin_sub = admin_sp.add_subparsers(dest="admin_command", required=True)
+
+    sp = admin_sub.add_parser("hash-password", help="generate admin_password_hash (prompts, hidden input)")
+    sp.set_defaults(func=cmd_hash_password)
+
+    sp = admin_sub.add_parser("erase", help="manually erase a guest's data (GDPR Art. 17)")
+    sp.add_argument("--email", required=True, help="the guest's login email")
+    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    sp.set_defaults(func=cmd_erase)
+
+    sp = admin_sub.add_parser(
+        "dearchive",
+        help="permanently move a guest's pre-erasure registration history onto their live account "
+             "(renamed from `merge`)",
+    )
+    sp.add_argument("--email", required=True, help="the guest's CURRENT (live) login email")
+    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    sp.set_defaults(func=cmd_dearchive)
+
+    sp = admin_sub.add_parser(
+        "maintenance",
+        help="set/unset sitewide maintenance mode (blocks new bookings, banners index.html)",
+    )
+    sp.add_argument("maintenance_command", choices=["on", "off", "status"], help="what to do")
+    sp.add_argument("-m", "--message", help="optional message shown in the banner/booking pages (only used with 'on')")
+    sp.set_defaults(func=cmd_maintenance)
+
+    sp = admin_sub.add_parser("git-snapshot", help="commit any data-dir changes now (same as the hourly timer)")
+    sp.add_argument("--dry-run", action="store_true", help="report what would be committed, without staging/committing")
+    sp.set_defaults(func=cmd_git_snapshot)
+
+    sp = admin_sub.add_parser("setup", help="show (or --interactive: be walked through) post-install setup steps")
     sp.add_argument(
         "-i", "--interactive", action="store_true",
         help="actually walk through each step and perform what's safely automatable "
              "(most of it needs root)",
     )
     sp.set_defaults(func=cmd_setup)
+
+    sp = admin_sub.add_parser(
+        "health",
+        help="full install-health diagnostic: settings/secrets/systemd/SELinux/nginx/... "
+             "(this is what `my-bt status -V` used to be)",
+    )
+    sp.set_defaults(func=cmd_admin_health)
 
     return p
 

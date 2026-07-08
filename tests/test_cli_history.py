@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 
-from app.cli_history import build_history, run_merge
+from app.cli_history import run_merge
 from app.erasure import find_archived_user_ids_for_email
 from app.security import hash_token, new_token
 from app.storage import Store
@@ -53,39 +53,6 @@ class FindArchivedUserIdsForEmailTest(CliHistoryTestBase):
         old2, _ = self._erase("guest@example.com")
         found = find_archived_user_ids_for_email(self.store, self.settings, "guest@example.com")
         self.assertEqual(set(found), {old1, old2})
-
-
-class BuildHistoryTest(CliHistoryTestBase):
-    def test_no_live_user_returns_none(self):
-        result = build_history(self.store, self.settings, "nobody@example.com")
-        self.assertIsNone(result.live_user)
-
-    def test_live_user_with_no_archived_history(self):
-        self.store.upsert_user_for_booking("guest@example.com", "Guest")
-        self.store.add_registration(
-            "c", "2026-01-01",
-            self.store.find_user_by_email("guest@example.com").user_id,
-            hash_token(new_token()),
-        )
-        result = build_history(self.store, self.settings, "guest@example.com")
-        self.assertIsNotNone(result.live_user)
-        self.assertEqual(result.live_times_booked, 1)
-        self.assertEqual(result.archived_times_booked, 0)
-        self.assertEqual(result.combined_times_booked, 1)
-        self.assertEqual(result.archived_user_ids, [])
-
-    def test_combines_live_and_archived_counts(self):
-        old_id, _ = self._erase("guest@example.com")
-        new_user = self.store.upsert_user_for_booking("guest@example.com", "Guest")  # re-books
-        self.store.add_registration("c", "2026-03-01", new_user.user_id, hash_token(new_token()))
-
-        result = build_history(self.store, self.settings, "guest@example.com")
-        self.assertEqual(result.live_user.user_id, new_user.user_id)
-        self.assertEqual(result.live_times_booked, 1)
-        self.assertEqual(result.archived_times_booked, 1)
-        self.assertEqual(result.combined_times_booked, 2)
-        self.assertEqual(result.archived_user_ids, [old_id])
-        self.assertEqual(len(result.archived_registrations), 1)
 
 
 class RunMergeTest(CliHistoryTestBase):

@@ -50,6 +50,20 @@ See /usr/share/doc/%{name}/README.md after installing.
 %build
 python3 -m py_compile app/*.py
 
+# 2026-07-13, the operator: "Can the test be run as part of the rpm build or
+# deploy? Then I would drop [`my-bt test`]." -- tests/ isn't installed by
+# %install below (never shipped in the final package, same effective
+# result as .git being excluded from the source tarball entirely), but it
+# DOES land in the extracted source tree %check runs from, since
+# scripts/build-rpm.sh's tarball step never excludes it. Pure stdlib
+# unittest -- no new BuildRequires needed beyond what %build already
+# assumes. A failing test here aborts the whole build (rpmbuild's normal
+# %check behavior on a non-zero exit), which is a real safety net that
+# didn't exist before: nothing previously stopped a broken build from
+# being packaged and installed.
+%check
+python3 -m unittest discover -q
+
 %install
 rm -rf %{buildroot}
 

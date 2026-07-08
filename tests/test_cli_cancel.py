@@ -3,9 +3,11 @@ import unittest
 from unittest.mock import patch
 
 from app.caldav_client import CalDAVClient, Response
-from app.cli_cancel import cancel_registration
+from app.cli_cancel import cancel_registration, resolve_course_shortname_for_date
 from app.security import hash_token, new_token
-from app.storage import STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED, Store
+from app.storage import (
+    STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store,
+)
 
 from .helpers import make_course, make_settings
 
@@ -128,6 +130,22 @@ class CancelRegistrationTest(unittest.TestCase):
         reloaded = self.store.find_by_id(reg.registration_id)
         self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
 
+    def test_cancels_pending_confirmation_registration(self):
+        # 2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        # their account-confirmation email link (STATUS_PENDING_CONFIRMATION)
+        # previously couldn't be canceled by ANY path at all -- closing that
+        # gap here (see Store.cancel()'s own docstring). This guest is still
+        # emailed (send_cancellation_emails doesn't check status), and no
+        # promotion happens -- a pending row never held a real spot.
+        user, reg = self._book("guest@example.org", "Guest", status=STATUS_PENDING_CONFIRMATION)
+        result = cancel_registration(self.store, self.settings, reg.registration_id)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.status_before, STATUS_PENDING_CONFIRMATION)
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("guest@example.org", to_addrs)
+
     def test_cancel_email_includes_a_working_reinstate_link(self):
         # 2026-07-10: `my-bt cancel` mints a fresh reinstate token the same
         # way every web cancel path does, so its own cancellation email
@@ -248,6 +266,71 @@ class CancelRegistrationTest(unittest.TestCase):
         self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
         # No CalDAV calls either -- can't sync a course that isn't configured.
         self.assertEqual(self.transport.calls, [])
+
+
+class ResolveCourseShortnameForDateTest(unittest.TestCase):
+    """app.cli_cancel.resolve_course_shortname_for_date -- `my-bt cancel
+    --date`'s course auto-detection (2026-07-13, the operator: "--course parameter
+    should be optional")."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def _book(self, course_shortname: str, email: str, status: str = STATUS_CONFIRMED, occurrence_date: str = "2026-08-01"):
+        user = self.store.upsert_user_for_booking(email, email.split("@")[0].title())
+        self.store.add_registration(course_shortname, occurrence_date, user.user_id, hash_token(new_token()), status=status)
+
+    def test_explicit_course_is_returned_unvalidated(self):
+        resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01", "whatever-i-say")
+        self.assertEqual(resolved, "whatever-i-say")
+        self.assertEqual(candidates, [])
+
+    def test_auto_detects_the_single_course_booked_on_that_date(self):
+        self._book("yoga-class-1", "guest@example.org")
+        resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
+        self.assertEqual(resolved, "yoga-class-1")
+        self.assertEqual(candidates, [])
+
+    def test_auto_detection_includes_waitlisted(self):
+        self._book("yoga-class-1", "guest@example.org", status=STATUS_WAITLISTED)
+        resolved, _candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
+        self.assertEqual(resolved, "yoga-class-1")
+
+    def test_auto_detection_includes_pending_confirmation(self):
+        self._book("yoga-class-1", "guest@example.org", status=STATUS_PENDING_CONFIRMATION)
+        resolved, _candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
+        self.assertEqual(resolved, "yoga-class-1")
+
+    def test_no_live_registrations_on_that_date_returns_none_with_no_candidates(self):
+        resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
+        self.assertIsNone(resolved)
+        self.assertEqual(candidates, [])
+
+    def test_two_courses_on_the_same_date_is_ambiguous(self):
+        self._book("yoga-class-1", "a@example.org")
+        self._book("pilates-1", "b@example.org")
+        resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
+        self.assertIsNone(resolved)
+        self.assertEqual(candidates, ["pilates-1", "yoga-class-1"])
+
+    def test_canceled_registrations_are_not_counted(self):
+        # Only LIVE, still-cancelable statuses count -- an already-canceled
+        # row for a second course on the same date shouldn't make this look
+        # ambiguous.
+        self._book("yoga-class-1", "a@example.org")
+        self._book("pilates-1", "b@example.org", status="canceled_by_guest")
+        resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
+        self.assertEqual(resolved, "yoga-class-1")
+        self.assertEqual(candidates, [])
+
+    def test_different_date_does_not_count_toward_ambiguity(self):
+        self._book("yoga-class-1", "a@example.org", occurrence_date="2026-08-01")
+        self._book("pilates-1", "b@example.org", occurrence_date="2026-08-08")
+        resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
+        self.assertEqual(resolved, "yoga-class-1")
+        self.assertEqual(candidates, [])
 
 
 if __name__ == "__main__":

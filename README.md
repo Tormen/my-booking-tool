@@ -66,7 +66,7 @@ a FIXED filename (2026-07-10: renamed from being named after the operator's own
 domain, specifically so every real-vs-`.example` pair in `site/` follows
 the exact same convention -- nginx itself doesn't care what the file on
 disk is called, only that it's included). Unlike the others, this one is
-entirely optional: `my-bt setup`/`status` only report on it if
+entirely optional: `my-bt admin setup`/`admin health` only report on it if
 `site/nginx-locations.conf` actually exists, and never auto-generate or
 edit it (rewriting a hand-hardened vhost would be worse than asking) --
 see `app/cli_checks.py::check_nginx_conf_repo_file()`. This file is
@@ -80,7 +80,7 @@ Want an even stricter check against the file nginx is *actually* running
 with, not just this checkout's copy? Set `[site].nginx_conf_path` in your
 real `settings.toml` to the absolute path nginx loads it from on this box
 (it can be named anything there -- this checkout's own copy is always
-looked up by the fixed name above, regardless). `my-bt status`/`setup`
+looked up by the fixed name above, regardless). `my-bt admin health`/`admin setup`
 then read that exact file directly off disk (not `nginx -T`'s merged
 dump) and **hard-fail** -- not just warn -- if it's missing a required
 location block or still has a leftover `REPLACE-ME` marker, since
@@ -90,8 +90,8 @@ checkout's own `site/nginx-locations.conf(.example)` if the two differ.
 See `app/cli_checks.py::check_nginx_conf_deployed()`.
 
 Nothing at `nginx_conf_path` yet (e.g. right after changing the setting,
-before the real file on the server has caught up)? `my-bt status`/
-`setup -i` parse `nginx -T`'s own "# configuration file `<path>`:" markers
+before the real file on the server has caught up)? `my-bt admin health`/
+`admin setup -i` parse `nginx -T`'s own "# configuration file `<path>`:" markers
 to find which file nginx is *actually* loading this vhost from right now,
 and say so instead of a dead-end "not found". nginx itself doesn't care
 what a conf.d file is named, so a mismatch here isn't inherently wrong --
@@ -122,7 +122,7 @@ do -- `scripts/build-rpm.sh`, `scripts/install.sh`, and `packaging/*.spec`
 all prefer your real files over the `.example` ones automatically,
 everywhere they're read from.
 
-`my-bt status`/`setup` check the live, deployed copies of `site/*.html`
+`my-bt admin health`/`admin setup` check the live, deployed copies of `site/*.html`
 for a leftover `REPLACE-ME` marker or an unsubstituted `${...}` template
 placeholder -- catching the mistake of publishing the generic template
 without customizing it first (see "Static-site pages" below). They never
@@ -145,14 +145,16 @@ app/                        the application (stdlib-only Python package)
   retention.py              GDPR Art. 5(1)(e) purge job (the "cronjob")
   git_snapshot.py           hourly auto-commit of the data dir to its own git repo
   site_render.py            renders site/privacy.html -- see "Static-site pages"
-  maintenance.py            `my-bt maintenance on/off/status` -- see "Maintenance mode"
-  cli_checks.py             `my-bt status`/`setup` health checks -- pure, unit-tested
-  cli_setup.py              `my-bt setup`/`setup -i` report + walkthrough logic
+  maintenance.py            `my-bt admin maintenance on/off/status` -- see "Maintenance mode"
+  cli_checks.py             `my-bt admin health`/`admin setup` health checks -- pure, unit-tested
+  cli_setup.py              `my-bt admin setup`/`admin setup -i` report + walkthrough logic
   version.py                `my-bt --version` (package version + git commit)
   webapp.py                 wsgiref WSGI app / routes
   serve.py                  entrypoint (python3 -m app.serve)
 
-tests/                      unit tests (170, run with `my-bt test` or unittest)
+tests/                      unit tests -- run via `python3 -m unittest discover`,
+                            or automatically during `rpmbuild` (packaging/my-booking-tool.spec's
+                            `%check` section; there's no `my-bt test` anymore)
 
 scripts/
   my-bt                     thin CLI wrapper -- see "The `my-bt` CLI" below
@@ -186,7 +188,7 @@ LICENSE                     AGPLv3, full text
 `app/cli_checks.py` and `app/cli_setup.py` inject every side effect (prompting,
 reading a secret, running a command, checking for root) for testing -- see
 `tests/test_cli_setup.py`. `site_render.py` runs at both build time
-(`scripts/render-site.py`) and run time (`my-bt setup -i`).
+(`scripts/render-site.py`) and run time (`my-bt admin setup -i`).
 
 ## Installing (and reinstalling after a server reinstall)
 
@@ -213,12 +215,12 @@ dnf always sees a newer package and upgrades in place rather than saying
 install) `%post` also runs `systemctl try-restart my-booking.service` for
 you, so the new code is actually running afterwards, not just unpacked.
 
-`%post` itself only prints a short pointer to `my-bt setup` (see "The
+`%post` itself only prints a short pointer to `my-bt admin setup` (see "The
 `my-bt` CLI" below) -- that command generates the full list dynamically,
 checking what's already done instead of always repeating a static wall of
 text (the old approach, where this list was duplicated across `%post`,
 `scripts/install.sh`, and this README, drifted out of sync more than once).
-Run `my-bt setup` any time to see it again, or `my-bt setup --interactive`
+Run `my-bt admin setup` any time to see it again, or `my-bt admin setup --interactive`
 to be walked through it step by step. What follows is the same list, in
 full detail, for reference:
 
@@ -228,11 +230,11 @@ full detail, for reference:
      account password(s).
    - `erasure_pepper` -- random hex: `openssl rand -hex 32`.
    - `admin_password_hash` -- **not** plain text, a hash. Generate it with
-     `my-bt hash-password` (prompts for the password with hidden input --
+     `my-bt admin hash-password` (prompts for the password with hidden input --
      it's never typed into a command line, so it never ends up in shell
      history), then save the printed output into the file, e.g.:
-     `my-bt hash-password | sudo tee /etc/my-booking/secrets/admin_password_hash`.
-     `my-bt status` (see below) specifically checks for and flags the
+     `my-bt admin hash-password | sudo tee /etc/my-booking/secrets/admin_password_hash`.
+     `my-bt admin health` (see below) specifically checks for and flags the
      common mistake of pasting the plain password here instead.
 
    The directory itself is already correctly SELinux-labeled by the RPM
@@ -248,17 +250,17 @@ full detail, for reference:
    overwrites your edits to any of them). If the packaged version of one
    also changed since you edited it, rpm can't just pick a side: it saves
    the new version alongside yours as `<file>.rpmnew` instead, and `%post`
-   (and `my-bt status`/`my-bt setup`) flag it loudly so a pending merge
+   (and `my-bt admin health`/`my-bt admin setup`) flag it loudly so a pending merge
    can't go unnoticed. Merge by hand, then remove the `.rpmnew`, e.g.:
    `sudo vimdiff /etc/my-booking/settings.toml /etc/my-booking/settings.toml.rpmnew`.
    (2026-07-10: `nginx-locations.conf` only just joined this list -- before
-   that, the RPM never carried this file at all, so `my-bt setup -i`'s own
+   that, the RPM never carried this file at all, so `my-bt admin setup -i`'s own
    vimdiff offer against it could never fire on a stock install, no matter
    how complete your source checkout's own copy was.)
 
    Every *other* file the package installs (systemd units, app code, the
    nginx example) isn't meant to be hand-edited, so it doesn't get the
-   `%config(noreplace)` treatment -- instead `my-bt status`/`setup` run
+   `%config(noreplace)` treatment -- instead `my-bt admin health`/`admin setup` run
    `rpm -V my-booking-tool` (rpm's own file-integrity verifier) and report
    any drift they find there too, so an accidental edit anywhere in the
    package still surfaces instead of silently persisting across upgrades.
@@ -305,56 +307,64 @@ Remove them yourself, on purpose, if you really want to: `sudo rm -rf
 ## The `my-bt` CLI
 
 Installed on PATH as `my-bt`. Run `my-bt --help` / `my-bt <command> --help`
-for the full option list. Highlights:
+/ `my-bt admin --help` for the full option list -- every subcommand and
+flag has its own short help text. Frequently-used commands (`list`,
+`users`, `show`, `stats`, `cancel`, `status`, `gdpr-retention`) live at the
+top level; rarer, heavier site-administration actions (`hash-password`,
+`erase`, `dearchive`, `maintenance`, `git-snapshot`, `setup`, `health`) are
+grouped under `my-bt admin` (2026-07-13 restructuring) so they don't
+clutter the commands you reach for daily.
 
-`list`/`show`/`history` all include a "party" column (guest bookings,
-2026-07 -- see "Guests" under "Booking page layout" below): "+N guest(s)"
-on the leader's own row, "guest of `<email>`" on a guest's row, blank for
-an ordinary solo booking.
+`list`/`show` all include a "party" column (guest bookings, 2026-07 -- see
+"Guests" under "Booking page layout" below): "+N guest(s)" on the leader's
+own row, "guest of `<email>`" on a guest's row, blank for an ordinary solo
+booking.
 
 ```
 my-bt --version                         # package version + git commit it was built from
 
-my-bt list                              # all registrations, live + archived
-my-bt list --live                       # only the live CSV
-my-bt list --archive                    # only the archived (erased) CSV
+my-bt list                              # today + future, live only (default -- mimics /admin's own table)
+my-bt list --all                        # every date, live + archived (pre-erasure history merged in
+                                         # on the fly for any live user -- nothing written to disk;
+                                         # `my-bt admin dearchive` is what actually persists a merge)
+my-bt list --past                       # same merge as --all, occurrence_date strictly before today only
 my-bt list --year 2026 --course example-monday-class
 my-bt list --status waitlisted --email guest@example.com
 my-bt list --format json   # or --format csv
-my-bt list --upcoming                   # today + future only (same cutoff as /admin's default view)
-my-bt list --past                       # strictly before today only (--upcoming/--past are mutually exclusive)
+my-bt list --raw                        # every raw CSV column (ids/hashes) instead of the clean default view
+my-bt list --all --email guest@example.com   # a guest's full history, live + pre-erasure combined
 
-my-bt users [--email ...] [--live|--archive]
+my-bt users [--email ...] [--live|--archive]   # --live/--archive default to live+archived combined
 my-bt show <registration_id>
 my-bt stats [--year 2026]
-
-my-bt hash-password                     # prompts (hidden input), prints
-                                         # the admin_password_hash value
-
-my-bt erase --email guest@example.com          # asks for confirmation
-my-bt erase --email guest@example.com --yes    # scripted/non-interactive
-
-my-bt history --email guest@example.com        # read-only: live + pre-erasure history
-my-bt merge --email guest@example.com          # asks for confirmation
-my-bt merge --email guest@example.com --yes    # scripted/non-interactive
 
 my-bt cancel --registration-id <id>                          # asks for confirmation
 my-bt cancel --registration-id <id> --yes                    # scripted/non-interactive
 my-bt cancel --registration-id <id> -m "course canceled"     # optional message in the cancellation emails
+my-bt cancel --date 2026-08-01                                # cancel EVERY live registration on one occurrence
+my-bt cancel --date 2026-08-01 --course example-monday-class  # --course only needed if that date is ambiguous
 
-my-bt maintenance on [-m "back Monday"]  # block new bookings, banner site/index.html
-my-bt maintenance off                    # reopen bookings, remove the banner
-my-bt maintenance status                 # report current state, touches nothing
+my-bt gdpr-retention                    # GDPR storage-limitation status: counts only
+my-bt gdpr-retention -V                 # ...also lists the actual rows
+my-bt gdpr-retention purge              # actually delete rows past their retention window
+                                         # (same job the nightly systemd timer already runs)
 
-my-bt purge-retention [--dry-run]       # same purge the nightly timer runs
-my-bt git-snapshot [--dry-run]          # commit data-dir changes now (same as the hourly timer)
-my-bt test [--repo-root /path/to/checkout]      # runs the unit test suite
+my-bt status                            # live server summary: up/running, maintenance mode, logged-in users
 
-my-bt status                            # health check -- see below
-my-bt setup                             # guided post-install steps -- see below
-my-bt setup --interactive               # ...or -i: be walked through them
+my-bt admin hash-password                # prompts (hidden input), prints the admin_password_hash value
+my-bt admin erase --email guest@example.com          # asks for confirmation
+my-bt admin erase --email guest@example.com --yes    # scripted/non-interactive
+my-bt admin dearchive --email guest@example.com          # asks for confirmation
+my-bt admin dearchive --email guest@example.com --yes    # scripted/non-interactive
+my-bt admin maintenance on [-m "back Monday"]  # block new bookings, banner site/index.html
+my-bt admin maintenance off                    # reopen bookings, remove the banner
+my-bt admin maintenance status                 # report current state, touches nothing
+my-bt admin git-snapshot [--dry-run]     # commit data-dir changes now (same as the hourly timer)
+my-bt admin setup                        # guided post-install steps -- see below
+my-bt admin setup --interactive          # ...or -i: be walked through them
+my-bt admin health                       # full install-health diagnostic -- see below
 
-my-bt -D erase --email guest@example.com   # -D/--debug: full traceback on
+my-bt -D admin erase --email guest@example.com   # -D/--debug: full traceback on
                                             # error instead of one clean line
                                             # (same as MY_BOOKING_DEBUG=1,
                                             # just for this one command)
@@ -364,9 +374,15 @@ my-bt -L status                            # -L/--log: also append this
                                             # that first, see below)
 ```
 
-`my-bt erase` only touches the CSVs (no CalDAV dependency by design, so it
-works even if your CalDAV/SMTP provider is unreachable); if the erased
-guest had a future confirmed/waitlisted booking, the app's own
+There's no more `my-bt test` -- the unit test suite instead runs
+automatically during `rpmbuild` (packaging/my-booking-tool.spec's `%check`
+section), aborting the build on any failure. Run
+`python3 -m unittest discover` directly from a checkout if you want to run
+it by hand.
+
+`my-bt admin erase` only touches the CSVs (no CalDAV dependency by design,
+so it works even if your CalDAV/SMTP provider is unreachable); if the
+erased guest had a future confirmed/waitlisted booking, the app's own
 cancellation path re-syncs the calendar the next time it touches that
 occurrence. If you need the calendar updated immediately after a CLI
 erase, restart `my-booking.service` or just wait for the next
@@ -374,30 +390,48 @@ booking/cancellation on that occurrence.
 
 If an erased guest later books again with the same email, they get a
 brand-new live account -- their old, erased identity is now just a hash.
-As of 2026-07-10, `/admin` automatically re-attaches any pre-erasure
-registrations sharing that same real email onto the new live account on
-every page load (the operator: "the merge should be automatically done if you
-also display the history in the /admin page") -- no button, no CLI step
-needed for this to show up in the web admin overview. `my-bt merge
---email ...` still exists for the CLI/`my-bt history` path and does the
-identical underlying move (`app/cli_history.py::run_merge`, the same
-helper `/admin` now calls itself): it moves the archived registration
-rows onto the live user_id (re-parented, `registration_id` unchanged) and
-removes them from the archive. It never touches the archived user row
-itself -- that old identity's name stays `[erased]` and email stays the
-hash, forever; only the registrations (which never held name/email, just
-a user_id) move. Both paths are idempotent: running/loading either again
-once everything's already merged is a no-op.
+`/admin` and `my-bt list --all`/`--past` both show any pre-erasure
+registrations sharing that same real email merged onto the new live
+account automatically (the operator: "the merge should be automatically done if
+you also display the history in the /admin page") -- purely a display-time
+merge, computed fresh on every page load/query, nothing written to disk
+(2026-07-13: this used to actually rewrite the CSVs on every `/admin` page
+load; it doesn't anymore -- see `app/cli_list.py::merge_archived_for_display`).
+`my-bt admin dearchive --email ...` (renamed from `my-bt merge`, `my-bt
+history` dropped entirely -- folded into `list --all`/`--past`) is the one
+command that still actually PERSISTS a merge: it moves the archived
+registration rows onto the live user_id (re-parented, `registration_id`
+unchanged) and removes them from the archive. It never touches the
+archived user row itself -- that old identity's name stays `[erased]` and
+email stays the hash, forever; only the registrations (which never held
+name/email, just a user_id) move. Idempotent: running it again once
+everything's already merged is a no-op.
 
 `my-bt cancel --registration-id ...` is the CLI equivalent of the web
 admin's cancel button (`/admin` -> Cancel): same status transition (->
 `canceled_by_host`), same optional message, and it sends the exact same
 cancellation emails to both the guest and `admin_email` -- there's no
-separate email logic to drift out of sync. Unlike the web admin path it
+separate email logic to drift out of sync. Cancelable statuses now include
+a guest who hasn't yet clicked their account-confirmation email link
+(`pending_confirmation`), not just confirmed/waitlisted (2026-07-13 fix --
+this used to be uncancelable by any path). Unlike the web admin path it
 does NOT promote the next waitlisted person or re-sync the calendar (no
-CalDAV dependency here by design, same reasoning as `my-bt erase`) -- use
-the web admin, or restart `my-booking.service` (which re-syncs lazily), if
-the calendar needs to reflect this immediately.
+CalDAV dependency here by design, same reasoning as `my-bt admin erase`) --
+use the web admin, or restart `my-booking.service` (which re-syncs
+lazily), if the calendar needs to reflect this immediately.
+
+`my-bt cancel --date ...` ("cancel the entire session", 2026-07-13) cancels
+every live confirmed/waitlisted/pending-confirmation registration for one
+course occurrence at once (illness, venue unavailable, ...) -- the same
+`app.cancel_flow.cancel_occurrence` behind the web admin's per-row "cancel
+entire session" checkbox and the no-login
+`/host-cancel-occurrence/<course>/<date>` magic link reachable from your
+own CalDAV event. `--course` is optional: auto-detected from that date's
+own live registrations, erroring with the list of candidates if more than
+one course actually has a booking there. Every participant is emailed --
+since this is always host-initiated, each one also gets a short apology
+("this is the exception, not the rule") plus a link to book the course's
+next occurrence, to keep them engaged despite the cancellation.
 
 **Undoing a cancellation:** both the guest's own `/my` page and the web
 admin's `/admin` overview show a "Reinstate" button on any canceled
@@ -422,7 +456,7 @@ around), and the admin's own copy links to `/host-reinstate/<reg_id>`,
 gated the same way `/host-cancel/<reg_id>` already is (an unguessable
 ID, no login wall). **New nginx locations** (`/reinstate/`,
 `/host-reinstate/`) are needed for these -- see
-`nginx/my-booking.conf`; `my-bt status` flags them if missing.
+`nginx/my-booking.conf`; `my-bt admin health` flags them if missing.
 No CLI equivalent yet.
 
 **Submission feedback (2026-07-11):** every form in the app -- Cancel,
@@ -444,8 +478,21 @@ fifth allow-listed inline-script hash.
 
 ### `my-bt status`
 
+A fast, live-only summary -- whether the process is actually up and
+answering requests right now (queried directly over HTTP on its own
+loopback port), whether maintenance mode is on (highlighted if so), and
+who's currently logged in (any unexpired session, with since-when-connected
+and their current/last-loaded page). This is deliberately NOT the deep
+install-health diagnostic anymore (2026-07-13 -- that content moved to
+`my-bt admin health`, see below): `status` stays fast and purely about "is
+it alive right now"; reach for `admin health` to actually diagnose an
+install problem.
+
+### `my-bt admin health`
+
 A guided health check across the whole install -- run this first whenever
-something seems off, or after any install/reinstall:
+something seems off, or after any install/reinstall (this is what plain
+`my-bt status` used to print, 2026-07-13):
 
 - `settings.toml` parses, and how many `[[course]]` blocks it has.
 - Whether `settings.toml.rpmnew` or `privacy.html.tmpl.rpmnew` is sitting
@@ -465,7 +512,7 @@ something seems off, or after any install/reinstall:
   `my-booking.service` last (re)started -- it's only read once, at
   startup, so an edit made after that isn't live yet even though the file
   on disk is already correct (a stale-in-memory config, not a bug --
-  `setup -i` offers to restart the service for you).
+  `admin setup -i` offers to restart the service for you).
 - SELinux: enforcing or not, and if enforcing, whether
   `httpd_can_network_connect` is on (see the SELinux note above).
 - `rpm -V my-booking-tool`: report-only integrity check across every file
@@ -476,7 +523,7 @@ something seems off, or after any install/reinstall:
 - Whether `[watchdog].nginx_access_log` matches nginx's own live config
   (offering to add/detect it if not), and if set, whether the
   `my-booking` user can actually read it (see "Watchdog" above --
-  `setup -i` offers to fix both).
+  `admin setup -i` offers to fix both).
 - If `[site].static_site_dir` is set: whether the live `privacy.html` at
   that path actually matches what current `settings.toml` values would
   render (see "Static-site pages" below) -- catches a `retention_months`
@@ -486,27 +533,27 @@ something seems off, or after any install/reinstall:
   being customized).
 - Whether the data directory (`--data-dir`) is already protected by its
   own, separate git repository (see "Data dir git snapshot" below) --
-  `setup -i` offers to initialize one.
+  `admin setup -i` offers to initialize one.
 
 Each line is `[OK]`/`[WARN]`/`[FAIL]` with a one-line fix where relevant;
 **exits non-zero if anything is `[WARN]` or `[FAIL]`** (2026-07-10 --
 previously only a `[FAIL]` did, but a `[WARN]` can still be a real,
 actionable gap -- e.g. a missing nginx `location` block silently makes a
-whole route unreachable -- so `my-bt status && <next step>` in a script/
-cron/CI context now actually catches it instead of quietly continuing).
-Only a fully clean report exits 0. Deliberately doesn't touch the
-network/CalDAV (same reasoning as `erase` -- no CalDAV dependency by
-design), so it still works to narrow things down even if your CalDAV/SMTP
-provider itself is unreachable.
+whole route unreachable -- so `my-bt admin health && <next step>` in a
+script/cron/CI context now actually catches it instead of quietly
+continuing). Only a fully clean report exits 0. Deliberately doesn't touch
+the network/CalDAV (same reasoning as `admin erase` -- no CalDAV
+dependency by design), so it still works to narrow things down even if
+your CalDAV/SMTP provider itself is unreachable.
 
-### `my-bt setup` / `my-bt setup --interactive`
+### `my-bt admin setup` / `my-bt admin setup --interactive`
 
-The same checks `status` runs, reorganized as an 11-step guided post-install
-list (secrets, `.rpmnew` merge, a `settings.toml` values summary, nginx,
-group membership, systemd, SELinux, the static site, live CalDAV calendar
-names, the watchdog's nginx access log, and the data dir git snapshot) --
-this is the single source of truth for those steps now; `%post`
-and `scripts/install.sh` just
+The same checks `admin health` runs, reorganized as an 11-step guided
+post-install list (secrets, `.rpmnew` merge, a `settings.toml` values
+summary, nginx, group membership, systemd, SELinux, the static site, live
+CalDAV calendar names, the watchdog's nginx access log, and the data dir
+git snapshot) -- this is the single source of truth for those steps now;
+`%post` and `scripts/install.sh` just
 point here instead of each keeping their own copy of the text (which used
 to drift out of sync). The logic itself lives in `app/cli_checks.py` (the
 check functions) and `app/cli_setup.py` (report-printing and the
@@ -515,25 +562,26 @@ argument-parsing wrapper around them, which is also what makes them
 unit-testable (`tests/test_cli_checks.py`, `tests/test_cli_setup.py`)
 without needing a real tty/root/systemd/rpm.
 
-Plain `my-bt setup` prints the list, annotating each item with whatever
-`status` would say about it, so a re-run after partial setup shows only
-what's actually left. It ends with the same rollup line `status` prints
-(`N problem(s), N warning(s)`, or `all checks passed`) and exits non-zero
-on any WARN or FAIL, same policy as `status` -- so `my-bt setup && <next
-step>` is a safe gate to script/cron against, not just a human-readable
-report. `-i`/`--interactive` gets the exact same exit-code behavior
-(reflecting the CURRENT state after whatever `-i` just fixed, not what it
-started at) -- `my-bt setup -i && <next step>` is just as safe to chain
-as the plain form. Add `-i`/`--interactive` to be walked through it step
-by step and have `my-bt` perform what it safely can:
+Plain `my-bt admin setup` prints the list, annotating each item with
+whatever `admin health` would say about it, so a re-run after partial
+setup shows only what's actually left. It ends with the same rollup line
+`admin health` prints (`N problem(s), N warning(s)`, or `all checks
+passed`) and exits non-zero on any WARN or FAIL, same policy as `admin
+health` -- so `my-bt admin setup && <next step>` is a safe gate to
+script/cron against, not just a human-readable report. `-i`/`--interactive`
+gets the exact same exit-code behavior (reflecting the CURRENT state after
+whatever `-i` just fixed, not what it started at) -- `my-bt admin setup -i
+&& <next step>` is just as safe to chain as the plain form. Add
+`-i`/`--interactive` to be walked through it step by step and have `my-bt`
+perform what it safely can:
 
 - Missing secrets: prompts and writes them (hidden input for passwords;
   offers to auto-generate `erasure_pepper`; reuses the same hashing as
-  `my-bt hash-password` for `admin_password_hash`), mode 0600.
+  `my-bt admin hash-password` for `admin_password_hash`), mode 0600.
 - A pending `settings.toml.rpmnew` or `privacy.html.tmpl.rpmnew`: offers to
   open `vimdiff` for you.
 - Group membership, enabling the systemd units, and the SELinux boolean:
-  offered when run as root (needs `sudo my-bt setup -i` for these --
+  offered when run as root (needs `sudo my-bt admin setup -i` for these --
   without root it tells you the exact command instead of guessing).
 - nginx: never automated (editing your existing, hand-maintained vhost
   isn't something to guess at), always shown as a reminder.
@@ -676,10 +724,12 @@ records -- the actual table/JSON output too) to the same file, with a
 timestamped `=== my-bt ... ===` line marking where each run starts, so a
 file with several runs in it stays easy to read.
 
-**First thing to try if something's wrong:** `my-bt status` (see above) --
-it checks most of what actually goes wrong in practice (a missing/
-misconfigured secret, a disabled systemd unit, the SELinux boolean) before
-you need to dig through logs at all.
+**First thing to try if something's wrong:** `my-bt admin health` (see
+above) -- it checks most of what actually goes wrong in practice (a
+missing/misconfigured secret, a disabled systemd unit, the SELinux
+boolean) before you need to dig through logs at all. `my-bt status` is the
+much faster "is it actually up and responding right now" check, worth
+running first if the site itself seems down.
 
 **Before sharing logs** (with anyone): `journalctl` output is meant to be
 safe to paste as-is under normal (non-debug) operation -- log lines are
@@ -695,11 +745,15 @@ troubleshooting.
 ## Testing
 
 ```
-my-bt test                       # from anywhere, once installed
 python3 -m unittest discover -s tests -t . -v   # from this checkout
 ```
 
-275 tests covering slot generation (including DST via `zoneinfo`, and that
+There's no more `my-bt test` -- the suite instead runs automatically
+during `rpmbuild` (`packaging/my-booking-tool.spec`'s `%check` section),
+aborting the build on any failure, so there's no separate step to remember
+before shipping a package.
+
+912+ tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
@@ -715,7 +769,7 @@ regression test that booking never overwrites an existing account's
 password), the spots-left display A/B-test knob
 (never fakes "FULL", never drops below "1 spot(s) left" while still
 bookable-as-confirmed), `site/privacy.html` rendering (`test_site_render.py`),
-the `my-bt status`/`setup` health checks and interactive walkthrough,
+the `my-bt admin health`/`admin setup` health checks and interactive walkthrough,
 including a live CalDAV PROPFIND check that `booking_calendar`/
 `conflict_calendars` actually exist on the configured server right now
 (`test_cli_checks.py`, `test_cli_setup.py` -- every side effect, including
@@ -751,8 +805,9 @@ change them to whatever you determine is appropriate; there's no single
 number this software can pick for you, just the Art. 5(1)(e) "no longer
 than necessary" principle it's built around. The nightly systemd timer
 (`my-booking-retention.timer`, 03:30) is the cronjob-equivalent that
-enforces it; `my-bt purge-retention --dry-run` lets you preview what the next
-run would remove.
+enforces it; `my-bt gdpr-retention` lets you preview what the next run
+would remove (counts only by default, `-V`/`--verbose` to also list the
+actual rows) -- `my-bt gdpr-retention purge` runs the purge on demand.
 
 **Data dir git snapshot** -- a separate git repository, rooted at
 `/var/lib/my-booking/.git` -- entirely independent of this project's own
@@ -776,14 +831,15 @@ git checkout -- with TWO layers committing to it:
 
 Both are a cheap, local safety net on top of whatever off-box backup you
 already run (see "Known simplifications" below -- that's still your own
-job), useful for recovering from an accidental `my-bt erase`, a bad manual
-CSV edit, or a botched migration. `my-bt git-snapshot [--dry-run]` runs the
-hourly layer's logic on demand; `my-bt setup -i` offers to initialize the
-repo (`git init`, a `.gitignore` excluding `*.tmp`, local `user.email`/
-`user.name`) if it isn't one yet -- **the per-write layer deliberately
-never does this itself**, same "don't silently turn a data dir into a git
-repo" principle the hourly layer already followed: until `my-bt setup -i`
-(or a manual `git init`) has been run once, both layers are silent no-ops.
+job), useful for recovering from an accidental `my-bt admin erase`, a bad
+manual CSV edit, or a botched migration. `my-bt admin git-snapshot
+[--dry-run]` runs the hourly layer's logic on demand; `my-bt admin setup
+-i` offers to initialize the repo (`git init`, a `.gitignore` excluding
+`*.tmp`, local `user.email`/`user.name`) if it isn't one yet -- **the
+per-write layer deliberately never does this itself**, same "don't
+silently turn a data dir into a git repo" principle the hourly layer
+already followed: until `my-bt admin setup -i` (or a manual `git init`)
+has been run once, both layers are silent no-ops.
 
 **Compliance caveat, stated plainly: git commit history is immutable by
 default.** A snapshot committed *before* a guest's GDPR erasure still
@@ -801,7 +857,7 @@ dealbreaker. Weigh this against the safety net the snapshot itself
 provides before deciding either way.
 
 **Right to erasure** (Art. 17): a guest can delete their own account from
-`/my`, or you can run `my-bt erase --email ...` on their behalf. Either way:
+`/my`, or you can run `my-bt admin erase --email ...` on their behalf. Either way:
 any future confirmed/waitlisted booking is canceled first (freeing the spot
 for the waitlist), then the user row and all their registration rows move
 from the live CSVs into `data/archived/{users,registrations}.csv` with the
@@ -810,28 +866,28 @@ key = `secrets/erasure_pepper`). A keyed hash is what makes this a real
 erasure rather than security theatre: a bare `sha256(email)` is reversible by
 dictionary/rainbow-table attack since email addresses are low-entropy and
 guessable; keying it with a secret pepper that's never stored alongside the
-archive removes that attack. `my-bt list`/`users` query live and archived
-data together (or separately with `--live`/`--archive`) so you retain
+archive removes that attack. `my-bt list --all`/`--past` and `my-bt
+users` (or `/admin`) query live and archived data together (or live-only
+with plain `list`/`--live`, archived-only with `--archive`) so you retain
 statistical/audit value (how many sessions happened, aggregate attendance)
 without retaining identifiable personal data past the point someone asked to
 be forgotten.
 
 **Re-booking after erasure:** a guest who books again under the same
-email gets a fresh live account. As of 2026-07-10, `/admin` automatically
-moves their pre-erasure registrations onto that new live user_id on every
-page load (a real write, not just a display-time fold-in) -- deliberately
-made a side effect of viewing the page rather than a separate confirm
-step, since it's idempotent by construction (a repeat load finds nothing
-left to merge) and there's no plausible case where you'd want to VIEW an
-account's history without also having it reflect their full history.
-`my-bt history --email ...` remains read-only (no merge as a side
-effect of just looking), and `my-bt merge --email ...` remains the
-explicit CLI action for anyone managing the archive outside the web
-admin -- both call the same underlying `app/cli_history.py::run_merge`
-the web admin now calls. None of these ever un-erase the old identity
-itself: the archived user row keeps its hashed email and `[erased]` name
-forever; only the registration rows (which never held name/email) get
-re-parented.
+email gets a fresh live account. `/admin` and `my-bt list --all`/`--past`
+both show their pre-erasure registrations merged onto that new live
+user_id automatically -- purely a DISPLAY-TIME merge (2026-07-13: this used
+to actually rewrite the CSVs on every `/admin` page load; it doesn't
+anymore, see `app/cli_list.py::merge_archived_for_display`), computed
+fresh on every load/query, nothing written to disk. `my-bt admin
+dearchive --email ...` (renamed from `my-bt merge`; `my-bt history`
+dropped entirely, folded into `list --all`/`--past`) is the one command
+that still actually PERSISTS a merge, for anyone managing the archive
+outside the web admin -- it calls `app/cli_history.py::run_merge`, the
+same underlying move the display-time helper mimics without writing.
+None of these ever un-erase the old identity itself: the archived user row
+keeps its hashed email and `[erased]` name forever; only the registration
+rows (which never held name/email) get re-parented.
 
 **DPIA (Data Protection Impact Assessment):** whether you need one depends
 on your own scale, data categories, and risk profile -- this is a
@@ -989,12 +1045,12 @@ means "12px from the box's right edge" (which tracks the box's own
     before every build) -- this is the `%doc`-shipped reference copy.
   - **At run time, without a rebuild:** if `[site].static_site_dir` is set
     in `settings.toml` (the actual live, separately-checked-out copy of
-    `site/`), `my-bt status` compares that live `privacy.html` against
+    `site/`), `my-bt admin health` compares that live `privacy.html` against
     what current `settings.toml` values would render and warns on drift,
-    and `my-bt setup --interactive` offers to regenerate it right there.
+    and `my-bt admin setup --interactive` offers to regenerate it right there.
     This closes the gap where changing just `retention_months` in
     `settings.toml` used to require a full rebuild+reinstall before the
-    live legal page reflected it -- now it's one `my-bt setup -i` away.
+    live legal page reflected it -- now it's one `my-bt admin setup -i` away.
     `site/privacy.html.tmpl` itself is also `%config(noreplace)` (see
     "Installing" above), so a package upgrade never clobbers wording
     edits you've made to it.
@@ -1015,7 +1071,7 @@ automatically: copy them to your live static-site host when you're ready,
 ideally at the same time as each course's booking link starts pointing at
 `/book/<shortname>`.
 
-`my-bt status`/`setup -i` actively help with that step now (added
+`my-bt admin health`/`admin setup -i` actively help with that step now (added
 2026-07-05, after this exact gap caused a real stale-page incident):
 - **Deployed vs. checkout drift**: for each of `index.html`/`impressum.html`/
   `terms.html`, compares the live copy in `[site].static_site_dir` against
@@ -1033,7 +1089,7 @@ ideally at the same time as each course's booking link starts pointing at
   never to repoint `static_site_dir` itself, since that's a deliberate
   architectural choice this tool has no business overriding.
 
-## Maintenance mode (`my-bt maintenance on|off|status`) (2026-07-10)
+## Maintenance mode (`my-bt admin maintenance on|off|status`) (2026-07-10)
 
 A sitewide toggle for planned downtime: "add my-bt commands to set/unset
 a maintenance mode ... a downtime warning right at the top of
@@ -1041,17 +1097,17 @@ a maintenance mode ... a downtime warning right at the top of
 should result in a page version of this maintenance message."
 
 ```
-my-bt maintenance on                    # enable, no custom message
-my-bt maintenance on -m "back Monday"   # enable with a custom message
-my-bt maintenance off                   # disable
-my-bt maintenance status                # report current state, changes nothing
+my-bt admin maintenance on                    # enable, no custom message
+my-bt admin maintenance on -m "back Monday"   # enable with a custom message
+my-bt admin maintenance off                   # disable
+my-bt admin maintenance status                # report current state, changes nothing
 ```
 
 State lives in a small JSON flag file in the data dir (`maintenance.json`),
 not `settings.toml` -- `settings.toml` is only read once at process
-startup (see `my-bt status`'s own settings-freshness check), so a setting
-there wouldn't take effect until a service restart, defeating the point
-of a quick toggle. This flag file is what both the running app and
+startup (see `my-bt admin health`'s own settings-freshness check), so a
+setting there wouldn't take effect until a service restart, defeating the
+point of a quick toggle. This flag file is what both the running app and
 `my-bt` itself consult, so `on`/`off` take effect on the very next
 request, no restart needed.
 
@@ -1066,12 +1122,13 @@ that `/my`'s login page still worked completely normally during
 maintenance: "I was able to click on login and see the normal login page
 ... This should not be!"
 
-`/admin/*`, `/host-cancel/<reg_id>`, and `/host-reinstate/<reg_id>` are
-the one deliberate exception -- those are the HOST's own tools (the
-latter two are unguessable-uuid4 "magic links" only ever emailed to
-`admin_email`), and blocking the host's own ability to manage bookings
-during a maintenance window they themselves declared would be
-counterproductive. `/my/logout` and the JSON-only `/my/session` status
+`/admin/*`, `/host-cancel/<reg_id>`, `/host-reinstate/<reg_id>`, and
+`/host-cancel-occurrence/<course>/<date>` are the one deliberate
+exception -- those are the HOST's own tools (the latter three are
+unguessable-enough "magic links" only ever reachable from the operator's
+own CalDAV event or `admin_email`), and blocking the host's own ability to
+manage bookings during a maintenance window they themselves declared would
+be counterproductive. `/my/logout` and the JSON-only `/my/session` status
 check (polled by the static homepage's own JS) are also left unblocked --
 neither is a booking or management action, so gating them would only
 cause confusing side effects (a guest stuck "logged in" against their
@@ -1108,9 +1165,11 @@ links won't work right now." plus your optional `-m/--message` text, plus
 a `mailto:` link to `[site].admin_email` and a note to reach out via
 Teams if you're a DBG Lux colleague.
 
-**Left on by accident?** `my-bt status`/`setup` report maintenance mode
-as a `warn` (not silence) whenever it's ON, specifically so it can't stay
-enabled for days after a real maintenance window ends without anyone
+**Left on by accident?** `my-bt status` highlights maintenance mode
+prominently whenever it's ON (impossible to miss in the live summary), and
+`my-bt admin health`/`admin setup` report it as a `warn` (not silence,
+exits non-zero), specifically so it can't stay enabled for days after a
+real maintenance window ends without anyone
 noticing -- see `app/cli_checks.py::check_maintenance_mode`.
 
 **Bypassing it for yourself** (2026-07-10, the operator: "can the maintenance
@@ -1470,8 +1529,8 @@ has access.
 ## Watchdog (`[watchdog]` in `settings.toml`)
 
 A periodic health check (`systemd/my-booking-watchdog.timer`, every 15 min
-by default -- see `my-bt status`/`setup`'s systemd check, which now covers
-this timer alongside the app service and the retention timer) that emails
+by default -- see `my-bt admin health`/`admin setup`'s systemd check, which
+now covers this timer alongside the app service and the retention timer) that emails
 `admin_email` once per run if anything below crosses its threshold in the
 last `window_minutes`; completely silent otherwise. This is deliberately a
 coarse, sitewide, periodic signal -- **not** a replacement for either of
@@ -1505,14 +1564,14 @@ every check just becomes a no-op). See `settings.toml.example`'s
 `[watchdog]` section for every default value and a short explanation of
 each.
 
-**nginx_access_log auto-detection:** `my-bt status`/`setup` cross-check
-`[watchdog].nginx_access_log` against nginx's own live config (`nginx -T`,
-same live-config approach the nginx-location/SELinux/CalDAV checks
-already use) for the vhost matching `[site].base_url`. Three outcomes:
+**nginx_access_log auto-detection:** `my-bt admin health`/`admin setup`
+cross-check `[watchdog].nginx_access_log` against nginx's own live config
+(`nginx -T`, same live-config approach the nginx-location/SELinux/CalDAV
+checks already use) for the vhost matching `[site].base_url`. Three outcomes:
 not configured but a real `access_log` was detected for this vhost --
-`setup --interactive` offers to write `nginx_access_log = "..."` into
+`admin setup --interactive` offers to write `nginx_access_log = "..."` into
 `settings.toml` for you; configured but it doesn't match what nginx is
-actually logging to -- `setup --interactive` offers to update it in place
+actually logging to -- `admin setup --interactive` offers to update it in place
 too (same prompt-and-write pattern, not just a manual-fix warning); or
 already matches -- nothing to do. This is a detect-and-*offer*, never a silent
 auto-enable: nginx's `log_format` can be customized, and the nginx-burst
@@ -1521,8 +1580,8 @@ turning the check on could give false confidence that it's monitoring
 something it can't actually parse -- the detection also spot-checks the
 log's first line against that format and adds a caveat if it looks custom.
 
-**nginx log read access:** once `nginx_access_log` is set, `my-bt status`/
-`setup` also check whether the `my-booking` user can actually read it --
+**nginx log read access:** once `nginx_access_log` is set, `my-bt admin health`/
+`admin setup` also check whether the `my-booking` user can actually read it --
 `ReadOnlyPaths=-/var/log/nginx` in the watchdog's own systemd unit only
 grants a sandboxing exception, it does nothing about the file's actual
 owner/group/mode/ACLs, which is nginx's/the distro's call. Fedora's nginx

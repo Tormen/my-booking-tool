@@ -177,6 +177,22 @@ def sync_occurrence(
         lines.append(f"{len(waiting)} on waitlist")
     if canceled:
         lines.append(f"{len(canceled)} canceled")
+    if active or waiting:
+        # 2026-07-13, the operator: "the CALDAV invite needs BOTH: cancel link per
+        # participant AND the course cancel link for ALL of them" -- a
+        # second, ALWAYS-present link alongside every individual
+        # participant's own "cancel:" line below, for the "illness/venue
+        # unavailable, cancel the whole session at once" case (see
+        # app.cancel_flow.cancel_occurrence and
+        # app/webapp.py::host_cancel_occurrence). Host/operator-only, same
+        # trust boundary as every other "cancel:" line here -- never sent
+        # to a guest (see guest_invite_ics()'s own docstring: a guest's
+        # personal .ics has no participant list and no cancel links at
+        # all).
+        lines.append(
+            f"cancel entire session (all participants): "
+            f"{settings.base_url}/host-cancel-occurrence/{course.shortname}/{occurrence_date.isoformat()}"
+        )
 
     if active or waiting:
         lines.append("")

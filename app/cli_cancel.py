@@ -25,11 +25,11 @@ from dataclasses import dataclass
 from datetime import date
 
 from . import calendar_sync
-from .cancel_flow import build_caldav_client, cancel_and_promote
+from .cancel_flow import CANCELABLE_STATUSES, build_caldav_client, cancel_and_promote
 from .cancellation import send_cancellation_emails
 from .config import Settings
 from .security import hash_token, new_token
-from .storage import STATUS_CONFIRMED, STATUS_WAITLISTED, Store
+from .storage import STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store
 
 
 @dataclass
@@ -70,15 +70,22 @@ def cancel_registration(
     Returns a CancelResult with ok=False (no exception, no side effects)
     if:
       - registration_id doesn't exist at all, or
-      - it exists but isn't confirmed/waitlisted (already canceled, or a
-        stale pending_confirmation row) -- Store.cancel() itself is a
-        no-op in that case, so this checks the status up front to give a
-        clear reason instead of silently "succeeding" at nothing.
+      - it's already canceled -- Store.cancel() itself is a no-op in that
+        case, so this checks the status up front to give a clear reason
+        instead of silently "succeeding" at nothing.
+
+    2026-07-13: also cancelable now if the row is still
+    STATUS_PENDING_CONFIRMATION (a guest who registered but hasn't yet
+    clicked their account-confirmation email link) -- previously excluded
+    here, which meant that guest's booking couldn't be canceled by ANY
+    path. See Store.cancel()'s own docstring for why this is safe (no
+    promotion/calendar-sync consequence for a row that never held a real
+    spot).
     """
     reg = store.find_by_id(registration_id)
     if reg is None:
         return CancelResult(ok=False, reason="no registration with that id", registration_id=registration_id)
-    if reg.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED):
+    if reg.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED, STATUS_PENDING_CONFIRMATION):
         return CancelResult(
             ok=False,
             reason=f"not cancelable (status is already {reg.status!r})",
@@ -143,3 +150,39 @@ def cancel_registration(
         message=message,
         emailed=emailed,
     )
+
+
+def resolve_course_shortname_for_date(
+    store: Store, occurrence_date: str, course_shortname: str | None = None,
+) -> tuple[str | None, list[str]]:
+    """`my-bt cancel --date ... [--course ...]`'s own course auto-detection
+    (2026-07-13, the operator: "as usually a single date for me holds a single
+    course, yes --course parameter should be optional"). If
+    `course_shortname` is given, it's returned as-is (unvalidated -- the
+    caller, cancel_flow.find_cancelable_registrations_for_occurrence, will
+    simply find nothing to cancel if it's wrong, same as passing a bogus
+    --course today).
+
+    Otherwise, looks at every LIVE, still-cancelable registration
+    (cancel_flow.CANCELABLE_STATUSES -- confirmed/waitlisted/pending-
+    confirmation) on `occurrence_date` and collects the distinct
+    course_shortnames among them:
+      - exactly one -> (that shortname, [])
+      - none at all -> (None, []) -- nothing to cancel, not an ambiguity
+      - more than one -> (None, sorted list of every candidate) -- caller
+        must ask the operator to pass --course explicitly.
+
+    Returns (resolved_shortname_or_None, candidates). `candidates` is only
+    ever non-empty in the ambiguous case -- a caller can tell "nothing to
+    cancel" and "ambiguous, please disambiguate" apart by checking it."""
+    if course_shortname:
+        return course_shortname, []
+    candidates = sorted({
+        r["course_shortname"] for r in store.read_registrations(scope="live")
+        if r["occurrence_date"] == occurrence_date and r["status"] in CANCELABLE_STATUSES
+    })
+    if len(candidates) == 1:
+        return candidates[0], []
+    if not candidates:
+        return None, []
+    return None, candidates

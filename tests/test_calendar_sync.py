@@ -126,6 +126,24 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
             unfolded,
         )
 
+    def test_includes_cancel_entire_session_link_alongside_per_participant_links(self):
+        # 2026-07-13, the operator: "the CALDAV invite needs BOTH: cancel link per
+        # participant AND the course cancel link for ALL of them" -- a
+        # second, always-present link for canceling the whole occurrence at
+        # once (app.cancel_flow.cancel_occurrence via
+        # app/webapp.py::host_cancel_occurrence), alongside each
+        # participant's own "cancel:" line, not instead of it.
+        reg_id = self._add("alice@example.org", STATUS_CONFIRMED)
+        transport = self._sync()
+        put_bodies = [b for m, _u, b, _h in transport.calls if m == "PUT"]
+        unfolded = put_bodies[0].replace("\r\n ", "")
+        self.assertIn(f"cancel: {self.settings.base_url}/host-cancel/{reg_id}", unfolded)
+        self.assertIn(
+            f"cancel entire session (all participants): "
+            f"{self.settings.base_url}/host-cancel-occurrence/yoga-class-1/{self.occ_date.isoformat()}",
+            unfolded,
+        )
+
     def test_guest_row_shows_guest_of_leader_instead_of_self(self):
         leader = self.store.upsert_user_for_booking("leader@example.org", "Leader")
         guest = self.store.upsert_user_for_booking("guest@example.org", "Guest Person")

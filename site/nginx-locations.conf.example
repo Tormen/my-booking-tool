@@ -56,7 +56,7 @@ server {
     #     external scripts/images/frames) - everything is same-origin, so
     #     default-src 'self' is safe as the baseline for everything not
     #     called out below.
-    #   - EIGHT distinct inline <script> blocks exist site-wide as of this
+    #   - NINE distinct inline <script> blocks exist site-wide as of this
     #     app version: index.html's (same-origin fetch() to /my/session
     #     only), the booking-form validation script shared by all
     #     /book/<slug> pages, the sortable/filterable-table script shared
@@ -66,7 +66,7 @@ server {
     #     page by app/templates.py::page() (2026-07-11 -- disables every
     #     button and shows "Please wait..." the instant any form is
     #     submitted, so a slow POST doesn't look like nothing happened and
-    #     can't be double-submitted from the UI), and three more
+    #     can't be double-submitted from the UI), three more
     #     (2026-07-07, fixing a real CSP violation the operator hit on /my's
     #     lockout screen): the password-reset page's resend-cooldown
     #     script, the "Almost there" page's fetch-based resend-cooldown
@@ -75,10 +75,14 @@ server {
     #     button id/label/seconds interpolated directly into the script
     #     text, so every render hashed differently and never matched any
     #     fixed allow-list; they're now stable, data-*-attribute-driven
-    #     scripts like the others, one hash apiece. All eight are
+    #     scripts like the others, one hash apiece -- and one more
+    #     (2026-07-13): /admin's "cancel entire session" checkbox wiring
+    #     script (auto-checks every sibling row sharing an occurrence,
+    #     greys out their Cancel buttons -- see
+    #     app/webapp.py::_CANCEL_ENTIRE_SESSION_SCRIPT). All nine are
     #     allow-listed by exact SHA-256 hash below instead of
     #     'unsafe-inline', so any future/injected inline script that isn't
-    #     byte-identical to these eight is blocked outright. These eight
+    #     byte-identical to these nine is blocked outright. These nine
     #     hashes match the app as shipped in this repo right now -- if you
     #     ever hand-edit any of app's inline scripts, regenerate the hashes
     #     or those pages' scripts will silently stop working (this bit a
@@ -99,7 +103,7 @@ server {
     #   - object-src/base-uri/form-action locked to 'none'/'self' as standard
     #     defense-in-depth; nothing in this app needs plugins, a <base> tag,
     #     or cross-origin form submission.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U=' 'sha256-4fhOi4IWLR6Of8C4WDGKPRRA/13iDwHcdyYyfYhM4gk='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
 
     # HARDENING: modern security headers, same low-risk defense-in-depth as
     # the four above. This app never needs camera/mic/geolocation/payment
@@ -202,6 +206,21 @@ server {
     # connection cap) as every other proxied location here, nothing
     # weaker.
     location /host-reinstate/ {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    # "cancel the entire session" -- reachable from the operator's own
+    # CalDAV event (see app/calendar_sync.py's "cancel entire session"
+    # line), never from a guest-facing email. Same trust model as
+    # /host-cancel/ (an unguessable-enough URL, no separate secret) --
+    # same hardening as every other proxied location here.
+    location /host-cancel-occurrence/ {
         proxy_pass http://127.0.0.1:8811;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

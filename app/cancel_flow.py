@@ -23,17 +23,69 @@ logic, same emails, same calendar sync.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Callable
 
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
-from .cancellation import booking_details_text, course_recap_html, html_email_body, intro_html
+from .cancellation import (
+    booking_details_text, course_recap_html, html_email_body, intro_html, send_cancellation_emails,
+)
 from .config import Settings
 from .emailer import send_mail
-from .storage import Store
+from .security import hash_token, new_token
+from .storage import (
+    STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Registration, Store,
+)
 
 log = logging.getLogger("my_booking.cancel_flow")
+
+# The three LIVE, still-cancelable statuses (2026-07-13: extended to include
+# STATUS_PENDING_CONFIRMATION -- see Store.cancel()'s own docstring for why
+# a guest who hasn't yet clicked their account-confirmation link used to be
+# stuck, uncancelable, by any path). Shared by cancel_occurrence() below and
+# by anything (scripts/my-bt, app/webapp.py) that needs to know which live
+# registrations on one occurrence WOULD be affected before actually acting --
+# see find_cancelable_registrations_for_occurrence().
+CANCELABLE_STATUSES = (STATUS_CONFIRMED, STATUS_WAITLISTED, STATUS_PENDING_CONFIRMATION)
+
+
+def find_cancelable_registrations_for_occurrence(
+    store: Store, course_shortname: str, occurrence_date_str: str,
+) -> list[Registration]:
+    """Every LIVE registration for one (course_shortname, occurrence_date)
+    that cancel_occurrence() below would act on -- i.e. everyone who'd be
+    notified by a "cancel this entire session" action. Read-only: used both
+    by the `/host-cancel-occurrence` confirmation page (GET, before the
+    host commits) and by cancel_occurrence() itself (which re-derives this
+    same list right before acting, since time may have passed between the
+    two)."""
+    return [
+        Registration(**r) for r in store.read_registrations(scope="live")
+        if r["course_shortname"] == course_shortname
+        and r["occurrence_date"] == occurrence_date_str
+        and r["status"] in CANCELABLE_STATUSES
+    ]
+
+
+@dataclass
+class CanceledParticipant:
+    """One row cancel_occurrence() actually canceled -- enough for a caller
+    (scripts/my-bt, the /host-cancel-occurrence confirmation page) to report
+    who was affected without a second store lookup."""
+    registration_id: str
+    user_id: str
+    user_name: str
+    user_email: str
+    status_before: str
+
+
+@dataclass
+class CancelOccurrenceResult:
+    course_shortname: str
+    occurrence_date: str
+    canceled: list[CanceledParticipant] = field(default_factory=list)
 
 
 def build_caldav_client(settings: Settings) -> CalDAVClient:
@@ -167,3 +219,102 @@ def cancel_and_promote(
         return
     href = _calendar_href(caldav, settings)
     calendar_sync.sync_occurrence(caldav, href, store, settings, course, date.fromisoformat(occurrence_date_str))
+
+
+def cancel_occurrence(
+    store: Store,
+    settings: Settings,
+    caldav: CalDAVClient | None,
+    course_shortname: str,
+    occurrence_date_str: str,
+    message: str = "",
+    sync_fn: Callable[[str, str], None] | None = None,
+) -> CancelOccurrenceResult:
+    """"Cancel the entire session" (2026-07-13, the operator: the operator canceling
+    one whole course occurrence at once -- illness, venue unavailable, ...
+    -- rather than one guest's booking). Cancels EVERY live confirmed/
+    waitlisted/pending-confirmation registration for this (course_shortname,
+    occurrence_date) -- see find_cancelable_registrations_for_occurrence()
+    and CANCELABLE_STATUSES above -- and emails each participant, exactly
+    the same app.cancellation.send_cancellation_emails every single-
+    registration cancel path already uses (canceled_by="host", so each
+    participant's copy gets the standard apology + next-occurrence-booking-
+    link addition too -- see that function's own docstring).
+
+    Unlike cancel_and_promote() above, this does NOT call
+    store.promote_next_waitlisted(): there's no one left on this occurrence
+    to promote INTO -- confirmed, waitlisted, AND pending-confirmation
+    registrations are all being canceled together, so nobody's spot is
+    "freed up" for anybody else. The calendar is still re-synced exactly
+    ONCE at the end (not once per canceled row) via the same
+    calendar_sync.sync_occurrence() cancel_and_promote() itself calls --
+    with zero live participants left, this normally means a single DELETE
+    of the operator's own event rather than a PUT.
+
+    `message`, if given, is the optional free-text note included in every
+    participant's cancellation email (same `host_message` field/dialog
+    Cancel already supports for a single registration).
+
+    `caldav`/`sync_fn`: same two ways to drive the calendar sync as
+    cancel_and_promote() above -- pass `caldav` for a fresh one-off
+    PROPFIND-then-sync (standalone callers: scripts/my-bt, the
+    /host-cancel-occurrence route building its own client), or `sync_fn`
+    to reuse a caller's own cached calendar-href lookup (e.g.
+    App._sync). Neither is required if `course` isn't in settings.toml
+    anymore -- see the "course removed" branch below, same as
+    cancel_and_promote()'s own.
+
+    Returns a CancelOccurrenceResult listing exactly who was canceled (empty
+    `canceled` list, still a valid result, if nobody was live on this
+    occurrence to begin with -- not an error, e.g. a double-submit of the
+    same host-cancel-occurrence link)."""
+    course = settings.course(course_shortname)
+    live_regs = find_cancelable_registrations_for_occurrence(store, course_shortname, occurrence_date_str)
+
+    canceled: list[CanceledParticipant] = []
+    for reg in live_regs:
+        user = store.find_user_by_id(reg.user_id)
+        # Fresh reinstate token per row, same as every other cancel path --
+        # see Store.cancel()'s own `reinstate_token_hash` docstring for why
+        # the original booking-confirmation token can't be reused here.
+        reinstate_token = new_token()
+        changed = store.cancel(
+            reg.registration_id, canceled_by="host", host_message=message,
+            reinstate_token_hash=hash_token(reinstate_token),
+        )
+        if not changed:  # pragma: no cover - raced by something else between the read above and here
+            continue
+        canceled.append(CanceledParticipant(
+            registration_id=reg.registration_id,
+            user_id=reg.user_id,
+            user_name=user.name if user else "",
+            user_email=user.email if user else "",
+            status_before=reg.status,
+        ))
+        if course:
+            ics_filename, ics_text = calendar_sync.guest_cancel_ics(
+                settings, course, date.fromisoformat(occurrence_date_str)
+            )
+            send_cancellation_emails(
+                settings, course, occurrence_date_str, user, canceled_by="host", message=message,
+                registration_id=reg.registration_id, reinstate_token=reinstate_token,
+                ics_attachment=(ics_filename, ics_text, "CANCEL"),
+            )
+
+    if course and canceled:
+        # One calendar sync for the whole occurrence, not one per canceled
+        # row -- calendar_sync.sync_occurrence() always recomputes the FULL
+        # current participant list itself (it doesn't take a delta), so
+        # calling it N times in a row would just do N-1 redundant
+        # PUTs/DELETEs of the exact same final state.
+        if sync_fn is not None:
+            sync_fn(course_shortname, occurrence_date_str)
+        elif caldav is not None:
+            href = _calendar_href(caldav, settings)
+            calendar_sync.sync_occurrence(
+                caldav, href, store, settings, course, date.fromisoformat(occurrence_date_str)
+            )
+
+    return CancelOccurrenceResult(
+        course_shortname=course_shortname, occurrence_date=occurrence_date_str, canceled=canceled,
+    )

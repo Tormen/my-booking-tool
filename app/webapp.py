@@ -111,15 +111,16 @@ from . import calendar_sync
 from . import cli_list
 from . import maintenance
 from .caldav_client import CalDAVClient, CalDAVError
-from .cancel_flow import cancel_and_promote
+from .cancel_flow import (
+    CANCELABLE_STATUSES, cancel_and_promote, cancel_occurrence, find_cancelable_registrations_for_occurrence,
+)
 from .cancellation import (
     booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text, intro_html,
     send_cancellation_emails, send_reinstatement_emails,
 )
 from .config import Settings
 from .emailer import _masked, send_mail
-from .cli_history import run_merge
-from .erasure import erase_user_by_email, find_archived_user_ids_for_email
+from .erasure import erase_user_by_email
 from .security import (
     RateLimiter, hash_secret, hash_token, is_erased_email, new_token,
     sanitize_csv_field, tokens_match, verify_admin_password, verify_secret,
@@ -516,6 +517,40 @@ _DIALOG_WIRING_SCRIPT = """<script>
 </script>"""
 
 
+# /admin overview's "cancel entire session" checkbox (2026-07-13, the operator:
+# "auto check ALL participants as well and GREY OUT and disable the cancel
+# button on any other line ... undone, when you uncheck ANY of them (this
+# then unchecks all)") -- see admin_overview()'s own row-rendering comment
+# for the checkbox/button markup this wires up (`.cancel-entire-checkbox`/
+# `.cancel-btn`, both tagged with a shared `data-occurrence` key). Module-
+# level constant, not per-row-interpolated, for the same CSP script-src-hash
+# reason _SORTABLE_FILTERABLE_TABLE_SCRIPT is (see that constant's own
+# comment) -- one script, one hash, no matter how many rows/occurrences
+# exist on the page.
+_CANCEL_ENTIRE_SESSION_SCRIPT = """<script>
+(function() {
+  document.querySelectorAll(".cancel-entire-checkbox").forEach(function(cb) {
+    cb.addEventListener("change", function() {
+      var key = cb.dataset.occurrence;
+      var ownButton = cb.form ? cb.form.querySelector("button.cancel-btn") : null;
+      document.querySelectorAll(".cancel-entire-checkbox").forEach(function(sib) {
+        if (sib.dataset.occurrence === key) sib.checked = cb.checked;
+      });
+      document.querySelectorAll("button.cancel-btn").forEach(function(btn) {
+        if (btn.dataset.occurrence !== key) return;
+        // Checking: grey out every OTHER row's Cancel button (this row's
+        // own button is how you actually submit) -- unchecking: re-enable
+        // every one of them, including this row's own (it may have been
+        // disabled by a SIBLING's checkbox in the meantime).
+        if (cb.checked && btn === ownButton) return;
+        btn.disabled = cb.checked;
+      });
+    });
+  });
+})();
+</script>"""
+
+
 def _course_subtitle_html(course) -> str:
     """Shared by _book_page() and courses() (2026-07-06) so the two never
     drift apart on this. course.subtitle is optional: unset (None, the
@@ -707,6 +742,18 @@ class App:
             sync_fn=lambda sn, occ_str: self._sync(sn, date.fromisoformat(occ_str)),
         )
 
+    def _cancel_occurrence(self, course_shortname: str, occurrence_date_str: str, message: str = ""):
+        """Thin wrapper around app.cancel_flow.cancel_occurrence (2026-07-13,
+        "cancel the entire session" -- see host_cancel_occurrence() below),
+        same reasoning as _cancel_and_promote() above: passes self._sync as
+        the sync_fn override so this reuses App's own cached calendar-href
+        lookup instead of a fresh one-off PROPFIND, and so tests can keep
+        stubbing self.app._sync to a no-op."""
+        return cancel_occurrence(
+            self.store, self.settings, self.caldav, course_shortname, occurrence_date_str, message=message,
+            sync_fn=lambda sn, occ_str: self._sync(sn, date.fromisoformat(occ_str)),
+        )
+
     # -- routing -----------------------------------------------------------
 
     def __call__(self, environ, start_response):
@@ -785,6 +832,8 @@ class App:
             return self.host_cancel(method, m.group(1), environ)
         if m := re.fullmatch(r"/host-reinstate/([0-9a-fA-F-]+)", path):
             return self.host_reinstate(method, m.group(1), environ)
+        if m := re.fullmatch(r"/host-cancel-occurrence/([a-z0-9-]+)/(\d{4}-\d{2}-\d{2})", path):
+            return self.host_cancel_occurrence(method, m.group(1), m.group(2), environ)
         if path == "/internal/status":
             return self.internal_status(method, environ)
         return "404 Not Found", [("Content-Type", "text/plain")], "not found"
@@ -3265,29 +3314,26 @@ class App:
         # so it's never something the "today + future only" view needs to
         # surface; it should only appear once "include past" is toggled.
         # 2026-07-10, the operator: "the merge should be automatically done if you
-        # also display the history in the /admin page" -- viewing this
-        # page (logging in, requesting the overview) now performs the same
-        # merge admin_merge()/`my-bt merge` do explicitly: any LIVE guest
+        # also display the history in the /admin page" -- any LIVE guest
         # whose current email hashes to an already-archived (erased)
-        # identity gets that pre-erasure registration history moved onto
-        # their live user_id, right here, before anything below is read.
-        # This used to be display-only (a "N (incl. M pre-erasure)"
-        # fold-in recomputed fresh on every render, never touching disk) --
-        # now it's the real thing, done automatically as a side effect of
-        # loading this page instead of needing a separate explicit click.
-        # Nominally unusual for a GET to mutate state, but idempotent by
-        # construction: run_merge() only ever moves rows that are STILL
-        # archived, so reloading this page immediately after finds nothing
-        # left to merge and is a pure no-op, same as any other page reload.
-        for live_user_row in self.store.read_users(scope="live"):
-            archived_user_ids = find_archived_user_ids_for_email(
-                self.store, self.settings, live_user_row["email"]
-            )
-            if archived_user_ids:
-                run_merge(self.store, archived_user_ids, live_user_row["user_id"])
-
+        # identity shows that pre-erasure registration history alongside
+        # their live rows here.
+        #
+        # 2026-07-13, the operator: "/admin should [be] non-mutating" -- this
+        # used to actually rewrite the CSVs on every page load (moving the
+        # archived rows for real, same as `my-bt admin dearchive`); now
+        # it's a pure display-time merge instead, via the SAME shared
+        # helper `my-bt list --all`/`--past` uses (see
+        # cli_list.merge_archived_for_display's own docstring) -- nothing
+        # on disk changes just from viewing this page anymore. `dearchive`
+        # remains the one explicit action that actually persists a merge.
         live_regs = [Registration(**r) for r in self.store.read_registrations(scope="live")]
-        archived_regs = [Registration(**r) for r in self.store.read_registrations(scope="archived")]
+        archived_regs = [
+            Registration(**r) for r in cli_list.merge_archived_for_display(
+                self.store, self.settings, self.store.read_users(scope="live"),
+                self.store.read_registrations(scope="archived"),
+            )
+        ]
         all_regs = live_regs + archived_regs
         users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
         # "Times booked" counts every registration ever made by this
@@ -3352,6 +3398,25 @@ class App:
             row["registration_id"]: row["party_label"]
             for row in cli_list.annotate_admin_party_label(raw_all_regs, raw_users_by_id)
         }
+        # "Cancel entire session" (2026-07-13, the operator): every LIVE row that
+        # cancel_flow.cancel_occurrence() would act on, grouped by
+        # (course_shortname, occurrence_date) -- used below to (a) show,
+        # right in each row's own cancel dialog, exactly who'd be notified
+        # if the operator checks "cancel entire session" instead of just
+        # this one row, and (b) give the JS wiring (see
+        # _CANCEL_ENTIRE_SESSION_SCRIPT) a key to find every sibling
+        # checkbox/button sharing the same occurrence. Same
+        # CANCELABLE_STATUSES cancel_occurrence() itself filters on, so this
+        # can never show a participant here that canceling wouldn't
+        # actually reach.
+        occurrence_participants: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for r in live_regs:
+            if r.status not in CANCELABLE_STATUSES:
+                continue
+            u = users_by_id.get(r.user_id)
+            if u is None or is_erased_email(u.email):
+                continue
+            occurrence_participants.setdefault((r.course_shortname, r.occurrence_date), []).append((u.name, u.email))
         rows = []
         for r in regs:
             user = users_by_id.get(r.user_id)
@@ -3394,15 +3459,54 @@ class App:
                 # bookings should NOT have a CANCEL button as well :D" --
                 # same fix, same reasoning, as my()'s own Cancel button
                 # just below.
-                disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED) or (
+                #
+                # 2026-07-13, the operator: a guest who hasn't yet clicked their
+                # account-confirmation email (STATUS_PENDING_CONFIRMATION)
+                # needs to be cancelable from here too -- previously they
+                # had NO way to be canceled at all, host or guest (see
+                # Store.cancel()'s own docstring). Not offered on `my()`'s
+                # own guest-facing Cancel button: a pending-confirmation
+                # guest has no password yet, so can't reach /my in the
+                # first place.
+                disabled = r.status not in (
+                    STATUS_CONFIRMED, STATUS_WAITLISTED, STATUS_PENDING_CONFIRMATION,
+                ) or (
                     date.fromisoformat(r.occurrence_date) < today
                 )
                 past_field = '<input type="hidden" name="past" value="1">' if show_past else ""
+                # "Cancel entire session" (2026-07-13, the operator: "the checkbox
+                # ... Cancel ALL reservations for this date ... SHOW who
+                # would all then receive this cancel email") -- an
+                # occurrence-key-tagged checkbox INSIDE this row's own
+                # dialog (same `form="{cancel_id}-form"` trick the message
+                # textarea below already uses to submit alongside a form it
+                # isn't a DOM child of), plus the full participant list so
+                # the operator sees who's affected before ever checking it.
+                # Checking it flips admin_cancel()'s own POST handling from
+                # "cancel just this row" to "cancel_flow.cancel_occurrence
+                # for this row's whole (course, date)" -- see admin_cancel()
+                # below. Only offered when this row's OWN Cancel button is
+                # enabled: canceling the entire session from a disabled
+                # (already-canceled/past) row wouldn't make sense either.
+                occurrence_key = f"{r.course_shortname}|{r.occurrence_date}"
+                siblings = occurrence_participants.get((r.course_shortname, r.occurrence_date), [])
+                entire_session_html = ""
+                if not disabled:
+                    participant_list = ", ".join(f"{esc(n)} ({esc(e)})" for n, e in siblings)
+                    entire_session_html = (
+                        f'<label class="cancel-entire-label">'
+                        f'<input type="checkbox" name="cancel_entire_session" value="1" '
+                        f'form="{cancel_id}-form" class="cancel-entire-checkbox" '
+                        f'data-occurrence="{esc(occurrence_key)}"> '
+                        f"Cancel the <b>entire session</b> instead -- "
+                        f"{len(siblings)} participant(s) will be notified: {participant_list}"
+                        "</label>"
+                    )
                 actions = (
                     f'<form method="post" action="/admin/cancel/{esc(r.registration_id)}" id="{cancel_id}-form">'
                     f'{past_field}'
-                    f'<button type="submit" class="confirm-dialog-btn" data-dialog="{cancel_id}-dialog" '
-                    f'{"disabled" if disabled else ""}>Cancel</button>'
+                    f'<button type="submit" class="confirm-dialog-btn cancel-btn" data-dialog="{cancel_id}-dialog" '
+                    f'data-occurrence="{esc(occurrence_key)}" {"disabled" if disabled else ""}>Cancel</button>'
                     "</form>"
                     f'<dialog id="{cancel_id}-dialog" class="card">'
                     f"<p><b>Are you sure?</b></p>"
@@ -3410,6 +3514,7 @@ class App:
                     f"on {esc(r.occurrence_date)}? They'll be notified by email.</p>"
                     f'<label>Optional message to them <textarea name="message" rows="2" class="big-input" '
                     f'form="{cancel_id}-form"></textarea></label>'
+                    f"{entire_session_html}"
                     '<div class="submit-row">'
                     f'<button type="submit" form="{cancel_id}-form">Confirm cancellation</button> '
                     f'<button type="button" class="dialog-close-btn" data-dialog="{cancel_id}-dialog">Never mind</button>'
@@ -3483,7 +3588,9 @@ class App:
           <th>Guests<span class="sort-indicator"></span></th>
           <th>Actions<span class="sort-indicator"></span></th>
         </tr></thead>
-        <tbody>{''.join(rows)}</tbody></table>""" + _SORTABLE_FILTERABLE_TABLE_SCRIPT + _DIALOG_WIRING_SCRIPT
+        <tbody>{''.join(rows)}</tbody></table>""" + (
+            _SORTABLE_FILTERABLE_TABLE_SCRIPT + _DIALOG_WIRING_SCRIPT + _CANCEL_ENTIRE_SESSION_SCRIPT
+        )
         return "200 OK", [("Content-Type", "text/html")], page("Admin overview", body)
 
     def admin_cancel(self, method: str, registration_id: str, environ):
@@ -3511,6 +3618,19 @@ class App:
             # the duplicate side effects; the redirect below (instead of
             # rendering "Canceled" on this same POST URL) additionally
             # closes the back-button-resubmit path itself at the source.
+            # "Cancel entire session" (2026-07-13, the operator: the /admin
+            # checkbox on each row -- see admin_overview()'s own row-
+            # rendering comment) -- the checkbox submits alongside THIS
+            # row's own form (via its `form="{cancel_id}-form"` attribute),
+            # so when checked, cancel the WHOLE (course, date) this row
+            # belongs to via cancel_flow.cancel_occurrence instead of just
+            # this one registration_id. Reuses the exact same route/dialog/
+            # message field -- no separate URL needed, same as the
+            # single-cancel path just below.
+            if form.get("cancel_entire_session") == "1":
+                self._cancel_occurrence(reg.course_shortname, reg.occurrence_date, message=message)
+                location = "/admin?past=1" if form.get("past") == "1" else "/admin"
+                return "302 Found", [("Location", location)], ""
             reinstate_token = new_token()
             changed = self.store.cancel(
                 registration_id, canceled_by="host", host_message=message,
@@ -3713,3 +3833,76 @@ class App:
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Reinstate booking", body)
+
+    def host_cancel_occurrence(self, method: str, course_shortname: str, occurrence_date_str: str, environ):
+        """"Cancel the entire session" -- no-login "magic link" twin of
+        host_cancel() above, but for EVERY registration on one occurrence
+        at once rather than a single guest's booking (2026-07-13, the operator:
+        "cancel the entire course link ... only for the HOST / admin").
+        Reachable from the operator's OWN CalDAV event (see
+        calendar_sync.sync_occurrence's own "cancel entire session" line) --
+        NEVER from a guest-facing email or .ics attachment; a guest's own
+        invite (calendar_sync.guest_invite_ics) has no participant list and
+        no cancel links of any kind, by design (see that function's own
+        docstring on why).
+
+        Same security model as host_cancel(): gated purely by
+        (course_shortname, occurrence_date) both being unremarkable, already
+        -public-inside-the-app values (a course shortname and a date aren't
+        secrets the way a token is) -- this link only ever appears inside
+        the operator's own trust boundary (his own calendar), same narrower
+        boundary host_cancel()'s own docstring explains for a single
+        registration's magic link.
+
+        GET shows a confirmation page listing every participant who'd be
+        canceled (via cancel_flow.find_cancelable_registrations_for_
+        occurrence -- confirmed, waitlisted, AND pending-confirmation, see
+        that function's own docstring), so the host can see exactly who's
+        affected before committing -- an empty list still renders (a plain
+        "nobody to cancel" message), it isn't treated as 404: unlike a
+        single registration_id, a (course, date) pair can legitimately have
+        nothing left to cancel (e.g. the link tapped twice) without being
+        an invalid link."""
+        course = self.settings.course(course_shortname)
+        if course is None:
+            return "404 Not Found", [("Content-Type", "text/html")], page(
+                "Not found", "<p>This link is invalid (course no longer configured).</p>"
+            )
+        participants = find_cancelable_registrations_for_occurrence(self.store, course_shortname, occurrence_date_str)
+        if method == "POST":
+            form = self._read_form(environ)
+            message = sanitize_csv_field(form.get("message", "").strip())
+            result = self._cancel_occurrence(course_shortname, occurrence_date_str, message=message)
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Canceled",
+                f"<p>{len(result.canceled)} registration(s) for <b>{esc(course.title)}</b> "
+                f"on {esc(occurrence_date_str)} canceled, every participant notified.</p>",
+            )
+        recap = _course_recap_html(course, occurrence_date_str)
+        if not participants:
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Cancel entire session",
+                f"<p>Nobody is currently booked for <b>{esc(course.title)}</b> on "
+                f"{esc(occurrence_date_str)} -- nothing to cancel.</p>" + recap
+                + '<p><a href="/" class="link-button">Back to home</a></p>',
+            )
+        users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
+        rows = []
+        for r in participants:
+            u = users_by_id.get(r.user_id)
+            who = f"{esc(u.name)} ({esc(u.email)})" if u else "(unknown)"
+            rows.append(f"<li>{who} -- {esc(status_label(r.status))}</li>")
+        body = (
+            f"<p>Cancel <b>EVERY</b> registration for <b>{esc(course.title)}</b> "
+            f"on {esc(occurrence_date_str)}? {len(participants)} participant(s) will be "
+            "notified by email:</p>"
+            f"<ul>{''.join(rows)}</ul>"
+            + recap
+            + """<form method="post" class="card">
+          <label>Reason <span class="opt">(optional)</span>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>
+          <div class="submit-row"><button type="submit">Confirm -- cancel entire session</button>
+            <a href="/" class="link-button">Never mind</a></div>
+        </form>"""
+        )
+        return "200 OK", [("Content-Type", "text/html")], page("Cancel entire session", body)

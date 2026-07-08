@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date
 
+from .erasure import find_archived_user_ids_for_email
 from .storage import format_display_timestamp, status_label
 
 # 2026-07-13, the operator: "would it be possible that my-bt lists a short-id that
@@ -286,3 +287,47 @@ def resolve_short_id(short: str, full_ids: list[str]) -> tuple[str | None, list[
     if len(matches) == 1:
         return matches[0], []
     return None, matches
+
+
+def merge_archived_for_display(store, settings, live_users: list[dict], archived_regs: list[dict]) -> list[dict]:
+    """Read-only equivalent of `my-bt admin dearchive`/Store.
+    merge_archived_registrations: for each LIVE user, finds any archived
+    (erased) identity sharing their email hash (find_archived_user_ids_
+    for_email) and re-labels those archived rows with the LIVE user_id --
+    WITHOUT writing anything to disk.
+
+    2026-07-13, the operator: "/admin should [be] non-mutating" -- both `my-bt
+    list --all`/`--past` and app/webapp.py's admin_overview() call this
+    instead of the previous behavior (silently rewriting the CSVs on
+    every page/command load). `dearchive` remains the one deliberate,
+    explicit action that actually persists a merge.
+
+    Same duplicate-avoidance rule as Store.merge_archived_registrations
+    (2026-07-10, the operator's own bug report): an archived row is DROPPED
+    entirely -- not relabeled, not shown at all -- if the live account it
+    would relabel onto already has its own live row for that exact
+    (course_shortname, occurrence_date). Showing both would look like two
+    bookings for a session that only really happened once.
+
+    Returns a NEW list of archived-row dicts -- unmatched rows (genuinely
+    orphaned pre-erasure history with no live rebook yet) come back
+    unchanged, still under their old archived user_id."""
+    live_user_id_by_archived_id: dict[str, str] = {}
+    for u in live_users:
+        for archived_id in find_archived_user_ids_for_email(store, settings, u["email"]):
+            live_user_id_by_archived_id[archived_id] = u["user_id"]
+
+    live_occurrences_by_user: dict[str, set] = {}
+    for r in store.read_registrations(scope="live"):
+        live_occurrences_by_user.setdefault(r["user_id"], set()).add((r["course_shortname"], r["occurrence_date"]))
+
+    out = []
+    for r in archived_regs:
+        live_id = live_user_id_by_archived_id.get(r["user_id"])
+        if not live_id:
+            out.append(r)
+            continue
+        if (r["course_shortname"], r["occurrence_date"]) in live_occurrences_by_user.get(live_id, set()):
+            continue
+        out.append({**r, "user_id": live_id})
+    return out

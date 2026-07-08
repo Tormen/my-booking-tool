@@ -982,9 +982,20 @@ class Store:
     def cancel(
         self, registration_id: str, canceled_by: str, host_message: str = "", reinstate_token_hash: str = "",
     ) -> bool:
-        """canceled_by is 'guest' or 'host'. Works on confirmed OR waitlisted
-        rows (leaving the waitlist is just a cancel). Idempotent: canceling
-        an already canceled registration is a no-op returning False.
+        """canceled_by is 'guest' or 'host'. Works on confirmed, waitlisted,
+        OR pending-confirmation rows (leaving the waitlist is just a
+        cancel). Idempotent: canceling an already canceled registration is
+        a no-op returning False.
+
+        2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        their account-confirmation email link (STATUS_PENDING_CONFIRMATION
+        -- see this status's own docstring) previously couldn't be
+        canceled by ANY path at all, host or guest -- a real gap, since
+        that guest is still fully expecting to attend. A pending row never
+        held a real capacity slot or touched the calendar (same docstring),
+        so canceling one here is just a status flip -- no promotion/
+        calendar-sync consequence, same as it never having reserved
+        anything in the first place.
 
         `reinstate_token_hash` (2026-07-10, the operator: a no-login "magic link"
         reinstate page reachable straight from the cancellation email,
@@ -1012,7 +1023,7 @@ class Store:
             changed = False
             for row in rows:
                 if row["registration_id"] == registration_id and row["status"] in (
-                    STATUS_CONFIRMED, STATUS_WAITLISTED,
+                    STATUS_CONFIRMED, STATUS_WAITLISTED, STATUS_PENDING_CONFIRMATION,
                 ):
                     row["status"] = (
                         STATUS_CANCELED_BY_GUEST if canceled_by == "guest" else STATUS_CANCELED_BY_HOST

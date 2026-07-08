@@ -2,9 +2,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from app.cancel_flow import cancel_and_promote
+from app.cancel_flow import cancel_and_promote, cancel_occurrence
 from app.security import hash_token, new_token
-from app.storage import STATUS_CONFIRMED, STATUS_WAITLISTED, Store
+from app.storage import (
+    STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store,
+)
 
 from .helpers import make_course, make_settings
 
@@ -78,6 +80,149 @@ class CancelAndPromoteCourseRemovedTest(unittest.TestCase):
         self.assertEqual(self.sent_emails, [])
 
         # sync_fn (stand-in for calendar_sync) never invoked either.
+        self.assertEqual(self.sync_calls, [])
+
+
+class CancelOccurrenceTest(unittest.TestCase):
+    """app.cancel_flow.cancel_occurrence() -- "cancel the entire session"
+    (2026-07-13, the operator). Uses `sync_fn` throughout (like
+    CancelAndPromoteCourseRemovedTest above) so these tests don't need a
+    real/fake CalDAV client -- calendar-sync mechanics are already covered
+    by test_calendar_sync.py; what's new here is WHICH rows get touched and
+    HOW MANY TIMES the sync happens."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        course = make_course(shortname="yoga-class-1", title="Yoga", capacity=5)
+        self.settings = make_settings(courses=(course,))
+
+        self.sent_emails: list[tuple[str, str, str]] = []
+        for target in ("app.cancellation.send_mail", "app.cancel_flow.send_mail"):
+            patcher = patch(
+                target,
+                side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body)),
+            )
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+        self.sync_calls: list[tuple[str, str]] = []
+
+    def _sync_fn(self):
+        return lambda course_shortname, occurrence_date_str: self.sync_calls.append(
+            (course_shortname, occurrence_date_str)
+        )
+
+    def _book(self, email: str, name: str, status: str, course_shortname: str = "yoga-class-1", occurrence_date: str = "2026-08-01"):
+        user = self.store.upsert_user_for_booking(email, name)
+        reg = self.store.add_registration(
+            course_shortname, occurrence_date, user.user_id, hash_token(new_token()), status=status,
+        )
+        return user, reg
+
+    def test_cancels_every_confirmed_waitlisted_and_pending_row_on_the_occurrence(self):
+        self._book("confirmed@example.org", "Confirmed", status=STATUS_CONFIRMED)
+        self._book("waiter@example.org", "Waiter", status=STATUS_WAITLISTED)
+        self._book("pending@example.org", "Pending", status=STATUS_PENDING_CONFIRMATION)
+
+        result = cancel_occurrence(
+            self.store, self.settings, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn(),
+        )
+
+        self.assertEqual(len(result.canceled), 3)
+        self.assertEqual({c.user_email for c in result.canceled},
+                          {"confirmed@example.org", "waiter@example.org", "pending@example.org"})
+        for reg in self.store.read_registrations(scope="live"):
+            self.assertEqual(reg["status"], STATUS_CANCELED_BY_HOST)
+
+    def test_does_not_touch_a_different_occurrence_or_a_different_course(self):
+        self._book("same-course-other-date@example.org", "Other", status=STATUS_CONFIRMED, occurrence_date="2026-08-08")
+        other_course = make_course(shortname="other-course", title="Other", capacity=5)
+        settings = make_settings(courses=(make_course(shortname="yoga-class-1", capacity=5), other_course))
+        self._book("other-course@example.org", "OtherCourse", status=STATUS_CONFIRMED, course_shortname="other-course")
+        _target_user, target_reg = self._book("target@example.org", "Target", status=STATUS_CONFIRMED)
+
+        result = cancel_occurrence(
+            self.store, settings, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn(),
+        )
+
+        self.assertEqual([c.registration_id for c in result.canceled], [target_reg.registration_id])
+        statuses = {r["registration_id"]: r["status"] for r in self.store.read_registrations(scope="live")}
+        self.assertEqual(statuses[target_reg.registration_id], STATUS_CANCELED_BY_HOST)
+        # Everyone else untouched.
+        self.assertEqual(sum(1 for s in statuses.values() if s == STATUS_CANCELED_BY_HOST), 1)
+
+    def test_emails_every_participant_with_host_apology_and_next_occurrence_link(self):
+        self._book("guest1@example.org", "Guest1", status=STATUS_CONFIRMED)
+        self._book("guest2@example.org", "Guest2", status=STATUS_WAITLISTED)
+
+        cancel_occurrence(
+            self.store, self.settings, None, "yoga-class-1", "2026-08-01",
+            message="venue flooded", sync_fn=self._sync_fn(),
+        )
+
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("guest1@example.org", to_addrs)
+        self.assertIn("guest2@example.org", to_addrs)
+        self.assertEqual(to_addrs.count("admin@example.org"), 2)  # one admin copy per canceled participant
+
+        guest1_mail = next(b for t, s, b in self.sent_emails if t == "guest1@example.org")
+        self.assertIn("Message: venue flooded", guest1_mail)
+        self.assertIn("exception rather than the rule", guest1_mail)
+        self.assertIn("Book the next occurrence of this course: https://", guest1_mail)
+        self.assertIn("/book/yoga-class-1", guest1_mail)
+
+        # The host does not need the link -- admin copy is a receipt, not a
+        # re-engagement email.
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org")
+        self.assertNotIn("/book/yoga-class-1", admin_mail)
+
+    def test_no_promotion_since_everyone_on_the_occurrence_is_canceled_together(self):
+        # Even though a waitlisted guest is present, there's nobody left to
+        # promote them INTO once everyone (confirmed + waitlisted) is
+        # canceled together -- unlike cancel_and_promote(), this never
+        # calls store.promote_next_waitlisted at all.
+        self._book("confirmed@example.org", "Confirmed", status=STATUS_CONFIRMED)
+        self._book("waiter@example.org", "Waiter", status=STATUS_WAITLISTED)
+
+        cancel_occurrence(self.store, self.settings, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn())
+
+        subjects = [s for _, s, _ in self.sent_emails]
+        self.assertFalse(any(s.startswith("You're in!") for s in subjects))
+        self.assertFalse(any(s.startswith("Promoted from waitlist:") for s in subjects))
+
+    def test_syncs_the_calendar_exactly_once_not_once_per_row(self):
+        self._book("guest1@example.org", "Guest1", status=STATUS_CONFIRMED)
+        self._book("guest2@example.org", "Guest2", status=STATUS_CONFIRMED)
+        self._book("guest3@example.org", "Guest3", status=STATUS_WAITLISTED)
+
+        cancel_occurrence(self.store, self.settings, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn())
+
+        self.assertEqual(self.sync_calls, [("yoga-class-1", "2026-08-01")])
+
+    def test_nobody_live_on_the_occurrence_is_a_clean_no_op(self):
+        result = cancel_occurrence(self.store, self.settings, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn())
+        self.assertEqual(result.canceled, [])
+        self.assertEqual(self.sent_emails, [])
+        self.assertEqual(self.sync_calls, [])
+
+    def test_course_removed_from_settings_still_cancels_but_does_not_email_or_sync(self):
+        # Same "if course:" guard as cancel_and_promote()/cancel_registration()
+        # -- the status transition doesn't depend on course config, but
+        # composing an email or syncing a calendar for a course no longer in
+        # settings.toml isn't possible.
+        self._book("guest@example.org", "Guest", status=STATUS_CONFIRMED)
+        settings_without_course = make_settings(courses=())
+
+        result = cancel_occurrence(
+            self.store, settings_without_course, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn(),
+        )
+
+        self.assertEqual(len(result.canceled), 1)
+        reloaded = self.store.find_by_id(result.canceled[0].registration_id)
+        self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
+        self.assertEqual(self.sent_emails, [])
         self.assertEqual(self.sync_calls, [])
 
 

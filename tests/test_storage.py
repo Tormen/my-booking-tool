@@ -296,6 +296,20 @@ class RegistrationTest(StoreTestBase):
         self.assertFalse(self.store.cancel(reg.registration_id, canceled_by="guest"))
         self.assertEqual(self.store.count_confirmed("yoga-class-1", "2026-07-08"), 0)
 
+    def test_cancel_works_on_pending_confirmation_row(self):
+        # 2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        # their account-confirmation email link (STATUS_PENDING_CONFIRMATION)
+        # previously couldn't be canceled by ANY path -- Store.cancel() only
+        # accepted confirmed/waitlisted. Now cancelable too, same as any
+        # other active status.
+        u = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        reg = self.store.add_registration(
+            "yoga-class-1", "2026-07-08", u.user_id, "", status=STATUS_PENDING_CONFIRMATION,
+        )
+        self.assertTrue(self.store.cancel(reg.registration_id, canceled_by="host"))
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
+
     def test_times_registered_counts_all_statuses(self):
         u = self.store.upsert_user_for_booking("a@b.com", "Alice")
         r1 = self.store.add_registration("c", "2026-01-01", u.user_id, hash_token(new_token()))

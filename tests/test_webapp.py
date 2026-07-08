@@ -2763,6 +2763,24 @@ class BookingFlowTest(unittest.TestCase):
         button_html = body[body.index("<button", cancel_start):body.index("</button>", cancel_start) + 1]
         self.assertNotIn("disabled", button_html)
 
+    def test_admin_overview_cancel_enabled_for_pending_confirmation_booking(self):
+        # 2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        # their account-confirmation email link (STATUS_PENDING_CONFIRMATION)
+        # previously had NO way to be canceled -- the Cancel button here was
+        # unconditionally disabled for that status. Closing that gap: same
+        # future-only gating as confirmed/waitlisted, just one more
+        # cancelable status.
+        user = self.store.upsert_user_for_booking("pending@example.org", "Pending")
+        self.store.add_registration(
+            "yoga-class-1", self._other_occ_date(), user.user_id, "", status=STATUS_PENDING_CONFIRMATION,
+        )
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        cancel_start = body.index("admin-cancel-")
+        button_html = body[body.index("<button", cancel_start):body.index("</button>", cancel_start) + 1]
+        self.assertNotIn("disabled", button_html)
+
     def test_admin_overview_shows_course_shortname_not_title(self):
         # 2026-07-06: the Course column shows the internal shortname (compact,
         # matches /book/<shortname>) -- not the human title. The cancel-dialog
@@ -2896,18 +2914,21 @@ class BookingFlowTest(unittest.TestCase):
         # also display the history in the /admin page" -- if an erased
         # guest books again with the SAME email, book() creates a brand-new
         # live user_id (the old email no longer exists in the live table --
-        # it's now a hash on the archived row). Merely LOADING /admin now
-        # physically moves that old registration onto the new live user_id
-        # (Store.merge_archived_registrations, via app.cli_history.run_merge)
-        # -- no separate button/action needed, and no more display-only
-        # "(incl. N pre-erasure)" annotation, since the count is now the
-        # real thing rather than an estimate.
+        # it's now a hash on the archived row). /admin shows that old
+        # registration alongside the live account's own rows.
+        #
+        # 2026-07-13, the operator: "/admin should [be] non-mutating" -- this used
+        # to physically rewrite the archived row's user_id on disk
+        # (Store.merge_archived_registrations); now it's purely a
+        # display-time merge (see cli_list.merge_archived_for_display) --
+        # nothing on disk changes just from loading this page. `my-bt
+        # admin dearchive` is the one explicit action that still persists
+        # a real merge.
         #
         # Pre- and post-erasure bookings are for DIFFERENT occurrence dates
-        # here (2026-07-10 fix: merge_archived_registrations now drops a
-        # conflicting archived row instead of duplicating one for the SAME
-        # course+date -- see test_merge_drops_a_row_that_would_duplicate_
-        # the_live_account_below for that case specifically).
+        # here (see test_admin_overview_merge_drops_a_row_that_would_
+        # duplicate_the_live_account below for the same-date case, which
+        # this display-time merge also has to guard against).
         email = "comeback-guest@example.org"
         user, environ = self._login_as_guest(email)
         self._book(email, name="ComebackGuest")
@@ -2922,23 +2943,24 @@ class BookingFlowTest(unittest.TestCase):
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
 
-        # Both registrations now resolve to the live account -- the old
-        # archived row's user_id was rewritten to the live user_id by the
-        # merge, so there's no more separate "[erased]"/hashed row for this
-        # email, and no display-only annotation either.
+        # Both registrations SHOW as the live account's own -- the archived
+        # row's user_id is relabeled for display only, so there's no more
+        # separate "[erased]"/hashed row shown for this email.
         self.assertNotIn("[erased]", body)
-        self.assertNotIn("pre-erasure", body)
         self.assertEqual(body.count(f"<td>{email}</td>"), 2)
         # true combined "Times booked": 2 total (pre- + post-erasure), but
         # only 1 up to today -- the post-erasure rebooking is for a FUTURE
         # occurrence (_other_occ_date()), so it doesn't count yet.
         self.assertIn("<td>1/2</td>", body)
-        self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 2)
+        # Nothing was actually written: the live account still only has ITS
+        # OWN one row on disk, and the pre-erasure row is still archived.
+        self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 1)
+        self.assertEqual(len(self.store.read_registrations(scope="archived")), 1)
 
     def test_admin_overview_merge_is_idempotent_on_repeated_loads(self):
-        # A second GET right after the first must find nothing left to
-        # merge and be a pure no-op -- merging is a side effect of a GET
-        # here, so it must not do anything surprising on a plain reload.
+        # A second GET right after the first must show the exact same
+        # merged view -- it's recomputed fresh every time (nothing is ever
+        # persisted), so "idempotent" here just means stable across reloads.
         email = "comeback-guest2@example.org"
         self._login_as_guest(email)
         self._book(email, name="ComebackGuest2")
@@ -2948,11 +2970,13 @@ class BookingFlowTest(unittest.TestCase):
 
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
-        self.app.admin_overview("GET", admin_environ)
-        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        _status, _headers, first_body = self.app.admin_overview("GET", admin_environ)
+        _status, _headers, second_body = self.app.admin_overview("GET", admin_environ)
 
-        self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 2)
-        self.assertNotIn("[erased]", body)
+        self.assertEqual(first_body, second_body)
+        self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 1)
+        self.assertEqual(len(self.store.read_registrations(scope="archived")), 1)
+        self.assertNotIn("[erased]", second_body)
 
     def test_admin_overview_merge_drops_a_row_that_would_duplicate_the_live_account(self):
         # 2026-07-10, the operator's own real bug report: erasing an account with
@@ -3064,6 +3088,82 @@ class BookingFlowTest(unittest.TestCase):
         self.sent_emails.clear()
         self._post_with_session(self.app.admin_cancel, (reg.registration_id,), {"message": ""}, admin_environ)
         self.assertEqual(self.sent_emails, [])
+
+    # -- 2026-07-13: /admin "cancel entire session" checkbox ----------------
+
+    def test_admin_overview_row_shows_cancel_entire_session_checkbox_with_participants(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        self._login_as_guest("second@example.org")
+        self._book("second@example.org", name="Second", occ_date=self.occ_date)
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('class="cancel-entire-checkbox"', body)
+        self.assertIn(f'data-occurrence="yoga-class-1|{self.occ_date}"', body)
+        self.assertIn("Regular (regular@example.org)", body)
+        self.assertIn("Second (second@example.org)", body)
+        self.assertIn("2 participant(s) will be notified", body)
+        # The wiring script (shared, module-level -- one CSP hash for every
+        # page/row) must actually be loaded on this page.
+        self.assertIn("ownButton", body)
+
+    def test_admin_overview_disabled_row_has_no_cancel_entire_session_checkbox(self):
+        # A past/already-canceled row's own Cancel button is disabled --
+        # offering "cancel the entire session" from it wouldn't make sense
+        # either (see admin_overview()'s own comment).
+        self._login_as_guest("regular@example.org")
+        self._import_past(self.store.find_user_by_email("regular@example.org").user_id, "2026-01-01", "past-reg")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        # "cancel-entire-checkbox" alone would also match the always-loaded
+        # wiring script (_CANCEL_ENTIRE_SESSION_SCRIPT) -- check for the
+        # actual per-row <input> instead, which is only rendered when the
+        # row's own Cancel button is enabled.
+        self.assertNotIn('name="cancel_entire_session"', body)
+
+    def test_admin_cancel_with_checkbox_cancels_every_registration_on_the_occurrence(self):
+        user1, _ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        user2, _ = self._login_as_guest("second@example.org")
+        self._book("second@example.org", name="Second", occ_date=self.occ_date)
+        reg1 = self.store.registrations_for_user(user1.user_id)[0]
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        self.sent_emails.clear()
+
+        self._post_with_session(
+            self.app.admin_cancel, (reg1.registration_id,),
+            {"message": "venue flooded", "cancel_entire_session": "1"}, admin_environ,
+        )
+
+        for user in (user1, user2):
+            reg = self.store.registrations_for_user(user.user_id)[0]
+            self.assertEqual(reg.status, "canceled_by_host")
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("regular@example.org", to_addrs)
+        self.assertIn("second@example.org", to_addrs)
+        participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
+        self.assertIn("Message: venue flooded", participant_mail)
+
+    def test_admin_cancel_without_checkbox_still_only_cancels_the_one_row(self):
+        # Regression guard for the new branch in admin_cancel(): absent (or
+        # any value other than "1") must behave exactly as before -- only
+        # the single targeted registration_id is touched.
+        user1, _ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        user2, _ = self._login_as_guest("second@example.org")
+        self._book("second@example.org", name="Second", occ_date=self.occ_date)
+        reg1 = self.store.registrations_for_user(user1.user_id)[0]
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+
+        self._post_with_session(self.app.admin_cancel, (reg1.registration_id,), {"message": ""}, admin_environ)
+
+        self.assertEqual(self.store.registrations_for_user(user1.user_id)[0].status, "canceled_by_host")
+        reg2 = self.store.registrations_for_user(user2.user_id)[0]
+        self.assertIn(reg2.status, ("confirmed", "waitlisted"))
 
     # -- /my/reinstate + /admin/reinstate: undo a cancellation --------------
     # 2026-07-10, the operator: "there should be then a reschedule button for
@@ -3419,6 +3519,76 @@ class BookingFlowTest(unittest.TestCase):
         self.sent_emails.clear()
         self._post(self.app.host_cancel, (reg.registration_id,), {"message": ""})
         self.assertEqual(self.sent_emails, [])
+
+    # -- 2026-07-13: host_cancel_occurrence -- "cancel the entire session" --
+
+    def test_host_cancel_occurrence_needs_no_admin_session(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        status, _headers, body = self.app.host_cancel_occurrence("GET", "yoga-class-1", self.occ_date, {})
+        self.assertIn("200", status)
+        self.assertNotIn("/admin/login", status + str(_headers))
+
+    def test_host_cancel_occurrence_confirm_page_lists_every_participant(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        self._login_as_guest("second@example.org")
+        self._book("second@example.org", name="Second")
+        _status, _headers, body = self.app.host_cancel_occurrence("GET", "yoga-class-1", self.occ_date, {})
+        self.assertIn("Cancel <b>EVERY</b> registration", body)
+        self.assertIn("Regular (regular@example.org)", body)
+        self.assertIn("Second (second@example.org)", body)
+        self.assertIn('<textarea name="message"', body)
+        self.assertIn("Confirm -- cancel entire session", body)
+        self.assertIn('href="/" class="link-button">Never mind</a>', body)
+
+    def test_host_cancel_occurrence_nobody_booked_is_not_an_error(self):
+        # Unlike host_cancel()'s own registration_id (invalid = 404), an
+        # occurrence with nothing live on it is a perfectly normal state
+        # (e.g. the link tapped twice) -- not an invalid link.
+        status, _headers, body = self.app.host_cancel_occurrence("GET", "yoga-class-1", self.occ_date, {})
+        self.assertIn("200", status)
+        self.assertIn("nothing to cancel", body)
+
+    def test_host_cancel_occurrence_unknown_course_is_404(self):
+        status, _headers, body = self.app.host_cancel_occurrence("GET", "no-such-course", self.occ_date, {})
+        self.assertIn("404", status)
+
+    def test_host_cancel_occurrence_cancels_and_notifies_every_participant(self):
+        user1, _ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        user2, _ = self._login_as_guest("second@example.org")
+        self._book("second@example.org", name="Second", occ_date=self.occ_date)
+        self.sent_emails.clear()
+
+        self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": "venue flooded"})
+
+        for user in (user1, user2):
+            reg = self.store.registrations_for_user(user.user_id)[0]
+            self.assertEqual(reg.status, "canceled_by_host")
+        to_addrs = [t for t, _, _ in self.sent_emails]
+        self.assertIn("regular@example.org", to_addrs)
+        self.assertIn("second@example.org", to_addrs)
+        participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
+        self.assertIn("Message: venue flooded", participant_mail)
+        self.assertIn("exception rather than the rule", participant_mail)
+
+    def test_host_cancel_occurrence_resubmission_does_not_send_duplicate_emails(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
+        self.sent_emails.clear()
+        self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
+        self.assertEqual(self.sent_emails, [])
+
+    def test_host_cancel_occurrence_route_is_wired_up(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        status, _headers, body = self.app.route(
+            "GET", f"/host-cancel-occurrence/yoga-class-1/{self.occ_date}", {}
+        )
+        self.assertIn("200", status)
+        self.assertIn("Cancel <b>EVERY</b> registration", body)
 
     # -- 2026-07-06: past-3 cap, "New booking", homepage link --------------
 

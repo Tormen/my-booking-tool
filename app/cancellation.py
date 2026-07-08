@@ -254,7 +254,20 @@ def send_cancellation_emails(
     course_recap_html() (2026-07-11) rather than concatenated on
     afterward -- see those two functions' own docstrings for why (the operator:
     the old layout put "Message: ..." AFTER the whole course description;
-    it belongs ABOVE it instead, and should vanish entirely when blank)."""
+    it belongs ABOVE it instead, and should vanish entirely when blank).
+
+    2026-07-13, the operator: any cancellation the HOST initiates (canceled_by=
+    "host" -- a single booking via `/admin`/`my-bt cancel`, or an entire
+    occurrence via cancel_flow.cancel_occurrence) gets a short apology +
+    "this is the exception" line, plus a link to book the course's NEXT
+    occurrence, appended to the PARTICIPANT's copy only ("the host does not
+    need the link"). Guest-initiated self-cancels (canceled_by="guest")
+    never get this -- there's nothing to apologize for when the guest made
+    their own choice. Kept to a plain `/book/<shortname>` link (the
+    course's normal booking page, which lists whichever occurrence is next)
+    rather than computing one specific date here -- this module has no
+    calendar-conflict/capacity-lookup machinery to compute that itself (see
+    app/slots.py), and the booking page already does that correctly."""
     details = booking_details_text(course, occ_date, message)
     recap_html = course_recap_html(course, occ_date, message)
     subject = f"Canceled: {course.title} on {occ_date}"
@@ -276,6 +289,23 @@ def send_cancellation_emails(
                 f'<p>If this was a mistake, you can reinstate it here: '
                 f'<a href="{guest_reinstate_url}">{guest_reinstate_url}</a></p>'
             )
+        apology_line = ""
+        apology_line_html = ""
+        if canceled_by == "host":
+            next_occurrence_url = f"{settings.base_url}/book/{course.shortname}"
+            apology_text = (
+                "We're sorry for the inconvenience -- canceling a course is rare, "
+                "the exception rather than the rule."
+            )
+            apology_line = (
+                f"\n{apology_text}\n"
+                f"Book the next occurrence of this course: {next_occurrence_url}\n"
+            )
+            apology_line_html = (
+                f"<p>{html.escape(apology_text, quote=True)}</p>"
+                f'<p>Book the next occurrence of this course: '
+                f'<a href="{next_occurrence_url}">{next_occurrence_url}</a></p>'
+            )
         # 2026-07-08, the operator: guest-facing emails should greet by name, same
         # as _send_confirm_email() already did -- see greeting_html()'s own
         # docstring. Participant copy only, never the admin copy below.
@@ -284,11 +314,13 @@ def send_cancellation_emails(
             f"Dear {user.name},\n\n"
             f"{participant_who} canceled this booking:\n\n{details}\n"
             f"Manage your bookings: {my_url}\n"
-            f"{reinstate_line}",
+            f"{reinstate_line}"
+            f"{apology_line}",
             html_body=html_email_body(
                 greeting_html(user.name) + intro_html(f"{participant_who} canceled this booking:") + recap_html
                 + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
                 + reinstate_line_html
+                + apology_line_html
             ),
             ics_attachment=ics_attachment,
         )

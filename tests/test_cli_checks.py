@@ -430,6 +430,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
             location /reinstate/ { proxy_pass http://127.0.0.1:8811; }
             location /host-cancel/ { proxy_pass http://127.0.0.1:8811; }
             location /host-reinstate/ { proxy_pass http://127.0.0.1:8811; }
+            location /host-cancel-occurrence/ { proxy_pass http://127.0.0.1:8811; }
             location /my { proxy_pass http://127.0.0.1:8811; }
             location /admin { proxy_pass http://127.0.0.1:8811; }
         }
@@ -438,7 +439,7 @@ class CheckNginxLocationsTest(unittest.TestCase):
              patch("app.cli_checks.subprocess.run",
                    return_value=type("R", (), {"returncode": 0, "stdout": merged, "stderr": ""})()):
             checks = cli_checks.check_nginx_locations()
-        self.assertEqual(len(checks), 8)
+        self.assertEqual(len(checks), len(cli_checks._REQUIRED_NGINX_LOCATIONS))
         self.assertTrue(all(level == "ok" for _, level, _ in checks))
 
     def test_one_missing_location_warns_others_stay_ok(self):
