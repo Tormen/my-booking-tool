@@ -234,5 +234,41 @@ class CancelSmartQueryTest(_MyBtCliTestBase):
         self.assertEqual(code, 1)
 
 
+class CancelConfirmationPromptTest(_MyBtCliTestBase):
+    """2026-07-09, the operator: "Please present the booking in the form like show
+    (for the fields you line up here in 1 line). and then ask below that:
+    Cancel ? - Type 'yes' to confirm:" -- covers the actual interactive
+    (no --yes) confirmation path, which CancelSmartQueryTest above never
+    exercises (every one of its cases passes --yes, skipping this prompt
+    entirely)."""
+
+    def _cancel_args_no_yes(self, query):
+        argv = ["--data-dir", self._tmp.name, "--settings", "unused.toml", "cancel", query]
+        return my_bt_mod.build_parser().parse_args(argv)
+
+    def test_confirmed_prompt_shows_vertical_key_value_then_cancels(self):
+        _user, reg = self._book("guest@example.org", "Guest")
+        args = self._cancel_args_no_yes(reg.registration_id)
+        with patch("builtins.input", return_value="yes") as m_input:
+            _code, output = self._run(my_bt_mod.cmd_cancel, args)
+        m_input.assert_called_once_with("Cancel? Type 'yes' to confirm: ")
+        self.assertKv(output, "attendee", "Guest <guest@example.org>")
+        self.assertKv(output, "course", "yoga-class-1")
+        self.assertKv(output, "registration", reg.registration_id)
+        self.assertIn(f"canceled registration {reg.registration_id}", output)
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, "canceled_by_host")
+
+    def test_declining_the_prompt_leaves_the_registration_untouched(self):
+        _user, reg = self._book("guest@example.org", "Guest")
+        args = self._cancel_args_no_yes(reg.registration_id)
+        with patch("builtins.input", return_value="no"):
+            _code, output = self._run(my_bt_mod.cmd_cancel, args)
+        self.assertIn("aborted", output)
+        self.assertNotIn("canceled registration", output)
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, "confirmed")
+
+
 if __name__ == "__main__":
     unittest.main()
