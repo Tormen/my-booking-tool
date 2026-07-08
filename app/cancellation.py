@@ -324,7 +324,7 @@ def send_cancellation_emails(
             ),
             ics_attachment=ics_attachment,
         )
-    admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
+    admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The attendee")
     send_mail(
         settings, settings.admin_email, subject,
         f"{admin_who} canceled this booking:\n\n{details}\n"
@@ -389,7 +389,7 @@ def send_reinstatement_emails(
             ),
             ics_attachment=ics_attachment,
         )
-    admin_who = "You" if reinstated_by == "host" else (f"{user.name} <{user.email}>" if user else "The guest")
+    admin_who = "You" if reinstated_by == "host" else (f"{user.name} <{user.email}>" if user else "The attendee")
     admin_intro = f"{admin_who} reinstated this booking -- {status_phrase}:"
     send_mail(
         settings, settings.admin_email, subject,

@@ -132,8 +132,8 @@ def cmd_list(args) -> None:
     --past: same merge, occurrence_date strictly before today only.
 
     2026-07-13: this is also what `my-bt history` used to be for (dropped
-    -- folded in here instead): `list --all --email x@y.com` shows a
-    guest's full history, live and pre-erasure combined, the same "N
+    -- folded in here instead): `list --all --email x@y.com` shows an
+    attendee's full history, live and pre-erasure combined, the same "N
     (incl. M pre-erasure)" merge /admin's overview shows.
 
     2026-07-13, the operator: "the default command shows it cleant up without
@@ -164,7 +164,7 @@ def cmd_list(args) -> None:
     # Archived pre-erasure history, merged onto the live user_id it
     # belongs to (display-only -- see merge_archived_for_display's own
     # docstring). Computed unconditionally, same as admin_overview()'s own
-    # all_regs: Times booked's TOTAL must reflect a guest's true lifetime
+    # all_regs: Times booked's TOTAL must reflect an attendee's true lifetime
     # count even when the rows actually displayed are narrowed to
     # today+future.
     archived_merged = app_cli_list.merge_archived_for_display(
@@ -221,7 +221,12 @@ def cmd_list(args) -> None:
 
 
 def cmd_users(args) -> None:
-    """`my-bt users` -- list guest accounts across live/archived/all.
+    """`my-bt users` -- list attendee accounts across live/archived/all.
+    2026-07-08, the operator: "I have no guests, I have clients or participants
+    in a yoga course. guest is who they can bring." -- "attendee" for the
+    account/person themselves, "guest" reserved for the +1 they bring
+    (party_id/invited_by_user_id -- see app.cli_list's own Guests column,
+    unchanged).
 
     2026-07-13: default output is a compact, readable view -- see
     app.cli_list.build_clean_user_view. Pass -r/--raw for every raw
@@ -292,14 +297,14 @@ def _show_occurrence(rows: list[dict], users_by_id: dict, all_rows: list[dict], 
 
 
 def _show_user(user_row: dict, store, fmt: str) -> None:
-    """One guest's profile (build_clean_user_view, same shape `my-bt
+    """One attendee's profile (build_clean_user_view, same shape `my-bt
     users` shows) plus their full booking history. A user_id is stable
     across the live/archived boundary (erase_user() only ever mutates
     name/email, never user_id -- see app/storage.py) so this user_row's
     OWN registrations are already fully found via a plain scope="all"
     read; no archived-history merge needed here (that's a DIFFERENT
     scenario -- re-attaching a DIFFERENT, now-orphaned archived user_id
-    onto a NEW live one after a guest re-registers post-erasure, see
+    onto a NEW live one after an attendee re-registers post-erasure, see
     merge_archived_for_display's own docstring)."""
     all_regs = store.read_registrations(scope="all")
     last_course = app_cli_list.compute_last_confirmed_course(all_regs, date.today())
@@ -337,7 +342,7 @@ def cmd_show(args) -> None:
     looks id-shaped, so an ordinary search term is never mistaken for
     one; (3) an exact course shortname; (4) every registration on a
     YYYY-MM-DD date, any course; (5) a name/email substring search
-    across guests -- same "type part of it" search the web admin's own
+    across attendees -- same "type part of it" search the web admin's own
     table filter offers. First rule that matches wins.
 
     --course alone shows that course's own settings.toml definition;
@@ -438,7 +443,7 @@ def cmd_stats(args) -> None:
     an unrelated --year would just be confusing (e.g. "last year to
     date" under `--year 2020` makes no sense). They're computed off
     live+archived combined regardless of --scope too, so a since-erased
-    guest's own history still counts."""
+    attendee's own history still counts."""
     store = _store(args)
     rows = store.read_registrations(scope=args.scope)
     if args.year:
@@ -524,8 +529,8 @@ def cmd_erase(args) -> None:
 
 
 def cmd_dearchive(args) -> None:
-    """`my-bt admin dearchive --email ...` -- permanently moves a guest's
-    pre-erasure registrations (parked under an old, erased identity
+    """`my-bt admin dearchive --email ...` -- permanently moves an
+    attendee's pre-erasure registrations (parked under an old, erased identity
     sharing this email's hash) onto their current live account, so they
     show up as normal history everywhere from then on (not just in
     `list`'s own on-the-fly merged view). Explicit and one-shot -- nothing
@@ -652,7 +657,7 @@ def _cmd_cancel_occurrence(args, settings, store) -> None:
         print(f"About to cancel EVERY registration for {course_shortname} on {args.date}:")
         for r in participants:
             user = store.find_user_by_id(r.user_id)
-            who = f"{user.name} <{user.email}>" if user else "(unknown guest)"
+            who = f"{user.name} <{user.email}>" if user else "(unknown attendee)"
             print(f"  {who} ({r.status})")
         confirm = input(f"{len(participants)} participant(s) will be notified. Type 'yes' to confirm: ")
         if confirm.strip().lower() != "yes":
@@ -665,7 +670,7 @@ def _cmd_cancel_occurrence(args, settings, store) -> None:
     )
     print(f"canceled {len(result.canceled)} registration(s) for {course_shortname} on {args.date}:")
     for c in result.canceled:
-        who = f"{c.user_name} <{c.user_email}>" if c.user_email else "(unknown guest)"
+        who = f"{c.user_name} <{c.user_email}>" if c.user_email else "(unknown attendee)"
         print(f"  {who}: {c.status_before} -> canceled_by_host")
 
 
@@ -736,7 +741,7 @@ def cmd_cancel(args) -> None:
     if reg is None:
         print(f"no registration with id {args.registration_id}")
         return
-    # 2026-07-13: pending_confirmation (a guest who hasn't yet clicked their
+    # 2026-07-13: pending_confirmation (an attendee who hasn't yet clicked their
     # account-confirmation email link) is cancelable too now -- see
     # Store.cancel()'s own docstring on why this used to be a real gap.
     if reg.status not in ("confirmed", "waitlisted", "pending_confirmation"):
@@ -745,7 +750,7 @@ def cmd_cancel(args) -> None:
 
     if not args.yes:
         user = store.find_user_by_id(reg.user_id)
-        who = f"{user.name} <{user.email}>" if user else "(unknown guest)"
+        who = f"{user.name} <{user.email}>" if user else "(unknown attendee)"
         confirm = input(
             f"Cancel {who}'s {reg.course_shortname} booking on {reg.occurrence_date} "
             f"(registration {reg_id})? Type 'yes' to confirm: "
@@ -759,11 +764,11 @@ def cmd_cancel(args) -> None:
         print(f"could not cancel {reg_id}: {result.reason}")
         return
 
-    who = f"{result.user_name} <{result.user_email}>" if result.user_email else "(unknown guest)"
+    who = f"{result.user_name} <{result.user_email}>" if result.user_email else "(unknown attendee)"
     print(f"canceled registration {result.registration_id}:")
-    print(f"  guest:  {who}")
-    print(f"  course: {result.course_shortname} on {result.occurrence_date}")
-    print(f"  status: {result.status_before} -> canceled_by_host")
+    print(f"  attendee: {who}")
+    print(f"  course:   {result.course_shortname} on {result.occurrence_date}")
+    print(f"  status:   {result.status_before} -> canceled_by_host")
     if result.message:
         print(f"  message: {result.message}")
     print(f"  notified: {'yes (both participant and admin emailed)' if result.emailed else 'no (course no longer configured in settings.toml)'}")
@@ -909,7 +914,7 @@ def cmd_maintenance(args) -> None:
             print(f"[skip] {t} does not exist")
 
     if enabling:
-        print("maintenance mode: ON -- guest-facing pages now show a maintenance page. "
+        print("maintenance mode: ON -- attendee-facing pages now show a maintenance page. "
               "Run `my-bt maintenance off` to reopen the site.")
     else:
         print("maintenance mode: off -- the site is open again.")
@@ -955,7 +960,7 @@ def _print_live_status(payload: dict) -> None:
 
     mnt = payload.get("maintenance", {})
     if mnt.get("enabled"):
-        banner = "!!  MAINTENANCE MODE IS ON -- guests are seeing a maintenance page  !!"
+        banner = "!!  MAINTENANCE MODE IS ON -- attendees are seeing a maintenance page  !!"
         print()
         print("!" * len(banner))
         print(banner)
@@ -1341,7 +1346,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--status", choices=["confirmed", "waitlisted", "canceled_by_guest", "canceled_by_host"],
         help="filter to one status",
     )
-    sp.add_argument("--email", help="filter by (partial, case-insensitive) guest email")
+    sp.add_argument("--email", help="filter by (partial, case-insensitive) attendee email")
     sp.add_argument("--user-id", help="filter to one exact user_id")
     sp.add_argument("--year", type=int, help="shorthand for --from YYYY-01-01 --to YYYY-12-31")
     sp.add_argument("--from", dest="from_", help="occurrence_date >= YYYY-MM-DD")
@@ -1352,7 +1357,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="every date, live + archived -- a live user's pre-erasure archived history is merged in "
              "on the fly (nothing is written to disk, see `my-bt admin dearchive` to persist that); "
              "this is also what `my-bt history` used to be for (dropped 2026-07-13, folded in here: "
-             "`list --all --email x@y.com` shows a guest's full combined history)",
+             "`list --all --email x@y.com` shows an attendee's full combined history)",
     )
     date_scope.add_argument(
         "--past", action="store_true",
@@ -1361,7 +1366,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_list)
 
     sp = _add_subcommand(
-        sub, "users", "list guest accounts (live + archived by default).",
+        sub, "users", "list attendee accounts (live + archived by default).",
         "Same -r/--raw and --format options as `my-bt list`.",
     )
     scope_args(sp)
@@ -1474,21 +1479,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_hash_password)
 
     sp = _add_subcommand(
-        admin_sub, "erase", "manually erase a guest's data (GDPR Art. 17).",
-        "Same effect as a guest self-erasing via /my, just host-initiated.",
+        admin_sub, "erase", "manually erase an attendee's data (GDPR Art. 17).",
+        "Same effect as an attendee self-erasing via /my, just host-initiated.",
     )
-    sp.add_argument("--email", required=True, help="the guest's login email")
+    sp.add_argument("--email", required=True, help="the attendee's login email")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_erase)
 
     sp = _add_subcommand(
         admin_sub, "dearchive",
-        "permanently move a guest's pre-erasure registration history onto their "
+        "permanently move an attendee's pre-erasure registration history onto their "
         "live account (renamed from `merge`).",
         "Unlike `my-bt list --all`'s own on-the-fly merge (nothing persisted), "
         "this one actually writes to disk.",
     )
-    sp.add_argument("--email", required=True, help="the guest's CURRENT (live) login email")
+    sp.add_argument("--email", required=True, help="the attendee's CURRENT (live) login email")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_dearchive)
 

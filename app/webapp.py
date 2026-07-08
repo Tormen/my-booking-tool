@@ -1,9 +1,9 @@
 """wsgiref-based web app -- no framework dependency. Routes:
 
   GET      /courses                 overview of every configured course, linking to /book/<shortname>
-  GET/POST /book/<shortname>        guest booking form (name+email only)
-  GET/POST /cancel/<token>          guest self-cancel (link from email)
-  GET/POST /reinstate/<token>       guest self-reinstate (link from the
+  GET/POST /book/<shortname>        attendee booking form (name+email only)
+  GET/POST /cancel/<token>          attendee self-cancel (link from email)
+  GET/POST /reinstate/<token>       attendee self-reinstate (link from the
                                      cancellation email), no login needed --
                                      same bearer-token model as /cancel/<token>,
                                      but the token is a FRESH one minted at
@@ -11,7 +11,7 @@
                                      booking's own cancel token (see
                                      Store.cancel()'s reinstate_token_hash
                                      param and guest_reinstate()'s docstring)
-  GET/POST /my                      guest login (email+password, "Login"/"Sign up" tabs) / bookings list
+  GET/POST /my                      attendee login (email+password, "Login"/"Sign up" tabs) / bookings list
   POST     /my/signup               "Sign up" tab's target -- create account + email a confirm link
   GET/POST /my/confirm/<token>      set password -- first-time account confirmation
                                      AND password reset both land here (same token
@@ -19,11 +19,11 @@
   GET/POST /my/reset                request a confirm/reset link by email (always
                                      the same response either way -- doesn't reveal
                                      whether an email is registered)
-  POST     /my/cancel/<reg_id>      guest cancels one of their own bookings
-  POST     /my/reinstate/<reg_id>   guest undoes a cancellation of their own,
+  POST     /my/cancel/<reg_id>      attendee cancels one of their own bookings
+  POST     /my/reinstate/<reg_id>   attendee undoes a cancellation of their own,
                                      for an occurrence still in the future
-  POST     /my/logout               guest logout
-  POST     /my/delete-account       guest erases their own account (Art. 17)
+  POST     /my/logout               attendee logout
+  POST     /my/delete-account       attendee erases their own account (Art. 17)
   GET      /my/session               JSON {"logged_in": bool, "email": ...} for the
                                      STATIC homepage's own JS to check (see my_session_status)
   GET      /my/settings             view/change name, view or abort a pending
@@ -3755,7 +3755,7 @@ class App:
                         course, reg.occurrence_date, user, canceled_by="host", message=message,
                         registration_id=registration_id, reinstate_token=reinstate_token,
                     )
-            return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and guest notified.</p>")
+            return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and attendee notified.</p>")
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         # 2026-07-11, the operator (screenshot of this exact page): "please add a
         # 'Never mind' button also here that brings you back to the
@@ -3818,7 +3818,7 @@ class App:
                     confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host", message=message,
                 )
             return "200 OK", [("Content-Type", "text/html")], page(
-                "Reinstated", "<p>Registration reinstated and guest notified.</p>"
+                "Reinstated", "<p>Registration reinstated and attendee notified.</p>"
             )
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (

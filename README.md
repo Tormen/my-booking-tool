@@ -3,7 +3,7 @@
 Self-hosted booking tool for a small set of recurring classes/sessions --
 built as a lightweight replacement for a third-party group-booking widget.
 Stdlib-only Python, CSV storage, CalDAV integration for calendar sync
-(works with any CalDAV provider, e.g. mailbox.org, Nextcloud, etc.), guest
+(works with any CalDAV provider, e.g. mailbox.org, Nextcloud, etc.), attendee
 self-service with cancel links, an admin overview, and GDPR-oriented data
 retention/erasure. This file is the practical "how to install / operate /
 reinstall" reference.
@@ -332,7 +332,7 @@ my-bt list --year 2026 --course example-monday-class
 my-bt list --status waitlisted --email guest@example.com
 my-bt list --format json   # or --format csv
 my-bt list --raw                        # every raw CSV column (ids/hashes) instead of the clean default view
-my-bt list --all --email guest@example.com   # a guest's full history, live + pre-erasure combined
+my-bt list --all --email guest@example.com   # an attendee's full history, live + pre-erasure combined
 
 my-bt users [--email ...] [--live|--archive]   # --live/--archive default to live+archived combined
 my-bt show <anything>                    # auto-detects: registration id, course shortname, YYYY-MM-DD date,
@@ -383,13 +383,13 @@ it by hand.
 
 `my-bt admin erase` only touches the CSVs (no CalDAV dependency by design,
 so it works even if your CalDAV/SMTP provider is unreachable); if the
-erased guest had a future confirmed/waitlisted booking, the app's own
+erased attendee had a future confirmed/waitlisted booking, the app's own
 cancellation path re-syncs the calendar the next time it touches that
 occurrence. If you need the calendar updated immediately after a CLI
 erase, restart `my-booking.service` or just wait for the next
 booking/cancellation on that occurrence.
 
-If an erased guest later books again with the same email, they get a
+If an erased attendee later books again with the same email, they get a
 brand-new live account -- their old, erased identity is now just a hash.
 `/admin` and `my-bt list --all`/`--past` both show any pre-erasure
 registrations sharing that same real email merged onto the new live
@@ -411,9 +411,9 @@ everything's already merged is a no-op.
 `my-bt cancel --registration-id ...` is the CLI equivalent of the web
 admin's cancel button (`/admin` -> Cancel): same status transition (->
 `canceled_by_host`), same optional message, and it sends the exact same
-cancellation emails to both the guest and `admin_email` -- there's no
+cancellation emails to both the attendee and `admin_email` -- there's no
 separate email logic to drift out of sync. Cancelable statuses now include
-a guest who hasn't yet clicked their account-confirmation email link
+an attendee who hasn't yet clicked their account-confirmation email link
 (`pending_confirmation`), not just confirmed/waitlisted (2026-07-13 fix --
 this used to be uncancelable by any path). Unlike the web admin path it
 does NOT promote the next waitlisted person or re-sync the calendar (no
@@ -434,18 +434,18 @@ since this is always host-initiated, each one also gets a short apology
 ("this is the exception, not the rule") plus a link to book the course's
 next occurrence, to keep them engaged despite the cancellation.
 
-**Undoing a cancellation:** both the guest's own `/my` page and the web
+**Undoing a cancellation:** both the attendee's own `/my` page and the web
 admin's `/admin` overview show a "Reinstate" button on any canceled
 booking whose occurrence is still in the future (2026-07-10). It's an
 undo, not a reschedule to a different date -- it puts the SAME
 registration back to confirmed (or waitlisted, if the class filled up in
 the meantime), re-checking capacity fresh at the moment you click it.
-Guests can only reinstate their own bookings; the admin can reinstate
-anyone's (handy when a guest cancels by mistake and asks you to fix it).
+Attendees can only reinstate their own bookings; the admin can reinstate
+anyone's (handy when an attendee cancels by mistake and asks you to fix it).
 Same confirm-dialog-with-optional-comment flow as Cancel -- whatever you
 type is emailed to the other side in a light-grey box, and the admin's
-own dialog shows the guest's email address next to their name so you can
-tell same-named guests apart before acting.
+own dialog shows the attendee's email address next to their name so you can
+tell same-named attendees apart before acting.
 
 Every cancellation email also carries its own no-login "Reinstate" link
 straight to a dedicated page (same What/When/Where recap + optional
@@ -681,7 +681,7 @@ journalctl -u my-booking.service --since "1 hour ago"
 By default this is quiet -- routine operation isn't logged -- but real
 problems are never silenced: an unhandled exception anywhere in a request
 always logs at ERROR with the full traceback, and a few other
-always-worth-seeing events (the nightly retention summary, a guest
+always-worth-seeing events (the nightly retention summary, an attendee
 self-erasing their account via `/my`, a rate-limiter rejection on
 login/reset, each watchdog run's outcome) log at WARNING. Both levels show
 up with no extra configuration.
@@ -734,7 +734,7 @@ running first if the site itself seems down.
 
 **Before sharing logs** (with anyone): `journalctl` output is meant to be
 safe to paste as-is under normal (non-debug) operation -- log lines are
-written to avoid raw guest emails/names on purpose (user IDs instead,
+written to avoid raw attendee emails/names on purpose (user IDs instead,
 masked email prefixes, etc.). In `MY_BOOKING_DEBUG=1` mode it's still
 designed to avoid raw addresses, but skim before pasting anyway,
 especially anything unexpected (e.g. an exception message that happens to
@@ -843,7 +843,7 @@ already followed: until `my-bt admin setup -i` (or a manual `git init`)
 has been run once, both layers are silent no-ops.
 
 **Compliance caveat, stated plainly: git commit history is immutable by
-default.** A snapshot committed *before* a guest's GDPR erasure still
+default.** A snapshot committed *before* an attendee's GDPR erasure still
 contains their real name/email in that OLD commit, forever -- erasing the
 live CSVs does nothing to a git history that already recorded them.
 **This tool deliberately does NOT prune, squash, or rewrite that history
@@ -857,7 +857,7 @@ or use a different backup approach entirely if immutable history is a
 dealbreaker. Weigh this against the safety net the snapshot itself
 provides before deciding either way.
 
-**Right to erasure** (Art. 17): a guest can delete their own account from
+**Right to erasure** (Art. 17): an attendee can delete their own account from
 `/my`, or you can run `my-bt admin erase --email ...` on their behalf. Either way:
 any future confirmed/waitlisted booking is canceled first (freeing the spot
 for the waitlist), then the user row and all their registration rows move
@@ -874,7 +874,7 @@ statistical/audit value (how many sessions happened, aggregate attendance)
 without retaining identifiable personal data past the point someone asked to
 be forgotten.
 
-**Re-booking after erasure:** a guest who books again under the same
+**Re-booking after erasure:** an attendee who books again under the same
 email gets a fresh live account. `/admin` and `my-bt list --all`/`--past`
 both show their pre-erasure registrations merged onto that new live
 user_id automatically -- purely a DISPLAY-TIME merge (2026-07-13: this used
@@ -947,7 +947,7 @@ same-tab link -- no downside either way.
 https://booking.example.org should show the same banner and not 'Login' button."
 `site/index.html.example` now has a small `<script>` at the bottom of
 `<body>` that calls `GET /my/session` (a same-origin `fetch()`, which
-carries the guest's session cookie automatically even though this page's
+carries the attendee's session cookie automatically even though this page's
 own JS can never read that cookie directly) and, only if it comes back
 `{"logged_in": true, ...}`, swaps the Login button for a "My bookings"
 link + "Log out" button -- same `.login-btn` styling, no new CSS needed.
@@ -985,7 +985,7 @@ homepage works exactly as you'd expect. But a fetch from *inside* the
 `<iframe>` embed is a third-party request relative to the embedding page's
 origin, and modern browsers increasingly block or partition third-party
 cookies by default -- so the swap may simply not happen there even when
-the guest really is logged in, in the top-level tab. Any failure or
+the attendee really is logged in, in the top-level tab. Any failure or
 negative result (network error, JS disabled, blocked cookie) just leaves
 the plain Login button exactly as it was before this existed, so there's
 no regression case, only an upgrade for the common direct-visit path. The
@@ -1112,7 +1112,7 @@ point of a quick toggle. This flag file is what both the running app and
 `my-bt` itself consult, so `on`/`off` take effect on the very next
 request, no restart needed.
 
-**What gets blocked:** every GUEST-facing route -- `/courses`,
+**What gets blocked:** every ATTENDEE-facing route -- `/courses`,
 `/book/<shortname>`, `/cancel/<token>`, `/reinstate/<token>`, and every
 `/my/*` endpoint (login, signup, reset, confirm, cancel, reinstate,
 settings, delete-account, ...) -- via one shared check,
@@ -1132,7 +1132,7 @@ manage bookings during a maintenance window they themselves declared would
 be counterproductive. `/my/logout` and the JSON-only `/my/session` status
 check (polled by the static homepage's own JS) are also left unblocked --
 neither is a booking or management action, so gating them would only
-cause confusing side effects (a guest stuck "logged in" against their
+cause confusing side effects (an attendee stuck "logged in" against their
 wishes, or a broken JSON parse) for no real benefit.
 
 Each blocked request gets the same 503 maintenance page, which includes
@@ -1217,7 +1217,7 @@ negative shows more. This is deliberately display-only
 
 - The actual confirmed-vs-waitlisted decision always uses the true
   confirmed count (`Store.add_registration_checking_capacity`) -- this
-  setting can never cause over-booking or a wrongly-waitlisted guest, no
+  setting can never cause over-booking or a wrongly-waitlisted attendee, no
   matter what number is shown.
 - An occurrence that's genuinely full always says "FULL, join waitlist,"
   regardless of the offset -- what that promises in the confirmation email
@@ -1249,7 +1249,7 @@ order, not a re-shuffle). See `settings.toml.example` for the field itself.
 
 All three pages (2026-07-06, and `/my` too as of 2026-07-09) show a small
 "Logged in as x@example.org · My bookings · booking.example.org · Log out" banner
-above their own heading when reached with an active `/my` guest session --
+above their own heading when reached with an active `/my` attendee session --
 e.g. after clicking "New booking" from `/my`. It also carries through to
 the booking result page ("Booked!"/"Almost there"/waitlisted). An
 anonymous visitor to `/courses` or `/book/<shortname>` sees the same box
@@ -1262,7 +1262,7 @@ here already signed in.
 
 That "Login" link (2026-07-11, the operator: "Login link returns to originating
 page") carries a `?next=/courses` or `?next=/book/<shortname>` query
-param, so a successful login lands back on the exact page the guest
+param, so a successful login lands back on the exact page the attendee
 clicked Login from instead of always on `/my`'s bookings list -- see
 `_safe_next_path()`'s own docstring for the allowlist this is validated
 against (both on the way in and again out of the login form's hidden
@@ -1373,15 +1373,15 @@ Two more `[[course]]` fields control the page header:
 10h45 - 12h45 -- Ayur Yoga Center Trier Nord"), set it to `""` to show
 nothing, or override it with your own text) and `description` (rendered as **raw HTML**, not
 escaped, so bold/italic/underline, links, and bullet lists all work --
-safe because this is your own settings.toml content, not guest input, the
+safe because this is your own settings.toml content, not attendee input, the
 same trust boundary as the hand-authored `site/*.html` pages).
 
 ## Account confirmation (`/my`, `/my/reset`, `/my/confirm/<token>`)
 
 The booking page only ever asks for name + email -- there is no
 password/PIN field to fill in, and, crucially, **booking never changes an
-existing account's password.** Older versions let anyone "take over" a
-guest's `/my` login just by resubmitting their email with an
+existing account's password.** Older versions let anyone "take over" an
+attendee's `/my` login just by resubmitting their email with an
 attacker-chosen PIN (`Store.upsert_user` used to overwrite `pin_hash`
 unconditionally on every booking); `Store.upsert_user_for_booking` now
 only ever touches `name`, never password fields, for an email that
@@ -1397,15 +1397,15 @@ What happens on submit depends on whether the email is already known:
   (it's excluded from `count_confirmed`, waitlist promotion, and calendar
   sync -- see `app/storage.py::STATUS_PENDING_CONFIRMATION`) and does not
   sync to the calendar, so nobody can grab every open spot on a course
-  just by submitting a pile of made-up email addresses. The guest gets an
+  just by submitting a pile of made-up email addresses. The attendee gets an
   email with a confirmation link instead of a "you're booked" email.
 
-Clicking the confirmation link (`/my/confirm/<token>`) lets the guest set
+Clicking the confirmation link (`/my/confirm/<token>`) lets the attendee set
 a password (the page suggests "e.g. a 6-digit code" only as an example,
 not an enforced format) for their `/my` login. Setting it both confirms
 the account and **promotes every one of that email's pending
 registrations**, re-checking capacity *fresh at that moment* -- an
-occurrence that filled up while the guest hadn't yet confirmed their
+occurrence that filled up while the attendee hadn't yet confirmed their
 address correctly lands the promoted booking on the waitlist instead of
 overbooking. Each promoted registration gets its own confirmation email
 and its own cancel link (generated at promotion time, not at the original
@@ -1417,7 +1417,7 @@ shows "This link has expired" rather than silently pretending to work.
 Requesting a new link (via `/my/reset` or `/my/signup`) also immediately
 invalidates whatever link was outstanding before it; clicking that
 now-superseded link shows "a newer link was already sent to you -- check
-your inbox", not the generic invalid-link message, so a guest who
+your inbox", not the generic invalid-link message, so an attendee who
 double-submitted knows to look for the newest email instead of assuming
 something's broken. The confirm/reset email itself states the expiry and
 that only the latest email's link works. Both the expiry and the
@@ -1454,11 +1454,11 @@ one applies to the other too; POST `/my/signup` is the tab's target.
 Login tab, with the admin password, logs into `/admin` instead -- so the
 admin doesn't need to remember a separate URL. This reuses
 `/admin/login`'s own rate-limit bucket (keyed by client IP, not by
-email), not the per-email guest one, so it can't be used to sidestep --
+email), not the per-email attendee one, so it can't be used to sidestep --
 or worsen -- either lockout: hammering "admin" via `/my` from one IP
 trips the exact same lockout `/admin/login` itself would from that IP,
 and vice versa. A wrong password for "admin" shows the same generic
-"Email and/or password did not match." a real guest mismatch gets, never
+"Email and/or password did not match." a real attendee mismatch gets, never
 "Wrong password" -- nothing about the response reveals that "admin" is
 treated specially. `/admin/login` itself is unchanged and still works
 exactly as before; this is purely an additional way in through `/my`.
@@ -1486,7 +1486,7 @@ pending row never held a real booking in the first place.
 
 ## Account settings (`/my/settings`, `/my/confirm-email/<token>`) (2026-07-10)
 
-A logged-in guest can change their display **name** (immediately, no
+A logged-in attendee can change their display **name** (immediately, no
 confirmation needed) and their login **email** (a two-step,
 dual-address-notified flow) from a new **Account settings** button next
 to `/my`'s "New booking" one.
@@ -1513,7 +1513,7 @@ plus a **Cancel this change** button) instead of the request form.
 
 Clicking the link in the new address's email (`GET
 /my/confirm-email/<token>`) only *previews* the change -- nothing is
-applied until the guest submits the confirmation form on that page
+applied until the attendee submits the confirmation form on that page
 (`POST`), the same GET-preview/POST-consume shape `/my/confirm/<token>`
 uses, so an email-scanning security service pre-fetching the link can't
 silently consume it. This route deliberately does **not** require an
@@ -1615,7 +1615,7 @@ booking, i.e. one made within `min_notice_hours` of start
   booking -- no warning, nothing special.
 - If it would still leave the course short, it's rejected with a short
   message naming the required headcount and the notice window, asking the
-  guest to book earlier next time.
+  attendee to book earlier next time.
 - Never applies once the slot is already full -- that booking only joins
   the waitlist, which can't affect whether the course runs.
 

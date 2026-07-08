@@ -237,7 +237,7 @@ def compute_times_booked_counts(rows: list[dict], today: date) -> tuple[Counter,
     see the total and also see the current time they joined") -- `rows`
     should be ALL registrations (live + archived, e.g.
     Store.read_registrations(scope="all")), same as admin_overview()'s own
-    `all_regs`, so an erased-but-never-rebooked guest's true historical
+    `all_regs`, so an erased-but-never-rebooked attendee's true historical
     count isn't silently dropped."""
     total_by_user = Counter(r["user_id"] for r in rows)
     upto_now_by_user = Counter(
