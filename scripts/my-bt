@@ -31,6 +31,7 @@ try:
     from app import cli_cancel as app_cli_cancel
     from app import cli_history as app_cli_history
     from app import cli_list as app_cli_list
+    from app import cli_stats as app_cli_stats
     from app import config as app_config
     from app import erasure as app_erasure
     from app import git_snapshot as app_git_snapshot
@@ -246,17 +247,67 @@ def cmd_show(args) -> None:
 
 
 def cmd_stats(args) -> None:
-    """`my-bt stats` -- quick counts per course/status."""
+    """`my-bt stats` -- one row per (course, status): a "total" column
+    (renamed from "count" -- 2026-07-08, the operator: "I just meant to rename
+    'count' to total count or just total", clarifying that this table's
+    shape was never meant to change), plus, as extra columns on that SAME
+    row (2026-07-08, the operator: "I just meant to add them as ADDITIONAL
+    columns to the existing table! Hence you will have this info per
+    status listed"): last/next occurrence counts and a year-over-year
+    comparison, each computed for that exact (course, status) -- not
+    confirmed-only, not course-only. "total" itself is also "count/
+    distinct" (2026-07-08, the operator: "and total should also have
+    count/distinct please"), same as the year-over-year columns. See
+    app/cli_stats.py for the actual computation (kept there, not here,
+    so it's unit-testable).
+
+    --year/--scope only ever restrict the "total" column, same as before
+    this existed -- the last/next-slot and year-over-year columns are
+    each about their OWN fixed window/date already, so narrowing them by
+    an unrelated --year would just be confusing (e.g. "last year to
+    date" under `--year 2020` makes no sense). They're computed off
+    live+archived combined regardless of --scope too, so a since-erased
+    guest's own history still counts."""
     store = _store(args)
     rows = store.read_registrations(scope=args.scope)
     if args.year:
         rows = [r for r in rows if r["occurrence_date"].startswith(str(args.year))]
-    counts: dict[tuple[str, str], int] = {}
-    for r in rows:
-        key = (r["course_shortname"], r["status"])
-        counts[key] = counts.get(key, 0) + 1
-    out = [{"course": c, "status": s, "count": n} for (c, s), n in sorted(counts.items())]
+    totals = app_cli_stats.compute_totals_with_distinct(rows)
+
+    all_rows = store.read_registrations(scope="all")
+    slots = app_cli_stats.compute_last_and_next_slot(all_rows)
+    year_stats = app_cli_stats.compute_year_period_stats(all_rows)
+
+    out = []
+    for course, status in sorted(totals):
+        key = (course, status)
+        slot = slots.get(key, {})
+        last_slot = slot.get("last_slot")
+        next_slot = slot.get("next_slot")
+        years = year_stats.get(key, {})
+        out.append({
+            "course": course,
+            "status": status,
+            "total": _fmt_count_distinct(totals[key]),
+            "last slot": last_slot[1] if last_slot else "",
+            "next slot": next_slot[1] if next_slot else "",
+            "last year": _fmt_count_distinct(years.get("last_year")),
+            "last year to date": _fmt_count_distinct(years.get("last_year_to_date")),
+            "this year to date": _fmt_count_distinct(years.get("this_year_to_date")),
+        })
     _print_rows(out, args.format)
+
+
+def _fmt_count_distinct(count_distinct: tuple[int, int] | None) -> str:
+    """"count/distinct" for a year-over-year cell -- 2026-07-08, the operator:
+    "add to each count a /xx where xx is the number of disjunct
+    participants in this period" -- "0/0" (not blank) for a (course,
+    status, window) with nothing in it, so the column stays numeric/
+    sortable in --format csv rather than mixing in empty strings."""
+    if count_distinct is None:
+        return "0/0"
+    count, distinct = count_distinct
+    return f"{count}/{distinct}"
 
 
 def cmd_hash_password(args) -> None:
