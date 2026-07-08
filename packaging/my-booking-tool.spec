@@ -62,7 +62,13 @@ python3 -m py_compile app/*.py
 # didn't exist before: nothing previously stopped a broken build from
 # being packaged and installed.
 %check
-python3 -m unittest discover -q
+# No -q: rpmbuild's %check output streams straight to the terminal, and
+# with -q there's nothing to see for the ~10-20s the suite takes -- looks
+# like the build hung. Plain default verbosity prints one .  per test
+# (F/E on failure/error) as they run, so there's visible progress and an
+# immediate pointer to which test broke, without the much longer
+# one-line-per-test output -v would add to the build log.
+python3 -m unittest discover
 
 %install
 rm -rf %{buildroot}
