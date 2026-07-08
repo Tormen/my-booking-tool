@@ -155,7 +155,7 @@ class NginxLocationsHintTest(unittest.TestCase):
             cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         text = "\n".join(lines)
         self.assertIn("this checkout's own", text)
-        self.assertNotIn("/usr/share/my-booking-tool/my-booking.conf.example", text)
+        self.assertNotIn("/opt/my-booking/site/my-booking.conf.example", text)
 
     def test_print_report_falls_back_to_generic_example_when_no_repo_file(self):
         lines: list[str] = []
@@ -163,7 +163,7 @@ class NginxLocationsHintTest(unittest.TestCase):
              patch("app.cli_checks.check_nginx_conf_repo_file",
                    return_value=[("nginx vhost conf (site/nginx-locations.conf)", "warn", "none found yet")]):
             cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
-        self.assertTrue(any("/usr/share/my-booking-tool/my-booking.conf.example" in ln for ln in lines))
+        self.assertTrue(any("/opt/my-booking/site/my-booking.conf.example" in ln for ln in lines))
 
     def test_interactive_setup_points_at_repo_file_when_complete(self):
         lines: list[str] = []
@@ -178,7 +178,7 @@ class NginxLocationsHintTest(unittest.TestCase):
             )
         text = "\n".join(lines)
         self.assertIn("this checkout's own", text)
-        self.assertNotIn("/usr/share/my-booking-tool/my-booking.conf.example", text)
+        self.assertNotIn("/opt/my-booking/site/my-booking.conf.example", text)
 
     def test_interactive_setup_falls_back_to_generic_example_when_no_repo_file(self):
         lines: list[str] = []
@@ -191,7 +191,7 @@ class NginxLocationsHintTest(unittest.TestCase):
                 prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
                 print_fn=lines.append,
             )
-        self.assertTrue(any("/usr/share/my-booking-tool/my-booking.conf.example" in ln for ln in lines))
+        self.assertTrue(any("/opt/my-booking/site/my-booking.conf.example" in ln for ln in lines))
 
 
 class InteractiveSetupSecretsTest(unittest.TestCase):

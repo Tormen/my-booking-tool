@@ -265,7 +265,7 @@ full detail, for reference:
    any drift they find there too, so an accidental edit anywhere in the
    package still surfaces instead of silently persisting across upgrades.
 3. Add the location blocks from
-   `/usr/share/my-booking-tool/my-booking.conf.example` to your existing
+   `/opt/my-booking/site/my-booking.conf.example` to your existing
    nginx vhost config, then `nginx -t && systemctl reload nginx`. Want a
    fully hardened reference instead of bare location blocks (rate
    limiting, CSP/HSTS/Permissions-Policy headers, an optional admin-IP

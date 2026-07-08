@@ -212,7 +212,7 @@ def print_report(
             print_fn("   automatically -- see README.md \"Installing\"), then:")
             print_fn("   sudo nginx -t && sudo systemctl reload nginx")
         else:
-            print_fn("   Add any missing block(s) from /usr/share/my-booking-tool/my-booking.conf.example")
+            print_fn("   Add any missing block(s) from /opt/my-booking/site/my-booking.conf.example")
             print_fn("   to your existing vhost (not edited automatically -- see README.md \"Installing\"),")
             print_fn("   then: sudo nginx -t && sudo systemctl reload nginx")
 
@@ -397,7 +397,7 @@ def interactive_setup(
         if repo_file_ok:
             print_fn(f"  this checkout's own site/{cli_checks._NGINX_CONF_FILENAME} (already complete)")
         else:
-            print_fn("  /usr/share/my-booking-tool/my-booking.conf.example")
+            print_fn("  /opt/my-booking/site/my-booking.conf.example")
         print_fn("to your existing vhost (not automated -- this would mean")
         print_fn("guessing at and editing your hand-maintained nginx config).")
     if prompt("Run `nginx -t && systemctl reload nginx` now?"):

@@ -147,6 +147,19 @@ install -m 644 site/privacy.html.tmpl %{buildroot}/opt/my-booking/site/privacy.h
 install -m 644 site/nginx-locations.conf %{buildroot}/opt/my-booking/site/nginx-locations.conf
 install -m 644 site/nginx-locations.conf.example %{buildroot}/opt/my-booking/site/nginx-locations.conf.example
 
+# 2026-07-08, the operator: "I just don't like spreading files all across the
+# system without good reason" -- this bare, non-hardened reference (just
+# the proxied location blocks, no rate limiting/CSP/security headers) used
+# to live under %{_datadir}/%{name} (a separate top-level directory) for
+# no reason stronger than "it's pure read-only package data, so FHS says
+# _datadir" -- but /opt/my-booking/site already mixes package templates
+# (this one, nginx-locations.conf.example) with %config(noreplace) real
+# files (nginx-locations.conf, privacy.html.tmpl) the admin is expected to
+# read/edit directly, so there's no consistency win left in keeping this
+# one file split off on its own. Every nginx reference file now lives in
+# the one place.
+install -m 644 nginx/my-booking.conf %{buildroot}/opt/my-booking/site/my-booking.conf.example
+
 install -d %{buildroot}%{_sharedstatedir}/my-booking
 
 install -d %{buildroot}%{_docdir}/%{name}
@@ -160,9 +173,6 @@ install -m 644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 # .example placeholders -- see scripts/build-rpm.sh) get shipped.
 install -d %{buildroot}%{_docdir}/%{name}/site
 install -m 644 site/index.html site/privacy.html site/terms.html site/impressum.html %{buildroot}%{_docdir}/%{name}/site/
-
-install -d %{buildroot}%{_datadir}/%{name}
-install -m 644 nginx/my-booking.conf %{buildroot}%{_datadir}/%{name}/my-booking.conf.example
 
 %pre
 getent group my-booking >/dev/null || groupadd -r my-booking
@@ -270,6 +280,7 @@ exit 0
 %config(noreplace) /opt/my-booking/site/privacy.html.tmpl
 %config(noreplace) /opt/my-booking/site/nginx-locations.conf
 /opt/my-booking/site/nginx-locations.conf.example
+/opt/my-booking/site/my-booking.conf.example
 %config(noreplace) /etc/my-booking/settings.toml
 /etc/my-booking/settings.toml.example
 %dir %attr(700,my-booking,my-booking) /etc/my-booking/secrets
@@ -287,7 +298,6 @@ exit 0
 %doc %{_docdir}/%{name}/site/privacy.html
 %doc %{_docdir}/%{name}/site/terms.html
 %doc %{_docdir}/%{name}/site/impressum.html
-%{_datadir}/%{name}/my-booking.conf.example
 
 %changelog
 # REPLACE-ME (forks): use your own name/email on entries for your own real

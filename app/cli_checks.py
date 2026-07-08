@@ -366,7 +366,7 @@ def check_nginx_locations() -> list[Check]:
         else:
             checks.append((f"nginx location {path}", "warn",
                             "not found in the live config -- add it from "
-                            "/usr/share/my-booking-tool/my-booking.conf.example"))
+                            "/opt/my-booking/site/my-booking.conf.example"))
     return checks
 
 
@@ -410,7 +410,7 @@ def check_nginx_conf_repo_file(home: str) -> list[Check]:
         return [(f"nginx vhost conf (site/{_NGINX_CONF_FILENAME})", "warn",
                   f"no real, personal nginx vhost conf file found yet -- copy "
                   f"site/{_NGINX_CONF_FILENAME}.example there as a hardened starting "
-                  "point, or nginx/my-booking.conf.example for a bare-bones one")]
+                  "point, or nginx/my-booking.conf for a bare-bones one")]
     text = f.read_text(encoding="utf-8", errors="replace")
     problems = []
     if _PLACEHOLDER_MARKER in text:
@@ -422,7 +422,7 @@ def check_nginx_conf_repo_file(home: str) -> list[Check]:
     ]
     if missing:
         problems.append(f"missing location block(s) for {', '.join(missing)} -- see "
-                          "nginx/my-booking.conf.example for the bare version to adapt")
+                          "nginx/my-booking.conf for the bare version to adapt")
     if problems:
         return [(f"nginx vhost conf (site/{_NGINX_CONF_FILENAME})", "warn", "; ".join(problems))]
     return [(f"nginx vhost conf (site/{_NGINX_CONF_FILENAME})", "ok",
