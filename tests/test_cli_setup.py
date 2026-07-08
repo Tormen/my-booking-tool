@@ -405,6 +405,22 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         Path(self.settings_path).write_text("x")
         self.static_dir = self.home / "live"
         self.static_dir.mkdir()
+        # 2026-07-08 fix: app.cli_checks._resolve_static_source() falls
+        # back to the REAL, hardcoded /usr/share/doc/my-booking-tool/site
+        # (the RPM's %doc copy) once this fake `home` has nothing under
+        # site/ -- on a machine with an older build of this same RPM
+        # already installed (e.g. the VPS that runs `rpmbuild`'s own
+        # %check), that path genuinely exists, so
+        # test_no_checkout_source_is_never_prompted_to_copy started
+        # failing there while passing everywhere else. test_cli_checks.py
+        # already patches this same constant per-test for the identical
+        # reason (see its own `_DOC_SITE_DIR` patches) -- this class was
+        # just missing it. Pointed at a path that's guaranteed to never
+        # exist, class-wide, so every test here stays isolated from
+        # whatever happens to be installed on the machine running them.
+        doc_site_patcher = patch("app.cli_checks._DOC_SITE_DIR", self.home / "no-such-doc-site")
+        doc_site_patcher.start()
+        self.addCleanup(doc_site_patcher.stop)
 
     def test_not_configured_is_never_prompted(self):
         prompt = FakePrompts({})
