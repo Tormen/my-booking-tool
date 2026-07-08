@@ -114,6 +114,28 @@ from .templates import esc, page
 
 log = logging.getLogger("my_booking.webapp")
 
+# 2026-07-08, the operator (screenshot of /admin?past=1's Status column reading
+# raw "confirmed"/"canceled_by_guest" etc.): "I prefer Host and Guest and
+# then also 'Confirmed' for the status" -- same round as the Guests
+# column's own Host/Guest capitalization. STATUS_* constants (app/storage.py)
+# are lowercase/underscored internal identifiers used throughout
+# storage/CSV/comparisons -- this is a display-only label map, the
+# underlying r.status values are never touched. Falls back to a generic
+# "Title Case, underscores->spaces" humanization for anything not listed
+# (there is currently no such status, but this keeps a future one from
+# rendering as a raw "some_new_status" instead of failing loudly).
+_STATUS_LABELS = {
+    STATUS_CONFIRMED: "Confirmed",
+    STATUS_WAITLISTED: "Waitlisted",
+    STATUS_PENDING_CONFIRMATION: "Pending confirmation",
+    STATUS_CANCELED_BY_GUEST: "Canceled by guest",
+    STATUS_CANCELED_BY_HOST: "Canceled by host",
+}
+
+
+def _status_label(status: str) -> str:
+    return _STATUS_LABELS.get(status, status.replace("_", " ").capitalize())
+
 SESSIONS: dict[str, dict] = {}
 SESSION_TTL_SECONDS = 60 * 60 * 4
 
@@ -2004,7 +2026,17 @@ class App:
                 # emailed cancel link and /admin could always do both;
                 # caught 2026-07-05 while touching this code for the
                 # cancel-dialog/both-sides-notification consistency pass).
-                disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED)
+                # 2026-07-08, the operator (screenshot of /admin?past=1 showing an
+                # enabled Cancel button on a 2025-10-18 row): "PAST bookings
+                # should NOT have a CANCEL button as well" -- a session that
+                # already happened can't be un-happened; also require
+                # occurrence_date >= today, same future-only gate Reinstate
+                # already uses just below. Applies here too, not just
+                # /admin ("what I tell you about /admin should of course
+                # also apply to /my").
+                disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED) or (
+                    date.fromisoformat(r.occurrence_date) < today
+                )
                 # A <dialog> (real pop-up) asking for an optional reason,
                 # opened by intercepting the Cancel button's click in JS
                 # below -- progressive enhancement: without JS (or on a
@@ -2056,9 +2088,9 @@ class App:
                         "</div></dialog>"
                     )
                 return (
-                    f"<tr><td>{course_cell}</td><td>{esc(r.occurrence_date)}</td>"
+                    f'<tr><td>{course_cell}</td><td class="nowrap">{esc(r.occurrence_date)}</td>'
                     f"<td>{esc(time_range)}</td><td>{esc(location)}</td>"
-                    f"<td>{esc(r.status)}</td>"
+                    f"<td>{esc(_status_label(r.status))}</td>"
                     f"<td>{actions}</td></tr>"
                 )
 
@@ -2068,7 +2100,7 @@ class App:
                 rows = "".join(_row(r) for r in regs_for_table)
                 return f"""
                 <div class="table-tools">
-                  <input type="search" id="{table_id}-filter" class="big-input" placeholder="Filter bookings...">
+                  <input type="search" id="{table_id}-filter" class="big-input id-input" placeholder="Filter bookings...">
                 </div>
                 <table id="{table_id}" border="1" cellpadding="6">
                   <thead><tr>
@@ -3165,10 +3197,36 @@ class App:
         # live CSV), so an erased identity that never got a live rebook
         # (nothing to merge into) still shows its own true historical count
         # rather than dropping to 0 just because its rows live in the
-        # archive.
-        times_by_user = Counter(r.user_id for r in all_regs)
+        # archive. Status is deliberately NOT filtered for either count
+        # below -- a canceled booking still counts as a real time they were
+        # once booked in.
+        #
+        # 2026-07-08, the operator (screenshot of a guest already showing "9" with
+        # sessions still weeks out): "please have the times booked UP TO
+        # THIS MOMENT / date (always including of course the current
+        # course)", then "actually even better: make it 2/9 ... so that I
+        # see the total and also see the current time they joined" -- shows
+        # BOTH counts as "up-to-now/total" (e.g. "2/9": 2 sessions actually
+        # happened so far, 9 ever booked including future ones). occurrence_
+        # date <= today (today's own session counts, not just strictly-past
+        # ones) is the same "past" cutoff used everywhere else in this
+        # codebase (see app/migrate_simplymeet.py's own docstring on this
+        # exact boundary).
+        times_total_by_user = Counter(r.user_id for r in all_regs)
+        times_upto_now_by_user = Counter(
+            r.user_id for r in all_regs if date.fromisoformat(r.occurrence_date) <= today
+        )
         regs = all_regs if show_past else [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
-        regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname))
+        # 2026-07-08, the operator: "include past should by default show the
+        # newest first" -- today-or-future (the default view) stays
+        # ascending (soonest upcoming session first, unchanged); toggling
+        # "include past" on flips to descending (most recent booking
+        # first) instead, same asc-for-upcoming/desc-for-past split as
+        # /my's own Upcoming/Past tables (see my()'s _table() calls).
+        # data-default-sort below (which drives the on-load indicator --
+        # see _SORTABLE_FILTERABLE_TABLE_SCRIPT) must match this, or the
+        # arrow would silently lie about which way the rows are ordered.
+        regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname), reverse=show_past)
         # Guest bookings (2026-07): group every registration -- live AND
         # archived, so an erased party member's row still counts toward
         # "+N guest(s)" on the still-live leader's row -- by party_id, so
@@ -3215,12 +3273,18 @@ class App:
             # No more separate "(incl. M pre-erasure)" fold-in needed here
             # (2026-07-10) -- the auto-merge pass at the top of this method
             # already moved any pre-erasure history for a live, re-booked
-            # guest into their real registrations before times_by_user was
-            # even computed, so this count is already the true total.
-            times_cell = str(times_by_user.get(r.user_id, 0))
+            # guest into their real registrations before these counts were
+            # even computed, so both are already the true totals.
+            times_cell = f"{times_upto_now_by_user.get(r.user_id, 0)}/{times_total_by_user.get(r.user_id, 0)}"
             if user and not erased:
                 cancel_id = f"admin-cancel-{esc(r.registration_id)}"
-                disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED)
+                # 2026-07-08, the operator (screenshot of /admin?past=1): "PAST
+                # bookings should NOT have a CANCEL button as well :D" --
+                # same fix, same reasoning, as my()'s own Cancel button
+                # just below.
+                disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED) or (
+                    date.fromisoformat(r.occurrence_date) < today
+                )
                 past_field = '<input type="hidden" name="past" value="1">' if show_past else ""
                 actions = (
                     f'<form method="post" action="/admin/cancel/{esc(r.registration_id)}" id="{cancel_id}-form">'
@@ -3307,7 +3371,10 @@ class App:
                     leader_label = leader_user.name
                 else:
                     leader_label = leader_user.email
-                party_cell = f"guest of {leader_label}"
+                # 2026-07-08, the operator: "If we write Host, then please also
+                # 'Guest'" -- capitalized to match "Host (+N guest)" on
+                # the leader's own row (same round, same column).
+                party_cell = f"Guest of {leader_label}"
             elif r.party_id:
                 other_members = {
                     m.user_id for m in party_members.get(r.party_id, []) if m.user_id != r.user_id
@@ -3323,8 +3390,8 @@ class App:
                     # of <name>" already does for the other side.
                     party_cell = f"Host (+{n} guest{'s' if n != 1 else ''})"
             rows.append(
-                f"<tr><td>{esc(r.status)}</td><td>{esc(r.course_shortname)}</td>"
-                f"<td>{esc(r.occurrence_date)}</td>{name_cell}{email_cell}"
+                f"<tr><td>{esc(_status_label(r.status))}</td><td>{esc(r.course_shortname)}</td>"
+                f'<td class="nowrap">{esc(r.occurrence_date)}</td>{name_cell}{email_cell}'
                 f"<td>{esc(format_display_timestamp(r.registered_at))}</td><td>{esc(times_cell)}</td>"
                 f"<td>{esc(party_cell)}</td>"
                 f"<td>{actions}</td></tr>"
@@ -3333,13 +3400,13 @@ class App:
         table_id = "admin-overview-table"
         body = f"""<p>{toggle}</p>
         <div class="table-tools">
-          <input type="search" id="{table_id}-filter" class="big-input" placeholder="Filter...">
+          <input type="search" id="{table_id}-filter" class="big-input id-input" placeholder="Filter...">
         </div>
         <table id="{table_id}" border="1" cellpadding="6">
         <thead><tr>
           <th>Status<span class="sort-indicator"></span></th>
           <th>Course<span class="sort-indicator"></span></th>
-          <th data-default-sort="asc">Date<span class="sort-indicator"></span></th>
+          <th data-default-sort="{'desc' if show_past else 'asc'}">Date<span class="sort-indicator"></span></th>
           <th>Name<span class="sort-indicator"></span></th>
           <th>Email<span class="sort-indicator"></span></th>
           <th>Registered<span class="sort-indicator"></span></th>

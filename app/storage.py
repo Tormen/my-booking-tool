@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 import uuid
 from dataclasses import dataclass, asdict, fields
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Iterable
 
@@ -70,13 +70,26 @@ def format_display_timestamp(iso_str: str) -> str:
     all still parse that with datetime.fromisoformat() same as before. Falls
     back to the raw string unchanged if it isn't valid ISO-8601 (e.g. an
     empty canceled_at on a still-active registration), same "don't blow up
-    on a blank/legacy value" spirit as the rest of this module."""
+    on a blank/legacy value" spirit as the rest of this module.
+
+    2026-07-08, the operator (screenshot of /admin?past=1's Registered column
+    showing "2025-10-18_0000.00" for SimplyMeet.me-imported rows): "if we
+    have no time, then please display just the date" -- app/migrate_
+    simplymeet.py's own docstring documents exactly why these are all
+    midnight: the export has no real "booking created at" timestamp, so
+    `registered_at` is set to a placeholder ("<occurrence_date>T00:00:00",
+    no real time-of-day) for every imported row. A real now_iso()-stamped
+    registration is for all practical purposes never exactly midnight, so
+    exact 00:00:00 is treated as "no real time recorded" and rendered as
+    just the date, rather than a misleadingly precise-looking "_0000.00"."""
     if not iso_str:
         return iso_str
     try:
         dt = datetime.fromisoformat(iso_str)
     except ValueError:
         return iso_str
+    if dt.time() == time(0, 0, 0):
+        return dt.strftime("%Y-%m-%d")
     return dt.strftime("%Y-%m-%d_%H%M.%S")
 
 

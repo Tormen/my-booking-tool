@@ -780,10 +780,15 @@ class SessionBannerTest(unittest.TestCase):
         # own 1em baseline (see below); no other rule may declare a
         # font-size below that. A handful of previously-smaller elements
         # (.session-banner/.note/.hint/.date-btn .d-date/.date-btn
-        # .d-spots/.sort-indicator/.hash-cell) now read as
-        # secondary/de-emphasized via font-style:italic instead of a
-        # smaller size ("making the smaller fonts italic instead -- as I
-        # had suggested to you before!").
+        # .d-spots/.hash-cell) now read as secondary/de-emphasized via
+        # font-style:italic instead of a smaller size ("making the smaller
+        # fonts italic instead -- as I had suggested to you before!").
+        # .sort-indicator is DELIBERATELY excluded from this list (2026-07-08,
+        # the operator: "is it just me or does this arrow up look distorted?") --
+        # italic synthetically shears the up/down-triangle glyph, which has
+        # no real italic form in most fonts, making it look skewed/broken
+        # rather than merely de-emphasized. It stays at the 1em baseline
+        # (never was smaller) with font-style:normal instead.
         _status, _headers, body = self.app.courses("GET", {})
         style = body[body.index("<style>") : body.index("</style>")]
         self.assertIn("input,button,textarea{font-size:1em", style)
@@ -791,11 +796,22 @@ class SessionBannerTest(unittest.TestCase):
             self.fail(f"found a font-size below 1em: {match.group(0)!r}")
         for selector in (
             ".session-banner", ".note", ".hint", ".date-btn .d-date",
-            ".date-btn .d-spots", ".sort-indicator", ".hash-cell",
+            ".date-btn .d-spots", ".hash-cell",
         ):
             rule = style[style.index(selector + "{") :]
             rule = rule[: rule.index("}")]
             self.assertIn("font-style:italic", rule, f"{selector} should be italic, not smaller")
+
+    def test_sort_indicator_is_not_italic(self):
+        # 2026-07-08, the operator (screenshot of /admin's Date column arrow):
+        # "is it just me or does this arrow up look distorted?" -- yes:
+        # font-style:italic was shearing the ▲/▼ glyph. See the previous
+        # test's own comment for the full story.
+        _status, _headers, body = self.app.courses("GET", {})
+        style = body[body.index("<style>") : body.index("</style>")]
+        rule = style[style.index(".sort-indicator{") :]
+        rule = rule[: rule.index("}")]
+        self.assertIn("font-style:normal", rule)
 
     # -- 2026-07-09: booking-page name/email prefilled+locked when logged in --
 
@@ -2498,6 +2514,92 @@ class BookingFlowTest(unittest.TestCase):
 
     # -- /admin overview: same shortname-leak audit as /my's table ----------
 
+    def test_admin_overview_status_column_is_capitalized(self):
+        # 2026-07-08, the operator (screenshot of raw "confirmed"/"canceled_by_guest"
+        # in the Status column): "I prefer Host and Guest and then also
+        # 'Confirmed' for the status" -- same round as the Guests column's
+        # own Host/Guest capitalization. See webapp._status_label().
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn("<td>Confirmed</td>", body)
+        self.assertNotIn("<td>confirmed</td>", body)
+
+    def test_admin_overview_date_column_is_nowrap(self):
+        # 2026-07-08, the operator (screenshot of a narrow Date column wrapping
+        # "2025-10-18" onto two lines): "please force the date to be
+        # non-breakable".
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn(f'<td class="nowrap">{self.occ_date}</td>', body)
+
+    def test_admin_overview_past_view_sorts_newest_first_by_default(self):
+        # 2026-07-08, the operator: "sorting: include past should by default show
+        # the newest first please" -- today-or-future (the default view)
+        # stays ascending; "include past" flips to descending.
+        user, environ = self._login_as_guest("regular@example.org")
+        for d in ["2026-01-01", "2026-02-01", "2026-03-01"]:
+            self._import_past(user.user_id, d, f"past-{d}")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn('<th data-default-sort="desc">Date<span class="sort-indicator"></span></th>', body)
+        first = body.index("2026-03-01")
+        second = body.index("2026-02-01")
+        third = body.index("2026-01-01")
+        self.assertTrue(first < second < third, "expected newest-first row order")
+
+    def test_admin_overview_default_view_still_sorts_ascending(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('<th data-default-sort="asc">Date<span class="sort-indicator"></span></th>', body)
+
+    def test_admin_overview_times_booked_excludes_future_bookings(self):
+        # 2026-07-08, the operator (screenshot of a guest already showing "9" with
+        # sessions still weeks out): "please have the times booked UP TO
+        # THIS MOMENT / date (always including of course the current
+        # course)", then "actually even better: make it 2/9". Book one
+        # past (today-or-earlier, via _import_past) and one future session
+        # for the same user and confirm the cell reads "1/2".
+        user, environ = self._login_as_guest("regular@example.org")
+        self._import_past(user.user_id, self.occ_date, "today-session")
+        self._import_past(user.user_id, "2027-01-01", "future-session")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn("<td>1/2</td>", body)
+
+    def test_admin_overview_cancel_disabled_for_past_confirmed_booking(self):
+        # 2026-07-08, the operator (screenshot of /admin?past=1 showing an enabled
+        # Cancel button on a long-past confirmed row): "PAST bookings
+        # should NOT have a CANCEL button as well :D"
+        user, environ = self._login_as_guest("regular@example.org")
+        self._import_past(user.user_id, "2026-01-01", "past-session")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        cancel_start = body.index("admin-cancel-")
+        button_html = body[body.index("<button", cancel_start):body.index("</button>", cancel_start) + 1]
+        self.assertIn("disabled", button_html)
+
+    def test_admin_overview_cancel_still_enabled_for_future_confirmed_booking(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        cancel_start = body.index("admin-cancel-")
+        button_html = body[body.index("<button", cancel_start):body.index("</button>", cancel_start) + 1]
+        self.assertNotIn("disabled", button_html)
+
     def test_admin_overview_shows_course_shortname_not_title(self):
         # 2026-07-06: the Course column shows the internal shortname (compact,
         # matches /book/<shortname>) -- not the human title. The cancel-dialog
@@ -2606,10 +2708,12 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
-        # times-booked column should show 1, not 0, for the erased row
+        # times-booked column should show 1/1 (one up-to-now, one total),
+        # not 0/0, for the erased row -- see the "N/M" format's own comment
+        # on times_upto_now_by_user/times_total_by_user (2026-07-08).
         row_start = body.index("[erased]")
         row_html = body[row_start:row_start + 400]
-        self.assertIn("<td>1</td>", row_html)
+        self.assertIn("<td>1/1</td>", row_html)
 
     def _other_occ_date(self) -> str:
         """A second, distinct occurrence date for yoga-class-1 -- lets a
@@ -2662,7 +2766,10 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn("[erased]", body)
         self.assertNotIn("pre-erasure", body)
         self.assertEqual(body.count(f"<td>{email}</td>"), 2)
-        self.assertIn("<td>2</td>", body)  # true combined "Times booked"
+        # true combined "Times booked": 2 total (pre- + post-erasure), but
+        # only 1 up to today -- the post-erasure rebooking is for a FUTURE
+        # occurrence (_other_occ_date()), so it doesn't count yet.
+        self.assertIn("<td>1/2</td>", body)
         self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 2)
 
     def test_admin_overview_merge_is_idempotent_on_repeated_loads(self):

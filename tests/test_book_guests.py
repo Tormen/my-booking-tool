@@ -362,7 +362,9 @@ class PartyAdminOverviewTest(GuestBookingTestBase):
     def test_guest_row_shows_guest_of_leader(self):
         self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
         _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
-        self.assertIn("guest of Leader", body)
+        # 2026-07-08, the operator: "If we write Host, then please also 'Guest'"
+        # -- capitalized to match "Host (+N guest)" on the leader's row.
+        self.assertIn("Guest of Leader", body)
 
     def test_guest_row_falls_back_to_email_when_leader_name_is_placeholder(self):
         # 2026-07-08, the operator (screenshot): "guest of Guest" reads as a bug,
@@ -374,8 +376,8 @@ class PartyAdminOverviewTest(GuestBookingTestBase):
         # without changing the placeholder itself.
         self._book("leader@example.org", "Guest", [("guest@example.org", "Guest One")])
         _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
-        self.assertIn("guest of leader@example.org", body)
-        self.assertNotIn("guest of Guest", body)
+        self.assertIn("Guest of leader@example.org", body)
+        self.assertNotIn("Guest of Guest", body)
 
     def test_party_column_header_is_labeled_guests(self):
         # 2026-07-08, the operator: "Party" was unclear -- renamed to "Guests".

@@ -951,6 +951,24 @@ class FormatDisplayTimestampTest(unittest.TestCase):
     def test_unparseable_input_is_returned_unchanged(self):
         self.assertEqual(format_display_timestamp("not-a-timestamp"), "not-a-timestamp")
 
+    def test_exact_midnight_renders_as_date_only(self):
+        # 2026-07-08, the operator (screenshot of /admin?past=1's Registered
+        # column showing "2025-10-18_0000.00" for SimplyMeet.me-imported
+        # rows): "if we have no time, then please display just the date"
+        # -- migrate_simplymeet.py stamps every imported row's
+        # registered_at as "<occurrence_date>T00:00:00" (no real time-of-
+        # day known), so exact midnight is treated as "no real time" and
+        # rendered without the misleadingly precise "_HHMM.SS" suffix.
+        self.assertEqual(format_display_timestamp("2025-10-18T00:00:00"), "2025-10-18")
+        self.assertEqual(format_display_timestamp("2025-10-18T00:00:00+00:00"), "2025-10-18")
+
+    def test_one_second_past_midnight_still_shows_full_timestamp(self):
+        # Guards against an overly broad "date == midnight" check -- only
+        # EXACT 00:00:00 is treated as the placeholder; a real registration
+        # that happens to fall in the first minute of a day must still
+        # render its real time.
+        self.assertEqual(format_display_timestamp("2025-10-18T00:00:01+00:00"), "2025-10-18_0000.01")
+
 
 class LockedCsvReadonlyModeTest(unittest.TestCase):
     """_LockedCsv(readonly=True) must open "r", never "r+" -- "r+" fails

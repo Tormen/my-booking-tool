@@ -127,10 +127,13 @@ def page(title: str, body: str, banner: str = "") -> str:
     never replacing it, and ONLY on single-line Name/Email/Password
     `<input>` fields app-wide (every page that has one -- login, signup,
     admin login, /my settings, the booking form's own guest rows).
-    Deliberately NOT applied to `.big-input` textareas (the Cancel/
+    Also applied to the `type="search"` table-filter boxes on /my and
+    /admin (2026-07-08, the operator: "lets also set the filter to 50 chars
+    width" -- overriding this docstring's earlier reasoning that they
+    should stay full-width to visually pair with their table). Still
+    deliberately NOT applied to `.big-input` textareas (the Cancel/
     Reinstate reason/message boxes -- free text benefits from the full
-    width) or the `type="search"` table-filter boxes on /my and /admin
-    (which visually pair with their own full-width table below them)."""
+    width)."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -180,8 +183,9 @@ button:disabled{{opacity:.5;cursor:not-allowed}}
 .link-button:disabled{{color:#888;text-decoration:none;opacity:1}}
 .table-tools{{margin-bottom:.6em}}
 table{{border-collapse:collapse;width:100%}}
-th{{user-select:none}}
-.sort-indicator{{font-style:italic}}
+th{{user-select:none;white-space:nowrap}}
+.sort-indicator{{font-style:normal}}
+.nowrap{{white-space:nowrap}}
 .hash-cell{{word-break:break-all;font-family:monospace;font-style:italic}}
 .course-card{{border:1px solid #ddd;border-radius:8px;padding:1em 1.2em;margin:1em 0}}
 .course-card h2{{margin:0 0 .2em;font-size:1.15em}}
