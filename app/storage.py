@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import fcntl
+import grp
 import logging
 import os
 import subprocess
@@ -296,6 +297,61 @@ def _git_commit_data_file(path: Path, message: str) -> None:
         log.warning("git auto-commit failed for %s", rel_path, exc_info=True)
 
 
+# The systemd-managed service account every long-running/scheduled piece of
+# my-booking-tool runs as (see systemd/*.service's User=/Group=my-booking).
+# 2026-07-09, real production incident on the operator's own VPS: he ran `my-bt
+# cancel` directly as root, rewriting registrations.csv as root:root mode
+# 0600 -- the very next my-booking-watchdog.timer tick crashed with
+# PermissionError just trying to READ it, since the watchdog is deliberately
+# sandboxed to run as this unprivileged account and nothing more. CSV writes
+# must stay readable by this group no matter which OS account performed the
+# write, not just whichever account happened to invoke `my-bt` this time.
+_SERVICE_GROUP = "my-booking"
+
+
+def _secure_data_path(path, mode: int = 0o640) -> None:
+    """Best-effort: chmod (default 0640 -- owner rw, GROUP read -- not
+    owner-only 0600) and chgrp to _SERVICE_GROUP. Applied to every CSV file
+    (mode=0o640) and the data directory itself (mode=0o750, needs the
+    execute bit for traversal -- see the mkdir call site) on every
+    write/creation, so permissions self-heal on the next write regardless of
+    who performed a previous one.
+
+    Deliberately never raises. Two different failure modes are logged at two
+    different levels, on purpose:
+      - _SERVICE_GROUP simply doesn't exist on this machine (KeyError from
+        getgrnam) -- entirely normal for a dev checkout or this repo's own
+        test suite, not something an operator needs to see on every single
+        CSV write, so this logs at DEBUG only.
+      - chmod fails outright, or chgrp fails for any OTHER reason (e.g. a
+        real deployment where the group exists but the calling process
+        isn't a member of it and isn't root) -- an actually actionable
+        problem worth surfacing, so this logs at WARNING (same as
+        _git_commit_data_file's own "genuine failures are logged" rule; a
+        missing group is the expected/normal case there, same distinction).
+    Either way, the write this is securing must never fail just because the
+    permissions touch-up couldn't fully complete.
+
+    Note this only changes the GROUP (chown(path, -1, gid)), never the
+    owner -- POSIX lets a file's own owner chgrp it to any group THEY are a
+    member of without root, which is exactly this app's existing model (see
+    README's "add your login to the my-booking group" instruction); forcing
+    ownership itself would need root universally and isn't necessary here."""
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        log.warning("could not chmod %s to %o (%s)", path, mode, exc)
+    try:
+        gid = grp.getgrnam(_SERVICE_GROUP).gr_gid
+    except KeyError:
+        log.debug("service group %r does not exist on this machine -- skipping chgrp of %s", _SERVICE_GROUP, path)
+        return
+    try:
+        os.chown(path, -1, gid)
+    except OSError as exc:
+        log.warning("could not chgrp %s to %r (%s)", path, _SERVICE_GROUP, exc)
+
+
 class _LockedCsv:
     """Context manager: opens `path` for locked read-modify-write, creating it
     with a header if missing. Yields (rows: list[dict], write(rows)) where
@@ -328,10 +384,13 @@ class _LockedCsv:
             rows = list(reader)
             return rows, self._set_rows_to_write
 
+        dir_existed = self.path.parent.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not dir_existed:
+            _secure_data_path(self.path.parent, mode=0o750)
         if not self.path.exists():
             self.path.touch()
-            os.chmod(self.path, 0o600)
+            _secure_data_path(self.path)
         self._fh = open(self.path, "r+", newline="", encoding="utf-8")
         fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
         self._fh.seek(0)
@@ -378,7 +437,7 @@ class _LockedCsv:
                     writer.writerow(clean)
                 tmp.flush()
                 os.fsync(tmp.fileno())
-            os.chmod(tmp_path, 0o600)
+            _secure_data_path(tmp_path)
             os.replace(tmp_path, self.path)
         except BaseException:
             if os.path.exists(tmp_path):

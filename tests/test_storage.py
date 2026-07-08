@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.security import hash_secret, hash_token, new_token
 from app.storage import (
@@ -15,6 +16,8 @@ from app.storage import (
     STATUS_WAITLISTED,
     Store,
     _LockedCsv,
+    _SERVICE_GROUP,
+    _secure_data_path,
     format_display_timestamp,
     status_label,
 )
@@ -1171,6 +1174,116 @@ class StoreReadOnlyMethodsUnderReadOnlyMountTest(StoreTestBase):
             self.reg.registration_id,
         )
         self.assertEqual(len(self.store.all_registrations()), 1)
+
+
+class SecureDataPathTest(unittest.TestCase):
+    """2026-07-09: real production incident on the operator's own VPS -- he ran
+    `my-bt cancel` directly as root, leaving registrations.csv root:root
+    mode 0600 -- completely unreadable by my-booking-watchdog.service (runs
+    as the unprivileged my-booking user/group), which then crashed with
+    PermissionError on its very next scheduled read. _secure_data_path is
+    the self-healing fix _LockedCsv now applies on every write/creation
+    (see _atomic_write and __enter__) -- these tests exercise it directly
+    rather than needing an actual multi-user setup with a real "my-booking"
+    system group to reproduce the original bug."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "registrations.csv"
+        self.path.touch()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_chmod_grants_group_read_not_just_owner(self):
+        os.chmod(self.path, 0o600)
+        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
+            _secure_data_path(self.path)
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o640)
+
+    def test_directory_mode_gets_the_execute_bit_when_asked(self):
+        directory = Path(self._tmp.name) / "archived"
+        directory.mkdir()
+        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
+            _secure_data_path(directory, mode=0o750)
+        self.assertEqual(stat.S_IMODE(os.stat(directory).st_mode), 0o750)
+
+    def test_chgrps_to_the_service_group_when_it_exists(self):
+        fake_gid = 424242
+        with mock.patch("app.storage.grp.getgrnam") as m_getgrnam, \
+                mock.patch("app.storage.os.chown") as m_chown:
+            m_getgrnam.return_value = mock.Mock(gr_gid=fake_gid)
+            _secure_data_path(self.path)
+        m_getgrnam.assert_called_once_with(_SERVICE_GROUP)
+        # -1 as the uid arg: never touches ownership, only the group -- see
+        # _secure_data_path's own docstring on why that's deliberate.
+        m_chown.assert_called_once_with(self.path, -1, fake_gid)
+
+    def test_missing_service_group_does_not_raise_and_chmod_still_applies(self):
+        # e.g. a dev checkout or this very test suite, where no system
+        # group named "my-booking" exists at all.
+        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError("no such group")):
+            try:
+                _secure_data_path(self.path)
+            except Exception as exc:
+                self.fail(f"_secure_data_path must swallow a missing group, raised {exc!r}")
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o640)
+
+    def test_chown_permission_error_does_not_raise(self):
+        # e.g. the calling process isn't root and isn't a member of the
+        # target group -- POSIX refuses the chgrp, but the write itself
+        # must still succeed.
+        with mock.patch("app.storage.grp.getgrnam") as m_getgrnam, \
+                mock.patch("app.storage.os.chown", side_effect=PermissionError("not allowed")):
+            m_getgrnam.return_value = mock.Mock(gr_gid=1)
+            try:
+                _secure_data_path(self.path)
+            except Exception as exc:
+                self.fail(f"_secure_data_path must swallow a chown PermissionError, raised {exc!r}")
+
+    def test_chmod_failure_does_not_raise(self):
+        with mock.patch("app.storage.os.chmod", side_effect=OSError("nope")), \
+                mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
+            try:
+                _secure_data_path(self.path)
+            except Exception as exc:
+                self.fail(f"_secure_data_path must swallow a chmod OSError, raised {exc!r}")
+
+
+class LockedCsvWritePermissionsTest(unittest.TestCase):
+    """End-to-end: an actual _LockedCsv write (the real path Store uses for
+    every CSV mutation) leaves the file group-readable (0640), not
+    owner-only (0600) -- and a data directory it has to create fresh gets
+    the execute bit too (0750), so traversal by a different group member
+    still works. See SecureDataPathTest above for the underlying helper's
+    own unit tests."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "registrations.csv"
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_written_file_is_group_readable(self):
+        with _LockedCsv(self.path, REG_FIELDS) as (rows, write):
+            write([])
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o640)
+
+    def test_newly_created_data_directory_is_group_traversable(self):
+        nested = Path(self._tmp.name) / "fresh_subdir" / "registrations.csv"
+        with _LockedCsv(nested, REG_FIELDS) as (rows, write):
+            write([])
+        self.assertEqual(stat.S_IMODE(os.stat(nested.parent).st_mode), 0o750)
+
+    def test_pre_existing_directory_mode_is_left_untouched(self):
+        # The directory already existed before this _LockedCsv call (e.g.
+        # an admin deliberately set something different on it already) --
+        # only FRESHLY created directories get the 0750 default applied.
+        os.chmod(self._tmp.name, 0o701)
+        with _LockedCsv(self.path, REG_FIELDS) as (rows, write):
+            write([])
+        self.assertEqual(stat.S_IMODE(os.stat(self._tmp.name).st_mode), 0o701)
 
 
 if __name__ == "__main__":
