@@ -74,6 +74,27 @@ class GenerateZshCompletionStructureTest(unittest.TestCase):
             i += 1
         self.assertEqual(violations, [], f"non-continued lines mid-block: {violations}")
 
+    def test_multi_alias_option_specs_have_unquoted_brace_expansion(self):
+        # A REAL bug, caught on the actual VPS (not by this test suite,
+        # since there's no zsh here to execute the output against): an
+        # earlier version emitted '(-D --debug){-D,--debug}[desc]' -- the
+        # {a,b} alias-expansion swallowed into the SAME single-quoted
+        # string as the rest of the spec. Quotes suppress shell brace
+        # expansion, so zsh's own _arguments received that whole thing as
+        # ONE literal, unparseable argument ("invalid argument: (-D
+        # --debug){-D,--debug}[...]"). The fix keeps {a,b} OUTSIDE any
+        # quotes -- '(-D --debug)'{-D,--debug}'[desc]' -- three
+        # concatenated shell words, the middle one a bare brace
+        # expansion, exactly matching e.g. git's/brew's own zsh
+        # completion functions' idiom for "these aliases share one
+        # description".
+        bad = re.search(r"'\([^']*\)\{", self.script)
+        self.assertIsNone(bad, f"brace-expansion group still inside quotes: {bad.group(0) if bad else ''!r}")
+        # And confirm the CORRECT shape actually appears at least once
+        # (i.e. this isn't just trivially passing because no multi-alias
+        # options exist at all -- --debug/-D is always present).
+        self.assertRegex(self.script, r"'\([^']*\)'\{[^}]*\}'\[")
+
     def test_no_unescaped_colon_in_positional_message_field(self):
         # For every 'N:message:action' positional spec, the message field
         # (between the first and second colon) must have no BARE colons

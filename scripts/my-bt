@@ -1419,7 +1419,23 @@ def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
         desc = _zsh_escape(_expand_help_text(parser, action))
         value = ":course:_mb_course_shortnames" if action.dest == "course" else ""
         if len(opts) > 1:
-            specs.append(f"'({' '.join(opts)}){{{','.join(opts)}}}[{desc}]{value}'")
+            # zsh's own idiom for "these aliases are mutually exclusive
+            # with each other, both get this same description" is
+            # '(-D --debug)'{-D,--debug}'[desc]' -- THREE separate shell
+            # words concatenated with no whitespace between them, where
+            # the MIDDLE one is a bare (unquoted) brace-expansion, not
+            # text sitting inside the surrounding quotes. Brace expansion
+            # only happens on UNQUOTED text -- wrapping '{-D,--debug}' in
+            # the same quotes as the rest (an earlier version of this
+            # function did exactly that) leaves it as inert literal
+            # characters instead, which _arguments then can't parse at
+            # all ("invalid argument: (-D --debug){-D,--debug}[...]" --
+            # a real failure the operator hit on the actual VPS, not caught here
+            # since there's no zsh in this sandbox to actually execute
+            # the generated script against).
+            group = f"({' '.join(opts)})"
+            brace = "{" + ",".join(opts) + "}"
+            specs.append(f"'{group}'{brace}'[{desc}]{value}'")
         else:
             specs.append(f"'{opts[0]}[{desc}]{value}'")
     return specs
