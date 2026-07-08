@@ -85,6 +85,11 @@ server {
     #     real deployment once -- both /my's and /admin's confirm-dialogs
     #     went dead with no visible error except a browser-console CSP
     #     violation).
+    #   - 2026-07-08: the sortable/filterable-table script's hash changed
+    #     again (still the same one shared by /my and /admin) -- added the
+    #     data-default-sort="asc"|"desc" on-load behavior (the operator: "by
+    #     default sort ... by Date ... so people see the sort arrow"). Body
+    #     changed, so the hash did too; regenerated and swapped in below.
     #   - style-src needs 'unsafe-inline': index.html's script injects new
     #     elements with inline style="..." at runtime (innerHTML), which a
     #     hash/nonce can't cover since the content doesn't exist until the
@@ -94,7 +99,7 @@ server {
     #   - object-src/base-uri/form-action locked to 'none'/'self' as standard
     #     defense-in-depth; nothing in this app needs plugins, a <base> tag,
     #     or cross-origin form submission.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-iNxXCkADirc/LTsyCSksXSFvFhKdlQdoS1GRTrLapLg=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
 
     # HARDENING: modern security headers, same low-risk defense-in-depth as
     # the four above. This app never needs camera/mic/geolocation/payment

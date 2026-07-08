@@ -343,10 +343,46 @@ class PartyAdminOverviewTest(GuestBookingTestBase):
         _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
         self.assertIn("+1 guest", body)
 
+    def test_leader_row_shows_host_prefix(self):
+        # 2026-07-08, the operator: "+1 guest" alone doesn't say WHOSE guest --
+        # only readable as "the host of this party" by inference. Spell
+        # out "Host" the same way "guest of <name>" already does for the
+        # other side of the same party.
+        self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
+        _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
+        self.assertIn("Host (+1 guest)", body)
+
+    def test_leader_row_pluralizes_multiple_guests(self):
+        self._book("leader@example.org", "Leader", [
+            ("guest1@example.org", "Guest One"), ("guest2@example.org", "Guest Two"),
+        ])
+        _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
+        self.assertIn("Host (+2 guests)", body)
+
     def test_guest_row_shows_guest_of_leader(self):
         self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
         _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
         self.assertIn("guest of Leader", body)
+
+    def test_guest_row_falls_back_to_email_when_leader_name_is_placeholder(self):
+        # 2026-07-08, the operator (screenshot): "guest of Guest" reads as a bug,
+        # even though it was technically correct -- the leader's own
+        # `.name` field literally held the "Guest" placeholder (someone
+        # left the name field as-is, or it was never resolved). Falling
+        # back to the leader's email whenever their name equals the
+        # literal placeholder avoids the confusing "of Guest" phrasing
+        # without changing the placeholder itself.
+        self._book("leader@example.org", "Guest", [("guest@example.org", "Guest One")])
+        _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
+        self.assertIn("guest of leader@example.org", body)
+        self.assertNotIn("guest of Guest", body)
+
+    def test_party_column_header_is_labeled_guests(self):
+        # 2026-07-08, the operator: "Party" was unclear -- renamed to "Guests".
+        self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
+        _status, _headers, body = self.app.admin_overview("GET", self._admin_environ())
+        self.assertIn('<th>Guests<span class="sort-indicator"></span></th>', body)
+        self.assertNotIn(">Party<", body)
 
     def test_solo_booking_has_blank_party_cell(self):
         user = self.store.upsert_user_for_booking("solo@example.org", "Solo")

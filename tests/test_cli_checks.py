@@ -1301,6 +1301,85 @@ class CheckDataDirGitTest(unittest.TestCase):
         self.assertEqual(checks[0][1], "ok")
 
 
+class CheckDataDirOwnershipTest(unittest.TestCase):
+    """2026-07-08 incident: scripts/migrate-simplymeet-history.py --commit
+    run from a root shell left users.csv/registrations.csv root-owned +
+    mode 0600, unreadable by the my-booking service -> live 500. This
+    check exists to catch that as a `fail` before it becomes a live
+    incident again -- see cli_checks.check_data_dir_ownership's own
+    docstring for the full story."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = Path(self._tmp.name)
+
+    def test_no_csvs_yet_is_empty(self):
+        # Nothing written yet -- nothing to own, not a failure.
+        checks = cli_checks.check_data_dir_ownership(self.data_dir)
+        self.assertEqual(checks, [])
+
+    def test_my_booking_user_missing_warns(self):
+        (self.data_dir / "users.csv").write_text("id,name\n")
+        with patch("pwd.getpwnam", side_effect=KeyError("no such user")):
+            checks = cli_checks.check_data_dir_ownership(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("doesn't exist yet", detail)
+
+    def test_correct_owner_is_ok(self):
+        p = self.data_dir / "users.csv"
+        p.write_text("id,name\n")
+        my_uid = os.stat(p).st_uid  # the test process's own uid, as a stand-in
+        with patch("pwd.getpwnam", return_value=type("P", (), {"pw_uid": my_uid})()):
+            checks = cli_checks.check_data_dir_ownership(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0][1], "ok")
+
+    def test_wrong_owner_fails_with_chown_command(self):
+        p = self.data_dir / "users.csv"
+        p.write_text("id,name\n")
+        real_uid = os.stat(p).st_uid
+        wrong_uid = real_uid + 1
+        with patch("pwd.getpwnam", return_value=type("P", (), {"pw_uid": wrong_uid})()), \
+             patch("pwd.getpwuid", return_value=type("P", (), {"pw_name": "root"})()):
+            checks = cli_checks.check_data_dir_ownership(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "fail")
+        self.assertIn("owned by root", detail)
+        self.assertIn(f"sudo chown my-booking:my-booking {p}", detail)
+
+    def test_multiple_mismatched_files_all_named_in_fix_command(self):
+        p1 = self.data_dir / "users.csv"
+        p2 = self.data_dir / "registrations.csv"
+        p1.write_text("id,name\n")
+        p2.write_text("id,course\n")
+        real_uid = os.stat(p1).st_uid
+        wrong_uid = real_uid + 1
+        with patch("pwd.getpwnam", return_value=type("P", (), {"pw_uid": wrong_uid})()), \
+             patch("pwd.getpwuid", return_value=type("P", (), {"pw_name": "root"})()):
+            checks = cli_checks.check_data_dir_ownership(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        _, level, detail = checks[0]
+        self.assertEqual(level, "fail")
+        self.assertIn(str(p1), detail)
+        self.assertIn(str(p2), detail)
+
+    def test_owner_uid_with_no_pwd_entry_shown_as_uid(self):
+        p = self.data_dir / "users.csv"
+        p.write_text("id,name\n")
+        real_uid = os.stat(p).st_uid
+        wrong_uid = real_uid + 1
+        with patch("pwd.getpwnam", return_value=type("P", (), {"pw_uid": wrong_uid})()), \
+             patch("pwd.getpwuid", side_effect=KeyError("no such uid")):
+            checks = cli_checks.check_data_dir_ownership(self.data_dir)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "fail")
+        self.assertIn(f"owned by uid {real_uid}", detail)
+
+
 class CheckMaintenanceModeTest(unittest.TestCase):
     """Reported as "warn" (not silently "ok"/nothing) whenever maintenance
     mode is ON -- deliberate, not a misconfiguration, but still something

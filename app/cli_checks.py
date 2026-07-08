@@ -113,6 +113,74 @@ def check_data_dir_git(data_dir: str | Path) -> list[Check]:
     return [(f"data dir git snapshot ({data_dir})", "ok", "git repo present -- hourly snapshot timer keeps it committed")]
 
 
+def check_data_dir_ownership(data_dir: str | Path) -> list[Check]:
+    """Whether every `*.csv` directly in `data_dir` is actually owned by
+    the `my-booking` system user -- the one every systemd unit
+    (my-booking.service, my-booking-git-snapshot.service,
+    my-booking-retention.service, my-booking-watchdog.service) runs as.
+
+    2026-07-08, real production incident: `scripts/migrate-simplymeet-
+    history.py --commit` was run from a root shell against the real data
+    dir. Every CSV it wrote went through Store._atomic_write(), which
+    always `os.chmod(tmp_path, 0o600)` before the atomic rename -- fine
+    normally, since the file is always OWNED by whoever wrote it, and
+    that's always been the my-booking service itself. Run as root
+    instead, the freshly-written users.csv/registrations.csv ended up
+    root-owned + mode 0600, i.e. readable by literally nobody except
+    root -- the my-booking service itself got PermissionError on its very
+    next read, a real GET /admin 500 (see the traceback: storage.py's
+    _read_csv_plain -> PermissionError: [Errno 13] Permission denied).
+    Fixed live with `chown my-booking: *.csv`; this check exists so the
+    NEXT time someone (a script, a `sudo -u` slip, anyone) writes to this
+    directory as the wrong user, `my-bt status` reports it as a `fail`
+    BEFORE it turns into a live 500 someone has to journalctl their way
+    back to.
+
+    Deliberately checks real file ownership via os.stat() rather than
+    os.access() (what the plain "data dir" check in `my-bt status` uses)
+    -- os.access() answers "can the CURRENT process touch this," which is
+    always yes for root regardless of who actually owns the file, so
+    running `my-bt status` itself as root (a completely normal thing to
+    do on this project, see README.md's "Installing" steps) would have
+    silently reported "ok" the whole time this exact incident was live.
+    An empty data dir (nothing written yet) or a dev checkout with no
+    'my-booking' system user at all are not failures -- see below."""
+    import pwd
+
+    data_dir = Path(data_dir)
+    csv_files = sorted(data_dir.glob("*.csv"))
+    if not csv_files:
+        return []  # nothing written yet -- nothing to own
+    try:
+        expected_uid = pwd.getpwnam("my-booking").pw_uid
+    except KeyError:
+        return [("data dir file ownership", "warn",
+                  "'my-booking' system user doesn't exist yet -- install the package first")]
+    mismatched = []
+    for f in csv_files:
+        try:
+            owner_uid = f.stat().st_uid
+        except OSError:
+            continue
+        if owner_uid != expected_uid:
+            try:
+                owner_name = pwd.getpwuid(owner_uid).pw_name
+            except KeyError:
+                owner_name = f"uid {owner_uid}"
+            mismatched.append((f, owner_name))
+    if mismatched:
+        fix = " ".join(str(f) for f, _ in mismatched)
+        detail = ", ".join(f"{f.name} is owned by {owner}" for f, owner in mismatched)
+        return [(
+            "data dir file ownership", "fail",
+            f"{detail} -- the my-booking service (runs as user 'my-booking') can't read/write "
+            f"{'this file' if len(mismatched) == 1 else 'these files'}. Usually caused by something "
+            "writing to the data dir as root or another user (e.g. scripts/migrate-simplymeet-"
+            f"history.py run from a root shell). Fix: sudo chown my-booking:my-booking {fix}"
+        )]
+    return [("data dir file ownership", "ok", f"all {len(csv_files)} CSV file(s) owned by my-booking")]
+
+
 def check_caldav_calendars(raw: dict) -> list[Check]:
     """Live PROPFIND against the configured CalDAV server, verifying
     `[calendar].booking_calendar` and every `[calendar].conflict_calendars`

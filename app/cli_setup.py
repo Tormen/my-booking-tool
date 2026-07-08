@@ -150,6 +150,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "watchdog_nginx_log_config": cli_checks.check_watchdog_nginx_access_log_config(raw),
         "watchdog_nginx_access": cli_checks.check_watchdog_nginx_access(raw),
         "data_dir_git": cli_checks.check_data_dir_git(data_dir),
+        "data_dir_ownership": cli_checks.check_data_dir_ownership(data_dir),
         "maintenance": cli_checks.check_maintenance_mode(data_dir),
     }
 
@@ -259,8 +260,9 @@ def print_report(
     else:
         print_fn("   [SKIP] nginx not detected for this vhost -- not checked")
 
-    print_fn("\n11. Data dir git snapshot (hourly auto-commit safety net):")
+    print_fn("\n11. Data dir git snapshot (hourly auto-commit safety net) and file ownership:")
     show(report["data_dir_git"])
+    show(report["data_dir_ownership"])
 
     print_fn("\n12. Maintenance mode (`my-bt maintenance on/off/status`):")
     show(report["maintenance"])
@@ -791,6 +793,32 @@ def interactive_setup(
                 print_fn(f"[ok] initialized git repo at {data_dir_path} ({result.detail})")
             except OSError as exc:
                 print_fn(f"[fail] could not initialize git repo at {data_dir_path}: {exc}")
+
+    # 11b. Data dir file ownership -- see cli_checks.check_data_dir_ownership's
+    # own docstring for the real 2026-07-08 incident this closes (a root-run
+    # migration script left users.csv/registrations.csv root-owned, mode
+    # 0600, so the my-booking service got PermissionError on its very next
+    # read -- a live GET /admin 500). UNLIKE the git-snapshot step just
+    # above, this DOES gate on is_root(): chown-ing a file to a DIFFERENT
+    # system user (my-booking) is a genuinely privileged operation, not
+    # something a mere my-booking-group member can do -- no point prompting
+    # for something that would just fail.
+    print_fn("\n-- 11b. Data dir file ownership --")
+    ownership_checks = cli_checks.check_data_dir_ownership(data_dir)
+    for label, level, detail in ownership_checks:
+        if level == "ok":
+            print_fn(f"[ok] {label}: {detail}")
+            continue
+        print_fn(f"{label}: {detail}")
+        if level != "fail":
+            continue  # "warn" here means the my-booking user doesn't exist yet -- nothing to chown
+        if not is_root():
+            print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+            continue
+        if prompt("Fix ownership now (chown my-booking:my-booking)?"):
+            mismatched = sorted(Path(data_dir).glob("*.csv"))
+            run(["chown", "my-booking:my-booking", *[str(p) for p in mismatched]])
+            print_fn("[ok] ownership fixed")
 
     # 12. Maintenance mode -- informational only, same reasoning as CalDAV
     # above: there's no safe "fix" to offer here (it's a deliberate toggle,

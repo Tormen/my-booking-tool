@@ -525,7 +525,13 @@ def cmd_status(args) -> None:
     any pending settings.toml.rpmnew / privacy.html.tmpl.rpmnew merge and
     a package-wide `rpm -V` integrity check), secrets (existence,
     permissions, and -- for admin_password_hash / erasure_pepper --
-    whether the content looks right), the data dir, the configured log
+    whether the content looks right), the data dir (writable, git-snapshot
+    protected, AND -- 2026-07-08, real incident: see
+    cli_checks.check_data_dir_ownership's own docstring -- every *.csv in
+    it actually OWNED by the my-booking service user, checked via
+    os.stat() rather than os.access() specifically so running `status`
+    itself as root, a completely normal thing to do here, can't mask a
+    real ownership problem), the configured log
     file (if any), my-booking group membership, systemd units, whether
     settings.toml has been edited since the service last (re)started
     (it's only read once at startup -- an edit made after that isn't
@@ -581,6 +587,7 @@ def cmd_status(args) -> None:
     else:
         checks.append((f"data dir ({data_dir})", "ok", "exists and writable"))
     checks.extend(cli_checks.check_data_dir_git(data_dir))
+    checks.extend(cli_checks.check_data_dir_ownership(data_dir))
 
     # -- configured log file, if any ---------------------------------------------
     log_file = app_config.peek_log_file(args.settings) if raw else None

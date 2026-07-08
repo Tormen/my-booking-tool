@@ -2204,6 +2204,26 @@ class BookingFlowTest(unittest.TestCase):
         # getElementById() call.
         self.assertIn("document.currentScript.previousElementSibling", body)
 
+    def test_my_upcoming_table_date_column_defaults_to_ascending_sort(self):
+        # 2026-07-08, the operator (screenshot of /admin?past=1): "Please by
+        # default sort ... by Date ... Like this people see also the sort
+        # arrow and can understand that this page is sortable." Data was
+        # already server-side sorted; only the visual indicator was
+        # missing until an actual click. Upcoming is rendered ascending.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn('<th data-default-sort="asc">Date<span class="sort-indicator"></span></th>', body)
+
+    def test_my_past_table_date_column_defaults_to_descending_sort(self):
+        # Same 2026-07-08 request as the ascending/upcoming test above --
+        # Past is rendered most-recent-first (descending), so its default
+        # sort indicator must match, not just copy Upcoming's "asc".
+        user, environ = self._login_as_guest("regular@example.org")
+        self._import_past(user.user_id, "2026-01-01", "past-1")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn('<th data-default-sort="desc">Date<span class="sort-indicator"></span></th>', body)
+
     def test_my_bookings_cancel_button_enabled_for_waitlisted_row_too(self):
         # 2026-07-05 fix: the Cancel button used to be disabled for
         # anything but STATUS_CONFIRMED, which made it impossible to leave
@@ -2482,6 +2502,15 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<input type="search" id="admin-overview-table-filter"', body)
         # See the same 2026-07-10 comment in the /my equivalent test above.
         self.assertIn("document.currentScript.previousElementSibling", body)
+
+    def test_admin_overview_date_column_defaults_to_ascending_sort(self):
+        # 2026-07-08, the operator: same default-sort-indicator request as /my's.
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('<th data-default-sort="asc">Date<span class="sort-indicator"></span></th>', body)
 
     def test_sort_filter_script_is_byte_identical_on_my_and_admin_pages(self):
         # 2026-07-10: the whole point of no longer interpolating table_id

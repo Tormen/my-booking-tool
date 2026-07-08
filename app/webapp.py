@@ -528,28 +528,30 @@ _SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
   var tbody = table.tBodies[0];
   var headerCells = Array.prototype.slice.call(table.tHead.rows[0].cells);
   var rows = Array.prototype.slice.call(tbody.rows);
+  function applySort(th, idx, dir) {
+    headerCells.forEach(function(h) {
+      h.dataset.dir = "";
+      var i = h.querySelector(".sort-indicator");
+      if (i) i.textContent = "";
+    });
+    th.dataset.dir = dir;
+    var indicator = th.querySelector(".sort-indicator");
+    if (indicator) indicator.textContent = dir === "asc" ? " ▲" : " ▼";
+    var sorted = rows.slice().sort(function(a, b) {
+      var av = a.cells[idx] ? a.cells[idx].textContent.trim() : "";
+      var bv = b.cells[idx] ? b.cells[idx].textContent.trim() : "";
+      var an = parseFloat(av), bn = parseFloat(bv);
+      var bothNumeric = av !== "" && bv !== "" && !isNaN(an) && !isNaN(bn)
+        && /^-?[0-9.]+$/.test(av) && /^-?[0-9.]+$/.test(bv);
+      var cmp = bothNumeric ? (an - bn) : av.localeCompare(bv, undefined, {sensitivity: "base"});
+      return dir === "asc" ? cmp : -cmp;
+    });
+    sorted.forEach(function(r) { tbody.appendChild(r); });
+  }
   headerCells.forEach(function(th, idx) {
     th.style.cursor = "pointer";
-    var indicator = th.querySelector(".sort-indicator");
     th.addEventListener("click", function() {
-      var dir = th.dataset.dir === "asc" ? "desc" : "asc";
-      headerCells.forEach(function(h) {
-        h.dataset.dir = "";
-        var i = h.querySelector(".sort-indicator");
-        if (i) i.textContent = "";
-      });
-      th.dataset.dir = dir;
-      if (indicator) indicator.textContent = dir === "asc" ? " ▲" : " ▼";
-      var sorted = rows.slice().sort(function(a, b) {
-        var av = a.cells[idx] ? a.cells[idx].textContent.trim() : "";
-        var bv = b.cells[idx] ? b.cells[idx].textContent.trim() : "";
-        var an = parseFloat(av), bn = parseFloat(bv);
-        var bothNumeric = av !== "" && bv !== "" && !isNaN(an) && !isNaN(bn)
-          && /^-?[0-9.]+$/.test(av) && /^-?[0-9.]+$/.test(bv);
-        var cmp = bothNumeric ? (an - bn) : av.localeCompare(bv, undefined, {sensitivity: "base"});
-        return dir === "asc" ? cmp : -cmp;
-      });
-      sorted.forEach(function(r) { tbody.appendChild(r); });
+      applySort(th, idx, th.dataset.dir === "asc" ? "desc" : "asc");
     });
   });
   var toolsDiv = table.previousElementSibling;
@@ -562,6 +564,24 @@ _SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
       });
     });
   }
+  // 2026-07-08, the operator (screenshot of /admin?past=1): "Please by default
+  // sort the view ... by Date ... Like this people see also the sort
+  // arrow and can understand that this page is sortable" -- every table
+  // using this script was already RENDERED in some sensible server-side
+  // order (see admin_overview()/my()'s own sort calls), but the arrow
+  // that shows WHICH column that is, and that clicking a header does
+  // anything at all, only ever appeared after an actual click. A
+  // `data-default-sort="asc"|"desc"` attribute on the relevant <th> (set
+  // server-side per table -- see admin_overview()/_table()) now runs the
+  // exact same applySort() on load, so the indicator (and, harmlessly,
+  // the sort itself -- a no-op re-sort matching what the server already
+  // produced) appears immediately without a click. Still a plain data
+  // attribute read at runtime, not a script-text change per table, so
+  // this stays the one script-src hash every table shares.
+  headerCells.forEach(function(th, idx) {
+    var dir = th.getAttribute("data-default-sort");
+    if (dir === "asc" || dir === "desc") applySort(th, idx, dir);
+  });
 })();
 </script>"""
 
@@ -2032,7 +2052,7 @@ class App:
                     f"<td>{actions}</td></tr>"
                 )
 
-            def _table(table_id: str, regs_for_table: list) -> str:
+            def _table(table_id: str, regs_for_table: list, default_sort_dir: str = "asc") -> str:
                 if not regs_for_table:
                     return ""
                 rows = "".join(_row(r) for r in regs_for_table)
@@ -2043,7 +2063,7 @@ class App:
                 <table id="{table_id}" border="1" cellpadding="6">
                   <thead><tr>
                     <th>Course<span class="sort-indicator"></span></th>
-                    <th>Date<span class="sort-indicator"></span></th>
+                    <th data-default-sort="{default_sort_dir}">Date<span class="sort-indicator"></span></th>
                     <th>Time<span class="sort-indicator"></span></th>
                     <th>Location<span class="sort-indicator"></span></th>
                     <th>Status<span class="sort-indicator"></span></th>
@@ -2054,7 +2074,7 @@ class App:
 
             upcoming_id, past_id = "my-upcoming-table", "my-past-table"
             upcoming_html = _table(upcoming_id, upcoming) or "<p>You have no upcoming bookings.</p>"
-            past_html = _table(past_id, past) or "<p>You have no past bookings.</p>"
+            past_html = _table(past_id, past, default_sort_dir="desc") or "<p>You have no past bookings.</p>"
             body = f"""
             <div class="submit-row">
               <a href="/courses"><button type="button">New booking</button></a>
@@ -3258,7 +3278,25 @@ class App:
             party_cell = ""
             if r.invited_by_user_id:
                 leader_user = users_by_id.get(r.invited_by_user_id)
-                leader_label = leader_user.name if leader_user else "(unknown)"
+                # 2026-07-08, the operator (screenshot of /admin?past=1, a row
+                # imported from SimplyMeet.me history): "Is guest of Guest
+                # correct??" -- technically yes (the leader's own `.name`
+                # really is the literal placeholder "Guest" -- see
+                # upsert_user_for_booking()/_book_with_guests()/
+                # migrate_simplymeet.run_migration()'s shared fallback for
+                # "no real name known"), but showing the placeholder NAME
+                # right after the WORD "guest" reads as a doubled, nonsense
+                # "guest of Guest" rather than an actual identifier. Falls
+                # back to the leader's email instead whenever their name
+                # is that exact placeholder -- always present, always
+                # actually identifies who the leader is, unlike a name
+                # that was never real to begin with.
+                if leader_user is None:
+                    leader_label = "(unknown)"
+                elif leader_user.name and leader_user.name != "Guest":
+                    leader_label = leader_user.name
+                else:
+                    leader_label = leader_user.email
                 party_cell = f"guest of {leader_label}"
             elif r.party_id:
                 other_members = {
@@ -3266,7 +3304,14 @@ class App:
                 }
                 if other_members:
                     n = len(other_members)
-                    party_cell = f"+{n} guest{'s' if n != 1 else ''}"
+                    # 2026-07-08, the operator: "+ 1 guest becomes Host (+ 1
+                    # guest)" -- same round as the "guest of Guest" fix
+                    # above, same underlying confusion: a bare "+1 guest"
+                    # doesn't say WHOSE guest, only readable as "the host
+                    # of this party" by inference. Spelling out "Host"
+                    # makes this row's role explicit the same way "guest
+                    # of <name>" already does for the other side.
+                    party_cell = f"Host (+{n} guest{'s' if n != 1 else ''})"
             rows.append(
                 f"<tr><td>{esc(r.status)}</td><td>{esc(r.course_shortname)}</td>"
                 f"<td>{esc(r.occurrence_date)}</td>{name_cell}{email_cell}"
@@ -3284,12 +3329,12 @@ class App:
         <thead><tr>
           <th>Status<span class="sort-indicator"></span></th>
           <th>Course<span class="sort-indicator"></span></th>
-          <th>Date<span class="sort-indicator"></span></th>
+          <th data-default-sort="asc">Date<span class="sort-indicator"></span></th>
           <th>Name<span class="sort-indicator"></span></th>
           <th>Email<span class="sort-indicator"></span></th>
           <th>Registered<span class="sort-indicator"></span></th>
           <th>Times booked<span class="sort-indicator"></span></th>
-          <th>Party<span class="sort-indicator"></span></th>
+          <th>Guests<span class="sort-indicator"></span></th>
           <th>Actions<span class="sort-indicator"></span></th>
         </tr></thead>
         <tbody>{''.join(rows)}</tbody></table>""" + _SORTABLE_FILTERABLE_TABLE_SCRIPT + _DIALOG_WIRING_SCRIPT
