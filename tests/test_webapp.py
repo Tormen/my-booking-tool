@@ -2,6 +2,7 @@ import io
 import json
 import re
 import tempfile
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from http import cookies
@@ -1217,6 +1218,166 @@ class MySessionStatusTest(unittest.TestCase):
     def test_content_type_is_json(self):
         _status, headers, _body = self.app.my_session_status("GET", {})
         self.assertIn(("Content-Type", "application/json"), headers)
+
+
+class RecordPageViewTest(unittest.TestCase):
+    """_record_page_view (2026-07-13) -- called from App.__call__ on every
+    request, before routing. See its own docstring for why "since when
+    connected" needs no new field (expires - SESSION_TTL_SECONDS)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def _new_tracked_session(self, data):
+        sid = webapp._new_session(data)
+        self.addCleanup(webapp.SESSIONS.pop, sid, None)
+        return sid
+
+    def test_anonymous_request_is_a_no_op(self):
+        webapp._record_page_view({}, "/courses")  # must not raise
+
+    def test_updates_last_page_and_last_seen_for_a_real_session(self):
+        sid = self._new_tracked_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={sid}"}
+        before = time.time()
+        webapp._record_page_view(environ, "/admin")
+        self.assertEqual(webapp.SESSIONS[sid]["last_page"], "/admin")
+        self.assertGreaterEqual(webapp.SESSIONS[sid]["last_seen"], before)
+
+    def test_expired_session_cookie_is_a_no_op(self):
+        sid = self._new_tracked_session({"kind": "admin"})
+        webapp.SESSIONS[sid]["expires"] = time.time() - 1
+        environ = {"HTTP_COOKIE": f"session={sid}"}
+        webapp._record_page_view(environ, "/admin")
+        # _get_session() already purges an expired entry outright -- so
+        # there's nothing left to have set last_page on.
+        self.assertNotIn(sid, webapp.SESSIONS)
+
+    def test_second_call_overwrites_the_first(self):
+        sid = self._new_tracked_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={sid}"}
+        webapp._record_page_view(environ, "/admin")
+        webapp._record_page_view(environ, "/admin/cancel/xyz")
+        self.assertEqual(webapp.SESSIONS[sid]["last_page"], "/admin/cancel/xyz")
+
+
+class InternalStatusEndpointTest(unittest.TestCase):
+    """GET /internal/status (2026-07-13) -- the same-process, localhost-only
+    JSON diagnostic endpoint `my-bt status` queries directly. See
+    internal_status()'s own docstring for the full trust model."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings()
+        self.app = App(self.settings, self.store)
+
+    def _new_tracked_session(self, data):
+        sid = webapp._new_session(data)
+        self.addCleanup(webapp.SESSIONS.pop, sid, None)
+        return sid
+
+    def test_get_only(self):
+        status, _headers, _body = self.app.internal_status("POST", {})
+        self.assertEqual(status, "405 Method Not Allowed")
+
+    def test_rejects_requests_that_arrived_via_nginx(self):
+        # Anything carrying X-Forwarded-For arrived through the reverse
+        # proxy, not a direct localhost connection from my-bt -- see
+        # _client_ip's own docstring for why nginx always sets this on
+        # every request it forwards.
+        status, _headers, _body = self.app.internal_status("GET", {"HTTP_X_FORWARDED_FOR": "1.2.3.4"})
+        self.assertEqual(status, "403 Forbidden")
+
+    def test_content_type_is_json(self):
+        _status, headers, _body = self.app.internal_status("GET", {})
+        self.assertIn(("Content-Type", "application/json"), headers)
+
+    def test_reports_maintenance_off_by_default(self):
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        self.assertFalse(payload["maintenance"]["enabled"])
+
+    def test_reports_maintenance_on_with_message(self):
+        maintenance.enable(self.store.data_dir, message="back soon")
+        self.addCleanup(maintenance.disable, self.store.data_dir)
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        self.assertTrue(payload["maintenance"]["enabled"])
+        self.assertEqual(payload["maintenance"]["message"], "back soon")
+
+    def test_lists_guest_session_by_email(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        matches = [s for s in payload["sessions"] if s["who"] == "regular@example.org"]
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0]["kind"], "guest")
+
+    def test_admin_session_shows_as_admin_not_a_user_id(self):
+        self._new_tracked_session({"kind": "admin"})
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        self.assertTrue(any(s["who"] == "admin" and s["kind"] == "admin" for s in payload["sessions"]))
+
+    def test_expired_session_excluded(self):
+        # Other tests in this same process leave their own (uncleaned-up)
+        # sessions in the module-level SESSIONS dict, admin ones included
+        # -- so this identifies its OWN session by a unique guest email
+        # rather than asserting the whole list is empty.
+        user = self.store.upsert_user_for_booking("expired-session@example.org", "Expired")
+        sid = self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        webapp.SESSIONS[sid]["expires"] = time.time() - 1
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        self.assertFalse(any(s["who"] == "expired-session@example.org" for s in payload["sessions"]))
+
+    def test_last_page_and_last_seen_reflect_record_page_view(self):
+        # Uses a guest session (unique email) rather than "admin" -- an
+        # admin session has no unique identifier in the payload, and other
+        # tests' own (uncleaned-up) admin sessions can otherwise be picked
+        # up by mistake here.
+        user = self.store.upsert_user_for_booking("last-page@example.org", "LastPage")
+        sid = self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        environ = {"HTTP_COOKIE": f"session={sid}"}
+        webapp._record_page_view(environ, "/my")
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        row = next(s for s in payload["sessions"] if s["who"] == "last-page@example.org")
+        self.assertEqual(row["last_page"], "/my")
+        self.assertIsNotNone(row["last_seen"])
+
+    def test_never_viewed_a_page_yet_shows_none(self):
+        user = self.store.upsert_user_for_booking("never-viewed@example.org", "NeverViewed")
+        self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        row = next(s for s in payload["sessions"] if s["who"] == "never-viewed@example.org")
+        self.assertIsNone(row["last_page"])
+        self.assertIsNone(row["last_seen"])
+
+    def test_connected_since_is_session_creation_time(self):
+        before = time.time()
+        user = self.store.upsert_user_for_booking("connected-since@example.org", "ConnectedSince")
+        self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        row = next(s for s in payload["sessions"] if s["who"] == "connected-since@example.org")
+        connected_since = datetime.fromisoformat(row["connected_since"]).timestamp()
+        # Should be "now" (creation time), NOT "now + SESSION_TTL_SECONDS"
+        # (the expiry) -- comfortably within a few seconds either way.
+        self.assertAlmostEqual(connected_since, before, delta=5)
+
+    def test_guest_with_unresolvable_user_id_shows_placeholder_not_a_crash(self):
+        self._new_tracked_session({"kind": "guest", "user_id": "totally-unresolvable-user-id"})
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        row = next(s for s in payload["sessions"] if "totally-unresolvable-user-id" in s["who"])
+        self.assertIn("totally-unresolvable-user-id", row["who"])
 
 
 class LateBookingQuorumTest(unittest.TestCase):
@@ -2518,7 +2679,9 @@ class BookingFlowTest(unittest.TestCase):
         # 2026-07-08, the operator (screenshot of raw "confirmed"/"canceled_by_guest"
         # in the Status column): "I prefer Host and Guest and then also
         # 'Confirmed' for the status" -- same round as the Guests column's
-        # own Host/Guest capitalization. See webapp._status_label().
+        # own Host/Guest capitalization. See storage.status_label() (moved
+        # there 2026-07-13 from webapp._status_label so app/cli_list.py
+        # can share it too).
         self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         admin_sid = webapp._new_session({"kind": "admin"})

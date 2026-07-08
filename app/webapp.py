@@ -76,6 +76,25 @@ referenced by a random cookie -- nothing sensitive is stored client-side.
 This is fine for a single small process; if you ever run >1 worker, move
 SESSIONS to something shared (e.g. sqlite) -- flagged here so it isn't a
 silent surprise later.
+
+GET /internal/status         same-process JSON dump of SESSIONS (who's
+                              logged in, since when, last page+timestamp)
+                              plus the current maintenance-mode state, for
+                              `my-bt status` to query directly over HTTP on
+                              127.0.0.1 -- see internal_status() below for
+                              why this doesn't need its own auth system.
+2026-07-13, the operator: "I would prefer a web endpoint that queries on
+localhost the running server" over persisting session state to disk --
+this app already only ever listens on 127.0.0.1 (see app/serve.py), so
+`my-bt` (always run on the same host) can hit that same loopback port
+directly, no new persistence layer needed. The endpoint rejects any
+request carrying X-Forwarded-For, since that header is only ever set by
+nginx (see _client_ip's own docstring) -- a request my-bt sends by
+connecting straight to 127.0.0.1:8811 never has it, but anything arriving
+via the public reverse proxy always would, so as long as nginx's own
+config never proxies this path (it doesn't, and shouldn't), this is
+unreachable from outside this host at all, with that header check as a
+second layer of defense.
 """
 from __future__ import annotations
 
@@ -84,12 +103,12 @@ import logging
 import re
 import socket
 import time
-from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from http import cookies
 from urllib.parse import parse_qs, urlparse
 
 from . import calendar_sync
+from . import cli_list
 from . import maintenance
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import cancel_and_promote
@@ -108,33 +127,16 @@ from .security import (
 from .slots import build_occurrences
 from .storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION,
-    STATUS_WAITLISTED, Registration, Store, User, format_display_timestamp, now_iso,
+    STATUS_WAITLISTED, Registration, Store, User, format_display_timestamp, now_iso, status_label,
 )
 from .templates import esc, page
+from .version import PACKAGE_VERSION
 
 log = logging.getLogger("my_booking.webapp")
 
-# 2026-07-08, the operator (screenshot of /admin?past=1's Status column reading
-# raw "confirmed"/"canceled_by_guest" etc.): "I prefer Host and Guest and
-# then also 'Confirmed' for the status" -- same round as the Guests
-# column's own Host/Guest capitalization. STATUS_* constants (app/storage.py)
-# are lowercase/underscored internal identifiers used throughout
-# storage/CSV/comparisons -- this is a display-only label map, the
-# underlying r.status values are never touched. Falls back to a generic
-# "Title Case, underscores->spaces" humanization for anything not listed
-# (there is currently no such status, but this keeps a future one from
-# rendering as a raw "some_new_status" instead of failing loudly).
-_STATUS_LABELS = {
-    STATUS_CONFIRMED: "Confirmed",
-    STATUS_WAITLISTED: "Waitlisted",
-    STATUS_PENDING_CONFIRMATION: "Pending confirmation",
-    STATUS_CANCELED_BY_GUEST: "Canceled by guest",
-    STATUS_CANCELED_BY_HOST: "Canceled by host",
-}
-
-
-def _status_label(status: str) -> str:
-    return _STATUS_LABELS.get(status, status.replace("_", " ").capitalize())
+# status_label() (display-only Status-column labeling) moved to
+# app/storage.py 2026-07-13 -- see its own docstring there for why
+# (app/cli_list.py needs it too, for `my-bt list`'s clean default view).
 
 SESSIONS: dict[str, dict] = {}
 SESSION_TTL_SECONDS = 60 * 60 * 4
@@ -320,6 +322,33 @@ def _get_session(environ) -> dict | None:
         return {**session, "_sid": sid}
     SESSIONS.pop(sid, None)
     return None
+
+
+def _record_page_view(environ, path: str) -> None:
+    """2026-07-13, the operator: "Can I see with my-bt who is currently logged
+    in please? (should be user, since when connected and their current /
+    last loaded page with timestamp)" -- called once per request from
+    App.__call__, BEFORE routing, so it captures the path even if the
+    route handler itself then 404s/errors. Only touches SESSIONS for a
+    request that already carries a valid session cookie (i.e. someone
+    logged in as a guest on /my or an admin on /admin) -- anonymous
+    browsing of /courses, /book/<slug>, etc. was never "logged in" and
+    isn't tracked here at all, keeping this dict from growing on every
+    anonymous hit.
+
+    "Since when connected" is deliberately NOT a new field: SESSIONS
+    already stores `expires` (set once, at _new_session() time, to
+    now + SESSION_TTL_SECONDS) -- `expires - SESSION_TTL_SECONDS` IS the
+    creation time, exactly, with no extra bookkeeping. See
+    internal_status() (App, below) for the one place that math happens."""
+    session = _get_session(environ)
+    if session is None:
+        return
+    sid = session["_sid"]
+    entry = SESSIONS.get(sid)
+    if entry is not None:
+        entry["last_page"] = path
+        entry["last_seen"] = time.time()
 
 
 def _invalidate_all_sessions_for_user(user_id: str) -> None:
@@ -687,6 +716,7 @@ class App:
         # only, never query strings/form bodies/cookies, so this is safe to
         # leave on without leaking anything from a booking form into logs.
         log.debug("%s %s", method, path)
+        _record_page_view(environ, path)
         try:
             status, headers, body = self.route(method, path, environ)
         except Exception:  # noqa: BLE001 - last-resort handler
@@ -755,6 +785,8 @@ class App:
             return self.host_cancel(method, m.group(1), environ)
         if m := re.fullmatch(r"/host-reinstate/([0-9a-fA-F-]+)", path):
             return self.host_reinstate(method, m.group(1), environ)
+        if path == "/internal/status":
+            return self.internal_status(method, environ)
         return "404 Not Found", [("Content-Type", "text/plain")], "not found"
 
     @staticmethod
@@ -2090,7 +2122,7 @@ class App:
                 return (
                     f'<tr><td>{course_cell}</td><td class="nowrap">{esc(r.occurrence_date)}</td>'
                     f"<td>{esc(time_range)}</td><td>{esc(location)}</td>"
-                    f"<td>{esc(_status_label(r.status))}</td>"
+                    f"<td>{esc(status_label(r.status))}</td>"
                     f"<td>{actions}</td></tr>"
                 )
 
@@ -2733,6 +2765,74 @@ class App:
         payload = {"logged_in": user is not None, "email": user.email if user else None}
         return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
 
+    # -- /internal/status --------------------------------------------------------
+
+    def internal_status(self, method: str, environ):
+        """GET-only JSON diagnostic dump for `my-bt status` -- NOT for
+        browsers/guests, and deliberately not linked from anywhere. See
+        the module docstring's "GET /internal/status" section for the
+        trust model (rejects anything carrying X-Forwarded-For, i.e.
+        anything that arrived via nginx rather than a direct localhost
+        connection).
+
+        "Currently logged in" (2026-07-13, the operator: "logged in means:
+        unexpired sessions") is exactly SESSIONS filtered to
+        expires > now -- no extra recency window. Each entry's
+        "connected_since" is expires - SESSION_TTL_SECONDS (see
+        _record_page_view's docstring for why that's exact, not
+        approximate); "last_page"/"last_seen" reflect the most recent
+        request _record_page_view saw for that session, and are None
+        for a session that's never made a second request yet (i.e. the
+        one that just logged in).
+
+        A "guest" session's `who` is resolved to the account's current
+        email via self.store (SESSIONS only ever stores user_id, which
+        is stable across an email change -- see my_settings_email());
+        falls back to a raw user_id string in the (should be impossible)
+        case the account was erased out from under a still-live session.
+        An "admin" session has no associated user record at all -- there
+        is exactly one admin login, gated by settings.toml's
+        admin_password_hash, not a per-person account."""
+        if method != "GET":
+            return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
+        if environ.get("HTTP_X_FORWARDED_FOR"):
+            # Arrived via nginx (which always sets this -- see _client_ip's
+            # docstring) rather than a direct localhost connection from
+            # my-bt itself. Refuse rather than risk this ever becoming
+            # reachable from outside this host, even if a future nginx
+            # config change accidentally proxied this path.
+            return "403 Forbidden", [("Content-Type", "text/plain")], "internal endpoint -- direct localhost access only"
+        now = time.time()
+        sessions_out = []
+        for sid, data in list(SESSIONS.items()):
+            if data.get("expires", 0) <= now:
+                continue
+            kind = data.get("kind", "?")
+            if kind == "guest":
+                user = self.store.find_user_by_id(data.get("user_id", ""))
+                who = user.email if user else f"(erased) user_id={data.get('user_id')}"
+            else:
+                who = "admin"
+            last_seen = data.get("last_seen")
+            sessions_out.append({
+                "kind": kind,
+                "who": who,
+                "connected_since": datetime.fromtimestamp(
+                    data["expires"] - SESSION_TTL_SECONDS, tz=timezone.utc
+                ).isoformat(),
+                "expires_at": datetime.fromtimestamp(data["expires"], tz=timezone.utc).isoformat(),
+                "last_page": data.get("last_page"),
+                "last_seen": datetime.fromtimestamp(last_seen, tz=timezone.utc).isoformat() if last_seen else None,
+            })
+        state = maintenance.read_state(self.store.data_dir)
+        payload = {
+            "server_time": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+            "version": PACKAGE_VERSION,
+            "maintenance": {"enabled": state.enabled, "message": state.message, "set_at": state.set_at},
+            "sessions": sessions_out,
+        }
+        return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
+
     # -- /my/settings -----------------------------------------------------------
     #
     # 2026-07-10: a guest's own name is fixed at signup/first-booking time,
@@ -3212,10 +3312,20 @@ class App:
         # ones) is the same "past" cutoff used everywhere else in this
         # codebase (see app/migrate_simplymeet.py's own docstring on this
         # exact boundary).
-        times_total_by_user = Counter(r.user_id for r in all_regs)
-        times_upto_now_by_user = Counter(
-            r.user_id for r in all_regs if date.fromisoformat(r.occurrence_date) <= today
-        )
+        # 2026-07-13: the actual Counter math moved to
+        # cli_list.compute_times_booked_counts (dict-based, so `my-bt
+        # list`'s own clean default view can share it too -- see that
+        # function's own docstring) -- called here on a minimal raw-dict
+        # projection of all_regs rather than the Registration objects
+        # themselves, since that shared function (also used straight off
+        # Store.read_registrations rows in scripts/my-bt) works on dicts.
+        raw_all_regs = [
+            {"registration_id": r.registration_id, "party_id": r.party_id,
+             "invited_by_user_id": r.invited_by_user_id, "user_id": r.user_id,
+             "occurrence_date": r.occurrence_date}
+            for r in all_regs
+        ]
+        times_total_by_user, times_upto_now_by_user = cli_list.compute_times_booked_counts(raw_all_regs, today)
         regs = all_regs if show_past else [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
         # 2026-07-08, the operator: "include past should by default show the
         # newest first" -- today-or-future (the default view) stays
@@ -3227,19 +3337,21 @@ class App:
         # see _SORTABLE_FILTERABLE_TABLE_SCRIPT) must match this, or the
         # arrow would silently lie about which way the rows are ordered.
         regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname), reverse=show_past)
-        # Guest bookings (2026-07): group every registration -- live AND
-        # archived, so an erased party member's row still counts toward
-        # "+N guest(s)" on the still-live leader's row -- by party_id, so
-        # each row can show who it booked together with (see Registration's
-        # own docstring for what party_id/invited_by_user_id record).
-        # Blank party_id (a solo booking, including everything made before
-        # this feature existed) is never grouped -- see Store's own
-        # promote_next_waitlisted docstring for the same "blank means not a
-        # party" convention.
-        party_members: dict[str, list[Registration]] = {}
-        for r in all_regs:
-            if r.party_id:
-                party_members.setdefault(r.party_id, []).append(r)
+        # Guest bookings (2026-07): "Host (+N guest(s))"/"Guest of <name>"
+        # per row -- live AND archived, so an erased party member's row
+        # still counts toward the still-live leader's own count. Computed
+        # via cli_list.annotate_admin_party_label (2026-07-13, moved out of
+        # this method so `my-bt list`'s own clean default view can show the
+        # identical column -- see that function's own docstring for the
+        # full "guest of Guest" placeholder-fallback history), over the
+        # same raw_all_regs projection used for times-booked just above,
+        # keyed back to each row by registration_id since that function
+        # returns dicts, not Registration objects.
+        raw_users_by_id = {uid: {"name": u.name, "email": u.email} for uid, u in users_by_id.items()}
+        party_label_by_reg_id = {
+            row["registration_id"]: row["party_label"]
+            for row in cli_list.annotate_admin_party_label(raw_all_regs, raw_users_by_id)
+        }
         rows = []
         for r in regs:
             user = users_by_id.get(r.user_id)
@@ -3341,56 +3453,13 @@ class App:
                 # aren't actionable here -- find_by_id() only reads the live
                 # CSV, so admin_cancel() couldn't find one of these anyway.
                 actions = ""
-            # "Guest of <leader>" if this row was added by someone else, or
-            # "+N guest(s)" on the leader's own row if they brought people
-            # along -- blank for an ordinary solo booking. Looked up by
-            # user_id (not registration_id) since the leader/guest relation
-            # is between PEOPLE, and the whole point of party_id is to
-            # survive each member canceling independently (see
-            # Registration's own docstring) -- so this still shows correctly
-            # even after some party members have already canceled.
-            party_cell = ""
-            if r.invited_by_user_id:
-                leader_user = users_by_id.get(r.invited_by_user_id)
-                # 2026-07-08, the operator (screenshot of /admin?past=1, a row
-                # imported from SimplyMeet.me history): "Is guest of Guest
-                # correct??" -- technically yes (the leader's own `.name`
-                # really is the literal placeholder "Guest" -- see
-                # upsert_user_for_booking()/_book_with_guests()/
-                # migrate_simplymeet.run_migration()'s shared fallback for
-                # "no real name known"), but showing the placeholder NAME
-                # right after the WORD "guest" reads as a doubled, nonsense
-                # "guest of Guest" rather than an actual identifier. Falls
-                # back to the leader's email instead whenever their name
-                # is that exact placeholder -- always present, always
-                # actually identifies who the leader is, unlike a name
-                # that was never real to begin with.
-                if leader_user is None:
-                    leader_label = "(unknown)"
-                elif leader_user.name and leader_user.name != "Guest":
-                    leader_label = leader_user.name
-                else:
-                    leader_label = leader_user.email
-                # 2026-07-08, the operator: "If we write Host, then please also
-                # 'Guest'" -- capitalized to match "Host (+N guest)" on
-                # the leader's own row (same round, same column).
-                party_cell = f"Guest of {leader_label}"
-            elif r.party_id:
-                other_members = {
-                    m.user_id for m in party_members.get(r.party_id, []) if m.user_id != r.user_id
-                }
-                if other_members:
-                    n = len(other_members)
-                    # 2026-07-08, the operator: "+ 1 guest becomes Host (+ 1
-                    # guest)" -- same round as the "guest of Guest" fix
-                    # above, same underlying confusion: a bare "+1 guest"
-                    # doesn't say WHOSE guest, only readable as "the host
-                    # of this party" by inference. Spelling out "Host"
-                    # makes this row's role explicit the same way "guest
-                    # of <name>" already does for the other side.
-                    party_cell = f"Host (+{n} guest{'s' if n != 1 else ''})"
+            # "Guest of <leader>"/"Host (+N guest(s))" -- see
+            # cli_list.annotate_admin_party_label's own docstring (this
+            # column's full history, including the "guest of Guest"
+            # placeholder fallback, now lives there instead of here).
+            party_cell = party_label_by_reg_id.get(r.registration_id, "")
             rows.append(
-                f"<tr><td>{esc(_status_label(r.status))}</td><td>{esc(r.course_shortname)}</td>"
+                f"<tr><td>{esc(status_label(r.status))}</td><td>{esc(r.course_shortname)}</td>"
                 f'<td class="nowrap">{esc(r.occurrence_date)}</td>{name_cell}{email_cell}'
                 f"<td>{esc(format_display_timestamp(r.registered_at))}</td><td>{esc(times_cell)}</td>"
                 f"<td>{esc(party_cell)}</td>"

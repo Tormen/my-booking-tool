@@ -18,6 +18,8 @@ import getpass
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -49,6 +51,14 @@ except ImportError as exc:  # pragma: no cover
 # accident, nothing about the code required it).
 DEFAULT_SETTINGS = os.environ.get("MY_BOOKING_SETTINGS", "/etc/my-booking/settings.toml")
 DEFAULT_DATA_DIR = os.environ.get("MY_BOOKING_DATA", "/var/lib/my-booking")
+
+# The running app only ever listens on 127.0.0.1:8811 (see app/serve.py's
+# --host/--port defaults and systemd/my-booking.service's ExecStart, which
+# never overrides either) -- `my-bt status` queries this directly, on the
+# same host, bypassing nginx entirely (see app/webapp.py's internal_status()
+# and its module docstring for the full trust model). Overridable for the
+# unusual case of a non-default --port at serve.py startup.
+DEFAULT_INTERNAL_URL = os.environ.get("MY_BOOKING_INTERNAL_URL", "http://127.0.0.1:8811")
 
 
 def _store(args) -> Store:
@@ -110,11 +120,22 @@ class _Tee:
 # -- subcommands --------------------------------------------------------------
 
 def cmd_list(args) -> None:
-    """`my-bt list` -- query registrations across live/archived/all. Every
-    row gets a "party" column (see app.cli_list.annotate_party_info) --
-    "+N guest(s)" if this is the leader of a guest booking, "guest of
-    <email>" if this row was someone else's added guest, blank for an
-    ordinary solo booking."""
+    """`my-bt list` -- query registrations across live/archived/all.
+
+    2026-07-13, the operator: "the default command shows it cleant up without
+    technical ids to ideally have a compact readable output ... for my-bt
+    list: can you mimick the view of the web-interface?" -- default output
+    now matches /admin's own table exactly: Status, Course, Date, Name,
+    Email, Registered, Times booked, Guests (see
+    app.cli_list.build_clean_registration_view -- Times booked/Guests are
+    the SAME shared helpers admin_overview() itself now calls, so the
+    numbers/wording can't drift between the two).
+
+    Pass -r/--raw for the original full raw-CSV-column view (every field
+    Store.read_registrations returns, plus a "party" column -- see
+    app.cli_list.annotate_party_info, a separate, older, lowercase format
+    from the clean view's "Guests" column, left unchanged for anyone
+    already scripting against -r's output)."""
     store = _store(args)
     rows = store.read_registrations(scope=args.scope)
     users = {u["user_id"]: u for u in store.read_users(scope="all")}
@@ -139,18 +160,48 @@ def cmd_list(args) -> None:
         ]
 
     rows.sort(key=lambda r: (r["occurrence_date"], r["course_shortname"]))
-    rows = app_cli_list.annotate_party_info(rows, users)
-    _print_rows(rows, args.format)
+
+    if args.raw:
+        rows = app_cli_list.annotate_party_info(rows, users)
+        _print_rows(rows, args.format)
+        return
+
+    # Times booked totals are always computed over the FULL live+archived
+    # set, same as /admin's own admin_overview() -- independent of
+    # whatever --scope/--course/--status/etc. narrowed the displayed
+    # `rows` down to, so e.g. `my-bt list --course foo` still shows each
+    # guest's TRUE overall times-booked count, not just their count
+    # within this one course.
+    all_rows_for_totals = store.read_registrations(scope="all")
+    # Short ids (2026-07-13, the operator: "a bit like what git does with its
+    # commit ids") are only ever assigned over LIVE registrations -- the
+    # same universe `my-bt cancel`'s short-id resolution searches (see
+    # cmd_cancel), since only a live row can actually be canceled by one.
+    # An archived row shown in this same `list` output (default scope is
+    # live+archived, see scope_args) just gets a blank "id" cell.
+    live_ids = [r["registration_id"] for r in store.read_registrations(scope="live")]
+    short_ids = app_cli_list.assign_short_ids(live_ids)
+    clean = app_cli_list.build_clean_registration_view(
+        rows, users, all_rows_for_totals, date.today(), short_ids_by_reg_id=short_ids
+    )
+    _print_rows(clean, args.format)
 
 
 def cmd_users(args) -> None:
-    """`my-bt users` -- list guest accounts across live/archived/all."""
+    """`my-bt users` -- list guest accounts across live/archived/all.
+
+    2026-07-13: default output is a compact, readable view (name, email,
+    joined, last login) -- see app.cli_list.build_clean_user_view. Pass
+    -r/--raw for every raw column (password/token hashes and all --
+    pin_hash/pin_salt are still stripped either way, see below)."""
     store = _store(args)
     rows = store.read_users(scope=args.scope)
     if args.email:
         needle = args.email.strip().lower()
         rows = [r for r in rows if needle in r["email"].lower()]
     rows = [{k: v for k, v in r.items() if k not in ("pin_hash", "pin_salt")} for r in rows]
+    if not args.raw:
+        rows = app_cli_list.build_clean_user_view(rows)
     _print_rows(rows, args.format)
 
 
@@ -334,16 +385,39 @@ def cmd_cancel(args) -> None:
     no promotion/calendar sync; that gap is closed now). This means this
     command has a real network/CalDAV dependency and can fail/take longer
     if the CalDAV server is unreachable, unlike `my-bt erase`'s status
-    check-style commands."""
+    check-style commands.
+
+    2026-07-13, the operator: "would it be possible that my-bt lists a short-id
+    that can also be used with my-bt cancel to cancel a booking? a bit
+    like what git does with its commit ids" -- --registration-id now
+    accepts EITHER the full id OR one of `my-bt list`'s own short "id"
+    column values (see app.cli_list.assign_short_ids/resolve_short_id):
+    tried as a full id first (the exact same store.find_by_id() lookup as
+    before, so nothing changes for any existing script passing a full
+    id), and only resolved as a short-id prefix against the LIVE
+    registration set if that exact lookup comes back empty."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
 
-    reg = store.find_by_id(args.registration_id)
+    reg_id = args.registration_id
+    reg = store.find_by_id(reg_id)
+    if reg is None:
+        live_ids = [r["registration_id"] for r in store.read_registrations(scope="live")]
+        resolved, candidates = app_cli_list.resolve_short_id(reg_id, live_ids)
+        if resolved:
+            reg_id = resolved
+            reg = store.find_by_id(reg_id)
+        elif candidates:
+            print(f"ambiguous id {args.registration_id!r} -- matches {len(candidates)} live registrations:")
+            for c in candidates:
+                print(f"  {c}")
+            print("use a longer prefix, or the full registration id (see `my-bt list` for both).")
+            return
     if reg is None:
         print(f"no registration with id {args.registration_id}")
         return
     if reg.status not in ("confirmed", "waitlisted"):
-        print(f"registration {args.registration_id} is not cancelable (status is already {reg.status!r})")
+        print(f"registration {reg_id} is not cancelable (status is already {reg.status!r})")
         return
 
     if not args.yes:
@@ -351,15 +425,15 @@ def cmd_cancel(args) -> None:
         who = f"{user.name} <{user.email}>" if user else "(unknown guest)"
         confirm = input(
             f"Cancel {who}'s {reg.course_shortname} booking on {reg.occurrence_date} "
-            f"(registration {args.registration_id})? Type 'yes' to confirm: "
+            f"(registration {reg_id})? Type 'yes' to confirm: "
         )
         if confirm.strip().lower() != "yes":
             print("aborted")
             return
 
-    result = app_cli_cancel.cancel_registration(store, settings, args.registration_id, message=args.message or "")
+    result = app_cli_cancel.cancel_registration(store, settings, reg_id, message=args.message or "")
     if not result.ok:
-        print(f"could not cancel {args.registration_id}: {result.reason}")
+        print(f"could not cancel {reg_id}: {result.reason}")
         return
 
     who = f"{result.user_name} <{result.user_email}>" if result.user_email else "(unknown guest)"
@@ -511,6 +585,75 @@ def cmd_maintenance(args) -> None:
         print("maintenance mode: off -- the site is open again.")
 
 
+def _query_internal_status(base_url: str, timeout: float = 3.0) -> tuple[dict | None, str | None]:
+    """GETs {base_url}/internal/status (see app/webapp.py::internal_status)
+    directly -- same host, loopback only, bypassing nginx entirely.
+    Returns (payload, error): exactly one of the two is set, never both,
+    so callers don't have to guess which to trust. A connection failure
+    here (refused/timed out) is itself the single most useful "is the
+    server up and running" signal `my-bt status` can give -- every other
+    check in this file inspects config/secrets/systemd-unit-state, but
+    none of them actually confirm the WSGI process is alive and answering
+    requests the way this one does."""
+    url = base_url.rstrip("/") + "/internal/status"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - fixed http://127.0.0.1 URL
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code} from {url}"
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, f"{exc} -- is the my-booking service running (`systemctl status my-booking`)?"
+
+
+def _fmt_ts(iso: str | None) -> str:
+    if not iso:
+        return "(none yet)"
+    try:
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return iso
+
+
+def _print_live_status(payload: dict) -> None:
+    """The concise, default `my-bt status` output the operator asked for
+    (2026-07-13): server-up summary, maintenance mode (highlighted if
+    ON), and the live logged-in-user list -- everything the full
+    per-check report (-V/--verbose, see cmd_status) would otherwise bury
+    a long scroll below."""
+    print(f"my-booking-tool {payload.get('version', '?')} -- responding, server time "
+          f"{_fmt_ts(payload.get('server_time'))}")
+
+    mnt = payload.get("maintenance", {})
+    if mnt.get("enabled"):
+        banner = "!!  MAINTENANCE MODE IS ON -- guests are seeing a maintenance page  !!"
+        print()
+        print("!" * len(banner))
+        print(banner)
+        print("!" * len(banner))
+        since = _fmt_ts(mnt.get("set_at")) if mnt.get("set_at") else "(unknown time)"
+        print(f"since {since}" + (f': "{mnt["message"]}"' if mnt.get("message") else ""))
+        print("Run `my-bt maintenance off` to reopen the site.")
+    else:
+        print("maintenance mode: off")
+
+    sessions = payload.get("sessions", [])
+    print()
+    if not sessions:
+        print("logged-in users: none (no unexpired sessions)")
+        return
+    print(f"logged-in users ({len(sessions)}):")
+    rows = [
+        {
+            "who": s["who"] + (" [admin]" if s["kind"] == "admin" else ""),
+            "connected since": _fmt_ts(s.get("connected_since")),
+            "last page": s.get("last_page") or "(none yet)",
+            "last seen": _fmt_ts(s.get("last_seen")),
+        }
+        for s in sessions
+    ]
+    _print_rows(rows, "table")
+
+
 # -- status / setup --------------------------------------------------------------
 # The actual check/report/interactive-walkthrough logic lives in
 # app/cli_checks.py + app/cli_setup.py -- deliberately NOT here, so it's
@@ -521,7 +664,24 @@ def cmd_maintenance(args) -> None:
 # before (see git history for how that used to go wrong).
 
 def cmd_status(args) -> None:
-    """`my-bt status` -- health check of the install: settings.toml (plus
+    """`my-bt status` -- by default, prints a short summary: whether the
+    live process is actually up and answering requests (queried directly
+    over HTTP on its own loopback port -- see _query_internal_status),
+    whether maintenance mode is on (highlighted if so), and who's
+    currently logged in (any unexpired session -- 2026-07-13, the operator:
+    "logged in means: unexpired sessions" -- with since-when-connected
+    and their current/last-loaded page+timestamp, both read straight out
+    of the live process's own in-memory SESSIONS dict, see
+    app/webapp.py::internal_status). Exactly what the operator asked for
+    2026-07-13: "please make current output of status appear when called
+    with -V / --verbose" -- so pass -V/--verbose for the full, original,
+    much longer per-check report this docstring describes below (every
+    static config/secrets/systemd/SELinux/nginx check `status` has always
+    run) IN ADDITION to the summary above. The summary alone answers "is
+    everything OK right now" fast; -V is for actually diagnosing a
+    problem the summary flagged.
+
+    -V/--verbose's static checks cover: settings.toml (plus
     any pending settings.toml.rpmnew / privacy.html.tmpl.rpmnew merge and
     a package-wide `rpm -V` integrity check), secrets (existence,
     permissions, and -- for admin_password_hash / erasure_pepper --
@@ -649,20 +809,59 @@ def cmd_status(args) -> None:
     # steps -- only plain `status` hadn't caught up).
     checks.extend(cli_checks.check_maintenance_mode(data_dir))
 
-    # -- report -------------------------------------------------------------------
-    icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
-    for label, level, detail in checks:
-        line = f"[{icon[level]}] {label}"
-        if detail:
-            line += f" -- {detail}"
-        print(line)
-
     fails = sum(1 for _, level, _ in checks if level == "fail")
     warns = sum(1 for _, level, _ in checks if level == "warn")
-    print()
+    oks = sum(1 for _, level, _ in checks if level == "ok")
+
+    # -- default (non-verbose) summary ---------------------------------------------
+    # 2026-07-13, the operator's exact spec for what `status` shows by default: (1)
+    # is the server up/running/working -- a summary of what -V's full report
+    # below shows in detail, (2) maintenance mode, highlighted if ON, (3)
+    # who's logged in (unexpired sessions, since-when, current/last page +
+    # timestamp -- queried live off the running process, see
+    # _query_internal_status/app/webapp.py::internal_status), (4) "anything
+    # else you deem useful" -- version + the live process's own clock, folded
+    # into _print_live_status.
     if fails:
-        print(f"{fails} problem(s), {warns} warning(s) -- fix the FAIL item(s) above, "
-              "then re-run `my-bt status`.")
+        static_summary = f"FAIL -- {fails} problem(s), {warns} warning(s) among {len(checks)} static checks"
+    elif warns:
+        static_summary = f"WARN -- {warns} warning(s) among {len(checks)} static checks"
+    else:
+        static_summary = f"OK -- {oks} static checks passed"
+    print(f"static config/install checks: {static_summary}" +
+          ("" if args.verbose else " (run `my-bt status -V` for the full per-item report)"))
+
+    payload, error = _query_internal_status(args.internal_url)
+    if error:
+        print(f"live process: NOT RESPONDING -- {error}")
+    else:
+        _print_live_status(payload)
+
+    # -- full per-check report, -V/--verbose only ------------------------------------
+    # 2026-07-13, the operator: "please make current output of status appear when
+    # called with -V / --verbose" -- this is that original output, unchanged,
+    # just no longer printed by default.
+    if args.verbose:
+        print()
+        print("-- full check report " + "-" * 58)
+        icon = {"ok": "OK  ", "warn": "WARN", "fail": "FAIL"}
+        for label, level, detail in checks:
+            line = f"[{icon[level]}] {label}"
+            if detail:
+                line += f" -- {detail}"
+            print(line)
+
+    print()
+    if fails or error:
+        detail_hint = "" if args.verbose else " (run with -V for detail)"
+        bits = []
+        if fails:
+            bits.append(f"{fails} problem(s){detail_hint} -- fix the FAIL item(s) above")
+        if warns:
+            bits.append(f"{warns} warning(s){detail_hint if not fails else ''}")
+        if error:
+            bits.append("the live process isn't responding")
+        print(", ".join(bits) + ". Re-run `my-bt status`" + ("" if args.verbose else " -V") + " once fixed.")
         sys.exit(1)
     elif warns:
         # 2026-07-10, the operator: "please make my-bt status FAIL in case of any
@@ -673,7 +872,8 @@ def cmd_status(args) -> None:
         # unreachable through nginx) sail straight past `my-bt status &&
         # <next step>` in a script/cron/CI context. Any warning now exits
         # non-zero too, same as a FAIL -- only a fully clean report exits 0.
-        print(f"{warns} warning(s), no hard failures -- worth a look above.")
+        print(f"{warns} warning(s), no hard failures -- worth a look" +
+              (" above" if args.verbose else " with `my-bt status -V`") + ".")
         sys.exit(1)
     else:
         print("all checks passed.")
@@ -713,8 +913,26 @@ def cmd_setup(args) -> None:
         sys.exit(1)
 
 
+class _HelpfulArgumentParser(argparse.ArgumentParser):
+    """2026-07-13, the operator: "please always show the -h version instead a
+    shortened usage version only, e.g. when calling 'my-bt' or 'my-bt
+    history'" -- argparse's default error() (hit on a missing required
+    subcommand, e.g. bare `my-bt`, or a missing required argument, e.g.
+    `my-bt history` with no --email) prints only the one-line usage
+    summary before the error, not the full option list/help text -- easy
+    to hit by accident and not very actionable on its own. Prints the
+    SAME output -h/--help would instead. add_subparsers() defaults
+    `parser_class` to `type(self)` (see argparse's own source), so every
+    subparser built off this one -- `my-bt history`, `my-bt cancel`, etc.
+    -- inherits this too, covering both cases the operator named with the one
+    override."""
+    def error(self, message):
+        self.print_help(sys.stderr)
+        self.exit(2, f"\n{self.prog}: error: {message}\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="my-bt", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = _HelpfulArgumentParser(prog="my-bt", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help=f"default: {DEFAULT_DATA_DIR}")
     p.add_argument("--settings", default=DEFAULT_SETTINGS, help=f"default: {DEFAULT_SETTINGS}")
     # action="version" is argparse's own special-case: it prints and exits
@@ -747,9 +965,29 @@ def build_parser() -> argparse.ArgumentParser:
     def format_arg(sp):
         sp.add_argument("--format", choices=["table", "csv", "json"], default="table")
 
+    def raw_arg(sp, what: str):
+        # 2026-07-13, the operator: "--raw or -r always shows the TABLE for users
+        # and list etc. and the default command shows it cleant up without
+        # technical ids to ideally have a compact readable output ... for
+        # my-bt list: can you mimick the view of the web-interface?" --
+        # default output is now the same compact, human-readable shape
+        # /admin's own web table shows (no registration_id/user_id/
+        # party_id/token hashes); -r/--raw brings back every raw CSV
+        # column, exactly what this command printed unconditionally before
+        # 2026-07-13. Deliberately a SEPARATE axis from -V/--verbose
+        # (`status`) -- the operator, same round: "this is better not to overload
+        # -V with different meanings" -- -V adds MORE detail on top of a
+        # summary, -r/--raw swaps the SHAPE of what's already there.
+        sp.add_argument(
+            "-r", "--raw", action="store_true",
+            help=f"show every raw CSV column (incl. ids/hashes) instead of the default, "
+                 f"cleaned-up {what} view",
+        )
+
     sp = sub.add_parser("list", help="query registrations (live + archived by default)")
     scope_args(sp)
     format_arg(sp)
+    raw_arg(sp, "list")
     sp.add_argument("--course", help="filter by course shortname")
     sp.add_argument("--status", choices=["confirmed", "waitlisted", "canceled_by_guest", "canceled_by_host"])
     sp.add_argument("--email", help="filter by (partial, case-insensitive) guest email")
@@ -771,6 +1009,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("users", help="list guest accounts (live + archived by default)")
     scope_args(sp)
     format_arg(sp)
+    raw_arg(sp, "users")
     sp.add_argument("--email", help="filter by (partial, case-insensitive) email")
     sp.set_defaults(func=cmd_users)
 
@@ -838,7 +1077,22 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--repo-root", help="checkout containing tests/ (default: auto-detect)")
     sp.set_defaults(func=cmd_test)
 
-    sp = sub.add_parser("status", help="health check: settings, secrets, systemd, SELinux")
+    sp = sub.add_parser(
+        "status",
+        help="live server summary: up/running, maintenance mode, logged-in users "
+             "(-V for the full settings/secrets/systemd/SELinux/nginx check report)",
+    )
+    sp.add_argument(
+        "-V", "--verbose", action="store_true",
+        help="also print the full per-item check report (settings/secrets/systemd/SELinux/"
+             "nginx/...) -- this is what plain `status` used to print unconditionally",
+    )
+    sp.add_argument(
+        "--internal-url", default=DEFAULT_INTERNAL_URL,
+        help="base URL of the running app's own loopback listener, queried for the live "
+             "maintenance-mode/logged-in-users summary (default: %(default)s, "
+             "or $MY_BOOKING_INTERNAL_URL)",
+    )
     sp.set_defaults(func=cmd_status)
 
     sp = sub.add_parser("setup", help="show (or --interactive: be walked through) post-install setup steps")

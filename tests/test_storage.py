@@ -16,6 +16,7 @@ from app.storage import (
     Store,
     _LockedCsv,
     format_display_timestamp,
+    status_label,
 )
 
 
@@ -968,6 +969,23 @@ class FormatDisplayTimestampTest(unittest.TestCase):
         # that happens to fall in the first minute of a day must still
         # render its real time.
         self.assertEqual(format_display_timestamp("2025-10-18T00:00:01+00:00"), "2025-10-18_0000.01")
+
+
+class StatusLabelTest(unittest.TestCase):
+    """2026-07-08, the operator: "I prefer Host and Guest and then also
+    'Confirmed' for the status". Moved here 2026-07-13 from
+    app/webapp.py's _status_label so app/cli_list.py (and therefore
+    `my-bt list`'s own clean default view) can show the identical label."""
+
+    def test_known_statuses_get_capitalized_labels(self):
+        self.assertEqual(status_label(STATUS_CONFIRMED), "Confirmed")
+        self.assertEqual(status_label(STATUS_WAITLISTED), "Waitlisted")
+        self.assertEqual(status_label(STATUS_PENDING_CONFIRMATION), "Pending confirmation")
+        self.assertEqual(status_label(STATUS_CANCELED_BY_GUEST), "Canceled by guest")
+        self.assertEqual(status_label(STATUS_CANCELED_BY_HOST), "Canceled by host")
+
+    def test_unknown_status_falls_back_to_generic_humanization(self):
+        self.assertEqual(status_label("some_new_status"), "Some new status")
 
 
 class LockedCsvReadonlyModeTest(unittest.TestCase):

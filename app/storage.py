@@ -51,6 +51,34 @@ STATUS_CANCELED_BY_HOST = "canceled_by_host"
 # see Store.confirm_pending_registration.
 STATUS_PENDING_CONFIRMATION = "pending_confirmation"
 
+# 2026-07-08, the operator (screenshot of /admin?past=1's Status column reading
+# raw "confirmed"/"canceled_by_guest" etc.): "I prefer Host and Guest and
+# then also 'Confirmed' for the status" -- same round as the Guests
+# column's own Host/Guest capitalization (see app/cli_list.py's
+# annotate_admin_party_label). Display-only: the underlying STATUS_*
+# values above are never touched. Falls back to a generic "Title Case,
+# underscores->spaces" humanization for anything not listed (there is
+# currently no such status, but this keeps a future one from rendering as
+# a raw "some_new_status" instead of failing loudly).
+#
+# 2026-07-13: moved here from app/webapp.py (as _STATUS_LABELS/
+# _status_label) so app/cli_list.py -- and therefore `my-bt list`'s own
+# default clean view -- can show the IDENTICAL label webapp.py's
+# admin_overview()/my() already do, rather than a second copy that could
+# drift. webapp.py now imports status_label from here instead of defining
+# its own.
+STATUS_LABELS = {
+    STATUS_CONFIRMED: "Confirmed",
+    STATUS_WAITLISTED: "Waitlisted",
+    STATUS_PENDING_CONFIRMATION: "Pending confirmation",
+    STATUS_CANCELED_BY_GUEST: "Canceled by guest",
+    STATUS_CANCELED_BY_HOST: "Canceled by host",
+}
+
+
+def status_label(status: str) -> str:
+    return STATUS_LABELS.get(status, status.replace("_", " ").capitalize())
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
