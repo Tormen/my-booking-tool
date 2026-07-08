@@ -273,9 +273,15 @@ full detail, for reference:
    vhost, anonymized -- see "Generic template vs. your real config" above
    for the same real-vs-`.example` convention applied to it.
 4. `sudo usermod -aG my-booking <your-login>` so `my-bt` works without sudo.
-5. `sudo systemctl enable --now my-booking.service` (the three recurring
+   Log out and back in (or just open a fresh shell) afterwards -- group
+   membership only applies to new sessions, not your current one.
+5. `my-bt` tab-completion for zsh is installed automatically as part of
+   the package (`/usr/share/zsh/site-functions/_my-bt`, already on zsh's
+   default `fpath`) -- same deal as step 4: open a new shell (or run
+   `compinit`) to pick it up, nothing else to install.
+6. `sudo systemctl enable --now my-booking.service` (the three recurring
    timers below are already enabled by default -- see next point).
-6. If SELinux is enforcing (default on Fedora -- check `getenforce`):
+7. If SELinux is enforcing (default on Fedora -- check `getenforce`):
    `sudo setsebool -P httpd_can_network_connect on`. Without this, nginx
    (which runs as the confined `httpd_t` domain) is blocked from
    `proxy_pass`-ing to the app's local port, and `/book`, `/cancel`, `/my`,
@@ -283,7 +289,7 @@ full detail, for reference:
    with `sudo ausearch -m avc -ts recent` if you hit this. The RPM's
    `%post` also relabels `/opt/my-booking`, `/etc/my-booking`, and
    `/var/lib/my-booking` via `restorecon` as a safety net.
-7. **Not done by this package** -- your live static site is a separate
+8. **Not done by this package** -- your live static site is a separate
    checkout/repo, not this one, so nothing here touches it automatically
    (and `%post` runs on every future upgrade too, which would risk
    clobbering your own later edits there if it did). Copy `site/index.html`,
