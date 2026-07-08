@@ -1397,7 +1397,18 @@ def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
     string per --option/-o this parser itself defines (NOT its own
     subcommands' options) -- -h/--help excluded, zsh's own completion
     system already handles that everywhere. See _zsh_join for how these
-    get assembled into an actual multi-line _arguments invocation."""
+    get assembled into an actual multi-line _arguments invocation.
+
+    2026-07-09, the operator: "as much autocomplete as possible also if it
+    recognises a course-name maybe if this is possible?" -- every
+    `--course` option (dest == "course") gets a `:course:
+    _mb_course_shortnames` value-completion suffix, so `--course <TAB>`
+    offers real course shortnames parsed live from settings.toml (see
+    generate_zsh_completion's own module docstring for the shell
+    function itself and why it's a live parse, not a build-time-frozen
+    list). Every OTHER option stays flag-only -- appending a value
+    completer to a plain store_true flag would incorrectly tell zsh that
+    flag takes an argument."""
     specs = []
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -1406,10 +1417,59 @@ def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
         if not opts:
             continue
         desc = _zsh_escape(_expand_help_text(parser, action))
+        value = ":course:_mb_course_shortnames" if action.dest == "course" else ""
         if len(opts) > 1:
-            specs.append(f"'({' '.join(opts)}){{{','.join(opts)}}}[{desc}]'")
+            specs.append(f"'({' '.join(opts)}){{{','.join(opts)}}}[{desc}]{value}'")
         else:
-            specs.append(f"'{opts[0]}[{desc}]'")
+            specs.append(f"'{opts[0]}[{desc}]{value}'")
+    return specs
+
+
+def _zsh_positional_specs(parser: argparse.ArgumentParser) -> list[str]:
+    """RAW zsh positional-argument specs (position 1, 2, ... within
+    WHATEVER _arguments call these get joined into -- see
+    generate_zsh_completion, this is only ever used for a LEAF command's
+    own `_arguments -s`, never the top-level/admin dispatcher's own
+    '1: :->state' plumbing) for this parser's own plain positional
+    arguments (no option_strings) -- e.g. show's/cancel's free-form
+    `query`, or `maintenance`'s on/off/status.
+
+    `choices=[...]` positionals (maintenance_command) get an exact-value
+    zsh action, e.g. '(on off status)' -- fully generic, no special-
+    casing needed. Free-text ones (show's/cancel's `query`) get course-
+    shortname completion via _mb_course_shortnames -- ONE of several
+    things you could type there (an id/date/email won't tab-complete,
+    but typing one is still perfectly valid), the one this completion
+    script can cheaply offer without shelling out to my-bt itself."""
+    specs = []
+    position = 0
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            continue
+        if action.option_strings:
+            continue
+        position += 1
+        desc = _zsh_escape(_expand_help_text(parser, action))
+        # Unlike the '...[description]' bracket syntax _zsh_option_specs
+        # uses (where only [/] are meaningful), a positional's 'N:message:
+        # action' spec treats EVERY colon as a field separator -- zsh's
+        # own docs are explicit that a literal colon must be backslash-
+        # escaped even between these fields, not just within one. Without
+        # this, a colon anywhere in the real help text (e.g. show's own
+        # query help starts "anything: registration id...") silently
+        # shifts where the message ends and the action begins. Also
+        # capped to the first clause -- these are long, full-sentence
+        # argparse help strings, impractical as a one-line completion
+        # menu message either way.
+        message = desc.split(" -- ")[0].split(", ")[0]
+        if len(message) > 40:
+            message = message[:40].rstrip() + "..."
+        message = message.replace(":", r"\:")
+        if action.choices:
+            choices_str = " ".join(str(c) for c in action.choices)
+            specs.append(f"'{position}:{message}:({choices_str})'")
+        else:
+            specs.append(f"'{position}:{message}:_mb_course_shortnames'")
     return specs
 
 
@@ -1460,12 +1520,25 @@ def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
     `admin`'s own second-level sub-commands, and each leaf's own flags):
     real command/flag names with their real one-line help text as the
     completion description, so `my-bt <TAB>`, `my-bt admin <TAB>`, and
-    `my-bt <command> --<TAB>` all complete correctly. Positional argument
-    VALUES (e.g. `--email <TAB>` offering real email addresses, or
-    `maintenance on|off|status`'s own choices) are deliberately not
-    attempted -- these would need to shell out to `my-bt` itself per
-    keystroke (the argcomplete approach) for real data, which is a much
-    bigger dependency/latency trade-off than the operator asked for here.
+    `my-bt <command> --<TAB>` all complete correctly -- this falls out of
+    plain zsh completion semantics (`_describe`/`_arguments` already
+    filter candidates by whatever's typed so far, at whatever depth), no
+    extra code needed for "my-bt a<TAB>" -> admin or "my-bt admin
+    gi<TAB>" -> git-snapshot to work once the dispatch tree below is
+    wired up correctly.
+
+    Positional argument VALUES: `choices=[...]` positionals (e.g.
+    `maintenance on|off|status`) get their exact real choices offered
+    (see _zsh_positional_specs); every `--course` option AND any free-
+    text positional (show's/cancel's `query`) get course-shortname
+    completion via the `_mb_course_shortnames` shell function emitted
+    below -- a live `grep` of the real settings.toml at completion time,
+    not a build-time-frozen list (course shortnames can change without a
+    rebuild, so freezing them here would go stale immediately). Anything
+    needing REAL DATA beyond that (an actual registration id/date/email)
+    would need to shell out to `my-bt` itself per keystroke (the
+    argcomplete approach) -- a much bigger dependency/latency trade-off
+    than the operator asked for here, so deliberately not attempted.
     """
     top_entries = "\n".join(f"      {e}" for e in _zsh_subcommand_entries(parser))
     top_choices = _zsh_subparser_choices(parser)
@@ -1477,7 +1550,7 @@ def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
     for name, sp in top_choices.items():
         nested = _zsh_subparser_choices(sp)
         if not nested:
-            own_opts = _zsh_option_specs(sp)
+            own_opts = _zsh_option_specs(sp) + _zsh_positional_specs(sp)
             body = (
                 f"          _arguments -s \\\n{_zsh_join(own_opts, '            ')}"
                 if own_opts else "          _arguments -s"
@@ -1495,7 +1568,7 @@ def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
         )
         nested_cases = []
         for nname, nsp in nested.items():
-            nopts = _zsh_option_specs(nsp)
+            nopts = _zsh_option_specs(nsp) + _zsh_positional_specs(nsp)
             nbody = (
                 f"              _arguments -s \\\n{_zsh_join(nopts, '                ')}"
                 if nopts else "              _arguments -s"
@@ -1530,6 +1603,26 @@ def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
 # regenerate by rebuilding the package. Installed into
 # %{{_datadir}}/zsh/site-functions/_my-bt, already on every zsh's fpath by
 # default -- open a new shell (or run `compinit`) to pick it up.
+
+# 2026-07-09, the operator: "as much autocomplete as possible also if it
+# recognises a course-name maybe if this is possible?" -- a LIVE parse of
+# the real settings.toml at completion time (via $MY_BOOKING_SETTINGS,
+# same env var scripts/my-bt's own --settings default already respects),
+# not a list frozen into this file at build time: course shortnames can
+# be renamed/added in settings.toml without ever rebuilding the package
+# (see `my-bt admin rename-course`), so baking them in here would go
+# stale the moment that happens. Silently offers nothing (not an error)
+# if settings.toml is unreadable or has no courses -- tab completion
+# failing quietly is fine, my-bt itself will give a real error at
+# runtime if the typed value doesn't actually exist.
+_mb_course_shortnames() {{
+  local settings=${{MY_BOOKING_SETTINGS:-/etc/my-booking/settings.toml}}
+  [[ -r $settings ]] || return 1
+  local -a names
+  names=(${{(f)"$(grep -oE '^[[:space:]]*shortname[[:space:]]*=[[:space:]]*\\"[^\\"]+\\"' "$settings" 2>/dev/null | sed -E 's/.*\\"([^\\"]+)\\".*/\\1/')"}})
+  (( ${{#names}} )) || return 1
+  _describe 'course' names
+}}
 
 _my_bt() {{
   local -a _mb_top_cmds

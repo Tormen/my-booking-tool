@@ -50,6 +50,21 @@ See /usr/share/doc/%{name}/README.md after installing.
 %build
 python3 -m py_compile app/*.py
 
+# 2026-07-08/09, the operator: "can you please built into the script a zsh
+# compatible shell auto-complete", then, once reminded it wasn't actually
+# built yet: "as we have the package you are right though that we can do
+# this via the rpm!" -- generated HERE, from THIS EXACT build's own
+# scripts/my-bt (MY_BOOKING_HOME=$(pwd) so its `from app import ...`
+# resolves against this checkout rather than the installed /opt/my-booking
+# path, same trick used to run it standalone before %install has even
+# run), rather than hand-maintained or self-installed at runtime -- see
+# scripts/my-bt's own generate_zsh_completion()/--print-zsh-completion
+# docstrings for the full rationale. This can never drift out of sync
+# with the real subcommands/flags a hand-maintained completion file
+# would, since it's regenerated from the real argparse tree on every
+# single build.
+MY_BOOKING_HOME=$(pwd) python3 scripts/my-bt --print-zsh-completion > _my-bt.zsh-completion
+
 # 2026-07-13, the operator: "Can the test be run as part of the rpm build or
 # deploy? Then I would drop [`my-bt test`]." -- tests/ isn't installed by
 # %install below (never shipped in the final package, same effective
@@ -101,6 +116,13 @@ install -d %{buildroot}/usr/local/bin
 # or /usr/bin symlink to a vendored binary normally uses, and avoids the
 # warning outright.
 ln -sf ../../../opt/my-booking/bin/my-bt %{buildroot}/usr/local/bin/my-bt
+
+# zsh completion (see %build's own comment on _my-bt.zsh-completion) --
+# %{_datadir}/zsh/site-functions is already on every zsh's fpath by
+# default on Fedora, so this needs no per-user setup at all: a new shell
+# (or `compinit`) just picks it up.
+install -d %{buildroot}%{_datadir}/zsh/site-functions
+install -m 644 _my-bt.zsh-completion %{buildroot}%{_datadir}/zsh/site-functions/_my-bt
 
 install -d %{buildroot}%{_unitdir}
 install -m 644 systemd/my-booking.service %{buildroot}%{_unitdir}/
@@ -226,6 +248,10 @@ this rpm package, not something you need to set up separately):
 Disable any one you don't want:
   sudo systemctl disable --now <unit>
 
+my-bt tab-completion for zsh is also installed (part of this package,
+%{_datadir}/zsh/site-functions/_my-bt, already on your fpath) -- open a
+new shell (or run `compinit`) to pick it up.
+
 MSG
 fi
 
@@ -306,6 +332,7 @@ exit 0
 /opt/my-booking/GIT_COMMIT
 /usr/local/bin/my-bt
 %attr(755,root,root) /opt/my-booking/bin/my-bt
+%{_datadir}/zsh/site-functions/_my-bt
 %config(noreplace) /opt/my-booking/site/privacy.html.tmpl
 %config(noreplace) /opt/my-booking/site/nginx-locations.conf
 /opt/my-booking/site/nginx-locations.conf.example
