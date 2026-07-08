@@ -1,4 +1,5 @@
 import os
+import re
 import stat
 import tempfile
 import unittest
@@ -548,6 +549,52 @@ class CheckNginxConfRepoFileTest(unittest.TestCase):
         label, level, detail = checks[0]
         self.assertEqual(level, "warn")
         self.assertIn("REPLACE-ME", detail)
+
+
+class TrackedNginxExampleFileTest(unittest.TestCase):
+    """Real regression, 2026-07-08: /host-cancel-occurrence/ was added to
+    _REQUIRED_NGINX_LOCATIONS and to the tracked site/nginx-locations.conf
+    .example, but the operator's own real, gitignored site/nginx-locations.conf
+    (what his OWN VPS actually installs from -- see
+    scripts/build-rpm.sh/packaging/my-booking-tool.spec) never got the
+    matching edit, and nothing caught it until he noticed a stale file on
+    the VPS after a rebuild. check_nginx_conf_repo_file() (tested above)
+    already guards the real file at `my-bt admin health` time, but that can
+    only ever run somewhere the real file actually exists -- it never runs
+    in this test suite/CI, since the real file is deliberately gitignored
+    (see the maintainer's local notes). This test instead guards the one nginx
+    reference file that IS tracked and ships to every fresh install,
+    directly off disk (not a synthetic fixture like the tests above) --
+    so any future new required location that's added to
+    _REQUIRED_NGINX_LOCATIONS but forgotten in the .example file fails
+    the suite immediately, on every commit, not just whenever someone
+    happens to run `my-bt admin health` against a real deployment."""
+
+    def test_example_file_has_every_required_location(self):
+        example = Path(__file__).resolve().parent.parent / "site" / "nginx-locations.conf.example"
+        text = example.read_text(encoding="utf-8")
+        for path in cli_checks._REQUIRED_NGINX_LOCATIONS:
+            with self.subTest(path=path):
+                self.assertRegex(
+                    text, rf"location\s+(?:[=~^]+\*?\s+)?{re.escape(path)}\s*\{{",
+                    f"{path} missing from site/nginx-locations.conf.example",
+                )
+
+    def test_example_file_has_no_leftover_replace_me_in_the_csp_hash_count(self):
+        # Not a full CSP-hash regeneration check (that needs a live app
+        # instance rendering every page) -- just the specific drift this
+        # file's own comment block warns about: the prose says how many
+        # inline <script> blocks/hashes exist, and that number must match
+        # how many 'sha256-...' entries actually appear in script-src, or
+        # the comment itself is already lying the moment it's read.
+        example = Path(__file__).resolve().parent.parent / "site" / "nginx-locations.conf.example"
+        text = example.read_text(encoding="utf-8")
+        hash_count = len(re.findall(r"'sha256-[A-Za-z0-9+/=]+'", text))
+        digit_words = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "FIVE",
+                       6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN"}
+        expected_word = digit_words.get(hash_count)
+        self.assertIsNotNone(expected_word, f"unexpected hash count {hash_count} -- extend digit_words")
+        self.assertIn(f"{expected_word} distinct inline <script> block", text)
 
 
 class CheckNginxConfDeployedTest(unittest.TestCase):
