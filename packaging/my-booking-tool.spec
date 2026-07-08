@@ -200,6 +200,35 @@ if [ "$1" -ge 2 ] 2>/dev/null; then
   echo "my-booking-tool: upgraded; service restarted if running."
 fi
 
+# 2026-07-08, the operator: "this should be enabled by default (and rather
+# manually disabled if wished so, the installer should inform the
+# installing user that this kind of mechanism is part of the rpm
+# package) as long with the other recurring services that are
+# installed with the package." Only on a GENUINE first install ($1 ==
+# 1) -- never on an upgrade, so an admin who deliberately disabled one
+# of these is never silently re-enabled just by upgrading the package.
+# my-booking.service itself is deliberately NOT included here: it needs
+# real configuration (secrets, CalDAV credentials, nginx) before it can
+# actually serve anything, so auto-starting it on a bare fresh install
+# would just crash-loop confusingly -- `my-bt admin setup` is what walks
+# you through enabling that one once it's actually ready.
+if [ "$1" -eq 1 ] 2>/dev/null; then
+  systemctl enable --now \
+    my-booking-retention.timer my-booking-watchdog.timer my-booking-git-snapshot.timer \
+    >/dev/null 2>&1 || true
+  cat <<'MSG'
+
+my-booking-tool: these recurring jobs are ENABLED BY DEFAULT (part of
+this rpm package, not something you need to set up separately):
+  my-booking-retention.timer     nightly GDPR retention purge (03:30)
+  my-booking-watchdog.timer      liveness check every 15 minutes
+  my-booking-git-snapshot.timer  hourly data-dir git snapshot
+Disable any one you don't want:
+  sudo systemctl disable --now <unit>
+
+MSG
+fi
+
 # settings.toml and site/privacy.html.tmpl are both %config(noreplace)
 # (see %files) -- if you've edited either, rpm never overwrites it on
 # upgrade. If the packaged version also changed, rpm instead drops the new

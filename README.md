@@ -273,7 +273,8 @@ full detail, for reference:
    vhost, anonymized -- see "Generic template vs. your real config" above
    for the same real-vs-`.example` convention applied to it.
 4. `sudo usermod -aG my-booking <your-login>` so `my-bt` works without sudo.
-5. `sudo systemctl enable --now my-booking.service my-booking-retention.timer my-booking-watchdog.timer my-booking-git-snapshot.timer`
+5. `sudo systemctl enable --now my-booking.service` (the three recurring
+   timers below are already enabled by default -- see next point).
 6. If SELinux is enforcing (default on Fedora -- check `getenforce`):
    `sudo setsebool -P httpd_can_network_connect on`. Without this, nginx
    (which runs as the confined `httpd_t` domain) is blocked from
