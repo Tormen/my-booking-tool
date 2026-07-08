@@ -2741,8 +2741,20 @@ class BookingFlowTest(unittest.TestCase):
         # so this "today-session" row wasn't actually dated today and got
         # excluded from the up-to-now count -- a real RPM %check failure
         # on the VPS (run on a Wednesday evening) is what surfaced this.
+        #
+        # 2026-07-09 fix: that first fix used local date.today(), but
+        # admin_overview()'s own cutoff is datetime.now(timezone.utc).date()
+        # (see app/webapp.py) -- the two disagree for a couple of hours
+        # around local midnight in any timezone ahead of UTC (e.g. CEST,
+        # UTC+2), where the local calendar date has already rolled to
+        # "tomorrow" while UTC hasn't. A real RPM %check run on the VPS
+        # during that window is what surfaced THIS bug: "today-session"
+        # got imported dated one day ahead of the UTC cutoff the app
+        # actually uses, so it fell on the wrong side of "up to now" and
+        # the count read 0/2 instead of 1/2. Match production's own UTC
+        # cutoff here instead of the local one.
         user, environ = self._login_as_guest("regular@example.org")
-        self._import_past(user.user_id, date.today().isoformat(), "today-session")
+        self._import_past(user.user_id, datetime.now(timezone.utc).date().isoformat(), "today-session")
         self._import_past(user.user_id, "2027-01-01", "future-session")
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
@@ -2901,8 +2913,14 @@ class BookingFlowTest(unittest.TestCase):
         # book()'s own flow, so a direct import is equivalent and
         # deterministic. `today=` omitted from erase_user_by_email so it
         # defaults to the real date.today() too.
+        #
+        # 2026-07-09 fix: switched to datetime.now(timezone.utc).date() --
+        # same UTC-vs-local-midnight mismatch as
+        # test_admin_overview_times_booked_excludes_future_bookings above.
+        # erase_user_by_email's own `today=` default is already UTC-based
+        # (app/erasure.py), so only this import needed to change to match.
         user, environ = self._login_as_guest("erased-guest2@example.org")
-        self._import_past(user.user_id, date.today().isoformat(), "erased-guest2-reg")
+        self._import_past(user.user_id, datetime.now(timezone.utc).date().isoformat(), "erased-guest2-reg")
         erase_user_by_email(self.store, self.settings, "erased-guest2@example.org")
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
@@ -2956,9 +2974,14 @@ class BookingFlowTest(unittest.TestCase):
         # flow -- that part genuinely exercises book()'s own account-
         # recreation behavior, and _other_occ_date() is always >= today+7,
         # so it's safely future regardless of wall-clock day/time.
+        #
+        # 2026-07-09 fix: switched to datetime.now(timezone.utc).date() --
+        # same UTC-vs-local-midnight mismatch as the two tests above; local
+        # date.today() can run a day ahead of admin_overview()'s own UTC
+        # cutoff in any timezone ahead of UTC, right around local midnight.
         email = "comeback-guest@example.org"
         user, environ = self._login_as_guest(email)
-        self._import_past(user.user_id, date.today().isoformat(), "comeback-guest-original-reg")
+        self._import_past(user.user_id, datetime.now(timezone.utc).date().isoformat(), "comeback-guest-original-reg")
         erase_user_by_email(self.store, self.settings, email)
 
         # Same email books again post-erasure, for a DIFFERENT date --
