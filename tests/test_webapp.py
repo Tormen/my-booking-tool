@@ -2732,8 +2732,17 @@ class BookingFlowTest(unittest.TestCase):
         # course)", then "actually even better: make it 2/9". Book one
         # past (today-or-earlier, via _import_past) and one future session
         # for the same user and confirm the cell reads "1/2".
+        #
+        # 2026-07-08 fix: use the real calendar date.today() here, NOT
+        # self.occ_date -- self.occ_date is yoga-class-1's next bookable
+        # Wednesday slot, which only equals today if the suite happens to
+        # run on an actual Wednesday before 17:15 local time. Any other
+        # day (or a Wednesday afternoon) it silently rolls to next week,
+        # so this "today-session" row wasn't actually dated today and got
+        # excluded from the up-to-now count -- a real RPM %check failure
+        # on the VPS (run on a Wednesday evening) is what surfaced this.
         user, environ = self._login_as_guest("regular@example.org")
-        self._import_past(user.user_id, self.occ_date, "today-session")
+        self._import_past(user.user_id, date.today().isoformat(), "today-session")
         self._import_past(user.user_id, "2027-01-01", "future-session")
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
@@ -2883,9 +2892,18 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("[erased]", body)
 
     def test_admin_overview_times_booked_counts_archived_registrations_too(self):
+        # 2026-07-08 fix: import the pre-erasure row directly, dated real
+        # date.today(), instead of booking via self._book() (which defaults
+        # to self.occ_date -- yoga-class-1's next Wednesday slot, not
+        # reliably "today", see test_admin_overview_times_booked_excludes_
+        # future_bookings above for the full explanation). This test is
+        # about the times-booked count on an erased/archived row, not
+        # book()'s own flow, so a direct import is equivalent and
+        # deterministic. `today=` omitted from erase_user_by_email so it
+        # defaults to the real date.today() too.
         user, environ = self._login_as_guest("erased-guest2@example.org")
-        self._book("erased-guest2@example.org", name="ErasedGuest2")
-        erase_user_by_email(self.store, self.settings, "erased-guest2@example.org", today=date.fromisoformat(self.occ_date))
+        self._import_past(user.user_id, date.today().isoformat(), "erased-guest2-reg")
+        erase_user_by_email(self.store, self.settings, "erased-guest2@example.org")
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
@@ -2929,10 +2947,19 @@ class BookingFlowTest(unittest.TestCase):
         # here (see test_admin_overview_merge_drops_a_row_that_would_
         # duplicate_the_live_account below for the same-date case, which
         # this display-time merge also has to guard against).
+        # 2026-07-08 fix: the pre-erasure row is imported directly, dated
+        # real date.today(), instead of booked via self._book() (defaults
+        # to self.occ_date, which is only reliably "today" on an actual
+        # Wednesday before 17:15 -- see test_admin_overview_times_booked_
+        # excludes_future_bookings above). The post-erasure "comeback"
+        # booking below stays on the real self._book()/self._other_occ_date()
+        # flow -- that part genuinely exercises book()'s own account-
+        # recreation behavior, and _other_occ_date() is always >= today+7,
+        # so it's safely future regardless of wall-clock day/time.
         email = "comeback-guest@example.org"
         user, environ = self._login_as_guest(email)
-        self._book(email, name="ComebackGuest")
-        erase_user_by_email(self.store, self.settings, email, today=date.fromisoformat(self.occ_date))
+        self._import_past(user.user_id, date.today().isoformat(), "comeback-guest-original-reg")
+        erase_user_by_email(self.store, self.settings, email)
 
         # Same email books again post-erasure, for a DIFFERENT date --
         # brand-new live user_id.
