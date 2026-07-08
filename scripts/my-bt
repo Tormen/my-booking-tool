@@ -1288,7 +1288,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="also append this run's output to settings.toml's [logging].log_file "
              "(configure that first -- see README.md 'Logs & debugging')",
     )
-    sub = p.add_subparsers(dest="command", required=True)
+    # 2026-07-09, the operator: bare `my-bt` (or `my-bt admin` -- any group that
+    # needs a further sub-command) printed argparse's default "the
+    # following arguments are required: command" error and exited 2 --
+    # "as the --help is displayed to me this is not an error, no need to
+    # write this". `required=True` (removed here and on admin_sub below)
+    # is what made a missing sub-command an *error* in the first place;
+    # `_help_parser` records, on each subparsers-owning parser, which
+    # parser's help to show if parsing stops there with no leaf `func`
+    # set -- see main()'s own check. Nested subparsers copy their own
+    # set_defaults() into the shared namespace as parsing descends (see
+    # argparse's _SubParsersAction.__call__), so whichever group parser
+    # was actually reached is what ends up in `args._help_parser` -- a
+    # leaf command's own set_defaults(func=...) simply doesn't touch this
+    # key, so it's never overwritten once real work is going to happen.
+    p.set_defaults(_help_parser=p)
+    sub = p.add_subparsers(dest="command")
 
     def scope_args(sp):
         g = sp.add_mutually_exclusive_group()
@@ -1470,7 +1485,8 @@ def build_parser() -> argparse.ArgumentParser:
         "These are the heavier, rarely-needed actions -- day-to-day use is "
         "`list`/`status`/`cancel` at the top level.",
     )
-    admin_sub = admin_sp.add_subparsers(dest="admin_command", required=True)
+    admin_sp.set_defaults(_help_parser=admin_sp)
+    admin_sub = admin_sp.add_subparsers(dest="admin_command")
 
     sp = _add_subcommand(
         admin_sub, "hash-password", "generate admin_password_hash (prompts, hidden input).",
@@ -1550,6 +1566,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    # 2026-07-09, the operator: bare `my-bt` or `my-bt admin` (any group needing a
+    # further sub-command) should behave exactly like `-h`/`--help` --
+    # full help, exit 0 -- not argparse's default required-subcommand
+    # error. See build_parser()'s own comment on `_help_parser` for how
+    # this gets set to whichever group parser parsing actually stopped
+    # at. `func` is what every LEAF subcommand sets via set_defaults(); if
+    # it's missing, no real command was ever chosen, so there's nothing
+    # to run.
+    if not hasattr(args, "func"):
+        args._help_parser.print_help()
+        sys.exit(0)
     # -D/--debug is just a per-invocation way to set MY_BOOKING_DEBUG=1
     # without needing to remember the env var (or touch the running
     # service's config) -- same single verbosity switch either way, see
