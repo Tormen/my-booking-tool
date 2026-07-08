@@ -179,9 +179,25 @@ class BuildCleanRegistrationViewTest(unittest.TestCase):
         self.assertEqual(result[0]["date"], "2026-07-10")
         self.assertEqual(result[0]["name"], "Ada")
         self.assertEqual(result[0]["email"], "ada@example.com")
-        self.assertEqual(result[0]["registered"], "2026-07-01")
         self.assertEqual(result[0]["times_booked"], "0/1")
         self.assertEqual(result[0]["guests"], "")
+
+    def test_date_is_the_first_column(self):
+        # 2026-07-08, the operator: "put this as first column" (the date column).
+        result = build_clean_registration_view([self.row], self.users, [self.row], today=date(2026, 7, 5))
+        self.assertEqual(next(iter(result[0])), "date")
+
+    def test_registered_column_hidden_by_default(self):
+        # 2026-07-08, the operator: "don't show when they registered by default
+        # but only with my-bt list -V".
+        result = build_clean_registration_view([self.row], self.users, [self.row], today=date(2026, 7, 5))
+        self.assertNotIn("registered", result[0])
+
+    def test_registered_column_shown_when_verbose(self):
+        result = build_clean_registration_view(
+            [self.row], self.users, [self.row], today=date(2026, 7, 5), verbose=True,
+        )
+        self.assertEqual(result[0]["registered"], "2026-07-01")
 
     def test_no_raw_ids_leak_into_the_output_columns(self):
         result = build_clean_registration_view([self.row], self.users, [self.row], today=date(2026, 7, 5))

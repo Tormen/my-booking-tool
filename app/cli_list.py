@@ -164,27 +164,41 @@ def compute_times_booked_counts(rows: list[dict], today: date) -> tuple[Counter,
 
 def build_clean_registration_view(
     rows: list[dict], users_by_id: dict[str, dict], all_rows: list[dict], today: date,
-    short_ids_by_reg_id: dict[str, str] | None = None,
+    short_ids_by_reg_id: dict[str, str] | None = None, verbose: bool = False,
 ) -> list[dict]:
     """Builds the compact, human-readable rows `my-bt list` shows by
     default (2026-07-13, the operator: "the default command shows it cleaned up
     without technical ids... can you mimick the view of the
-    web-interface?") -- the exact same columns /admin's own table shows:
-    Status, Course, Date, Name, Email, Registered, Times booked, Guests.
-    No registration_id/user_id/party_id/invited_by_user_id/token hashes --
+    web-interface?") -- Date, Id, Status, Course, Name, Email, Times
+    booked, Guests, plus Registered when `verbose` (see below). No
+    registration_id/user_id/party_id/invited_by_user_id/token hashes --
     pass -r/--raw for the full raw CSV-column view instead (see
     scripts/my-bt's cmd_list).
 
+    2026-07-08, the operator: "put [date] as first column" -- "date" leads every
+    row (it was 4th, after id/status/course); "Please don't show when
+    they registered by default but only with my-bt list -V" -- the
+    "registered" column (registration timestamp) is now OMITTED unless
+    `verbose=True` (scripts/my-bt's cmd_list wires this to -V/--verbose,
+    the same "adds more detail on top of the summary" axis already used
+    by `gdpr-retention -V` and the old `status -V` -- a separate axis
+    from -r/--raw, which swaps the shape rather than adding to it; see
+    raw_arg()'s own comment in scripts/my-bt). `rows` is already sorted
+    by occurrence_date by the caller (cmd_list) before this runs, so the
+    added "date first" column reads top-to-bottom in the order it's
+    sorted by.
+
     ONE exception to "no ids" (2026-07-13, same day, the operator's very next
-    message): a leading "id" column with a short, git-style abbreviated
-    registration_id (see assign_short_ids), usable with `my-bt cancel` --
-    "a bit like what git does with its commit ids". Deliberately CLI-only,
-    never shown on the web (the operator: "not to the web interface as there we
-    have the cancel button") -- pass `short_ids_by_reg_id` (see
-    scripts/my-bt's cmd_list for how it's built, from the LIVE
-    registration_id universe only) to populate it; omit/None leaves every
-    row's "id" blank (e.g. an archived row, which was never live and so
-    was never assigned one -- can't be `cancel`ed by id anyway).
+    message): a leading -- well, now second -- "id" column with a short,
+    git-style abbreviated registration_id (see assign_short_ids), usable
+    with `my-bt cancel` -- "a bit like what git does with its commit
+    ids". Deliberately CLI-only, never shown on the web (the operator: "not to
+    the web interface as there we have the cancel button") -- pass
+    `short_ids_by_reg_id` (see scripts/my-bt's cmd_list for how it's
+    built, from the LIVE registration_id universe only) to populate it;
+    omit/None leaves every row's "id" blank (e.g. an archived row, which
+    was never live and so was never assigned one -- can't be `cancel`ed
+    by id anyway).
 
     `rows` is the (already filtered/sorted) set to display; `all_rows`
     is the FULL unfiltered set (live + archived, no --course/--status/
@@ -201,17 +215,19 @@ def build_clean_registration_view(
         name = user["name"] if user else "(unknown)"
         email = user["email"] if user else "(unknown)"
         uid = r["user_id"]
-        out.append({
+        row = {
+            "date": r["occurrence_date"],
             "id": short_ids_by_reg_id.get(r["registration_id"], ""),
             "status": status_label(r["status"]),
             "course": r["course_shortname"],
-            "date": r["occurrence_date"],
             "name": name,
             "email": email,
-            "registered": format_display_timestamp(r.get("registered_at", "")),
-            "times_booked": f"{upto_now_by_user.get(uid, 0)}/{total_by_user.get(uid, 0)}",
-            "guests": r["party_label"],
-        })
+        }
+        if verbose:
+            row["registered"] = format_display_timestamp(r.get("registered_at", ""))
+        row["times_booked"] = f"{upto_now_by_user.get(uid, 0)}/{total_by_user.get(uid, 0)}"
+        row["guests"] = r["party_label"]
+        out.append(row)
     return out
 
 
