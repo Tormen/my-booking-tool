@@ -77,5 +77,29 @@ class PageFaviconTest(unittest.TestCase):
         self.assertNotIn("https://", html.split("<style>")[0])
 
 
+class IdInputWidthTest(unittest.TestCase):
+    """2026-07-08, the operator (screenshot of /admin/login's password field
+    stretched across the full-width 1000px body, section 14's own width
+    change): "the Name, Email, Password fields should not be that wide
+    ... wide enough for really long passwords (maybe 50 chars) and emails
+    like firstname.doublebarrelled-name@long-company.example" (54
+    chars) -- confirmed "50 chars is OK" as the actual target. `.id-input`
+    caps `.big-input`'s own width:100% at a character-count width (ch
+    scales with .big-input's own font-size) rather than a fixed pixel
+    value, applied alongside (not instead of) `.big-input` on every
+    single-line Name/Email/Password field app-wide -- see app/webapp.py's
+    Name/Email/Password `<input>` call sites."""
+
+    def test_id_input_caps_width_at_50_characters(self):
+        html = page("Some title", "<p>body</p>")
+        self.assertIn(".id-input{max-width:50ch}", html)
+
+    def test_id_input_does_not_override_big_input_but_narrows_it(self):
+        # .id-input must be a NARROWER cap layered on top of .big-input's
+        # own width:100%, not a replacement for its font-size/padding.
+        html = page("Some title", "<p>body</p>")
+        self.assertIn('.big-input{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em}', html)
+
+
 if __name__ == "__main__":
     unittest.main()

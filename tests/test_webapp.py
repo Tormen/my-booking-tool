@@ -809,8 +809,8 @@ class SessionBannerTest(unittest.TestCase):
 
     def test_book_page_fields_stay_editable_when_anonymous(self):
         _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
-        self.assertIn('<input class="big-input" name="name" required>', body)
-        self.assertIn('<input class="big-input" name="email" type="email" required>', body)
+        self.assertIn('<input class="big-input id-input" name="name" required>', body)
+        self.assertIn('<input class="big-input id-input" name="email" type="email" required>', body)
         # Only the CSS selector "input[readonly]" (always present in the
         # <style> block) should mention "readonly" here -- no actual input
         # tag should have the attribute for an anonymous visitor.
@@ -1509,6 +1509,17 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Manage your bookings: https://example.org/my", email_body)
         self.assertIn("Cancel this booking directly: https://example.org/cancel/", email_body)
 
+    def test_confirmed_booking_email_greets_by_name(self):
+        # 2026-07-08, the operator: "they should now all start with 'Dear <NAME>',
+        # correct?" -- they didn't yet; added here (and to the waitlisted,
+        # cancellation, and reinstatement participant emails).
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self._book("regular@example.org", name="Regular")
+        email_body = next(b for _, s, b in self.sent_emails if s.startswith("Booking confirmed:"))
+        self.assertTrue(email_body.startswith("Dear Regular,\n\n"))
+
     def test_confirmed_booking_email_attaches_a_publish_ics(self):
         # 2026-07-09, the operator: "Can you please attach a calendar invite also
         # in the email that is sent to the participant?"
@@ -1601,6 +1612,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Where: Example Community Gym, Room 1", email_body)
         self.assertIn("Manage your bookings: https://example.org/my", email_body)
         self.assertIn("Leave the waitlist directly: https://example.org/cancel/", email_body)
+        self.assertTrue(email_body.startswith("Dear Guest1,\n\n"))
 
     def test_waitlisted_booking_email_has_no_ics_attachment(self):
         # No confirmed slot yet -- nothing real to add to a calendar.
@@ -2297,10 +2309,16 @@ class BookingFlowTest(unittest.TestCase):
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", participant_mail)
         self.assertIn("Message: can't make it", participant_mail)
+        # 2026-07-08, the operator: guest-facing emails greet by name -- the admin
+        # copy right below deliberately does NOT (it's a receipt to the
+        # operator's own inbox, not a letter -- see greeting_html()'s
+        # docstring in app/cancellation.py).
+        self.assertTrue(participant_mail.startswith("Dear Regular,\n\n"))
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Canceled:"))
         self.assertIn("Regular <regular@example.org> canceled this booking:", admin_mail)
         self.assertIn("Message: can't make it", admin_mail)
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
+        self.assertFalse(admin_mail.startswith("Dear"))
 
     def test_my_cancel_email_offers_a_reinstate_link_to_the_participant(self):
         # 2026-07-10: originally a plain "book again" link ("With the
@@ -2825,8 +2843,12 @@ class BookingFlowTest(unittest.TestCase):
         )
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
         self.assertIn("Message: sorry, changed my mind", participant_mail)
+        # 2026-07-08, the operator: same participant-only "Dear NAME," greeting as
+        # the cancellation email -- the admin copy right below stays bare.
+        self.assertTrue(participant_mail.startswith("Dear Regular,\n\n"))
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Reinstated:"))
         self.assertIn("Message: sorry, changed my mind", admin_mail)
+        self.assertFalse(admin_mail.startswith("Dear"))
 
     def test_my_reinstate_without_a_comment_omits_the_message_line(self):
         user, environ = self._login_as_guest("regular@example.org")

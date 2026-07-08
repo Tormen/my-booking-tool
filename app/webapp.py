@@ -94,8 +94,8 @@ from . import maintenance
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import cancel_and_promote
 from .cancellation import (
-    booking_details_text, course_recap_html, html_email_body, html_to_text, intro_html, send_cancellation_emails,
-    send_reinstatement_emails,
+    booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text, intro_html,
+    send_cancellation_emails, send_reinstatement_emails,
 )
 from .config import Settings
 from .emailer import _masked, send_mail
@@ -1151,6 +1151,14 @@ class App:
                 f'<p>Optional: set up a password to view/manage this from '
                 f'<a href="{my_url}">{my_url}</a>: <a href="{confirm_url}">{confirm_url}</a></p>'
             )
+        # 2026-07-08, the operator: "they should now all start with 'Dear <NAME>',
+        # correct?" -- they didn't (only _send_confirm_email() had this);
+        # added here too, same terse-but-warm register. See
+        # cancellation.greeting_html()'s own docstring for why it's a
+        # plain, non-bold line ahead of intro_html()'s bold status
+        # sentence, and why this is guest-facing only, never the admin
+        # copies in this method's own siblings.
+        greeting = f"Dear {user.name},\n\n"
         if status == STATUS_WAITLISTED:
             intro = (
                 "You're on the waitlist -- full for now, but you'll be confirmed automatically "
@@ -1158,13 +1166,14 @@ class App:
             )
             send_mail(
                 self.settings, user.email, f"Waitlisted: {course.title} on {occ_date}",
+                f"{greeting}"
                 f"{intro}\n\n"
                 f"{details}\n"
                 f"Manage your bookings: {my_url}\n"
                 f"Leave the waitlist directly: {cancel_url}\n"
                 f"{account_line}",
                 html_body=html_email_body(
-                    intro_html(intro) + f"{recap_html}"
+                    greeting_html(user.name) + intro_html(intro) + f"{recap_html}"
                     f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
                     f'<p>Leave the waitlist directly: <a href="{cancel_url}">{cancel_url}</a></p>'
                     f"{account_line_html}"
@@ -1174,13 +1183,14 @@ class App:
             ics_filename, ics_text = calendar_sync.guest_invite_ics(self.settings, course, date.fromisoformat(occ_date))
             send_mail(
                 self.settings, user.email, f"Booking confirmed: {course.title} on {occ_date}",
+                f"{greeting}"
                 "Your spot is confirmed:\n\n"
                 f"{details}\n"
                 f"Manage your bookings: {my_url}\n"
                 f"Cancel this booking directly: {cancel_url}\n"
                 f"{account_line}",
                 html_body=html_email_body(
-                    intro_html("Your spot is confirmed:") + f"{recap_html}"
+                    greeting_html(user.name) + intro_html("Your spot is confirmed:") + f"{recap_html}"
                     f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
                     f'<p>Cancel this booking directly: <a href="{cancel_url}">{cancel_url}</a></p>'
                     f"{account_line_html}"
@@ -1620,16 +1630,16 @@ class App:
             # only, not a security boundary).
             if logged_in_user is not None:
                 name_field = (
-                    f'<input class="big-input" name="name" value="{esc(logged_in_user.name)}" readonly required>'
+                    f'<input class="big-input id-input" name="name" value="{esc(logged_in_user.name)}" readonly required>'
                 )
                 email_field = (
-                    f'<input class="big-input" name="email" type="email" '
+                    f'<input class="big-input id-input" name="email" type="email" '
                     f'value="{esc(logged_in_user.email)}" readonly required>'
                 )
                 first_time_hint = ""
             else:
-                name_field = '<input class="big-input" name="name" required>'
-                email_field = '<input class="big-input" name="email" type="email" required>'
+                name_field = '<input class="big-input id-input" name="name" required>'
+                email_field = '<input class="big-input id-input" name="email" type="email" required>'
                 first_time_hint = (
                     "<p class=\"hint\">First time booking with this email? We'll send a link to confirm your\n"
                     "                account and set a password.</p>"
@@ -1717,9 +1727,9 @@ class App:
                 row.className = "guest-row";
                 row.innerHTML =
                   '<label>Guest email <span class="req">(required)</span>' +
-                  '<input class="big-input" name="guest_email_' + i + '" type="email" required></label>' +
+                  '<input class="big-input id-input" name="guest_email_' + i + '" type="email" required></label>' +
                   '<label>Guest name <span class="opt">(optional)</span>' +
-                  '<input class="big-input" name="guest_name_' + i + '"></label>' +
+                  '<input class="big-input id-input" name="guest_name_' + i + '"></label>' +
                   '<button type="button" class="link-button remove-guest-btn">Remove participant</button>';
                 guestRowsEl.appendChild(row);
                 row.querySelector(".remove-guest-btn").addEventListener("click", function() {{
@@ -2269,8 +2279,8 @@ class App:
         next_field = f'<input type="hidden" name="next" value="{esc(next_path)}">' if next_path else ""
         login_body = f"""{login_err_html}<form method="post" action="/my" class="card">
           {next_field}
-          <label>Email <input class="big-input" name="email" type="text" required></label>
-          <label>Password <input class="big-input" name="password" type="password" required></label>
+          <label>Email <input class="big-input id-input" name="email" type="text" required></label>
+          <label>Password <input class="big-input id-input" name="password" type="password" required></label>
           <div class="submit-row"><button type="submit" id="my-login-btn"{
               f' data-lockout-btn data-lockout-seconds="{int(login_lockout_seconds)}"' if login_lockout_seconds else ""
             }>{esc(login_label)}</button></div>
@@ -2293,8 +2303,8 @@ class App:
             # rather than dangling below the closed form (2026-07-06 fix,
             # same complaint as the success message above).
             signup_body = f"""{signup_err_html}<form method="post" action="/my/signup" class="card">
-              <label>Name <input class="big-input" name="name" type="text" required></label>
-              <label>Email <input class="big-input" name="email" type="email" required></label>
+              <label>Name <input class="big-input id-input" name="name" type="text" required></label>
+              <label>Email <input class="big-input id-input" name="email" type="email" required></label>
               <p class="hint">We'll email you a link to set your password.</p>
               <div class="submit-row"><button type="submit" id="my-signup-btn"{
                   f' data-lockout-btn data-lockout-seconds="{int(signup_lockout_seconds)}"' if signup_lockout_seconds else ""
@@ -2368,7 +2378,7 @@ class App:
         reset_label = "Send me a link"
         err_html = '<p class="err">Too many attempts -- try again later.</p>' if lockout_seconds else ""
         body = f"""{err_html}<form method="post" class="card" id="reset-form">
-          <label>Email <input class="big-input" name="email" type="email" required></label>
+          <label>Email <input class="big-input id-input" name="email" type="email" required></label>
           <div class="submit-row"><button type="submit" id="reset-btn" data-resend-cooldown-btn{
               f' data-lockout-btn data-lockout-seconds="{int(lockout_seconds)}"' if lockout_seconds else ""
             }>{esc(reset_label)}</button></div>
@@ -2380,7 +2390,7 @@ class App:
     def _set_password_form(self, token: str) -> str:
         return f"""<form method="post" class="card">
           <label>New password <span class="req">(required)</span>
-            <input class="big-input" name="password" type="password"
+            <input class="big-input id-input" name="password" type="password"
               minlength="{MIN_PASSWORD_LENGTH}" required></label>
           <p class="hint">At least {MIN_PASSWORD_LENGTH} characters. Any letters, numbers, or
             symbols are allowed, and there's no upper limit -- just avoid leading/trailing
@@ -2796,7 +2806,7 @@ class App:
         banner = self._session_banner_html(environ, on_my_page=True)
         name_err_html = f'<p class="err">{esc(name_error)}</p>' if name_error else ""
         name_body = f"""{name_err_html}<form method="post" action="/my/settings/name" class="card">
-          <label>Name <input class="big-input" name="name" type="text" value="{esc(user.name)}" required></label>
+          <label>Name <input class="big-input id-input" name="name" type="text" value="{esc(user.name)}" required></label>
           <div class="submit-row"><button type="submit">Save name</button></div>
         </form>"""
 
@@ -2826,8 +2836,8 @@ class App:
             </div>"""
         else:
             email_body = f"""{email_err_html}<form method="post" action="/my/settings/email" class="card">
-              <label>Current email <input class="big-input" value="{esc(user.email)}" disabled></label>
-              <label>New email <input class="big-input" name="email" type="email" required></label>
+              <label>Current email <input class="big-input id-input" value="{esc(user.email)}" disabled></label>
+              <label>New email <input class="big-input id-input" name="email" type="email" required></label>
               <p class="hint">We'll email a confirmation link to the new address -- your login
                 email only changes once that link is clicked.</p>
               <div class="submit-row"><button type="submit">Change email</button></div>
@@ -3095,7 +3105,7 @@ class App:
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
         login_label = "Log in"
         body = f"""{err_html}<form method="post" class="card">
-          <label>Admin password <input class="big-input" name="password" type="password" required></label>
+          <label>Admin password <input class="big-input id-input" name="password" type="password" required></label>
           <div class="submit-row"><button type="submit" id="admin-login-btn"{
               f' data-lockout-btn data-lockout-seconds="{int(lockout_seconds)}"' if lockout_seconds else ""
             }>{esc(login_label)}</button></div>

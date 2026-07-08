@@ -151,6 +151,23 @@ def intro_html(text: str) -> str:
     return f'<p style="font-size:1.25em;font-weight:bold;margin:0 0 .5em">{html.escape(text, quote=True)}</p>'
 
 
+def greeting_html(name: str) -> str:
+    """"Dear NAME," as its own plain (non-bold) paragraph, meant to sit
+    BEFORE intro_html()'s bold status sentence -- 2026-07-08, the operator: after
+    _send_confirm_email() got a "Dear NAME," greeting (2026-07-07) and the
+    guest-facing booking-result/cancellation/reinstatement emails didn't,
+    asked "they should now all start with 'Dear <NAME>', correct?". They
+    didn't; this closes that gap for those three, deliberately NOT for the
+    admin-facing copies (admin_email) or the party-admin summary, which are
+    receipts to the operator's own inbox, not letters to a guest -- see
+    each call site's own comment. Kept separate from intro_html() rather
+    than folded into it: the greeting is a normal-weight salutation, not
+    the bold, larger "most important fact" line intro_html() exists for,
+    and not every intro_html() caller (e.g. the admin-facing emails above)
+    wants a greeting at all."""
+    return f'<p style="margin:0 0 .5em">Dear {html.escape(name, quote=True)},</p>'
+
+
 def message_html(message: str) -> str:
     """The optional free-text comment collected by Cancel's and Reinstate's
     own confirm dialogs (2026-07-10, the operator: "Reinstate should, LIKE CANCEL,
@@ -259,13 +276,17 @@ def send_cancellation_emails(
                 f'<p>If this was a mistake, you can reinstate it here: '
                 f'<a href="{guest_reinstate_url}">{guest_reinstate_url}</a></p>'
             )
+        # 2026-07-08, the operator: guest-facing emails should greet by name, same
+        # as _send_confirm_email() already did -- see greeting_html()'s own
+        # docstring. Participant copy only, never the admin copy below.
         send_mail(
             settings, user.email, subject,
+            f"Dear {user.name},\n\n"
             f"{participant_who} canceled this booking:\n\n{details}\n"
             f"Manage your bookings: {my_url}\n"
             f"{reinstate_line}",
             html_body=html_email_body(
-                intro_html(f"{participant_who} canceled this booking:") + recap_html
+                greeting_html(user.name) + intro_html(f"{participant_who} canceled this booking:") + recap_html
                 + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
                 + reinstate_line_html
             ),
@@ -325,11 +346,13 @@ def send_reinstatement_emails(
     if user:
         participant_who = "You" if reinstated_by == "guest" else "The host"
         intro = f"{participant_who} reinstated this booking -- {status_phrase}:"
+        # 2026-07-08, the operator: same "Dear NAME," greeting as
+        # send_cancellation_emails' own participant copy above.
         send_mail(
             settings, user.email, subject,
-            f"{intro}\n\n{details}\nManage your bookings: {my_url}\n",
+            f"Dear {user.name},\n\n{intro}\n\n{details}\nManage your bookings: {my_url}\n",
             html_body=html_email_body(
-                intro_html(intro) + recap_html
+                greeting_html(user.name) + intro_html(intro) + recap_html
                 + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
             ),
             ics_attachment=ics_attachment,

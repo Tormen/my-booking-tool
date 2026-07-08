@@ -113,7 +113,24 @@ def page(title: str, body: str, banner: str = "") -> str:
     still read visually as secondary/de-emphasized text without actually
     being smaller than a button label. Deliberately scoped to the app
     pages only, not site/index.html -- see that file's own top-of-file
-    comment for why its content (a raw Word paste) isn't touched here."""
+    comment for why its content (a raw Word paste) isn't touched here.
+
+    `.id-input` (2026-07-08, the operator, screenshot of /admin/login's password
+    field stretched across the full-width 1000px body: "the Name, Email,
+    Password fields should not be that wide ... wide enough for really
+    long passwords (maybe 50 chars) and emails like
+    firstname.doublebarrelled-name@long-company.example" -- 54 chars;
+    confirmed "50 chars is OK" as the sizing target) caps `.big-input`'s
+    own `width:100%` at `max-width:50ch` -- `ch` scales with `.big-input`'s
+    own font-size, so this is a character-count cap, not a fixed pixel
+    width. Applied ALONGSIDE `big-input` (`class="big-input id-input"`),
+    never replacing it, and ONLY on single-line Name/Email/Password
+    `<input>` fields app-wide (every page that has one -- login, signup,
+    admin login, /my settings, the booking form's own guest rows).
+    Deliberately NOT applied to `.big-input` textareas (the Cancel/
+    Reinstate reason/message boxes -- free text benefits from the full
+    width) or the `type="search"` table-filter boxes on /my and /admin
+    (which visually pair with their own full-width table below them)."""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -137,6 +154,7 @@ label{{display:block;margin-top:.6em}}
 .req{{color:#b00020}}
 .hint{{color:#555;margin:.1em 0 0;font-style:italic}}
 .big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em}}
+.id-input{{max-width:50ch}}
 .dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5em;margin:.4em 0}}
 .date-btn{{position:relative;display:block}}
 .date-btn input{{position:absolute;opacity:0;width:1px;height:1px}}

@@ -10,7 +10,9 @@ their own rather than only ever asserting on giant end-to-end email
 bodies."""
 import unittest
 
-from app.cancellation import booking_details_text, course_recap_html, html_email_body, intro_html, message_html
+from app.cancellation import (
+    booking_details_text, course_recap_html, greeting_html, html_email_body, intro_html, message_html,
+)
 
 from .helpers import make_course
 
@@ -122,6 +124,25 @@ class IntroHtmlTest(unittest.TestCase):
         # name into the intro sentence (e.g. "Jane <jane@x.com> canceled
         # this booking:") -- this must not be a raw HTML-injection hole.
         rendered = intro_html('<script>alert(1)</script> canceled this booking:')
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
+
+
+class GreetingHtmlTest(unittest.TestCase):
+    """2026-07-08, the operator: "they should now all start with 'Dear <NAME>',
+    correct?" -- closes the gap between _send_confirm_email() (already had
+    this) and the guest-facing booking-result/cancellation/reinstatement
+    emails (didn't). Deliberately plain/non-bold, unlike intro_html()'s
+    bold status sentence right after it -- a greeting isn't the "most
+    important fact" intro_html() exists to spotlight."""
+
+    def test_is_plain_not_bold(self):
+        rendered = greeting_html("Regular")
+        self.assertNotIn("font-weight:bold", rendered)
+        self.assertIn("Dear Regular,", rendered)
+
+    def test_escapes_a_guest_supplied_name(self):
+        rendered = greeting_html("<script>alert(1)</script>")
         self.assertNotIn("<script>alert(1)</script>", rendered)
         self.assertIn("&lt;script&gt;", rendered)
 
