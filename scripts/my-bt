@@ -960,6 +960,26 @@ class _HelpfulArgumentParser(argparse.ArgumentParser):
         self.exit(2, f"\n{self.prog}: error: {message}\n")
 
 
+def _add_subcommand(subparsers, name: str, summary: str, extra: str = "", **kwargs):
+    """Registers one subcommand with a `-h` page that opens with AT LEAST
+    the same one-sentence summary shown in its parent's own listing, plus
+    (where there's something worth adding) one more sentence of detail.
+
+    2026-07-08, the operator, on `my-bt admin -h` printing a bare usage+options
+    dump with no explanation of what "admin" even is: "There should be a
+    sentence here about the admin command as such" -- then, generalizing
+    it to every subcommand: "you need to have AT LEAST what my-bt -h
+    gives you about the command but maybe even 1 sentence more or so."
+    argparse only ever shows `description=` when a leaf parser's own
+    `-h`/`--help` is invoked directly -- `help=` alone (what every
+    add_parser() call here used before this existed) only surfaces in
+    the PARENT's own subcommand listing, never on the child's own page.
+    Without this, `my-bt <command> -h` was just usage + the option list,
+    with zero explanation of what the command actually does."""
+    description = f"{summary} {extra}".strip() if extra else summary
+    return subparsers.add_parser(name, help=summary, description=description, **kwargs)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = _HelpfulArgumentParser(prog="my-bt", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help=f"default: {DEFAULT_DATA_DIR}")
@@ -1023,10 +1043,12 @@ def build_parser() -> argparse.ArgumentParser:
                  f"cleaned-up {what} view",
         )
 
-    sp = sub.add_parser(
-        "list",
-        help="query registrations -- default: today+future, live only "
-             "(see --all/--past for more, incl. archived pre-erasure history)",
+    sp = _add_subcommand(
+        sub, "list",
+        "query registrations -- default: today+future, live only "
+        "(see --all/--past for more, incl. archived pre-erasure history).",
+        "Default output mirrors /admin's clean web view (no ids/hashes) -- "
+        "pass -r/--raw for every raw CSV column instead.",
     )
     format_arg(sp)
     raw_arg(sp, "list")
@@ -1054,27 +1076,39 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_list)
 
-    sp = sub.add_parser("users", help="list guest accounts (live + archived by default)")
+    sp = _add_subcommand(
+        sub, "users", "list guest accounts (live + archived by default).",
+        "Same -r/--raw and --format options as `my-bt list`.",
+    )
     scope_args(sp)
     format_arg(sp)
     raw_arg(sp, "users")
     sp.add_argument("--email", help="filter by (partial, case-insensitive) email")
     sp.set_defaults(func=cmd_users)
 
-    sp = sub.add_parser("show", help="show one registration by id")
+    sp = _add_subcommand(
+        sub, "show", "show one registration by id.",
+        "Accepts either the short id shown in `my-bt list`'s own 'id' column, "
+        "or the full registration id.",
+    )
     format_arg(sp)
     sp.add_argument("registration_id", help="full registration id (see `my-bt list` for short ids and full ids)")
     sp.set_defaults(func=cmd_show)
 
-    sp = sub.add_parser("stats", help="counts per course/status")
+    sp = _add_subcommand(
+        sub, "stats", "counts per course/status.",
+        "Quick capacity/attendance overview without listing every individual row.",
+    )
     scope_args(sp)
     format_arg(sp)
     sp.add_argument("--year", type=int, help="restrict to one year (occurrence_date starts with this year)")
     sp.set_defaults(func=cmd_stats)
 
-    sp = sub.add_parser(
-        "cancel",
-        help="cancel one live registration (host-initiated, same as the web admin's cancel)",
+    sp = _add_subcommand(
+        sub, "cancel",
+        "cancel one live registration (host-initiated, same as the web admin's cancel).",
+        "Pass --date instead of --registration-id to cancel every live "
+        "registration for one course occurrence at once.",
     )
     id_group = sp.add_mutually_exclusive_group(required=True)
     id_group.add_argument(
@@ -1090,9 +1124,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_cancel)
 
-    sp = sub.add_parser(
-        "gdpr-retention",
-        help="GDPR storage-limitation status: what would be purged, and when (see `purge` to act on it)",
+    sp = _add_subcommand(
+        sub, "gdpr-retention",
+        "GDPR storage-limitation status: what would be purged, and when "
+        "(see `purge` to act on it).",
+        "Read-only by default -- nothing is deleted unless you run the `purge` subcommand.",
     )
     sp.add_argument(
         "-V", "--verbose", action="store_true",
@@ -1101,13 +1137,18 @@ def build_parser() -> argparse.ArgumentParser:
     format_arg(sp)
     sp.set_defaults(func=cmd_gdpr_retention)
     gdpr_sub = sp.add_subparsers(dest="gdpr_command")
-    gp = gdpr_sub.add_parser("purge", help="actually delete every row past its retention window")
+    gp = _add_subcommand(
+        gdpr_sub, "purge", "actually delete every row past its retention window.",
+        "Irreversible -- run plain `gdpr-retention` first to see what this would remove.",
+    )
     gp.set_defaults(func=cmd_gdpr_retention_purge)
 
-    sp = sub.add_parser(
-        "status",
-        help="live server summary: up/running, maintenance mode, logged-in users "
-             "(see `my-bt admin health` for the full settings/secrets/systemd/SELinux/nginx report)",
+    sp = _add_subcommand(
+        sub, "status",
+        "live server summary: up/running, maintenance mode, logged-in users "
+        "(see `my-bt admin health` for the full settings/secrets/systemd/SELinux/nginx report).",
+        "Fast and live-only -- queries the running process directly over its "
+        "own loopback listener, no deep install diagnostics.",
     )
     sp.add_argument(
         "--internal-url", default=DEFAULT_INTERNAL_URL,
@@ -1122,39 +1163,60 @@ def build_parser() -> argparse.ArgumentParser:
     # rarely-needed-day-to-day commands live here instead of cluttering
     # the top level next to `list`/`status`/`cancel`, which you reach for
     # far more often.
-    admin_sp = sub.add_parser("admin", help="site-administration commands (setup, secrets, GDPR erasure, ...)")
+    admin_sp = _add_subcommand(
+        sub, "admin", "site-administration commands (setup, secrets, GDPR erasure, ...).",
+        "These are the heavier, rarely-needed actions -- day-to-day use is "
+        "`list`/`status`/`cancel` at the top level.",
+    )
     admin_sub = admin_sp.add_subparsers(dest="admin_command", required=True)
 
-    sp = admin_sub.add_parser("hash-password", help="generate admin_password_hash (prompts, hidden input)")
+    sp = _add_subcommand(
+        admin_sub, "hash-password", "generate admin_password_hash (prompts, hidden input).",
+        "Paste the output into /etc/my-booking/secrets/admin_password_hash.",
+    )
     sp.set_defaults(func=cmd_hash_password)
 
-    sp = admin_sub.add_parser("erase", help="manually erase a guest's data (GDPR Art. 17)")
+    sp = _add_subcommand(
+        admin_sub, "erase", "manually erase a guest's data (GDPR Art. 17).",
+        "Same effect as a guest self-erasing via /my, just host-initiated.",
+    )
     sp.add_argument("--email", required=True, help="the guest's login email")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_erase)
 
-    sp = admin_sub.add_parser(
-        "dearchive",
-        help="permanently move a guest's pre-erasure registration history onto their live account "
-             "(renamed from `merge`)",
+    sp = _add_subcommand(
+        admin_sub, "dearchive",
+        "permanently move a guest's pre-erasure registration history onto their "
+        "live account (renamed from `merge`).",
+        "Unlike `my-bt list --all`'s own on-the-fly merge (nothing persisted), "
+        "this one actually writes to disk.",
     )
     sp.add_argument("--email", required=True, help="the guest's CURRENT (live) login email")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sp.set_defaults(func=cmd_dearchive)
 
-    sp = admin_sub.add_parser(
-        "maintenance",
-        help="set/unset sitewide maintenance mode (blocks new bookings, banners index.html)",
+    sp = _add_subcommand(
+        admin_sub, "maintenance",
+        "set/unset sitewide maintenance mode (blocks new bookings, banners index.html).",
+        "The 'status' choice for the positional argument below just reports "
+        "the current state without changing it.",
     )
     sp.add_argument("maintenance_command", choices=["on", "off", "status"], help="what to do")
     sp.add_argument("-m", "--message", help="optional message shown in the banner/booking pages (only used with 'on')")
     sp.set_defaults(func=cmd_maintenance)
 
-    sp = admin_sub.add_parser("git-snapshot", help="commit any data-dir changes now (same as the hourly timer)")
+    sp = _add_subcommand(
+        admin_sub, "git-snapshot", "commit any data-dir changes now (same as the hourly timer).",
+        "Useful right before a risky manual edit, so you have a rollback point.",
+    )
     sp.add_argument("--dry-run", action="store_true", help="report what would be committed, without staging/committing")
     sp.set_defaults(func=cmd_git_snapshot)
 
-    sp = admin_sub.add_parser("setup", help="show (or --interactive: be walked through) post-install setup steps")
+    sp = _add_subcommand(
+        admin_sub, "setup", "show (or --interactive: be walked through) post-install setup steps.",
+        "Plain `setup` only reports; add -i/--interactive to actually fix "
+        "what's safely automatable (most of it needs root).",
+    )
     sp.add_argument(
         "-i", "--interactive", action="store_true",
         help="actually walk through each step and perform what's safely automatable "
@@ -1162,10 +1224,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.set_defaults(func=cmd_setup)
 
-    sp = admin_sub.add_parser(
-        "health",
-        help="full install-health diagnostic: settings/secrets/systemd/SELinux/nginx/... "
-             "(this is what `my-bt status -V` used to be)",
+    sp = _add_subcommand(
+        admin_sub, "health",
+        "full install-health diagnostic: settings/secrets/systemd/SELinux/nginx/... "
+        "(this is what `my-bt status -V` used to be).",
+        "Slower than plain `my-bt status` -- this is for diagnosing an "
+        "install problem, not a quick liveness check.",
     )
     sp.set_defaults(func=cmd_admin_health)
 
