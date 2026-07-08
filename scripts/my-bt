@@ -91,6 +91,31 @@ def _print_rows(rows: list[dict], fmt: str) -> None:
         print("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols))
 
 
+def _print_single_row_kv(row: dict, fmt: str) -> None:
+    """Vertical 'key : value' layout for exactly ONE entity (a single
+    registration, a course's own settings.toml definition, a user's own
+    profile row) -- 2026-07-09, the operator, on a 14-column registration
+    wrapping illegibly across the terminal in the normal horizontal
+    _print_rows table: "show works on a single entity -> please use more
+    human friendly output ... a simple: key : value table". json/csv stay
+    exactly as they already were (already machine-readable, nothing to
+    fix there); only the default 'table' format gets this treatment.
+    Multi-row `show` results (an occurrence with several bookings,
+    ambiguous matches, a user's own booking history) stay on the existing
+    horizontal _print_rows table -- a vertical layout only helps when
+    there's exactly one row; several side by side is what a table is
+    for."""
+    if fmt in ("json", "csv"):
+        _print_rows([row], fmt)
+        return
+    if not row:
+        print("(no data)")
+        return
+    width = max(len(str(k)) for k in row)
+    for k, v in row.items():
+        print(f"{str(k).ljust(width)} : {v}")
+
+
 def _in_range(value: str, start: str | None, end: str | None) -> bool:
     if start and value < start:
         return False
@@ -258,16 +283,18 @@ def cmd_users(args) -> None:
 
 def _show_registration_by_full_id(full_id: str, store, users_by_id: dict, fmt: str) -> None:
     """Shared by every path that ends up resolving to one specific
-    registration_id (auto-detected or via a resolved short id) --
-    original `show` behavior, unchanged: full detail, "party" column
-    (app.cli_list.annotate_party_info) computed across ALL rows in that
-    row's scope first (so a sibling party member elsewhere in the file
-    is actually found), then narrowed to just the requested row."""
+    registration_id (auto-detected or via a resolved short id) -- full
+    detail, "party" column (app.cli_list.annotate_party_info) computed
+    across ALL rows in that row's scope first (so a sibling party member
+    elsewhere in the file is actually found), then narrowed to just the
+    requested row. 2026-07-09, the operator, on this wrapping illegibly across
+    the terminal as a 14-column ONE-row table: printed as a vertical
+    key : value listing instead (see _print_single_row_kv)."""
     for scope in ("live", "archived"):
         rows = app_cli_list.annotate_party_info(store.read_registrations(scope=scope), users_by_id)
         for r in rows:
             if r["registration_id"] == full_id:
-                _print_rows([{**r, "_scope": scope}], fmt)
+                _print_single_row_kv({**r, "_scope": scope}, fmt)
                 return
     print("not found", file=sys.stderr)
     sys.exit(1)
@@ -279,8 +306,9 @@ def _show_course(course, fmt: str) -> None:
     live occurrence computation (that needs CalDAV conflict-checking,
     see app/slots.py::build_occurrences) -- `my-bt list`/the booking
     website already show live upcoming occurrences; this is specifically
-    "what IS this course configured as"."""
-    _print_rows([asdict(course)], fmt)
+    "what IS this course configured as". One row -> vertical key : value
+    listing, same reasoning as _show_registration_by_full_id above."""
+    _print_single_row_kv(asdict(course), fmt)
 
 
 def _show_occurrence(rows: list[dict], users_by_id: dict, all_rows: list[dict], fmt: str) -> None:
@@ -305,12 +333,15 @@ def _show_user(user_row: dict, store, fmt: str) -> None:
     read; no archived-history merge needed here (that's a DIFFERENT
     scenario -- re-attaching a DIFFERENT, now-orphaned archived user_id
     onto a NEW live one after an attendee re-registers post-erasure, see
-    merge_archived_for_display's own docstring)."""
+    merge_archived_for_display's own docstring). The profile itself is one
+    row -> vertical key : value listing, same reasoning as
+    _show_registration_by_full_id above; the booking history below it is
+    genuinely multi-row, so that part stays on the horizontal table."""
     all_regs = store.read_registrations(scope="all")
     last_course = app_cli_list.compute_last_confirmed_course(all_regs, date.today())
     profile = app_cli_list.build_clean_user_view([user_row], last_course_by_user=last_course, verbose=True)
     print("-- profile --")
-    _print_rows(profile, fmt)
+    _print_single_row_kv(profile[0], fmt)
     own_rows = [r for r in all_regs if r["user_id"] == user_row.get("user_id")]
     own_rows.sort(key=lambda r: r["occurrence_date"])
     print("-- booking history --")
@@ -390,12 +421,17 @@ def cmd_show(args) -> None:
         return
 
     if not args.query:
-        print(
-            "nothing to show -- pass a registration id, course shortname, YYYY-MM-DD date, "
-            "or a name/email, or use --course/--user",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        # 2026-07-09, the operator: "Why does my-bt show not show the --help like
+        # the others?" -- query/--course/--user are all optional (a
+        # mutually exclusive group, none required), so argparse itself
+        # never errors on a bare `my-bt show` the way it does for e.g.
+        # `my-bt cancel` (whose query/--id/--date group IS required) --
+        # this used to print a bespoke one-line stderr
+        # message instead of real help. Same fix as bare `my-bt`/`my-bt
+        # admin` (see build_parser()'s own `_help_parser` comment): full
+        # help, exit 0, for consistency across every command.
+        args._help_parser.print_help()
+        sys.exit(0)
 
     full_ids = [r["registration_id"] for r in all_rows]
     kind, data = app_cli_show.classify_show_query(
@@ -675,17 +711,16 @@ def _cmd_cancel_occurrence(args, settings, store) -> None:
 
 
 def cmd_cancel(args) -> None:
-    """`my-bt cancel --registration-id ... [--message/-m ...]` -- CLI
-    equivalent of the web admin's /admin/cancel/<reg_id> (host-initiated
-    cancel): same identification (registration_id, the natural unique key
-    -- mirrors how admin_cancel() in app/webapp.py finds the registration
-    it's canceling), same status transition (-> canceled_by_host), same
-    optional message stored in host_message, and the SAME cancellation
-    emails to both the participant and admin_email -- see
-    app.cli_cancel.cancel_registration, which calls the exact
-    app.cancellation.send_cancellation_emails function admin_cancel()
-    itself calls, so this can never send something different from what the
-    web admin path sends.
+    """`my-bt cancel <query>` -- CLI equivalent of the web admin's
+    /admin/cancel/<reg_id> (host-initiated cancel): same identification
+    (registration_id, the natural unique key -- mirrors how admin_cancel()
+    in app/webapp.py finds the registration it's canceling), same status
+    transition (-> canceled_by_host), same optional message stored in
+    host_message, and the SAME cancellation emails to both the participant
+    and admin_email -- see app.cli_cancel.cancel_registration, which calls
+    the exact app.cancellation.send_cancellation_emails function
+    admin_cancel() itself calls, so this can never send something
+    different from what the web admin path sends.
 
     Also promotes the next waitlisted person (if this cancellation freed a
     confirmed spot) and re-syncs the calendar event, via
@@ -698,33 +733,70 @@ def cmd_cancel(args) -> None:
 
     2026-07-13, the operator: "would it be possible that my-bt lists a short-id
     that can also be used with my-bt cancel to cancel a booking? a bit
-    like what git does with its commit ids" -- --registration-id now
-    accepts EITHER the full id OR one of `my-bt list`'s own short "id"
-    column values (see app.cli_list.assign_short_ids/resolve_short_id):
-    tried as a full id first (the exact same store.find_by_id() lookup as
-    before, so nothing changes for any existing script passing a full
-    id), and only resolved as a short-id prefix against the LIVE
-    registration set if that exact lookup comes back empty.
+    like what git does with its commit ids" -- --id now accepts EITHER the
+    full id OR one of `my-bt list`'s own short "id" column values (see
+    app.cli_list.assign_short_ids/resolve_short_id): tried as a full id
+    first (the exact same store.find_by_id() lookup as before, so nothing
+    changes for any existing script passing a full id), and only resolved
+    as a short-id prefix against the LIVE registration set if that exact
+    lookup comes back empty.
 
     2026-07-13, the operator: "cancel entire course" -- `--date YYYY-MM-DD`
-    (mutually exclusive with --registration-id) cancels EVERY live
-    confirmed/waitlisted/pending-confirmation registration for one
-    occurrence at once, via app.cancel_flow.cancel_occurrence -- the same
-    function behind the web admin's /admin checkbox and the no-login
+    (mutually exclusive with --id) cancels EVERY live confirmed/
+    waitlisted/pending-confirmation registration for one occurrence at
+    once, via app.cancel_flow.cancel_occurrence -- the same function
+    behind the web admin's /admin checkbox and the no-login
     `/host-cancel-occurrence/<course>/<date>` magic link, so all three
     paths share one implementation. --course is optional ("as usually a
     single date for me holds a single course"): auto-detected from that
     date's live cancelable registrations if omitted, erroring with the
     list of candidates if more than one course actually has a booking on
-    that date."""
+    that date.
+
+    2026-07-09, the operator: "make cancel also SMART like show" -- a bare
+    positional `query` (mutually exclusive with --id/--date, same shape as
+    `show`'s own query/--course/--user group) is auto-classified via
+    app.cli_cancel.classify_cancel_query: a registration id (short or
+    full) or a YYYY-MM-DD date get treated exactly as if --id/--date had
+    been passed directly; a bare course shortname (not itself cancelable
+    without a date) gets a helpful explanation instead of a confusing
+    failure. --id/--date/--course still FORCE a specific type directly,
+    bypassing auto-detection entirely, same as show's --course/--user."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
+
+    if args.query:
+        live_ids = [r["registration_id"] for r in store.read_registrations(scope="live")]
+        kind, data = app_cli_cancel.classify_cancel_query(
+            args.query, live_ids, settings.courses, min_id_length=app_cli_list.SHORT_ID_LENGTH,
+        )
+        if kind == "id":
+            args.id = data
+        elif kind == "ambiguous_id":
+            print(f"ambiguous id {args.query!r} -- matches {len(data)} live registrations:")
+            for c in data:
+                print(f"  {c}")
+            print("use a longer prefix, or the full registration id (see `my-bt list` for both).")
+            return
+        elif kind == "date":
+            args.date = data
+        elif kind == "course":
+            print(
+                f"{args.query!r} is a course, not a specific booking or date -- pair it with "
+                f"--date to cancel every registration for one occurrence (e.g. `my-bt cancel "
+                f"--date YYYY-MM-DD --course {data.shortname}`), or pass a registration id/date directly.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        else:
+            print(f"{args.query!r} not recognized as a registration id or date -- see `my-bt cancel -h`.", file=sys.stderr)
+            sys.exit(1)
 
     if args.date:
         _cmd_cancel_occurrence(args, settings, store)
         return
 
-    reg_id = args.registration_id
+    reg_id = args.id
     reg = store.find_by_id(reg_id)
     if reg is None:
         live_ids = [r["registration_id"] for r in store.read_registrations(scope="live")]
@@ -733,13 +805,13 @@ def cmd_cancel(args) -> None:
             reg_id = resolved
             reg = store.find_by_id(reg_id)
         elif candidates:
-            print(f"ambiguous id {args.registration_id!r} -- matches {len(candidates)} live registrations:")
+            print(f"ambiguous id {args.id!r} -- matches {len(candidates)} live registrations:")
             for c in candidates:
                 print(f"  {c}")
             print("use a longer prefix, or the full registration id (see `my-bt list` for both).")
             return
     if reg is None:
-        print(f"no registration with id {args.registration_id}")
+        print(f"no registration with id {args.id}")
         return
     # 2026-07-13: pending_confirmation (an attendee who hasn't yet clicked their
     # account-confirmation email link) is cancelable too now -- see
@@ -1265,6 +1337,225 @@ def _add_subcommand(subparsers, name: str, summary: str, extra: str = "", **kwar
     return subparsers.add_parser(name, help=summary, description=description, **kwargs)
 
 
+# -- zsh completion -----------------------------------------------------
+# 2026-07-08, the operator: "can you please built into the script a zsh
+# compatible shell auto-complete that is auto-installing in the users
+# home dir on first run" -- then, once reminded this had never actually
+# been built and asked to do it: "as we have the package you are right
+# though that we can do this via the rpm!" -- so instead of my-bt writing
+# to the user's own $HOME/.zshrc at runtime (fragile: fighting over one
+# shared dotfile, needing to detect whether it's already been added,
+# surviving the user's own edits...), packaging/my-booking-tool.spec's
+# %build generates a static completion file from THIS EXACT build's own
+# `build_parser()` (see below) and %install ships it straight into the
+# system-wide zsh completion directory (%{_datadir}/zsh/site-functions),
+# already on every zsh's fpath by default on Fedora -- no per-user setup
+# at all, and it can never drift out of sync with the real subcommands/
+# flags the way a hand-maintained completion file would, since it's
+# regenerated from the real argparse tree on every single build.
+def _zsh_escape(text: str) -> str:
+    """Sanitizes an argparse help= string for safe embedding inside a
+    single-quoted zsh _arguments/_describe '...[description]' spec:
+    collapses whitespace, strips `[`/`]` (these delimit the description
+    itself in _arguments' own spec syntax, so a literal one in the help
+    text would prematurely end it), and escapes embedded single quotes
+    the standard zsh way. `:` is deliberately left alone -- it's only a
+    delimiter for the OPTIONAL trailing ':message:action' part of a spec
+    (which none of these specs ever use), not inside the [description]
+    bracket itself, so stripping it would just make URLs/times/ratios in
+    help text (e.g. "http://...", "13/19") harder to read for no reason."""
+    text = " ".join((text or "").split())
+    for ch in "[]":
+        text = text.replace(ch, "")
+    return text.replace("'", "'\\''")
+
+
+def _expand_help_text(parser: argparse.ArgumentParser, action: argparse.Action) -> str:
+    """Mirrors argparse.HelpFormatter._expand_help's own %(default)s/
+    %(prog)s/etc. substitution. `action.help` is the RAW, un-expanded
+    format string -- argparse only interpolates it when actually
+    rendering -h/--help text through a HelpFormatter, never on plain
+    attribute access -- so without this, e.g. `status`'s --internal-url
+    help (which uses %(default)s) would show up in the completion
+    tooltip as the literal, un-substituted text "%(default)s" instead of
+    the real default value."""
+    help_text = action.help or ""
+    if "%" not in help_text:
+        return help_text
+    params = dict(vars(action), prog=parser.prog)
+    for k, v in list(params.items()):
+        if v is argparse.SUPPRESS:
+            del params[k]
+    try:
+        return help_text % params
+    except (KeyError, ValueError, TypeError):
+        return help_text
+
+
+def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
+    """One RAW (un-indented, no line-continuation) zsh _arguments spec
+    string per --option/-o this parser itself defines (NOT its own
+    subcommands' options) -- -h/--help excluded, zsh's own completion
+    system already handles that everywhere. See _zsh_join for how these
+    get assembled into an actual multi-line _arguments invocation."""
+    specs = []
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            continue
+        opts = [s for s in action.option_strings if s not in ("-h", "--help")]
+        if not opts:
+            continue
+        desc = _zsh_escape(_expand_help_text(parser, action))
+        if len(opts) > 1:
+            specs.append(f"'({' '.join(opts)}){{{','.join(opts)}}}[{desc}]'")
+        else:
+            specs.append(f"'{opts[0]}[{desc}]'")
+    return specs
+
+
+def _zsh_subcommand_entries(parser: argparse.ArgumentParser) -> list[str]:
+    """One RAW 'name:description' zsh entry per direct sub-command this
+    parser's own add_subparsers() group defines, in registration order,
+    for feeding straight to _describe (array-literal elements -- these
+    don't need backslash line-continuation, only _arguments calls do)."""
+    entries = []
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for choice_action in action._choices_actions:
+                desc = _zsh_escape(choice_action.help or "")
+                entries.append(f"'{choice_action.dest}:{desc}'")
+    return entries
+
+
+def _zsh_subparser_choices(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    """{name: subparser} for this parser's own direct add_subparsers()
+    group, or {} if it has none."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    return {}
+
+
+def _zsh_join(specs: list[str], indent: str) -> str:
+    """Assembles RAW spec strings (from _zsh_option_specs/state-directive
+    literals) into a valid zsh multi-line backslash-continued block: every
+    line ends in ` \\` EXCEPT the last, which must not, or zsh treats what
+    follows as a syntax error. Returns "" for an empty list -- callers
+    must handle that case themselves (an _arguments call always needs AT
+    LEAST one spec/state-directive, so an empty result means "don't emit
+    a continuation at all here", not "emit an empty one")."""
+    if not specs:
+        return ""
+    lines = [f"{indent}{s} \\" for s in specs[:-1]] + [f"{indent}{specs[-1]}"]
+    return "\n".join(lines)
+
+
+def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
+    """Builds a complete, self-contained `#compdef my-bt` zsh completion
+    script by walking `parser`'s own argparse tree -- see the module-level
+    comment above this function for why this is generated at RPM %build
+    time rather than hand-maintained or self-installed at runtime.
+
+    Covers, at every depth this CLI actually has (top-level commands,
+    `admin`'s own second-level sub-commands, and each leaf's own flags):
+    real command/flag names with their real one-line help text as the
+    completion description, so `my-bt <TAB>`, `my-bt admin <TAB>`, and
+    `my-bt <command> --<TAB>` all complete correctly. Positional argument
+    VALUES (e.g. `--email <TAB>` offering real email addresses, or
+    `maintenance on|off|status`'s own choices) are deliberately not
+    attempted -- these would need to shell out to `my-bt` itself per
+    keystroke (the argcomplete approach) for real data, which is a much
+    bigger dependency/latency trade-off than the operator asked for here.
+    """
+    top_entries = "\n".join(f"      {e}" for e in _zsh_subcommand_entries(parser))
+    top_choices = _zsh_subparser_choices(parser)
+    top_dispatch = _zsh_join(
+        _zsh_option_specs(parser) + ["'1: :->cmd'", "'*::arg:->args'"], indent="    "
+    )
+
+    leaf_cases = []
+    for name, sp in top_choices.items():
+        nested = _zsh_subparser_choices(sp)
+        if not nested:
+            own_opts = _zsh_option_specs(sp)
+            body = (
+                f"          _arguments -s \\\n{_zsh_join(own_opts, '            ')}"
+                if own_opts else "          _arguments -s"
+            )
+            leaf_cases.append(f"""        {name})
+{body}
+          ;;""")
+            continue
+        # Exactly one level deeper (my-bt admin <sub>, my-bt gdpr-retention
+        # purge): same '1: :->state' / '*::arg:->state_args' dispatch
+        # pattern as the top level, just nested one case deeper.
+        nested_entries = "\n".join(f"          {e}" for e in _zsh_subcommand_entries(sp))
+        nested_dispatch = _zsh_join(
+            _zsh_option_specs(sp) + ["'1: :->subcmd'", "'*::subarg:->subargs'"], indent="          "
+        )
+        nested_cases = []
+        for nname, nsp in nested.items():
+            nopts = _zsh_option_specs(nsp)
+            nbody = (
+                f"              _arguments -s \\\n{_zsh_join(nopts, '                ')}"
+                if nopts else "              _arguments -s"
+            )
+            nested_cases.append(f"""            {nname})
+{nbody}
+              ;;""")
+        nested_cases_str = "\n".join(nested_cases)
+        leaf_cases.append(f"""        {name})
+          local -a _mb_sub_cmds
+          _mb_sub_cmds=(
+{nested_entries}
+          )
+          _arguments -C \\
+{nested_dispatch}
+          case $state in
+            subcmd)
+              _describe '{name} sub-command' _mb_sub_cmds
+              ;;
+            subargs)
+              case $words[1] in
+{nested_cases_str}
+              esac
+              ;;
+          esac
+          ;;""")
+    leaf_cases_str = "\n".join(leaf_cases)
+
+    return f"""#compdef my-bt
+# Auto-generated by scripts/my-bt's own generate_zsh_completion() at RPM
+# build time (packaging/my-booking-tool.spec %build) -- DO NOT hand-edit;
+# regenerate by rebuilding the package. Installed into
+# %{{_datadir}}/zsh/site-functions/_my-bt, already on every zsh's fpath by
+# default -- open a new shell (or run `compinit`) to pick it up.
+
+_my_bt() {{
+  local -a _mb_top_cmds
+  _mb_top_cmds=(
+{top_entries}
+  )
+
+  _arguments -C \\
+{top_dispatch}
+
+  case $state in
+    cmd)
+      _describe 'my-bt command' _mb_top_cmds
+      ;;
+    args)
+      case $words[1] in
+{leaf_cases_str}
+      esac
+      ;;
+  esac
+}}
+
+_my_bt "$@"
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = _HelpfulArgumentParser(prog="my-bt", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help=f"default: {DEFAULT_DATA_DIR}")
@@ -1409,7 +1700,7 @@ def build_parser() -> argparse.ArgumentParser:
     query_group.add_argument("--course", help="force: show this course (by shortname) directly")
     query_group.add_argument("--user", help="force: search users by this name/email substring directly")
     sp.add_argument("--date", help="paired with --course: show that one course-occurrence directly")
-    sp.set_defaults(func=cmd_show)
+    sp.set_defaults(func=cmd_show, _help_parser=sp)
 
     sp = _add_subcommand(
         sub, "stats", "counts per course/status.",
@@ -1424,22 +1715,28 @@ def build_parser() -> argparse.ArgumentParser:
         sub, "cancel",
         "cancel by registration id (one booking), or by date (+course if ambiguous, every booking "
         "for that occurrence) -- host-initiated, same as the web admin's cancel.",
-        "Pass --date instead of --registration-id to cancel every live "
-        "registration for one course occurrence at once.",
+        "Auto-detects a registration id or date from ONE positional query, same as `my-bt show` -- "
+        "or force a type with --id/--date/--course.",
     )
     id_group = sp.add_mutually_exclusive_group(required=True)
     id_group.add_argument(
-        "--registration-id",
-        help="full or short (see `my-bt list`'s own 'id' column) id of the one registration to cancel",
+        "query", nargs="?",
+        help="anything: a registration id (short or full, see `my-bt list`'s own 'id' column) or a "
+             "YYYY-MM-DD date -- auto-detected, same as `my-bt show`'s own query",
     )
     id_group.add_argument(
-        "--date", help="cancel EVERY live registration for this occurrence (YYYY-MM-DD) -- pair with "
-                        "--course if more than one course is ever booked on the same date",
+        "--id",
+        help="force: registration id (short or full, see `my-bt list`'s own 'id' column) of the "
+             "one registration to cancel",
     )
-    sp.add_argument("--course", help="course shortname, only used (and only needed if ambiguous) with --date")
+    id_group.add_argument(
+        "--date", help="force: cancel EVERY live registration for this occurrence (YYYY-MM-DD) -- pair "
+                        "with --course if more than one course is ever booked on the same date",
+    )
+    sp.add_argument("--course", help="course shortname, only used (and only needed if ambiguous) with --date/query")
     sp.add_argument("-m", "--message", help="optional message included in the cancellation emails")
     sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    sp.set_defaults(func=cmd_cancel)
+    sp.set_defaults(func=cmd_cancel, _help_parser=sp)
 
     sp = _add_subcommand(
         sub, "gdpr-retention",
@@ -1565,6 +1862,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # 2026-07-08/09, the operator: zsh completion (see generate_zsh_completion's
+    # own docstring above) -- generated at RPM %build time, not a real
+    # user-facing subcommand, so this is checked directly against
+    # sys.argv rather than added to build_parser()'s own subparsers
+    # (keeps it out of `my-bt -h`'s command listing, and lets it work
+    # standalone with no settings.toml/data-dir present, e.g. in a clean
+    # rpmbuild chroot).
+    if len(sys.argv) >= 2 and sys.argv[1] == "--print-zsh-completion":
+        sys.stdout.write(generate_zsh_completion(build_parser()))
+        return
     args = build_parser().parse_args()
     # 2026-07-09, the operator: bare `my-bt` or `my-bt admin` (any group needing a
     # further sub-command) should behave exactly like `-h`/`--help` --

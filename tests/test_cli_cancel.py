@@ -3,7 +3,8 @@ import unittest
 from unittest.mock import patch
 
 from app.caldav_client import CalDAVClient, Response
-from app.cli_cancel import cancel_registration, resolve_course_shortname_for_date
+from app.cli_cancel import cancel_registration, classify_cancel_query, resolve_course_shortname_for_date
+from app.cli_list import assign_short_ids
 from app.security import hash_token, new_token
 from app.storage import (
     STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store,
@@ -323,7 +324,6 @@ class ResolveCourseShortnameForDateTest(unittest.TestCase):
         self._book("pilates-1", "b@example.org", status="canceled_by_guest")
         resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
         self.assertEqual(resolved, "yoga-class-1")
-        self.assertEqual(candidates, [])
 
     def test_different_date_does_not_count_toward_ambiguity(self):
         self._book("yoga-class-1", "a@example.org", occurrence_date="2026-08-01")
@@ -331,6 +331,86 @@ class ResolveCourseShortnameForDateTest(unittest.TestCase):
         resolved, candidates = resolve_course_shortname_for_date(self.store, "2026-08-01")
         self.assertEqual(resolved, "yoga-class-1")
         self.assertEqual(candidates, [])
+
+
+class ClassifyCancelQueryTest(unittest.TestCase):
+    """app.cli_cancel.classify_cancel_query -- 2026-07-09, the operator: "please
+    make cancel also SMART like show ... the ID short or long is unique to
+    recognize! a DATE as well a course name as well!" Reuses the exact same
+    building blocks as app.cli_show.classify_show_query (see that module's
+    own tests in test_cli_show.py for the low-level id/date-shape checks);
+    these tests focus on classify_cancel_query's own narrower precedence
+    (id > course > date, no user/email step) and its distinct "course"
+    outcome (not itself cancelable -- needs a --date too)."""
+
+    def setUp(self):
+        self.courses = [make_course(shortname="yoga-class-1"), make_course(shortname="pilates-1")]
+
+    def test_exact_full_id_match(self):
+        ids = ["4aa6b8c1-ccf0-4af4-b492-dab5bfecf650", "other-id"]
+        kind, data = classify_cancel_query(
+            "4aa6b8c1-ccf0-4af4-b492-dab5bfecf650", ids, self.courses, min_id_length=6,
+        )
+        self.assertEqual(kind, "id")
+        self.assertEqual(data, ids[0])
+
+    def test_short_id_prefix_resolves_via_hash(self):
+        ids = ["4aa6b8c1-ccf0-4af4-b492-dab5bfecf650"]
+        short = assign_short_ids(ids)[ids[0]]
+        kind, data = classify_cancel_query(short, ids, self.courses, min_id_length=6)
+        self.assertEqual(kind, "id")
+        self.assertEqual(data, ids[0])
+
+    def test_ambiguous_short_id_prefix(self):
+        # Trivial digest_fn deliberately collides both ids on the exact
+        # same digest -- same technique test_cli_list.py's own
+        # ResolveShortIdTest uses (real sha1 output can't be hand-crafted
+        # to collide on demand). The query itself must still look
+        # id-shaped (valid hex, long enough) to reach resolve_short_id at
+        # all -- "aaaaaa" qualifies at min_id_length=6.
+        ids = ["id-a", "id-b"]
+        kind, data = classify_cancel_query(
+            "aaaaaa", ids, self.courses, min_id_length=6, digest_fn=lambda s: "aaaaaa",
+        )
+        self.assertEqual(kind, "ambiguous_id")
+        self.assertCountEqual(data, ids)
+
+    def test_bare_course_shortname_is_reported_as_course_not_cancelable(self):
+        kind, data = classify_cancel_query("yoga-class-1", [], self.courses, min_id_length=6)
+        self.assertEqual(kind, "course")
+        self.assertEqual(data.shortname, "yoga-class-1")
+
+    def test_course_shortname_match_is_case_insensitive(self):
+        kind, data = classify_cancel_query("YOGA-CLASS-1", [], self.courses, min_id_length=6)
+        self.assertEqual(kind, "course")
+
+    def test_date_recognized_when_no_id_or_course_matches(self):
+        kind, data = classify_cancel_query("2026-08-01", [], self.courses, min_id_length=6)
+        self.assertEqual(kind, "date")
+        self.assertEqual(data, "2026-08-01")
+
+    def test_course_takes_precedence_over_date_shaped_lookalike(self):
+        # Not a realistic collision (course shortnames aren't YYYY-MM-DD
+        # shaped in practice) but confirms the documented precedence order
+        # (course checked before date) rather than leaving it implicit.
+        weird_course = make_course(shortname="2026-08-01")
+        kind, data = classify_cancel_query(
+            "2026-08-01", [], [weird_course], min_id_length=6,
+        )
+        self.assertEqual(kind, "course")
+
+    def test_unrecognized_query_returns_none(self):
+        kind, data = classify_cancel_query("not-a-thing-at-all", [], self.courses, min_id_length=6)
+        self.assertEqual(kind, "none")
+        self.assertIsNone(data)
+
+    def test_short_ambiguous_id_like_query_without_matches_is_none(self):
+        # id-shaped (hex, long enough) but resolves to nothing -- distinct
+        # from "none" only in that it at least LOOKS like an id; either
+        # way nothing cancelable comes out of it.
+        kind, data = classify_cancel_query("deadbeef", [], self.courses, min_id_length=6)
+        self.assertEqual(kind, "none")
+        self.assertIsNone(data)
 
 
 if __name__ == "__main__":

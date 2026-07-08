@@ -27,6 +27,8 @@ from datetime import date
 from . import calendar_sync
 from .cancel_flow import CANCELABLE_STATUSES, build_caldav_client, cancel_and_promote
 from .cancellation import send_cancellation_emails
+from .cli_list import resolve_short_id
+from .cli_show import find_course_by_shortname, looks_like_date, looks_like_registration_id
 from .config import Settings
 from .security import hash_token, new_token
 from .storage import STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION, STATUS_WAITLISTED, Store
@@ -186,3 +188,71 @@ def resolve_course_shortname_for_date(
     if not candidates:
         return None, []
     return None, candidates
+
+
+def classify_cancel_query(
+    query: str, live_full_reg_ids: list[str], courses, min_id_length: int, digest_fn=None,
+) -> tuple[str, object]:
+    """Classifies one free-form `my-bt cancel <query>` positional -- 2026-
+    07-09, the operator: "please make cancel also SMART like show ... the ID
+    short or long is unique to recognize! a DATE as well a course name as
+    well!" -- same id/date auto-detection app.cli_show.classify_show_query
+    gives `my-bt show`, reusing its exact same building blocks
+    (looks_like_registration_id/looks_like_date/find_course_by_shortname,
+    resolve_short_id), just narrowed to what `cancel` can actually ACT on:
+    unlike `show` (a read-only lookup across live+archived), `cancel` is
+    live-only and mutating, so this only ever searches LIVE registrations,
+    and doesn't classify by name/email at all -- "cancel this person"
+    isn't a specific enough target the way an id/date/occurrence is.
+
+    Tried in this order, first match wins (mirrors classify_show_query's
+    own precedence exactly, minus the user/email step it doesn't need
+    here):
+    1. Exact full registration_id match.
+    2. A short-id hash-prefix match (only if `query` looks id-shaped --
+       see looks_like_registration_id), against the LIVE registration set
+       only (a short id is only ever assigned over live rows in the first
+       place -- see app.cli_list.assign_short_ids's own docstring).
+    3. An exact course shortname match -- NOT itself cancelable (a course
+       alone has no specific occurrence), so the caller should explain
+       that rather than silently failing; returned so it CAN explain it,
+       instead of falling through to a generic "not recognized".
+    4. A YYYY-MM-DD date.
+
+    Returns (kind, data):
+    - ("id", full_registration_id)
+    - ("ambiguous_id", [candidate full ids])
+    - ("course", Course) -- needs a --date to actually be cancelable
+    - ("date", the query string, already validated YYYY-MM-DD)
+    - ("none", None) -- not recognized as anything
+
+    --id/--date/--course (see scripts/my-bt's own `cancel` subparser)
+    still FORCE a specific type directly, bypassing this entirely, same
+    as `show`'s --course/--user.
+
+    `digest_fn`, if given, is passed straight through to resolve_short_id
+    -- for tests only, same reason app.cli_list.assign_short_ids/
+    resolve_short_id themselves accept it (real sha1 output can't be
+    hand-crafted to collide on demand, so exercising the ambiguous-
+    collision branch needs a trivial injectable digest instead)."""
+    stripped_query = query.replace("-", "").strip().lower()
+    exact_id_matches = [fid for fid in live_full_reg_ids if fid.replace("-", "").lower() == stripped_query]
+    if len(exact_id_matches) == 1:
+        return "id", exact_id_matches[0]
+
+    if looks_like_registration_id(query, min_id_length):
+        resolve_kwargs = {"digest_fn": digest_fn} if digest_fn is not None else {}
+        resolved, candidates = resolve_short_id(query, live_full_reg_ids, **resolve_kwargs)
+        if resolved:
+            return "id", resolved
+        if candidates:
+            return "ambiguous_id", candidates
+
+    course_matches = find_course_by_shortname(query, courses)
+    if len(course_matches) == 1:
+        return "course", course_matches[0]
+
+    if looks_like_date(query):
+        return "date", query.strip()
+
+    return "none", None
