@@ -114,8 +114,16 @@ class _MyBtCliTestBase(unittest.TestCase):
         return user, reg
 
     def _run(self, func, args):
+        # Redirects stderr too, not just stdout -- cmd_cancel's own error
+        # paths (unrecognized query, bare-course-not-cancelable) print to
+        # stderr directly. Without this, a real `%check` run (which shows
+        # unittest's default dot-per-test progress on the SAME stream)
+        # gets this test's deliberately-triggered error text interleaved
+        # into the middle of the dots -- harmless (tests still pass), but
+        # noisy and easy to mistake for something actually wrong.
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        err = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try:
                 func(args)
             except SystemExit as exc:
