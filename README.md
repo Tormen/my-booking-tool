@@ -335,7 +335,8 @@ my-bt list --raw                        # every raw CSV column (ids/hashes) inst
 my-bt list --all --email guest@example.com   # a guest's full history, live + pre-erasure combined
 
 my-bt users [--email ...] [--live|--archive]   # --live/--archive default to live+archived combined
-my-bt show <registration_id>
+my-bt show <anything>                    # auto-detects: registration id, course shortname, YYYY-MM-DD date,
+                                          # or a name/email substring -- or force a type: --course/--user
 my-bt stats [--year 2026]
 
 my-bt cancel --registration-id <id>                          # asks for confirmation

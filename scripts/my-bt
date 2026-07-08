@@ -20,6 +20,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from dataclasses import asdict
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,7 @@ try:
     from app import cli_cancel as app_cli_cancel
     from app import cli_history as app_cli_history
     from app import cli_list as app_cli_list
+    from app import cli_show as app_cli_show
     from app import cli_stats as app_cli_stats
     from app import config as app_config
     from app import erasure as app_erasure
@@ -248,23 +250,170 @@ def cmd_users(args) -> None:
     _print_rows(rows, args.format)
 
 
-def cmd_show(args) -> None:
-    """`my-bt show <registration_id>` -- full detail on one registration.
-    Gets the same "party" column `my-bt list` does (see
-    app.cli_list.annotate_party_info) -- computed across ALL rows in that
-    row's scope first (so a sibling party member elsewhere in the file is
-    actually found), then narrowed down to just the requested row."""
-    store = _store(args)
-    users = {u["user_id"]: u for u in store.read_users(scope="all")}
+def _show_registration_by_full_id(full_id: str, store, users_by_id: dict, fmt: str) -> None:
+    """Shared by every path that ends up resolving to one specific
+    registration_id (auto-detected or via a resolved short id) --
+    original `show` behavior, unchanged: full detail, "party" column
+    (app.cli_list.annotate_party_info) computed across ALL rows in that
+    row's scope first (so a sibling party member elsewhere in the file
+    is actually found), then narrowed to just the requested row."""
     for scope in ("live", "archived"):
-        rows = app_cli_list.annotate_party_info(store.read_registrations(scope=scope), users)
+        rows = app_cli_list.annotate_party_info(store.read_registrations(scope=scope), users_by_id)
         for r in rows:
-            if r["registration_id"] == args.registration_id:
-                r = {**r, "_scope": scope}
-                _print_rows([r], args.format)
+            if r["registration_id"] == full_id:
+                _print_rows([{**r, "_scope": scope}], fmt)
                 return
     print("not found", file=sys.stderr)
     sys.exit(1)
+
+
+def _show_course(course, fmt: str) -> None:
+    """The course's own static settings.toml definition -- title,
+    location, weekday/time, duration, capacity, etc. Deliberately NOT a
+    live occurrence computation (that needs CalDAV conflict-checking,
+    see app/slots.py::build_occurrences) -- `my-bt list`/the booking
+    website already show live upcoming occurrences; this is specifically
+    "what IS this course configured as"."""
+    _print_rows([asdict(course)], fmt)
+
+
+def _show_occurrence(rows: list[dict], users_by_id: dict, all_rows: list[dict], fmt: str) -> None:
+    """One or more registrations sharing an occurrence_date (2026-07-08,
+    the operator: `show <date>` -- possibly more than one course meets on the
+    same date, all shown together, each row's own "course" column makes
+    that unambiguous to read). Same clean columns `my-bt list` uses, NOT
+    narrowed to live-only (a lookup, not an action) -- no short "id"
+    column here though, since these rows can be a live/archived mix and
+    a short id is only ever assigned over the live universe (see
+    assign_short_ids's own docstring)."""
+    clean = app_cli_list.build_clean_registration_view(rows, users_by_id, all_rows, date.today(), verbose=True)
+    _print_rows(clean, fmt)
+
+
+def _show_user(user_row: dict, store, fmt: str) -> None:
+    """One guest's profile (build_clean_user_view, same shape `my-bt
+    users` shows) plus their full booking history. A user_id is stable
+    across the live/archived boundary (erase_user() only ever mutates
+    name/email, never user_id -- see app/storage.py) so this user_row's
+    OWN registrations are already fully found via a plain scope="all"
+    read; no archived-history merge needed here (that's a DIFFERENT
+    scenario -- re-attaching a DIFFERENT, now-orphaned archived user_id
+    onto a NEW live one after a guest re-registers post-erasure, see
+    merge_archived_for_display's own docstring)."""
+    all_regs = store.read_registrations(scope="all")
+    last_course = app_cli_list.compute_last_confirmed_course(all_regs, date.today())
+    profile = app_cli_list.build_clean_user_view([user_row], last_course_by_user=last_course, verbose=True)
+    print("-- profile --")
+    _print_rows(profile, fmt)
+    own_rows = [r for r in all_regs if r["user_id"] == user_row.get("user_id")]
+    own_rows.sort(key=lambda r: r["occurrence_date"])
+    print("-- booking history --")
+    if own_rows:
+        users_by_id = {u["user_id"]: u for u in store.read_users(scope="all")}
+        _show_occurrence(own_rows, users_by_id, all_regs, fmt)
+    else:
+        print("(no registrations)")
+
+
+def _report_ambiguous(label: str, rows: list[dict], fmt: str) -> None:
+    print(f"{len(rows)} {label} match -- be more specific:", file=sys.stderr)
+    _print_rows(rows, fmt)
+    sys.exit(1)
+
+
+def cmd_show(args) -> None:
+    """`my-bt show <query>` -- shows ANY entity: a registration/booking,
+    a course, a course-occurrence, or a user, auto-detected from ONE
+    free-form `query` (2026-07-08, the operator: "show should be used to show
+    any entity! this can be a booking or a course or a course-occurance
+    or a user"), OR force a specific type with --course/--user (same
+    day: "keep the explicit parameters like --course and --user to FORCE
+    a specific type if needed").
+
+    Auto-detection order (see app.cli_show.classify_show_query for the
+    full rationale): (1) exact full registration_id; (2) a short id (see
+    `my-bt list`'s own "id" column) -- ONLY tried if `query` actually
+    looks id-shaped, so an ordinary search term is never mistaken for
+    one; (3) an exact course shortname; (4) every registration on a
+    YYYY-MM-DD date, any course; (5) a name/email substring search
+    across guests -- same "type part of it" search the web admin's own
+    table filter offers. First rule that matches wins.
+
+    --course alone shows that course's own settings.toml definition;
+    --course --date shows that one occurrence (same as auto-detecting a
+    bare date, but pre-narrowed to one course, for when more than one
+    course meets on the same date). --user forces the name/email search
+    directly, skipping every other check.
+
+    Searches live+archived combined throughout -- `show` is a read-only
+    lookup, not a mutating action (unlike `my-bt cancel`, which stays
+    live-only on purpose)."""
+    store = _store(args)
+    settings = app_config.load_settings(args.settings)
+    users_by_id = {u["user_id"]: u for u in store.read_users(scope="all")}
+    all_rows = store.read_registrations(scope="all")
+
+    if args.course:
+        course_matches = app_cli_show.find_course_by_shortname(args.course, settings.courses)
+        if not course_matches:
+            print(f"no course with shortname {args.course!r}", file=sys.stderr)
+            sys.exit(1)
+        course = course_matches[0]
+        if args.date:
+            rows = [
+                r for r in all_rows
+                if r["course_shortname"] == course.shortname and r["occurrence_date"] == args.date
+            ]
+            if not rows:
+                print(f"no registrations for {course.shortname} on {args.date}", file=sys.stderr)
+                sys.exit(1)
+            _show_occurrence(rows, users_by_id, all_rows, args.format)
+            return
+        _show_course(course, args.format)
+        return
+
+    if args.user:
+        matches = app_cli_show.find_users_by_name_or_email(args.user, list(users_by_id.values()))
+        if not matches:
+            print("no matching user", file=sys.stderr)
+            sys.exit(1)
+        if len(matches) > 1:
+            _report_ambiguous("users", app_cli_list.build_clean_user_view(matches), args.format)
+            return
+        _show_user(matches[0], store, args.format)
+        return
+
+    if not args.query:
+        print(
+            "nothing to show -- pass a registration id, course shortname, YYYY-MM-DD date, "
+            "or a name/email, or use --course/--user",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    full_ids = [r["registration_id"] for r in all_rows]
+    kind, data = app_cli_show.classify_show_query(
+        args.query, full_ids, settings.courses, list(users_by_id.values()), all_rows,
+        min_id_length=app_cli_list.SHORT_ID_LENGTH,
+    )
+    if kind == "registration":
+        _show_registration_by_full_id(data, store, users_by_id, args.format)
+    elif kind == "ambiguous_registration":
+        print(f"{len(data)} registrations match -- be more specific:", file=sys.stderr)
+        for fid in data:
+            print(f"  {fid}", file=sys.stderr)
+        sys.exit(1)
+    elif kind == "course":
+        _show_course(data, args.format)
+    elif kind == "occurrence":
+        _show_occurrence(data, users_by_id, all_rows, args.format)
+    elif kind == "user":
+        _show_user(data, store, args.format)
+    elif kind == "ambiguous_user":
+        _report_ambiguous("users", app_cli_list.build_clean_user_view(data), args.format)
+    else:
+        print("not found", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_stats(args) -> None:
@@ -1167,12 +1316,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_users)
 
     sp = _add_subcommand(
-        sub, "show", "show one registration by id.",
-        "Accepts either the short id shown in `my-bt list`'s own 'id' column, "
-        "or the full registration id.",
+        sub, "show", "show any entity: a registration/booking, a course, a course-occurrence, or a user.",
+        "Auto-detects from ONE query -- registration id (short or full), course shortname, "
+        "YYYY-MM-DD date, or a name/email substring -- or force a type with --course/--user.",
     )
     format_arg(sp)
-    sp.add_argument("registration_id", help="full registration id (see `my-bt list` for short ids and full ids)")
+    query_group = sp.add_mutually_exclusive_group()
+    query_group.add_argument(
+        "query", nargs="?",
+        help="anything: registration id (short or full, see `my-bt list`'s own 'id' column), "
+             "course shortname, YYYY-MM-DD date, or a name/email substring -- auto-detected",
+    )
+    query_group.add_argument("--course", help="force: show this course (by shortname) directly")
+    query_group.add_argument("--user", help="force: search users by this name/email substring directly")
+    sp.add_argument("--date", help="paired with --course: show that one course-occurrence directly")
     sp.set_defaults(func=cmd_show)
 
     sp = _add_subcommand(
