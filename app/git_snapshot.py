@@ -54,6 +54,7 @@ def snapshot(
     *,
     run: RunFunc = _default_run,
     now: datetime | None = None,
+    message: str | None = None,
 ) -> SnapshotResult:
     """Stages everything under `data_dir` (`git add -A`) and commits only
     if something actually changed -- no empty commits. `data_dir` must
@@ -66,7 +67,14 @@ def snapshot(
     `my-bt setup -i` sets at init time -- see app/cli_setup.py) so this
     still works non-interactively even if the repo was initialized by
     hand without ever setting those, which would otherwise make `git
-    commit` fail (no identity configured)."""
+    commit` fail (no identity configured).
+
+    `message`, if given, is used verbatim as the commit message instead of
+    the auto-generated `"automatic snapshot: <timestamp>"` text -- for
+    `my-bt admin git-snapshot -m "..."` right before a risky manual edit,
+    so the rollback point in `git log` is actually named instead of just
+    timestamped (git already records a real commit timestamp on its own,
+    so there's no need to also fold one into a custom message)."""
     data_dir = Path(data_dir)
     if not (data_dir / ".git").exists():
         return SnapshotResult("not_a_repo", f"{data_dir} is not yet a git repo -- run `my-bt setup -i` to initialize it")
@@ -81,18 +89,21 @@ def snapshot(
     if diff.returncode == 0:
         return SnapshotResult("no_changes", "nothing changed since the last snapshot -- no commit made")
 
-    moment = now if now is not None else datetime.now(timezone.utc)
-    message = f"automatic snapshot: {moment.isoformat()}"
+    if message is not None:
+        commit_message = message
+    else:
+        moment = now if now is not None else datetime.now(timezone.utc)
+        commit_message = f"automatic snapshot: {moment.isoformat()}"
     run(
         [
             "git",
             "-c", "user.email=my-booking-tool <noreply@localhost>",
             "-c", "user.name=my-booking-tool",
-            "commit", "-m", message,
+            "commit", "-m", commit_message,
         ],
         cwd=str(data_dir),
     )
-    return SnapshotResult("committed", message)
+    return SnapshotResult("committed", commit_message)
 
 
 def main() -> None:  # pragma: no cover - exercised via systemd, not tests

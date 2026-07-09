@@ -1010,7 +1010,7 @@ def cmd_git_snapshot(args) -> None:
             print("nothing changed (dry run, nothing to commit)")
         return
 
-    result = app_git_snapshot.snapshot(data_dir)
+    result = app_git_snapshot.snapshot(data_dir, message=args.message)
     print(result.detail)
 
 
@@ -2104,9 +2104,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = _add_subcommand(
         admin_sub, "git-snapshot", "commit any data-dir changes now (same as the hourly timer).",
-        "Useful right before a risky manual edit, so you have a rollback point.",
+        "Useful right before a risky manual edit, so you have a rollback point. "
+        "-m/--message: use this as the actual commit message instead of the "
+        "auto-generated \"automatic snapshot: <timestamp>\" text, so the "
+        "rollback point is named instead of just timestamped (ignored with "
+        "--dry-run, since nothing is committed then).",
     )
     sp.add_argument("--dry-run", action="store_true", help="report what would be committed, without staging/committing")
+    sp.add_argument("-m", "--message", help="custom commit message (default: \"automatic snapshot: <timestamp>\")")
     sp.set_defaults(func=cmd_git_snapshot)
 
     sp = _add_subcommand(

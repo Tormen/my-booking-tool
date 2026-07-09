@@ -93,6 +93,24 @@ class SnapshotRealRepoTest(unittest.TestCase):
         self.assertEqual(result.status, "no_changes")
         self.assertEqual(_commit_count(self.data_dir), 0)
 
+    def test_custom_message_is_used_verbatim_instead_of_auto_generated_one(self):
+        # `my-bt admin git-snapshot -m "..."` -- see app/git_snapshot.py's
+        # snapshot() docstring: a custom message replaces the "automatic
+        # snapshot: <timestamp>" text entirely rather than being appended
+        # to it, since git already records a real commit timestamp on its
+        # own.
+        (self.data_dir / "users.csv").write_text("user_id,email\n1,a@b.com\n")
+        result = git_snapshot.snapshot(self.data_dir, message="before the settings.toml rewrite")
+        self.assertEqual(result.status, "committed")
+        self.assertEqual(result.detail, "before the settings.toml rewrite")
+        log = _git(self.data_dir, "log", "-1", "--pretty=%s")
+        self.assertEqual(log.stdout.strip(), "before the settings.toml rewrite")
+
+    def test_no_custom_message_falls_back_to_auto_generated_one(self):
+        (self.data_dir / "users.csv").write_text("user_id,email\n1,a@b.com\n")
+        result = git_snapshot.snapshot(self.data_dir, message=None)
+        self.assertIn("automatic snapshot:", result.detail)
+
 
 if __name__ == "__main__":
     unittest.main()

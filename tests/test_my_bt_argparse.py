@@ -110,6 +110,30 @@ class BareCommandHelpParserTest(unittest.TestCase):
         self.assertTrue(args.yes)
 
 
+class GitSnapshotMessageArgTest(unittest.TestCase):
+    """2026-07-14, the operator, pasting `my-bt admin git-snapshot -h` output:
+    "add optional message parameter" -- -m/--message lets a manual snapshot
+    get a real, named commit message instead of the auto-generated
+    "automatic snapshot: <timestamp>" text. See app/git_snapshot.py's
+    snapshot() docstring for how the message is actually used."""
+
+    def test_bare_git_snapshot_has_message_none(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "git-snapshot"])
+        self.assertIsNone(args.message)
+        self.assertEqual(args.func, my_bt_mod.cmd_git_snapshot)
+
+    def test_message_flag_is_captured(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "git-snapshot", "-m", "before the risky edit"])
+        self.assertEqual(args.message, "before the risky edit")
+
+    def test_long_message_flag_is_captured(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "git-snapshot", "--message", "before the risky edit"])
+        self.assertEqual(args.message, "before the risky edit")
+
+
 class UsersScopeArgsTest(unittest.TestCase):
     """2026-07-14, the operator, changing `my-bt users`'s bare-default scope:
     "actually no: by default my-bt users should show --live users that
