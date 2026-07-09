@@ -135,6 +135,16 @@ canceled_retention_months = 6
 # (`openssl rand -hex 32`); rotating it means previously-erased emails can no
 # longer be recognized as "the same erased person" if they ever come up again.
 erasure_pepper_file = "/etc/my-booking/secrets/erasure_pepper"
+# Optional. 2026-07-09, the operator: "the scheduler that then deletes accounts
+# should detect imminent accounts that would need to be deleted and then
+# send out such an email" -- a dormant-account warning (one email, not a
+# series of nudges) sent this many days BEFORE an account would reach
+# retention_months above of inactivity (User.last_login_at, falling back
+# to created_at if it has never logged in again since booking). 0 (the
+# default), a blank string, or leaving this commented out all disable the
+# warning entirely -- no automated account deletion happens either way;
+# this only controls the WARNING email, see app.retention's own docstring.
+# how_many_days_before_account_deletion_send_warning_mail = 30
 
 [logging]
 # Optional. If set, the web service, the retention job, and `my-bt -L`/

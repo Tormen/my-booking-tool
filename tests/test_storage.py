@@ -1291,5 +1291,45 @@ class LockedCsvWritePermissionsTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(self._tmp.name).st_mode), 0o750)
 
 
+class TouchLoginClearsDeletionWarningTest(StoreTestBase):
+    """2026-07-09, the operator: account-deletion warning email (see
+    app.retention.send_account_deletion_warnings) -- a real login must
+    reset the dormancy clock that warning is based on, so
+    deletion_warning_sent_at is cleared here, not just last_login_at set."""
+
+    def test_touch_login_sets_last_login_at(self):
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.assertEqual(user.last_login_at, "")
+        self.store.touch_login(user.user_id)
+        self.assertTrue(self.store.find_user_by_id(user.user_id).last_login_at)
+
+    def test_touch_login_clears_a_previously_set_deletion_warning(self):
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.store.mark_deletion_warning_sent(user.user_id, "2028-01-01T00:00:00+00:00")
+        self.assertTrue(self.store.find_user_by_id(user.user_id).deletion_warning_sent_at)
+        self.store.touch_login(user.user_id)
+        self.assertEqual(self.store.find_user_by_id(user.user_id).deletion_warning_sent_at, "")
+
+    def test_touch_login_on_unknown_user_id_is_a_no_op(self):
+        self.store.touch_login("00000000-0000-0000-0000-000000000000")  # must not raise
+
+
+class MarkDeletionWarningSentTest(StoreTestBase):
+    def test_sets_the_field_to_the_given_timestamp(self):
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.store.mark_deletion_warning_sent(user.user_id, "2028-01-01T00:00:00+00:00")
+        self.assertEqual(
+            self.store.find_user_by_id(user.user_id).deletion_warning_sent_at, "2028-01-01T00:00:00+00:00",
+        )
+
+    def test_defaults_to_now_when_no_timestamp_given(self):
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.store.mark_deletion_warning_sent(user.user_id)
+        self.assertTrue(self.store.find_user_by_id(user.user_id).deletion_warning_sent_at)
+
+    def test_unknown_user_id_is_a_no_op(self):
+        self.store.mark_deletion_warning_sent("00000000-0000-0000-0000-000000000000")  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()

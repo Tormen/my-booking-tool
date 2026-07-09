@@ -2,10 +2,11 @@ import tempfile
 import unittest
 from dataclasses import replace
 from datetime import date, datetime, timezone
+from unittest.mock import patch
 
-from app.retention import run_purge, should_purge
+from app.retention import run_purge, send_account_deletion_warnings, should_purge
 from app.security import hash_token, new_token
-from app.storage import STATUS_PENDING_CONFIRMATION, Store
+from app.storage import STATUS_PENDING_CONFIRMATION, USER_FIELDS, Store, _LockedCsv
 
 from .helpers import make_settings
 
@@ -107,6 +108,127 @@ class PendingConfirmationPurgeTest(unittest.TestCase):
             self.store, self.settings, today=date(2026, 7, 5), now=datetime(2026, 7, 5, tzinfo=timezone.utc)
         )
         self.assertEqual(purged, 0)
+
+
+def _set_user_row(store: Store, user_id: str, **fields) -> None:
+    """Test-only helper: no Store method exposes writing created_at/
+    last_login_at/deletion_warning_sent_at directly (they're always
+    system-set, e.g. Store.touch_login()'s own now_iso() call) -- reaches
+    into the same _LockedCsv primitive Store itself uses, same pattern
+    tests/test_cancel_flow.py uses for registration rows via
+    dataclasses.replace + replace_all_registrations (no users.csv
+    equivalent of that one exists, so this goes one level lower)."""
+    with _LockedCsv(store.users_path, USER_FIELDS) as (rows, write):
+        for row in rows:
+            if row["user_id"] == user_id:
+                row.update(fields)
+        write(rows, "test setup")
+
+
+class SendAccountDeletionWarningsTest(unittest.TestCase):
+    """2026-07-09, the operator: "Our scheduler that then deletes accounts should
+    detect imminent accounts that would need to be deleted and then send
+    out such an email" -- see app.retention.send_account_deletion_
+    warnings's own docstring for the full story (reuses retention_months
+    as the dormancy threshold, last_login_at falling back to created_at,
+    exactly ONE email per dormancy period)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings(retention_months=24, account_deletion_warning_days=30)
+        self.today = date(2028, 1, 1)
+        self.sent_emails = []
+        patcher = patch(
+            "app.retention.send_mail",
+            side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(): (
+                self.sent_emails.append((to, subject, body, bcc_addrs))
+            ),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _make_user(self, email: str, last_login_at: str = "", created_at: str = ""):
+        user = self.store.upsert_user_for_booking(email, "Guest")
+        _set_user_row(self.store, user.user_id, last_login_at=last_login_at, created_at=created_at)
+        return user
+
+    def test_disabled_when_warning_days_is_zero(self):
+        settings = make_settings(retention_months=24, account_deletion_warning_days=0)
+        self._make_user("dormant@example.org", last_login_at="2025-12-15T00:00:00+00:00")  # ~24mo before today - 30d
+        warned = send_account_deletion_warnings(self.store, settings, today=self.today)
+        self.assertEqual(warned, 0)
+        self.assertEqual(self.sent_emails, [])
+
+    def test_warns_when_within_the_configured_window(self):
+        # retention_months=24, account_deletion_warning_days=30: a login
+        # 24 months minus 10 days before "today" means the account is 10
+        # days from deletion -- inside the 30-day warning window.
+        self._make_user("soon@example.org", last_login_at="2026-01-11T00:00:00+00:00")
+        warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(warned, 1)
+        to, subject, body, _bcc = self.sent_emails[0]
+        self.assertEqual(to, "soon@example.org")
+        self.assertIn("account will be deleted soon", subject)
+        self.assertIn("2026-01-11", body)
+
+    def test_does_not_warn_when_outside_the_window(self):
+        # Only 10 months of inactivity so far -- nowhere near the 24-month
+        # deletion threshold, let alone inside the 30-day warning window.
+        self._make_user("active@example.org", last_login_at="2027-03-01T00:00:00+00:00")
+        warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(warned, 0)
+
+    def test_does_not_warn_once_already_past_the_deletion_date(self):
+        # No real deletion-enforcement job exists yet (see this function's
+        # own docstring) -- an overdue account just never gets touched by
+        # this warning either, rather than re-warning forever.
+        self._make_user("overdue@example.org", last_login_at="2020-01-01T00:00:00+00:00")
+        warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(warned, 0)
+
+    def test_falls_back_to_created_at_when_never_logged_in(self):
+        self._make_user("neverlogged@example.org", last_login_at="", created_at="2026-01-11T00:00:00+00:00")
+        warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(warned, 1)
+
+    def test_only_one_email_is_ever_sent_per_dormancy_period(self):
+        user = self._make_user("soon@example.org", last_login_at="2026-01-11T00:00:00+00:00")
+        first = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(first, 1)
+        second = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(second, 0)
+        self.assertEqual(len(self.sent_emails), 1)
+
+    def test_touch_login_clears_the_warning_flag_so_a_future_dormancy_can_warn_again(self):
+        user = self._make_user("comesback@example.org", last_login_at="2026-01-11T00:00:00+00:00")
+        send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(len(self.sent_emails), 1)
+        self.store.touch_login(user.user_id)
+        # Freshly logged in -- nowhere near dormant anymore, so no new
+        # warning fires right now, but the flag itself must be cleared...
+        warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(warned, 0)
+        reloaded = self.store.find_user_by_id(user.user_id)
+        self.assertEqual(reloaded.deletion_warning_sent_at, "")
+
+    def test_bcc_attendee_emails_applies_to_the_warning_email(self):
+        settings = make_settings(
+            retention_months=24, account_deletion_warning_days=30, bcc_attendee_emails="watcher@example.org",
+        )
+        self._make_user("soon@example.org", last_login_at="2026-01-11T00:00:00+00:00")
+        send_account_deletion_warnings(self.store, settings, today=self.today)
+        _to, _subject, _body, bcc_addrs = self.sent_emails[0]
+        self.assertEqual(bcc_addrs, ("watcher@example.org",))
+
+    def test_no_activity_signal_at_all_is_skipped_not_erroring(self):
+        # Defensive edge case -- created_at is always set in practice
+        # (Store.upsert_user_for_booking always stamps it), but this
+        # confirms a blank-everything row can't crash the sweep.
+        self._make_user("blank@example.org", last_login_at="", created_at="")
+        warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(warned, 0)
 
 
 if __name__ == "__main__":

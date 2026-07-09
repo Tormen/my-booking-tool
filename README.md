@@ -817,6 +817,18 @@ enforces it; `my-bt gdpr-retention` lets you preview what the next run
 would remove (counts only by default, `-V`/`--verbose` to also list the
 actual rows) -- `my-bt gdpr-retention purge` runs the purge on demand.
 
+**Account-deletion warning email** (2026-07-09): optional
+`how_many_days_before_account_deletion_send_warning_mail` in
+`[privacy]` -- 0, a blank string, or leaving it commented out (the
+default) disables this entirely. When set, the same nightly timer
+sends a guest ONE warning email this many days before their account
+would reach `retention_months` of inactivity (last login, falling back
+to account-creation date if they've never logged in again since
+booking). Note this is a WARNING only -- there is no automated job that
+actually erases an account once that deadline passes, only this email
+and the registration-row purge above; a guest keeps their account
+indefinitely unless they delete it themselves via `/my`.
+
 **Data dir git snapshot** -- a separate git repository, rooted at
 `/var/lib/my-booking/.git` -- entirely independent of this project's own
 git checkout -- with TWO layers committing to it:

@@ -32,6 +32,7 @@ USER_FIELDS = [
     "created_at", "last_login_at",
     "pending_email", "pending_email_token_hash", "pending_email_token_created_at",
     "prev_pending_email_token_hash", "pending_email_cancel_token_hash",
+    "deletion_warning_sent_at",
 ]
 REG_FIELDS = [
     "registration_id", "course_shortname", "occurrence_date", "user_id", "status",
@@ -183,6 +184,18 @@ class User:
     # change (see clear_pending_email/find_user_by_pending_email_cancel_token_hash),
     # never confirm it.
     pending_email_cancel_token_hash: str = ""
+    # 2026-07-09, the operator: "the scheduler that then deletes accounts should
+    # detect imminent accounts that would need to be deleted and then send
+    # out such an email" (a dormant-account warning, like the Notion
+    # screenshot he shared -- "your account will be deleted in 90 days,
+    # log in to keep it"). "Only ONE email" per dormancy period -- this is
+    # the guard against re-sending it every night once someone's within
+    # the warning window. Set by app.retention.send_account_deletion_
+    # warnings() the first time it warns this account; cleared again by
+    # Store.touch_login() the next time they actually log in, so a FUTURE
+    # dormancy period (log in, then go quiet again) can warn again --
+    # this is NOT a permanent "already warned once ever" flag.
+    deletion_warning_sent_at: str = ""
 
 
 @dataclass
@@ -579,14 +592,32 @@ class Store:
                     return
 
     def touch_login(self, user_id: str) -> None:
+        """Also clears deletion_warning_sent_at (2026-07-09) -- a real login
+        resets the dormancy clock the account-deletion warning is based on
+        (see app.retention.send_account_deletion_warnings), so any warning
+        already sent belongs to a dormancy period that just ended. Without
+        clearing this, a guest who logs back in, then goes quiet again
+        years later, would never be warned a second time."""
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             changed = False
             for row in rows:
                 if row["user_id"] == user_id:
                     row["last_login_at"] = now_iso()
+                    row["deletion_warning_sent_at"] = ""
                     changed = True
             if changed:
                 write(rows, "record login")
+
+    def mark_deletion_warning_sent(self, user_id: str, when: str | None = None) -> None:
+        """Records that app.retention.send_account_deletion_warnings() just
+        warned this account -- see deletion_warning_sent_at's own
+        docstring on User for why this is checked/cleared the way it is."""
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == user_id:
+                    row["deletion_warning_sent_at"] = when or now_iso()
+                    write(rows, "mark account-deletion warning sent")
+                    return
 
     def set_name(self, user_id: str, name: str) -> None:
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):

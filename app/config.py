@@ -144,6 +144,21 @@ class Settings:
     retention_months: int
     canceled_retention_months: int
     erasure_pepper: bytes
+    # Optional (2026-07-09, the operator: "Our scheduler that then deletes accounts
+    # should detect imminent accounts that would need to be deleted and
+    # then send out such an email" -- a dormant-account warning, one email,
+    # before deletion, similar to a Notion account-cleanup notice he
+    # forwarded as an example). 0 (the default -- also what "" or a
+    # commented-out/omitted key parse to, see load_settings()) disables
+    # this entirely: no warning is ever sent. When positive, it's how many
+    # days BEFORE an account would reach `retention_months` of inactivity
+    # (see app.retention.send_account_deletion_warnings) that the ONE
+    # warning email goes out -- reusing retention_months as the actual
+    # dormancy threshold rather than adding a second duration setting,
+    # per the operator: "there is already a variable that defines the duration".
+    # "Inactivity" is User.last_login_at, falling back to created_at for an
+    # account that has never logged in again since booking.
+    account_deletion_warning_days: int = 0
 
     courses: tuple[Course, ...] = field(default_factory=tuple)
 
@@ -428,6 +443,14 @@ def load_settings(toml_path: str | Path) -> Settings:
         retention_months=int(privacy.get("retention_months", 24)),
         canceled_retention_months=int(privacy.get("canceled_retention_months", 6)),
         erasure_pepper=bytes.fromhex(_read_secret(privacy["erasure_pepper_file"])),
+        # `or 0` collapses every "off" spelling the operator asked for (0, "", or
+        # the key omitted entirely -- privacy.get's own default) to the
+        # same falsy value in one step: 0/""/None are all falsy in Python,
+        # so only a genuinely truthy (non-zero, non-blank) value reaches
+        # int() at all.
+        account_deletion_warning_days=int(
+            privacy.get("how_many_days_before_account_deletion_send_warning_mail", 0) or 0
+        ),
         courses=courses,
         log_file=(logging_cfg.get("log_file") or None),
         watchdog_enabled=bool(watchdog.get("enabled", True)),

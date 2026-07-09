@@ -256,6 +256,61 @@ class LoadSettingsBccAttendeeEmailsTest(unittest.TestCase):
         self.assertEqual(settings.bcc_attendee_email_list, ())
 
 
+class LoadSettingsAccountDeletionWarningDaysTest(unittest.TestCase):
+    """2026-07-09, the operator: "Our scheduler that then deletes accounts should
+    detect imminent accounts that would need to be deleted and then send
+    out such an email" -- optional [privacy] key, three equivalent ways
+    to disable it (0, "", or omitted -- all fall through `or 0` in
+    load_settings() to the same falsy value)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.caldav_password_file = self.dir / "caldav_password"
+        self.smtp_password_file = self.dir / "smtp_password"
+        self.admin_password_hash_file = self.dir / "admin_password_hash"
+        self.erasure_pepper_file = self.dir / "erasure_pepper"
+        for p in (self.caldav_password_file, self.smtp_password_file, self.admin_password_hash_file):
+            p.write_text("secret")
+        self.erasure_pepper_file.write_text("00" * 32)
+
+    def _write(self, extra_privacy_line: str = "") -> Path:
+        toml_path = self.dir / "settings.toml"
+        header = MINIMAL_HEADER.format(
+            caldav_password_file=self.caldav_password_file,
+            smtp_password_file=self.smtp_password_file,
+            admin_password_hash_file=self.admin_password_hash_file,
+            erasure_pepper_file=self.erasure_pepper_file,
+        )
+        header = header.replace(
+            'erasure_pepper_file = "{erasure_pepper_file}"'.format(erasure_pepper_file=self.erasure_pepper_file),
+            'erasure_pepper_file = "{erasure_pepper_file}"\n'.format(erasure_pepper_file=self.erasure_pepper_file)
+            + extra_privacy_line,
+        )
+        toml_path.write_text(header)
+        return toml_path
+
+    def test_defaults_to_zero_when_omitted(self):
+        settings = load_settings(self._write())
+        self.assertEqual(settings.account_deletion_warning_days, 0)
+
+    def test_explicit_zero_is_zero(self):
+        toml_path = self._write("how_many_days_before_account_deletion_send_warning_mail = 0\n")
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.account_deletion_warning_days, 0)
+
+    def test_blank_string_is_zero(self):
+        toml_path = self._write('how_many_days_before_account_deletion_send_warning_mail = ""\n')
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.account_deletion_warning_days, 0)
+
+    def test_positive_value_is_parsed(self):
+        toml_path = self._write("how_many_days_before_account_deletion_send_warning_mail = 30\n")
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.account_deletion_warning_days, 30)
+
+
 class WeekdayTimeRangeLabelTest(unittest.TestCase):
     """Course.weekday_time_range_label() -- 2026-07-10, the operator: "add the
     weekday to the TIME column (e.g. SAT 10h45-12h45)" on /my's bookings
