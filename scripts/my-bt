@@ -2074,8 +2074,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = _add_subcommand(
         admin_sub, "watchdog-check",
-        "run the \"strange usage patterns\" sweep now (same as the periodic timer).",
-        "Emails settings.admin_email a combined alert if anything fired -- not a dry run.",
+        "check nginx/app-log/signups/sshd for abuse patterns now (same as the periodic timer).",
+        "Emails settings.admin_email ONE combined alert if anything fired -- not a dry run. "
+        "Four independent checks, each silently skipped if its own setting/threshold is unset: "
+        "(1) [watchdog].nginx_access_log -- one IP making too many requests, or too high a 4xx/5xx "
+        "share, within window_minutes; cross-checked against fail2ban's own ban list. "
+        "(2) [logging].log_file -- a burst of login/password-reset rate-limiter rejections. "
+        "(3) registrations.csv (via the data dir) -- a burst of brand-new pending-confirmation "
+        "signups, the shape a capacity-grab attempt would take. "
+        "(4) sshd -- a burst of failed-password attempts, read via `journalctl -u sshd`. "
+        "See app/watchdog.py's own module docstring for the full detail on all four.",
     )
     sp.set_defaults(func=cmd_admin_watchdog_check)
 
