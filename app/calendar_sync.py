@@ -239,6 +239,14 @@ def sync_occurrence(
         start=start,
         end=end,
         alarms_minutes_before=settings.trainer_calendar_reminder_minutes,
+        # 2026-07-14, the operator: host_calendar_entry_cc_list -- see
+        # Course's own field docstring. organizer is only set when there's
+        # actually a cc list to attach (an ATTENDEE with no ORGANIZER is
+        # invalid iTIP); this deployment's own caldav_username is the
+        # natural "who owns this calendar" identity, since that's exactly
+        # whose calendar this event is being PUT onto.
+        organizer=settings.caldav_username if course.host_calendar_entry_cc_list else None,
+        attendees=course.host_calendar_entry_cc_list,
     )
     for attempt in range(1, _SYNC_CONFLICT_MAX_ATTEMPTS + 1):
         try:

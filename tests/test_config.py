@@ -147,6 +147,26 @@ capacity = 10
             settings.course("has-url").location_url, "https://maps.example.org/?q=Example+Room",
         )
 
+    def test_host_calendar_entry_cc_list_defaults_to_empty_tuple_when_omitted(self):
+        # 2026-07-14, the operator: "list of email addresses that if set on a
+        # course in settings.toml will also be invited as optional (cc)"
+        # -- optional, so an existing settings.toml with no
+        # host_calendar_entry_cc_list key anywhere must keep parsing
+        # exactly as before.
+        toml_path = self._write(self._course_block("no-cc"))
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.course("no-cc").host_calendar_entry_cc_list, ())
+
+    def test_host_calendar_entry_cc_list_is_parsed_when_present(self):
+        toml_path = self._write(
+            self._course_block("has-cc")
+            + '\nhost_calendar_entry_cc_list = ["a@example.org", "b@example.org"]\n'
+        )
+        settings = load_settings(toml_path)
+        self.assertEqual(
+            settings.course("has-cc").host_calendar_entry_cc_list, ("a@example.org", "b@example.org"),
+        )
+
 
 class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
     """2026-07-07, the operator: "make the reminders (list) a setting. But default

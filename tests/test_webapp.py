@@ -2579,10 +2579,15 @@ class BookingFlowTest(unittest.TestCase):
         cancel_id = f"cancel-{reg.registration_id}"
         self.assertIn(f'data-dialog="{cancel_id}-dialog" >Cancel', body)  # not "disabled>Cancel"
 
-    def test_my_bookings_delete_account_dialog_has_exact_requested_wording(self):
+    def test_account_settings_delete_account_dialog_has_exact_requested_wording(self):
+        # 2026-07-14, the operator: "please move the delete button under 'Account
+        # settings': and rename to 'DELETE this account'" -- this used to
+        # live at the bottom of /my (My bookings); it's on /my/settings
+        # (Account settings) now instead.
         _user, environ = self._login_as_guest("regular@example.org")
-        _status, _headers, body = self.app.my("GET", environ)
+        _status, _headers, body = self.app.my_settings("GET", environ)
         self.assertIn('<dialog id="delete-account-dialog" class="card">', body)
+        self.assertIn("DELETE this account", body)
         self.assertIn(
             "Delete your account and all related data? This will cancel any booking you still have!",
             body,
@@ -3500,6 +3505,32 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn("/my/reinstate/", body)
         self.assertNotIn(">Reinstate<", body)
 
+    def test_my_bookings_table_has_no_reinstate_button_for_a_host_canceled_booking(self):
+        # 2026-07-14, the operator (screenshot of a "Canceled by host" row still
+        # showing this button): "a meeting that was canceled by HOST
+        # should NOT have a reinstate button." A host cancellation means
+        # the session itself isn't happening -- a guest reinstating
+        # themselves can't undo that.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertNotIn("/my/reinstate/", body)
+        self.assertNotIn(">Reinstate<", body)
+
+    def test_my_reinstate_is_a_no_op_for_a_host_canceled_booking(self):
+        # Server-side guard matching the button-hiding above -- a crafted/
+        # replayed POST must not be able to reinstate a host cancellation
+        # just because the button is hidden.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.store.cancel(reg.registration_id, canceled_by="host")
+        self._post_with_session(self.app.my_reinstate, (reg.registration_id,), {"message": ""}, environ)
+        reloaded = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
+
     def test_my_reinstate_includes_the_optional_comment_in_both_emails(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
@@ -3983,15 +4014,19 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn(">My bookings<", banner)
         self.assertIn(self.settings.base_url, banner)  # homepage + Log out still there
 
-    def test_my_page_bottom_row_has_only_the_delete_account_button(self):
+    def test_my_page_bottom_row_has_no_log_out_button_or_delete_account_button(self):
         # The banner's own Logout replaces the old standalone "Log out"
-        # button here -- only the destructive "Delete my account" action
-        # remains in the bottom row now.
+        # button here. 2026-07-14, the operator: "please move the delete button
+        # under 'Account settings': and rename to 'DELETE this account'"
+        # -- the destructive delete-account action moved to /my/settings
+        # (see MySettingsTest), so /my's own bottom row no longer has
+        # either button.
         user, environ = self._login_as_guest("regular@example.org")
         _status, _headers, body = self.app.my("GET", environ)
         bottom = body.split("<h3>Past")[1]
         self.assertNotIn(">Log out<", bottom)
-        self.assertIn("Delete my account", bottom)
+        self.assertNotIn("Delete my account", bottom)
+        self.assertNotIn("delete-account-form", bottom)
 
 
 class AdminLoginRateLimitTest(unittest.TestCase):

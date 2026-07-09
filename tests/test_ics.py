@@ -50,6 +50,36 @@ class VEventTest(unittest.TestCase):
         for line in ev.to_ics().split("\r\n"):
             self.assertLessEqual(len(line.encode("utf-8")), 75)
 
+    def test_no_organizer_or_attendee_lines_by_default(self):
+        # 2026-07-14: host_calendar_entry_cc_list's organizer/attendees
+        # fields must be byte-identical-absent when unused, same
+        # convention as alarms_minutes_before.
+        ev = VEvent(
+            uid="x@y", summary="s", description="d", location="l",
+            start=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+        )
+        ics = ev.to_ics()
+        self.assertNotIn("ORGANIZER", ics)
+        self.assertNotIn("ATTENDEE", ics)
+
+    def test_organizer_and_attendee_lines_present_when_configured(self):
+        ev = VEvent(
+            uid="x@y", summary="s", description="d", location="l",
+            start=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+            end=datetime(2026, 1, 1, 1, 0, tzinfo=timezone.utc),
+            organizer="calendar@example.org",
+            attendees=("cc1@example.org", "cc2@example.org"),
+        )
+        # Unfolded -- these lines are long enough that RFC 5545 line-folding
+        # (_fold(), see module docstring) splits them across a "\r\n "
+        # continuation, same as every other long-line assertion in this
+        # test module/tests/test_calendar_sync.py.
+        unfolded = ev.to_ics().replace("\r\n ", "")
+        self.assertIn("ORGANIZER:mailto:calendar@example.org", unfolded)
+        self.assertIn("ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:cc1@example.org", unfolded)
+        self.assertIn("ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:cc2@example.org", unfolded)
+
 
 if __name__ == "__main__":
     unittest.main()

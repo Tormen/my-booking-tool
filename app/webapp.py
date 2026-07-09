@@ -2246,7 +2246,21 @@ class App:
                 # should, LIKE CANCEL, also ask for a COMMENT to be sent
                 # with the email to the other") -- reuses the same
                 # _DIALOG_WIRING_SCRIPT already loaded on this page.
-                if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST) and (
+                #
+                # 2026-07-14, the operator (screenshot of a "Canceled by host" row
+                # still showing this button): "a meeting that was canceled
+                # by HOST should NOT have a reinstate button." Only
+                # STATUS_CANCELED_BY_GUEST now -- a HOST cancellation means
+                # the session itself isn't happening (illness, venue
+                # unavailable, ...), which a guest un-canceling themselves
+                # can't undo; same reasoning already applied to the
+                # cancellation EMAIL's own reinstate link 2026-07-13 (see
+                # app.cancellation.send_cancellation_emails's own "any
+                # cancellation the HOST initiates ... doesn't need the
+                # link" note) -- this closes the same gap on the /my page
+                # itself, which that email-only fix missed. See
+                # my_reinstate()'s own matching server-side guard below.
+                if r.status == STATUS_CANCELED_BY_GUEST and (
                     date.fromisoformat(r.occurrence_date) >= today
                 ):
                     reinstate_id = f"reinstate-{esc(r.registration_id)}"
@@ -2303,21 +2317,14 @@ class App:
             <h3>Upcoming</h3>
             {upcoming_html}
             <h3>Past (most recent {MY_PAST_BOOKINGS_LIMIT})</h3>
-            {past_html}
-            <div class="submit-row">
-              <form method="post" action="/my/delete-account" style="display:inline" id="delete-account-form"
-                onsubmit="return confirm('Delete your account and all related data? This will cancel any booking you still have!');">
-                <button type="submit" class="confirm-dialog-btn" data-dialog="delete-account-dialog">Delete my account &amp; data</button>
-              </form>
-            </div>
-            <dialog id="delete-account-dialog" class="card">
-              <p><b>Are you sure?</b></p>
-              <p>Delete your account and all related data? This will cancel any booking you still have!</p>
-              <div class="submit-row">
-                <button type="submit" form="delete-account-form">Yes, delete everything</button>
-                <button type="button" class="dialog-close-btn" data-dialog="delete-account-dialog">Never mind</button>
-              </div>
-            </dialog>""" + _DIALOG_WIRING_SCRIPT
+            {past_html}""" + _DIALOG_WIRING_SCRIPT
+            # 2026-07-14, the operator: "please move the delete button under
+            # 'Account settings': and rename to 'DELETE this account'" --
+            # the delete-account form/dialog used to live at the bottom of
+            # THIS page; it's now rendered by _my_settings_page() instead
+            # (see that method). _DIALOG_WIRING_SCRIPT stays appended here
+            # regardless -- the Cancel/Reinstate confirm dialogs above
+            # (per-row, built in _row()) still need it on this same page.
             return (
                 "200 OK", [("Content-Type", "text/html")],
                 page("My bookings", body, banner=self._session_banner_html(environ, on_my_page=True)),
@@ -2786,7 +2793,12 @@ class App:
         capacity; never a move to a different date). The future-date check
         is re-done here, not just trusted from the page: my()'s button is
         already hidden for a past occurrence, but a crafted/replayed POST
-        could still hit this route directly.
+        could still hit this route directly. Same reasoning for the
+        guest-canceled-only check below (2026-07-14, the operator: "a meeting
+        that was canceled by HOST should NOT have a reinstate button") --
+        my()'s button is already hidden for a host-canceled row too, but
+        this re-checks it server-side for the same crafted/replayed-POST
+        reason.
 
         Optional `message` (2026-07-10, the operator: "Reinstate should, LIKE
         CANCEL, also ask for a COMMENT to be sent with the email to the
@@ -2800,7 +2812,7 @@ class App:
         if not session or session.get("kind") != "guest":
             return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
         reg = self.store.find_by_id(registration_id)
-        if reg and reg.user_id == session["user_id"]:
+        if reg and reg.user_id == session["user_id"] and reg.status == STATUS_CANCELED_BY_GUEST:
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
             course = self.settings.course(reg.course_shortname)
@@ -3132,7 +3144,26 @@ class App:
         {name_body}
         <h3>Email</h3>
         {email_body}
-        <p><a href="/my">Back to my bookings</a></p>"""
+        <p><a href="/my">Back to my bookings</a></p>
+        <div class="submit-row">
+          <form method="post" action="/my/delete-account" style="display:inline" id="delete-account-form"
+            onsubmit="return confirm('Delete your account and all related data? This will cancel any booking you still have!');">
+            <button type="submit" class="confirm-dialog-btn" data-dialog="delete-account-dialog">DELETE this account</button>
+          </form>
+        </div>
+        <dialog id="delete-account-dialog" class="card">
+          <p><b>Are you sure?</b></p>
+          <p>Delete your account and all related data? This will cancel any booking you still have!</p>
+          <div class="submit-row">
+            <button type="submit" form="delete-account-form">Yes, delete everything</button>
+            <button type="button" class="dialog-close-btn" data-dialog="delete-account-dialog">Never mind</button>
+          </div>
+        </dialog>""" + _DIALOG_WIRING_SCRIPT
+        # 2026-07-14, the operator: "please move the delete button under 'Account
+        # settings': and rename to 'DELETE this account'" -- moved here
+        # from the bottom of /my (see my()'s own comment at the same
+        # spot). Same form/dialog/confirm() markup as before, just
+        # relocated + relabeled.
         return "200 OK", [("Content-Type", "text/html")], page("Account settings", body, banner=banner)
 
     def my_settings(self, method: str, environ):

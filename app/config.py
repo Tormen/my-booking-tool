@@ -61,6 +61,19 @@ class Course:
     # deliberately loose convention that leaves room to slot a new course
     # in later without renumbering everything else.
     order_in_all_courses: int = 0
+    # Optional, per-course. 2026-07-14, the operator: "list of email addresses
+    # that if set on a course in settings.toml will also be invited as
+    # optional (cc) so that they receive the same invite as well ! This is
+    # super useful for my work yoga events." Passed straight through to
+    # app.ics.VEvent's own organizer/attendees fields by
+    # app.calendar_sync.sync_occurrence() -- see that call site and
+    # VEvent's own docstring for the ROLE=OPT-PARTICIPANT/RSVP=FALSE
+    # semantics, and the caveat that whether this actually triggers an
+    # invite EMAIL depends on the CalDAV server's own scheduling support.
+    # Empty tuple (the default -- key omitted in settings.toml) means no
+    # ORGANIZER/ATTENDEE properties at all, byte-identical to before this
+    # existed.
+    host_calendar_entry_cc_list: tuple[str, ...] = ()
 
     WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
     WEEKDAY_LABELS = {
@@ -407,6 +420,7 @@ def load_settings(toml_path: str | Path) -> Settings:
             location_url=c.get("location_url", ""),
             subtitle=c.get("subtitle"),
             order_in_all_courses=int(c.get("order_in_all_courses", 0)),
+            host_calendar_entry_cc_list=tuple(c.get("host_calendar_entry_cc_list", [])),
         )
         for c in raw.get("course", [])
     ]

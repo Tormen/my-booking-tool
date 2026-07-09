@@ -229,6 +229,18 @@ sshd_failure_threshold = 5
 # course's bookings becomes a clickable link (opens in a new tab) instead
 # of plain text. Omit it entirely to keep plain text, exactly as before
 # this existed.
+# host_calendar_entry_cc_list is optional (2026-07-14, the operator: "list of
+# email addresses that if set on a course in settings.toml will also be
+# invited as optional (cc) so that they receive the same invite as well"):
+# each address gets added as an ATTENDEE (ROLE=OPT-PARTICIPANT, RSVP=FALSE
+# -- a courtesy copy, not a scheduling request) on THIS course's own HOST
+# calendar event (never the guest's personal .ics). Omit entirely (the
+# default) for no ORGANIZER/ATTENDEE properties at all, exactly as before
+# this existed. Whether an address actually receives an invite EMAIL (vs.
+# just appearing silently as an attendee) depends on your CalDAV server's
+# own scheduling/iTIP support -- test with your own server before relying
+# on this.
+# host_calendar_entry_cc_list = ["someone@example.org"]
 [[course]]
 shortname   = "example-monday-class"
 title       = "Example Class"

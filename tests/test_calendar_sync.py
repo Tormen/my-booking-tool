@@ -570,5 +570,62 @@ class GuestInviteAndCancelIcsTest(unittest.TestCase):
         self.assertIn("TRIGGER:-PT60M", ics_text)
 
 
+class SyncOccurrenceHostCalendarEntryCcListTest(unittest.TestCase):
+    """2026-07-14, the operator: "list of email addresses that if set on a course
+    in settings.toml will also be invited as optional (cc) so that they
+    receive the same invite as well." -- sync_occurrence()'s own HOST
+    event, not the guest .ics (guest_invite_ics is untouched by this)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.occ_date = date(2026, 8, 1)
+
+    def _sync(self, course):
+        settings = make_settings(courses=(course,), booking_calendar="Bookings")
+        user = self.store.upsert_user_for_booking("alice@example.org", "Alice")
+        self.store.add_registration(
+            course.shortname, self.occ_date.isoformat(), user.user_id, "tok-hash", status=STATUS_CONFIRMED,
+        )
+        transport = FakeTransport()
+        client = CalDAVClient(
+            settings.caldav_url, settings.caldav_username, settings.caldav_password, transport=transport,
+        )
+        sync_occurrence(client, "/caldav/Bookings/", self.store, settings, course, self.occ_date)
+        put_bodies = [b for m, _u, b, _h in transport.calls if m == "PUT"]
+        self.assertEqual(len(put_bodies), 1)
+        return put_bodies[0].replace("\r\n ", "")  # unfold -- see test_ics.py's own note
+
+    def test_no_organizer_or_attendee_when_cc_list_is_unset(self):
+        course = make_course(shortname="no-cc")
+        ics_text = self._sync(course)
+        self.assertNotIn("ORGANIZER", ics_text)
+        self.assertNotIn("ATTENDEE", ics_text)
+
+    def test_organizer_and_attendees_added_when_cc_list_is_set(self):
+        course = make_course(
+            shortname="has-cc", host_calendar_entry_cc_list=("work.copy@example.org",),
+        )
+        ics_text = self._sync(course)
+        # caldav_username is make_settings()'s default -- "calendar@example.org".
+        self.assertIn("ORGANIZER:mailto:calendar@example.org", ics_text)
+        self.assertIn(
+            "ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:"
+            "mailto:work.copy@example.org",
+            ics_text,
+        )
+
+    def test_multiple_cc_addresses_each_get_their_own_attendee_line(self):
+        course = make_course(
+            shortname="has-cc-multi",
+            host_calendar_entry_cc_list=("a@example.org", "b@example.org"),
+        )
+        ics_text = self._sync(course)
+        self.assertIn("mailto:a@example.org", ics_text)
+        self.assertIn("mailto:b@example.org", ics_text)
+        self.assertEqual(ics_text.count("ATTENDEE;ROLE=OPT-PARTICIPANT"), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

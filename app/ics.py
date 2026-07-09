@@ -77,6 +77,24 @@ class VEvent:
     # (the default) omits the property entirely, same as before this
     # field existed.
     status: str | None = None
+    # organizer/attendees: added 2026-07-14 for
+    # app.config.Course.host_calendar_entry_cc_list (the operator: "list of email
+    # addresses that if set on a course in settings.toml will also be
+    # invited as optional (cc) so that they receive the same invite as
+    # well"). Both default to "off" (None / empty tuple), same
+    # byte-identical-unless-opted-in convention as alarms_minutes_before
+    # above -- a course with no cc list configured renders exactly as
+    # before these fields existed. organizer is a plain email address (no
+    # "mailto:" prefix -- added by to_ics()); attendees are ROLE=
+    # OPT-PARTICIPANT (never REQ-PARTICIPANT: this is a courtesy copy, not
+    # a scheduling request the recipient is expected to RSVP to) and
+    # RSVP=FALSE (no reply expected). Whether an ATTENDEE actually
+    # triggers an invite EMAIL from the CalDAV server (vs. just appearing
+    # silently in the event's own attendee list) depends entirely on that
+    # server's own iTIP/scheduling support -- this class only controls
+    # what goes in the .ics itself.
+    organizer: str | None = None
+    attendees: tuple[str, ...] = ()
 
     def to_ics(self) -> str:
         lines = ["BEGIN:VCALENDAR", "VERSION:2.0"]
@@ -94,6 +112,10 @@ class VEvent:
             f"DESCRIPTION:{_escape_text(self.description)}",
             f"LOCATION:{_escape_text(self.location)}",
         ]
+        if self.organizer:
+            lines.append(f"ORGANIZER:mailto:{self.organizer}")
+        for email in self.attendees:
+            lines.append(f"ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:{email}")
         if self.status:
             lines.append(f"STATUS:{self.status}")
         for minutes in self.alarms_minutes_before:
