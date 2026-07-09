@@ -665,6 +665,27 @@ def cmd_admin_rename_course(args) -> None:
     print(f"{fixed} upcoming occurrence(s) had their calendar event moved to the new calendar UID")
 
 
+def cmd_admin_resync_calendar(args) -> None:
+    """`my-bt admin resync-calendar` -- re-syncs every course's future
+    occurrence that currently has a live calendar entry, recomputing each
+    one's description from scratch. Run this once, by hand, any time
+    `app.calendar_sync.sync_occurrence()`'s own description format
+    changes (see that function's own docstring, and SOLUTION-DESIGN.md's
+    standing note on this) -- 2026-07-09, the operator, on noticing a real
+    occurrence's invite was still missing the "cancel entire session"
+    line added days earlier: "please ensure that the existing (future)
+    calendar invites are updated as well." Only the operator's OWN CalDAV
+    event is ever touched here -- an already-emailed guest's personal
+    .ics attachment can't be (and doesn't need to be) retroactively
+    edited; see app.calendar_sync.resync_all_future_calendar_events's own
+    docstring."""
+    settings = app_config.load_settings(args.settings)
+    caldav = app_cancel_flow.build_caldav_client(settings)
+    href = app_cancel_flow.calendar_href(caldav, settings)
+    fixed = app_calendar_sync.resync_all_future_calendar_events(caldav, href, _store(args), settings, today=date.today())
+    print(f"{fixed} upcoming occurrence(s) re-synced")
+
+
 def _cmd_cancel_occurrence(args, settings, store) -> None:
     """`my-bt cancel --date ...` -- the mass-cancel branch factored out of
     cmd_cancel() so that function's own docstring/single-row logic stays
@@ -1943,6 +1964,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--from", dest="from_", required=True, help="the OLD course shortname (must no longer be in settings.toml)")
     sp.add_argument("--to", required=True, help="the NEW course shortname (must already be in settings.toml)")
     sp.set_defaults(func=cmd_admin_rename_course)
+
+    sp = _add_subcommand(
+        admin_sub, "resync-calendar",
+        "recompute every future occurrence's HOST calendar event from scratch.",
+        "Run once, by hand, any time the calendar invite's own description format changes "
+        "-- see SOLUTION-DESIGN.md. Only the operator's own CalDAV event is touched; an "
+        "already-emailed guest .ics can't be (and doesn't need to be) retroactively edited.",
+    )
+    sp.set_defaults(func=cmd_admin_resync_calendar)
 
     sp = _add_subcommand(
         admin_sub, "maintenance",

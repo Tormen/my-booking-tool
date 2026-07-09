@@ -9,7 +9,7 @@ from datetime import date
 from app.caldav_client import CalDAVClient, CalDAVConflictError, Response
 from app.calendar_sync import (
     _SYNC_CONFLICT_MAX_ATTEMPTS, event_uid, guest_cancel_ics, guest_invite_ics,
-    resync_after_course_rename, sync_occurrence,
+    resync_after_course_rename, resync_all_future_calendar_events, sync_occurrence,
 )
 from app.ics import parse_uid
 from app.storage import (
@@ -401,6 +401,114 @@ class ResyncAfterCourseRenameTest(unittest.TestCase):
                 client, "/caldav/Bookings/", self.store, self.settings,
                 "lux-wed-mindfulness", "no-such-course", today=self.today,
             )
+
+
+class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
+    """2026-07-09, the operator, on noticing a real occurrence's calendar invite was
+    still missing the "cancel entire session" line added days earlier:
+    "please ensure that the existing (future) calendar invites are updated
+    as well" -- then narrowed to HOST-side events only, since an
+    already-emailed guest .ics can't be retroactively edited. See
+    resync_all_future_calendar_events's own docstring. Same discovery logic
+    as ResyncAfterCourseRenameTest above, just across every configured
+    course instead of one, and no old-uid deletion step (the shortname
+    never changes here -- every occurrence is re-synced under its OWN
+    already-current uid)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.course_a = make_course(shortname="yoga-class-1", title="Yoga A", capacity=14)
+        self.course_b = make_course(shortname="yoga-class-2", title="Yoga B", capacity=10)
+        self.settings = make_settings(
+            courses=(self.course_a, self.course_b), booking_calendar="Bookings", base_url="https://example.org",
+        )
+        self.today = date(2026, 7, 8)
+
+    def _client(self, report_body: str = EMPTY_REPORT):
+        transport = FakeTransport(report_body)
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=transport,
+        )
+        return client, transport
+
+    def _confirm(self, email: str, occurrence_date: str, course: str) -> None:
+        user = self.store.upsert_user_for_booking(email, email.split("@")[0].title())
+        self.store.add_registration(course, occurrence_date, user.user_id, "tok-hash", status=STATUS_CONFIRMED)
+
+    def test_resyncs_confirmed_future_occurrence(self):
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        client, transport = self._client()
+
+        fixed = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        )
+
+        self.assertEqual(fixed, 1)
+        methods = [m for m, _u, _b, _h in transport.calls]
+        self.assertIn("PUT", methods)
+
+    def test_covers_every_configured_course_not_just_the_first(self):
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        self._confirm("bob@example.org", "2026-07-11", "yoga-class-2")
+        client, transport = self._client()
+
+        fixed = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        )
+
+        self.assertEqual(fixed, 2)
+        put_urls = [u for m, u, _b, _h in transport.calls if m == "PUT"]
+        self.assertTrue(any(event_uid(self.settings, "yoga-class-1", date(2026, 7, 10)) in u for u in put_urls))
+        self.assertTrue(any(event_uid(self.settings, "yoga-class-2", date(2026, 7, 11)) in u for u in put_urls))
+
+    def test_waitlisted_only_occurrence_is_skipped(self):
+        # No confirmed registrant -- sync_occurrence's own rule means there
+        # was never a calendar event here at all, so this must be left
+        # alone entirely (no PUT, no DELETE).
+        user = self.store.upsert_user_for_booking("wl@example.org", "Waity")
+        self.store.add_registration("yoga-class-1", "2026-07-10", user.user_id, "tok-hash", status=STATUS_WAITLISTED)
+        client, transport = self._client()
+
+        fixed = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        )
+
+        self.assertEqual(fixed, 0)
+        self.assertEqual(transport.calls, [])
+
+    def test_past_occurrences_are_not_touched(self):
+        self._confirm("alice@example.org", "2026-07-01", "yoga-class-1")  # before self.today
+        client, transport = self._client()
+
+        fixed = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        )
+
+        self.assertEqual(fixed, 0)
+        self.assertEqual(transport.calls, [])
+
+    def test_today_itself_is_touched(self):
+        self._confirm("alice@example.org", self.today.isoformat(), "yoga-class-1")
+        client, transport = self._client()
+
+        fixed = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        )
+
+        self.assertEqual(fixed, 1)
+
+    def test_no_confirmed_registrations_anywhere_touches_nothing(self):
+        client, transport = self._client()
+
+        fixed = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        )
+
+        self.assertEqual(fixed, 0)
+        self.assertEqual(transport.calls, [])
 
 
 class GuestInviteAndCancelIcsTest(unittest.TestCase):

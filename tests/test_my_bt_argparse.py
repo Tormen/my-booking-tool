@@ -57,6 +57,18 @@ class BareCommandHelpParserTest(unittest.TestCase):
         self.assertTrue(hasattr(args, "func"))
         self.assertEqual(args.func, my_bt_mod.cmd_admin_health)
 
+    def test_resync_calendar_leaf_command_sets_func(self):
+        # 2026-07-09, the operator: "please ensure that the existing (future)
+        # calendar invites are updated as well" -- see
+        # app.calendar_sync.resync_all_future_calendar_events's own
+        # docstring for the full story; this just confirms the new
+        # subcommand is wired up the same way every other admin leaf
+        # command is.
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "resync-calendar"])
+        self.assertTrue(hasattr(args, "func"))
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_resync_calendar)
+
     def test_gdpr_retention_group_unaffected_already_had_its_own_func(self):
         # gdpr-retention's own subparsers (dest="gdpr_command") was never
         # required=True -- it already has func set at its own level
@@ -96,6 +108,7 @@ class BareCommandMainBehaviorTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("hash-password", output)
         self.assertIn("rename-course", output)
+        self.assertIn("resync-calendar", output)
         self.assertNotIn("error:", output)
 
     def test_genuine_error_still_exits_nonzero_with_error_text(self):

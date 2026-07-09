@@ -323,6 +323,69 @@ def resync_after_course_rename(
     return fixed
 
 
+def resync_all_future_calendar_events(
+    client: CalDAVClient,
+    calendar_href: str,
+    store: Store,
+    settings: Settings,
+    today: date | None = None,
+) -> int:
+    """Re-syncs every course's future occurrence that currently has a live
+    calendar entry (>=1 CONFIRMED registration -- see sync_occurrence's own
+    "0 confirmed = no event at all" rule), recomputing each one's
+    description from the CURRENT registration data, exactly as if a fresh
+    booking/cancellation had just happened on it.
+
+    2026-07-09, the operator, after noticing a real occurrence's calendar event
+    was still missing the "cancel entire session" line added on 2026-07-13
+    (screenshot: 2026-07-11's invite showing only per-participant cancel
+    links): "If we change anything with the CALENDAR INVITE(s) (host
+    and/or attendee): Please ensure that the existing (future) calendar
+    invites are updated as well (maybe either on install or on the next
+    moment you touch this calendar invite again ?)" -- then, once reminded
+    an already-EMAILED guest .ics can't be edited after the fact: "so then
+    nothing is to do for the invites that got emailed already... only for
+    future invites which should already be the case. So we only talk
+    about the HOST invites here." Scope confirmed: this is about the
+    operator's own live CalDAV event only.
+
+    An occurrence that gets ANY new booking/cancellation before it starts
+    already picks up whatever the CURRENT description format is for
+    free -- sync_occurrence() always recomputes the FULL description from
+    scratch, never a diff against what was there before. This command
+    exists for the occurrences that DON'T get touched again before they
+    happen (fully booked, nobody cancels) -- without it, those would keep
+    showing whatever format was current the last time someone
+    booked/canceled on them, indefinitely. Run this once, by hand, any
+    time `sync_occurrence()`'s own description format changes -- see
+    SOLUTION-DESIGN.md's own standing note on this, and `my-bt admin
+    resync-calendar`.
+
+    Same "confirmed registrations >= today" occurrence-discovery logic as
+    resync_after_course_rename() above, just across every configured
+    course rather than one -- see that function's own docstring for why
+    ONLY confirmed (never waitlisted-only) occurrences are considered:
+    those are the only ones sync_occurrence() would currently keep a
+    calendar entry for at all.
+
+    Returns how many occurrences were re-synced."""
+    today = today or date.today()
+    today_iso = today.isoformat()
+    rows = store.read_registrations(scope="live")
+    fixed = 0
+    for course in settings.courses:
+        dates = sorted({
+            r["occurrence_date"] for r in rows
+            if r["course_shortname"] == course.shortname
+            and r["status"] == STATUS_CONFIRMED
+            and r["occurrence_date"] >= today_iso
+        })
+        for d_iso in dates:
+            sync_occurrence(client, calendar_href, store, settings, course, date.fromisoformat(d_iso))
+            fixed += 1
+    return fixed
+
+
 # -- Emailed guest invite/cancel attachments (2026-07-09, the operator: "Can you
 # please attach a calendar invite also in the email that is sent to the
 # participant?") ------------------------------------------------------------
