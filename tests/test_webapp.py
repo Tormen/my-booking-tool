@@ -875,6 +875,87 @@ class SessionBannerTest(unittest.TestCase):
         self.assertEqual(booked_user.email, "regular@example.org")
         self.assertEqual(booked_user.name, "Regular")
 
+    # -- 2026-07-09: already-booked future dates listed alongside pickable ones --
+
+    def _occ_dates(self, n: int) -> list[str]:
+        occs = build_occurrences(
+            self.course, self.settings, datetime.now(timezone.utc), lambda sn, d: 0, lambda start, end: False,
+        )
+        return [o.date.isoformat() for o in occs[:n]]
+
+    def test_confirmed_future_booking_shown_as_booked_badge(self):
+        # the operator, on a screenshot of /my showing 2 future confirmed
+        # bookings the date-picker never mentioned: "It could be nice
+        # here, to show the user that he/she already booked the classes
+        # ... Like here: I have 2 future bookings already booked, they
+        # should be listed." Answers to follow-up questions: FUTURE only,
+        # waitlisted labeled "On waitinglist", not clickable.
+        first_date, second_date = self._occ_dates(2)
+        environ = self._login_environ("regular@example.org")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.store.add_registration("yoga-class-1", first_date, user.user_id, hash_token(new_token()))
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        # Merged into the same "Dates available" row as an inert badge --
+        # not a radio input at all.
+        self.assertIn(f'<span class="date-btn date-badge"><span><span class="d-date">{first_date}</span>'
+                      '<span class="ribbon">Booked</span></span></span>', body)
+        self.assertNotIn(f'value="{first_date}"', body)
+        # The still-bookable second date stays a real, selectable option.
+        self.assertIn(f'value="{second_date}"', body)
+
+    def test_waitlisted_future_booking_labeled_on_waitinglist(self):
+        first_date = self._occ_dates(1)[0]
+        environ = self._login_environ("regular@example.org")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.store.add_registration(
+            "yoga-class-1", first_date, user.user_id, hash_token(new_token()), status=STATUS_WAITLISTED,
+        )
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        self.assertIn('<span class="ribbon">On waitinglist</span>', body)
+        self.assertNotIn(">Booked<", body)
+
+    def test_canceled_booking_is_not_shown_at_all(self):
+        first_date = self._occ_dates(1)[0]
+        environ = self._login_environ("regular@example.org")
+        user = self.store.find_user_by_email("regular@example.org")
+        reg = self.store.add_registration("yoga-class-1", first_date, user.user_id, hash_token(new_token()))
+        self.store.cancel(reg.registration_id, canceled_by="guest")
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        # NOT a bare "date-badge" substring check -- that class name is
+        # always present in the page's own <style> block regardless of
+        # whether any badge actually rendered; check for the real element.
+        self.assertNotIn('<span class="date-btn date-badge">', body)
+        # Canceled -- back to a normal, pickable date.
+        self.assertIn(f'value="{first_date}"', body)
+
+    def test_past_booking_for_this_course_is_not_shown(self):
+        # the operator: "Only FUTURE bookings!" -- old history has no place here.
+        environ = self._login_environ("regular@example.org")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.store.add_registration("yoga-class-1", "2020-01-01", user.user_id, hash_token(new_token()))
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        # NOT a bare "date-badge" substring check -- that class name is
+        # always present in the page's own <style> block regardless of
+        # whether any badge actually rendered; check for the real element.
+        self.assertNotIn('<span class="date-btn date-badge">', body)
+
+    def test_anonymous_guest_never_sees_already_booked_badges(self):
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        # NOT a bare "date-badge" substring check -- that class name is
+        # always present in the page's own <style> block regardless of
+        # whether any badge actually rendered; check for the real element.
+        self.assertNotIn('<span class="date-btn date-badge">', body)
+
+    def test_already_booked_badge_has_no_radio_input(self):
+        first_date, second_date = self._occ_dates(2)
+        environ = self._login_environ("regular@example.org")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.store.add_registration("yoga-class-1", first_date, user.user_id, hash_token(new_token()))
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
+        badge_html = body.split('<span class="date-btn date-badge">', 1)[1].split("</span></span></span>", 1)[0]
+        self.assertNotIn("<input", badge_html)
+        self.assertNotIn("<label", badge_html)
+
     def test_booking_result_page_also_shows_banner_when_logged_in(self):
         environ = self._login_environ("regular@example.org")
         occs = build_occurrences(

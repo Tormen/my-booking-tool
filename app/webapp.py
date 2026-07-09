@@ -1695,27 +1695,90 @@ class App:
         # has full control of the server, so this isn't a new privilege
         # boundary, just a place raw HTML is intentionally allowed through.
         desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
-        if not occurrences:
+        # 2026-07-09, the operator (screenshot of /my showing 2 future confirmed
+        # bookings the date-picker above never mentioned): "It could be
+        # nice here, to show the user that he/she already booked the
+        # classes ... Like here: I have 2 future bookings already booked,
+        # they should be listed." Follow-up answers, in order: (1) "Only
+        # FUTURE bookings!" -- no past history, so filtered to
+        # occurrence_date >= today; (2) "Ignore canceled and also show
+        # waitlisted but rather say: 'On waitinglist'"; (3) a diagonal
+        # ribbon across the date-box corner (his own suggestion, in place
+        # of a plain greyed-out box) "with contrasted fontcolor" -- see
+        # .date-badge/.ribbon in templates.py's <style> block; (4) "not
+        # clickable" -- a plain <span>, no <input>/<label> at all, unlike
+        # the real bookable date-boxes below.
+        already_booked = []
+        if logged_in_user is not None:
+            today_iso = datetime.now(timezone.utc).date().isoformat()
+            already_booked = sorted(
+                (
+                    r for r in self.store.registrations_for_user(logged_in_user.user_id)
+                    if r.course_shortname == course.shortname
+                    and r.status in (STATUS_CONFIRMED, STATUS_WAITLISTED)
+                    and r.occurrence_date >= today_iso
+                ),
+                key=lambda r: r.occurrence_date,
+            )
+        if not occurrences and not already_booked:
             body = subtitle + desc_html + "<p>No dates currently available, please check back next week.</p>"
+        elif not occurrences:
+            # Nothing left TO book, but the guest does have other future
+            # bookings for this course -- show those (still useful
+            # context), skip the rest of the form (name/email/agree/submit
+            # would have nothing to submit against).
+            already_booked_html = "".join(
+                '<span class="date-btn date-badge"><span><span class="d-date">'
+                + esc(r.occurrence_date) + '</span><span class="ribbon">'
+                + ("On waitinglist" if r.status == STATUS_WAITLISTED else "Booked")
+                + "</span></span></span>"
+                for r in already_booked
+            )
+            body = (
+                subtitle + desc_html
+                + f'<label>Dates available<div class="dates" role="radiogroup" '
+                f'aria-label="Dates available">{already_booked_html}</div></label>'
+                + "<p>No further dates currently available, please check back next week.</p>"
+            )
         else:
+            bookable_items = [
+                (
+                    o.date.isoformat(),
+                    '<label class="date-btn">'
+                    f'<input type="radio" name="occurrence_date" value="{esc(o.date.isoformat())}" '
+                    f'data-date="{esc(o.date.isoformat())}" data-full="{"1" if o.is_full else "0"}" '
+                    # data-spots-left is the TRUE remaining count, deliberately
+                    # separate from _spots_left_text()'s possibly
+                    # spots_left_offset-adjusted display text -- the "adding a
+                    # guest may waitlist your whole party" warning (see the
+                    # guest-rows script below) has to reason from reality, not
+                    # the display-only urgency number (see _spots_left_text's
+                    # own docstring for why that number must never drive an
+                    # actual admission decision).
+                    f'data-spots-left="{o.spots_left}"'
+                    + (" checked" if o.date == occurrences[0].date else "")
+                    + '><span><span class="d-date">' + esc(o.date.isoformat()) + "</span>"
+                    + (f'<span class="d-spots">{esc(text)}</span>' if (text := self._spots_left_text(o)) else "")
+                    + "</span></label>",
+                )
+                for o in occurrences
+            ]
+            # Already-booked dates are merged chronologically into the SAME
+            # row as the real, pickable ones (not a separate section) --
+            # sorting the combined (date, html) pairs by date keeps that
+            # true regardless of which list either date came from.
+            already_booked_items = [
+                (
+                    r.occurrence_date,
+                    '<span class="date-btn date-badge"><span><span class="d-date">'
+                    + esc(r.occurrence_date) + '</span><span class="ribbon">'
+                    + ("On waitinglist" if r.status == STATUS_WAITLISTED else "Booked")
+                    + "</span></span></span>",
+                )
+                for r in already_booked
+            ]
             date_buttons = "".join(
-                '<label class="date-btn">'
-                f'<input type="radio" name="occurrence_date" value="{esc(o.date.isoformat())}" '
-                f'data-date="{esc(o.date.isoformat())}" data-full="{"1" if o.is_full else "0"}" '
-                # data-spots-left is the TRUE remaining count, deliberately
-                # separate from _spots_left_text()'s possibly
-                # spots_left_offset-adjusted display text -- the "adding a
-                # guest may waitlist your whole party" warning (see the
-                # guest-rows script below) has to reason from reality, not
-                # the display-only urgency number (see _spots_left_text's
-                # own docstring for why that number must never drive an
-                # actual admission decision).
-                f'data-spots-left="{o.spots_left}"'
-                + (" checked" if i == 0 else "")
-                + '><span><span class="d-date">' + esc(o.date.isoformat()) + "</span>"
-                + (f'<span class="d-spots">{esc(text)}</span>' if (text := self._spots_left_text(o)) else "")
-                + "</span></label>"
-                for i, o in enumerate(occurrences)
+                html for _, html in sorted(bookable_items + already_booked_items, key=lambda pair: pair[0])
             )
             first_label = "Join waitlist" if occurrences[0].is_full else self.settings.book_button_label
             note_html = f'<p class="note">{esc(note)}</p>' if (note := self._policy_note()) else ""

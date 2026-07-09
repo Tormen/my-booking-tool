@@ -168,6 +168,10 @@ label{{display:block;margin-top:.6em}}
 .date-btn input:checked + span{{background:#196B24;color:#fff;border-color:#196B24}}
 .date-btn input:checked + span .d-spots{{color:#dff0e2}}
 .date-btn input:focus-visible + span{{outline:2px solid #196B24;outline-offset:1px}}
+.date-badge>span{{cursor:default;background:#f2f2f2;color:#888;position:relative;overflow:hidden}}
+.date-badge .ribbon{{position:absolute;top:.6em;right:-3.2em;width:11em;transform:rotate(45deg);
+  background:#666;color:#fff;font-weight:bold;text-align:center;padding:.15em 0;
+  box-shadow:0 1px 2px rgba(0,0,0,.25)}}
 .selected-box{{background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.7em 1em;margin:.8em 0}}
 .description{{background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;padding:1em 1.2em;margin:.8em 0}}
 .description ul,.description ol{{margin:.4em 0;padding-left:1.4em}}
