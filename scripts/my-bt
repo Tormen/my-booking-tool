@@ -647,8 +647,8 @@ def cmd_admin_resync_calendar(args) -> None:
     line added days earlier: "please ensure that the existing (future)
     calendar invites are updated as well." Only the operator's OWN CalDAV
     event is ever touched here -- an already-emailed guest's personal
-    .ics attachment can't be (and doesn't need to be) retroactively
-    edited; see app.calendar_sync.resync_all_future_calendar_events's own
+    .ics attachment can't be retroactively edited; see
+    app.calendar_sync.resync_all_future_calendar_events's own
     docstring."""
     settings = app_config.load_settings(args.settings)
     caldav = app_cancel_flow.build_caldav_client(settings)
@@ -886,6 +886,25 @@ def cmd_admin_gdpr(args) -> None:
         if (d := app_retention.account_deletion_date(User(**row), settings)) is not None and d <= today
     )
     print(f"{accounts_due} account(s) past their retention window (see `admin gdpr accounts`)")
+
+    # 2026-07-14, the operator: "please also provide a table with the currently
+    # expected purge counts per month for accounts and for bookings" --
+    # one combined table, merging both dicts' month keys (plain "YYYY-MM"
+    # strings sort correctly lexicographically, no date parsing needed).
+    # Includes past-due months too (matches bookings_due/accounts_due
+    # above counting past-due rows as well), not just upcoming ones.
+    booking_counts = app_retention.registration_purge_counts_by_month(store, settings)
+    account_counts = app_retention.account_deletion_counts_by_month(store, settings)
+    months = sorted(set(booking_counts) | set(account_counts))
+    if months:
+        print("\nexpected purge counts by month:")
+        _print_rows(
+            [
+                {"month": m, "bookings": booking_counts.get(m, 0), "accounts": account_counts.get(m, 0)}
+                for m in months
+            ],
+            "table",
+        )
 
 
 def cmd_admin_gdpr_bookings(args) -> None:
@@ -2029,7 +2048,7 @@ def build_parser() -> argparse.ArgumentParser:
         "recompute every future occurrence's HOST calendar event from scratch.",
         "Run once, by hand, any time the calendar invite's own description format changes "
         "-- see SOLUTION-DESIGN.md. Only the operator's own CalDAV event is touched; an "
-        "already-emailed guest .ics can't be (and doesn't need to be) retroactively edited.",
+        "already-emailed guest .ics can't be retroactively edited.",
     )
     sp.set_defaults(func=cmd_admin_resync_calendar)
 
@@ -2113,8 +2132,8 @@ def main() -> None:
 
     log_fh = None
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
+    log_path = app_config.peek_log_file(args.settings)
     if args.log:
-        log_path = app_config.peek_log_file(args.settings)
         if not log_path:
             print("--log: no [logging].log_file configured in settings.toml -- "
                   "add one first, e.g.:", file=sys.stderr)
@@ -2137,7 +2156,27 @@ def main() -> None:
                       "continuing without it", file=sys.stderr)
                 log_fh = None
 
-    debug = configure_logging()
+    # 2026-07-14 fix: this used to call configure_logging() with no
+    # log_file at all, so a configured [logging].log_file was silently
+    # never honored by ANY `my-bt` invocation -- harmless while the
+    # systemd timers called `python3 -m app.retention`/`app.git_snapshot`/
+    # `app.watchdog` directly (each of those modules' own main() calls
+    # configure_logging(settings.log_file) itself), but the same day's
+    # restructure to have every timer call `my-bt admin ...` instead (see
+    # systemd/my-booking-*.service) bypasses those main()s entirely --
+    # cmd_admin_gdpr_bookings/cmd_admin_gdpr_accounts/cmd_git_snapshot/
+    # cmd_admin_watchdog_check all call the underlying function directly,
+    # never that module's main(). Caught while answering the operator's question
+    # "does my-bt log anything into journal otherwise?"
+    #
+    # log_fh is not None only when -L/--log successfully opened THE SAME
+    # log_path and installed the Tee above -- in that case configure_
+    # logging()'s own StreamHandler already reaches that file via the Tee
+    # (see _Tee's docstring), so passing log_file too would add a second,
+    # independent FileHandler onto the identical path and double every
+    # log line. Pass it through otherwise (plain invocations, and every
+    # systemd-timer invocation, none of which use -L).
+    debug = configure_logging(None if log_fh is not None else log_path)
     try:
         args.func(args)
     except KeyboardInterrupt:

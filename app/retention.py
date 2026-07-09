@@ -280,3 +280,36 @@ def purge_dormant_accounts(
     if purged:
         log.warning("account purge: erased %d dormant account(s)", purged)
     return purged
+
+
+def registration_purge_counts_by_month(store: Store, settings: Settings) -> dict[str, int]:
+    """`my-bt admin gdpr`'s "expected purge counts per month" table --
+    every registration row's registration_purge_date(), bucketed by
+    "YYYY-MM". Includes rows already past due (their month is in the
+    past) exactly as `admin gdpr bookings`'s own listing does -- this is
+    a forward-*and*-backward-looking projection of when each row
+    reaches/reached its retention window, not just a count of what's
+    still upcoming. 2026-07-14, the operator: "please also provide a table
+    with the currently expected purge counts per month for accounts and
+    for bookings"."""
+    counts: dict[str, int] = {}
+    for reg in store.all_registrations():
+        month = registration_purge_date(reg, settings).strftime("%Y-%m")
+        counts[month] = counts.get(month, 0) + 1
+    return counts
+
+
+def account_deletion_counts_by_month(store: Store, settings: Settings) -> dict[str, int]:
+    """Same as registration_purge_counts_by_month() above, but for LIVE
+    accounts and account_deletion_date() -- skips any account with no
+    activity timestamp to project from (see that function's own
+    docstring for why that's possible in principle)."""
+    counts: dict[str, int] = {}
+    for row in store.read_users(scope="live"):
+        user = User(**row)
+        deadline = account_deletion_date(user, settings)
+        if deadline is None:
+            continue
+        month = deadline.strftime("%Y-%m")
+        counts[month] = counts.get(month, 0) + 1
+    return counts

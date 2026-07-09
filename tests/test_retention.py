@@ -5,8 +5,10 @@ from datetime import date, datetime, timezone
 from unittest.mock import patch
 
 from app.retention import (
+    account_deletion_counts_by_month,
     account_deletion_date,
     purge_dormant_accounts,
+    registration_purge_counts_by_month,
     registration_purge_date,
     run_purge,
     send_account_deletion_warnings,
@@ -378,6 +380,58 @@ class PurgeDormantAccountsTest(unittest.TestCase):
         purged = purge_dormant_accounts(self.store, settings, today=self.today)
         self.assertEqual(purged, 2)
         self.assertEqual(len(self.store.read_users(scope="live")), 1)
+
+
+class PurgeCountsByMonthTest(unittest.TestCase):
+    """registration_purge_counts_by_month() / account_deletion_counts_by_month()
+    -- the "expected purge counts per month" table `my-bt admin gdpr`
+    prints (2026-07-14, the operator: "please also provide a table with the
+    currently expected purge counts per month for accounts and for
+    bookings"). Both just bucket the same per-row/per-account dates
+    registration_purge_date()/account_deletion_date() already compute,
+    by "YYYY-MM"."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings(retention_months=24, canceled_retention_months=6)
+
+    def _reg(self, occurrence_date, status="confirmed"):
+        u = self.store.upsert_user_for_booking(f"{occurrence_date}-{status}-{len(self.store.all_registrations())}@x.com", "X")
+        r = self.store.add_registration("c", occurrence_date, u.user_id, hash_token(new_token()))
+        if status != "confirmed":
+            self.store.cancel(r.registration_id, canceled_by="guest")
+            r = self.store.find_by_id(r.registration_id)
+        return r
+
+    def _make_user(self, email: str, last_login_at: str = ""):
+        user = self.store.upsert_user_for_booking(email, "Guest")
+        _set_user_row(self.store, user.user_id, last_login_at=last_login_at)
+        return user
+
+    def test_registration_counts_grouped_by_purge_month(self):
+        self._reg("2026-01-01")  # purges 2028-01
+        self._reg("2026-01-15")  # same month, purges 2028-01
+        self._reg("2027-06-01")  # purges 2029-06
+        counts = registration_purge_counts_by_month(self.store, self.settings)
+        self.assertEqual(counts, {"2028-01": 2, "2029-06": 1})
+
+    def test_registration_counts_empty_store_gives_empty_dict(self):
+        self.assertEqual(registration_purge_counts_by_month(self.store, self.settings), {})
+
+    def test_account_counts_grouped_by_deletion_month(self):
+        self._make_user("a@example.org", last_login_at="2026-01-01T00:00:00+00:00")  # 2028-01
+        self._make_user("b@example.org", last_login_at="2026-01-20T00:00:00+00:00")  # 2028-01
+        self._make_user("c@example.org", last_login_at="2027-06-01T00:00:00+00:00")  # 2029-06
+        counts = account_deletion_counts_by_month(self.store, self.settings)
+        self.assertEqual(counts, {"2028-01": 2, "2029-06": 1})
+
+    def test_account_counts_skips_accounts_with_no_activity_timestamp(self):
+        self._make_user("no-activity@example.org", last_login_at="")
+        _set_user_row(self.store, self.store.read_users(scope="live")[0]["user_id"], created_at="")
+        counts = account_deletion_counts_by_month(self.store, self.settings)
+        self.assertEqual(counts, {})
 
 
 if __name__ == "__main__":
