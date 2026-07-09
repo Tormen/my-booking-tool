@@ -749,10 +749,16 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
     """2026-07-14: the "on install" half of the operator's own standing request
     (2026-07-09: "maybe either on install or on the next moment you touch
     this calendar invite again ?") -- resync_if_format_changed() only
-    actually resyncs (and only ever the once) when
-    CALENDAR_INVITE_FORMAT_VERSION doesn't match a marker file recorded
-    under the data dir, so `my-bt setup -i` can call this unconditionally
-    on every run without re-syncing every single time it's invoked."""
+    actually resyncs when CALENDAR_INVITE_FORMAT_VERSION doesn't match a
+    marker file recorded under the data dir, so `my-bt setup -i` can call
+    this unconditionally on every run without re-syncing every single
+    time it's invoked. 2026-07-16, the operator, after being told a previous
+    incident's fix wouldn't take effect until he separately ran `my-bt
+    admin resync-calendar` by hand: "but WHY can't my-bt setup then NOT
+    to THIS???" -- fair complaint, so this ALSO now resyncs whenever a
+    previous attempt left pending skips recorded, independent of the
+    format-version marker; see test_pending_skips_trigger_a_resync_even_
+    when_the_format_marker_already_matches below."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -810,6 +816,36 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
 
         self.assertIsNone(result)
         self.assertEqual(transport.calls, [])
+
+    def test_pending_skips_trigger_a_resync_even_when_the_format_marker_already_matches(self):
+        # 2026-07-16, the operator: "but WHY can't my-bt setup then NOT to
+        # THIS???" -- a stale skip marker left over from a PREVIOUS,
+        # already-fixed-in-the-meantime incident used to just sit there
+        # forever (repeated in every `admin health`/`admin setup` as a
+        # WARN, exit 1) because the format-version marker already
+        # matched, so this function returned None before ever attempting
+        # a real resync that could clear it. Now the pending-skips
+        # marker is its own, independent trigger.
+        format_marker = Path(self.data_dir) / ".calendar_invite_format_version"
+        format_marker.write_text("1\n", encoding="utf-8")
+        skip_marker = Path(self.data_dir) / CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
+        skip_marker.write_text("yoga-class-1 on 2026-07-10: HTTP 412 (now fixed)\n", encoding="utf-8")
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        client, transport = self._client()
+
+        result = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=1,
+        )
+
+        # It actually ran (not None) and cleared the now-resolved skip.
+        self.assertIsNotNone(result)
+        self.assertEqual(result.fixed, 1)
+        self.assertEqual(result.skipped, [])
+        self.assertFalse(skip_marker.exists())
+        # The format-version marker is untouched in meaning (still "1"),
+        # even though we ran only because of the pending skip.
+        self.assertEqual(format_marker.read_text(encoding="utf-8").strip(), "1")
 
     def test_stale_marker_triggers_a_resync_and_updates_the_marker(self):
         marker = Path(self.data_dir) / ".calendar_invite_format_version"

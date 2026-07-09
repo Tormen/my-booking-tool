@@ -810,6 +810,18 @@ caller could ever report a partial failure. Fixed two ways:
   in *every later* `admin health`/`admin setup` run, not just the one run
   that happened to discover it. A clean resync afterwards clears the
   marker automatically.
+- A pending skip marker is now, by itself, enough to trigger `setup -i`'s
+  automatic resync (2026-07-16) -- see `resync_if_format_changed()`'s
+  own docstring. Previously it only ran when the format-version marker
+  was stale, so a skip marker left over from an ALREADY-FIXED underlying
+  problem (e.g. the SEQUENCE incident above) would just sit there
+  forever as a `[warn]`/exit-1 -- nothing would ever re-attempt it,
+  since the format marker already matched. the operator: *"but WHY can't my-bt
+  setup then NOT to THIS???"* (i.e. why require a separate manual `admin
+  resync-calendar` run to find out a fix actually worked) -- fair
+  complaint. Now a non-empty skip marker is its own independent trigger,
+  same standing as a stale format-version marker: `setup -i` retries
+  known failures itself instead of leaving a human to remember to.
 
 **Retrying harder was tried and deliberately reverted (2026-07-16).** An
 earlier version of this gave the bulk resync path (used by both `-i` and

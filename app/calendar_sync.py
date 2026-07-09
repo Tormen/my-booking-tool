@@ -642,14 +642,31 @@ def resync_if_format_changed(
     today: date | None = None,
     format_version: int = CALENDAR_INVITE_FORMAT_VERSION,
 ) -> ResyncResult | None:
-    """Runs resync_all_future_calendar_events() automatically, but only if
-    `format_version` (CALENDAR_INVITE_FORMAT_VERSION by default) doesn't
-    match what's recorded in a small marker file under `data_dir` -- see
-    that constant's own docstring for the full "on install" story. Returns
-    the ResyncResult (same as resync_all_future_calendar_events(), so a
-    fixed=0 result is a valid "ran, nothing to do" outcome) if it ran, or
-    None if the format hasn't changed since the last run (nothing to do,
-    marker left alone).
+    """Runs resync_all_future_calendar_events() automatically if EITHER of
+    two things is true: `format_version` (CALENDAR_INVITE_FORMAT_VERSION
+    by default) doesn't match what's recorded in a small marker file
+    under `data_dir` -- see that constant's own docstring for the full
+    "on install" story -- OR a previous attempt left unresolved skips
+    recorded (CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME, see
+    record_resync_skips()). Returns the ResyncResult (same as
+    resync_all_future_calendar_events(), so a fixed=0 result is a valid
+    "ran, nothing to do" outcome) if it ran, or None if NEITHER
+    condition applies (truly nothing to do, both markers left alone).
+
+    2026-07-16, the operator, after being told the fix for a persistent-conflict
+    incident wouldn't take effect until someone remembered to separately
+    run `my-bt admin resync-calendar` by hand: "but WHY can't my-bt setup
+    then NOT to THIS???" -- fair complaint. The format-version check
+    alone used to be the ONLY thing this function looked at, so a
+    format-unchanged marker made it return None immediately even when
+    check_calendar_invite_resync_skips() had known, already-recorded
+    failures sitting there from a previous run -- those would just sit
+    forever until someone manually ran the resync command, regardless of
+    whether whatever had been breaking them (e.g. the 2026-07-16 stale-
+    SEQUENCE bug) had since been fixed. Now a non-empty skip marker is
+    its own, independent reason to retry, same as a stale format-version
+    marker -- `setup -i` retries known failures itself instead of
+    silently requiring a human to remember to.
 
     Writes the new version to the marker only AFTER resync_all_future_
     calendar_events() RETURNS -- if it raises (a hard failure before/
@@ -671,22 +688,34 @@ def resync_if_format_changed(
     (2026-07-15/16: the previous version of this function returned a
     plain int, which silently dropped exactly that information).
 
-    A missing marker (fresh install, or a data dir that predates this
-    feature) is treated as "definitely stale" -- always resyncs once (a
-    no-op scan if there's nothing booked yet) and writes the marker, so
-    every install ends up with one recorded regardless of history."""
+    A missing format-version marker (fresh install, or a data dir that
+    predates this feature) is treated as "definitely stale" -- always
+    resyncs once (a no-op scan if there's nothing booked yet) and writes
+    the marker, so every install ends up with one recorded regardless of
+    history."""
     marker_path = Path(data_dir) / CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME
     try:
         recorded = marker_path.read_text(encoding="utf-8").strip()
     except OSError:
         recorded = None
-    if recorded == str(format_version):
+    format_is_stale = recorded != str(format_version)
+
+    skip_marker_path = Path(data_dir) / CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
+    try:
+        has_pending_skips = bool(skip_marker_path.read_text(encoding="utf-8").strip())
+    except OSError:
+        has_pending_skips = False
+
+    if not format_is_stale and not has_pending_skips:
         return None
     result = resync_all_future_calendar_events(client, calendar_href, store, settings, today=today)
     # 2026-07-15: atomic_write_text (temp file + fsync + rename + dir
     # fsync), not a bare write_text() -- a torn write here on a hard
     # crash would leave a marker that's neither the old nor the new
     # version, misreporting drift either way. See app/atomic_io.py.
+    # Written even when we only ran because of pending skips (format_is_
+    # stale False) -- harmless (same value it already had) and keeps
+    # this the one place that owns writing it.
     atomic_write_text(marker_path, f"{format_version}\n")
     record_resync_skips(data_dir, result)
     return result
