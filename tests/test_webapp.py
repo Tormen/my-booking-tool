@@ -799,7 +799,7 @@ class SessionBannerTest(unittest.TestCase):
             self.fail(f"found a font-size below 1em: {match.group(0)!r}")
         for selector in (
             ".session-banner", ".note", ".hint", ".date-btn .d-date",
-            ".date-btn .d-spots", ".hash-cell",
+            ".date-btn .d-spots", ".hash-cell", ".th-note",
         ):
             rule = style[style.index(selector + "{") :]
             rule = rule[: rule.index("}")]
@@ -2979,6 +2979,21 @@ class BookingFlowTest(unittest.TestCase):
         environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
         self.assertIn('<th data-default-sort="asc">Date<span class="sort-indicator"></span></th>', body)
+
+    def test_admin_overview_times_booked_header_has_explanatory_subtitle(self):
+        # the operator, screenshot of /admin: "please add a small subtitle
+        # explaining this: Times booked <in-small-below: for now / total>"
+        # -- the column shows "up-to-now/total" (see
+        # test_admin_overview_times_booked_excludes_future_bookings above),
+        # which isn't self-explanatory at a glance.
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn(
+            '<th>Times booked<span class="sort-indicator"></span>'
+            '<span class="th-note">for now / total</span></th>',
+            body,
+        )
 
     def test_admin_overview_times_booked_excludes_future_bookings(self):
         # 2026-07-08, the operator (screenshot of a guest already showing "9" with

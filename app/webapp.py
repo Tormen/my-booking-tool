@@ -3749,7 +3749,7 @@ class App:
           <th>Name<span class="sort-indicator"></span></th>
           <th>Email<span class="sort-indicator"></span></th>
           <th>Registered<span class="sort-indicator"></span></th>
-          <th>Times booked<span class="sort-indicator"></span></th>
+          <th>Times booked<span class="sort-indicator"></span><span class="th-note">for now / total</span></th>
           <th>Guests<span class="sort-indicator"></span></th>
           <th>Actions<span class="sort-indicator"></span></th>
         </tr></thead>
