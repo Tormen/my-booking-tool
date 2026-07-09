@@ -17,6 +17,7 @@ from app.storage import (
     Store,
     _LockedCsv,
     _SERVICE_GROUP,
+    _SERVICE_USER,
     _fsync_dir,
     _secure_data_path,
     format_display_timestamp,
@@ -1132,7 +1133,13 @@ class SecureDataPathTest(unittest.TestCase):
     the self-healing fix _LockedCsv now applies on every write/creation
     (see _atomic_write and __enter__) -- these tests exercise it directly
     rather than needing an actual multi-user setup with a real "my-booking"
-    system group to reproduce the original bug."""
+    system group to reproduce the original bug.
+
+    2026-07-10: a SECOND real incident -- chgrp-only wasn't enough for a
+    read-WRITE service. See _secure_data_path's own docstring for the full
+    story; the tests below patch os.geteuid explicitly (rather than relying
+    on incidentally not running the suite as root) so the root/non-root
+    branch is deterministic regardless of who/what runs these tests."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1144,32 +1151,37 @@ class SecureDataPathTest(unittest.TestCase):
 
     def test_chmod_grants_group_read_not_just_owner(self):
         os.chmod(self.path, 0o600)
-        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
+        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()), \
+                mock.patch("app.storage.os.geteuid", return_value=1000):
             _secure_data_path(self.path)
         self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o640)
 
     def test_directory_mode_gets_the_execute_bit_when_asked(self):
         directory = Path(self._tmp.name) / "archived"
         directory.mkdir()
-        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
+        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()), \
+                mock.patch("app.storage.os.geteuid", return_value=1000):
             _secure_data_path(directory, mode=0o750)
         self.assertEqual(stat.S_IMODE(os.stat(directory).st_mode), 0o750)
 
     def test_chgrps_to_the_service_group_when_it_exists(self):
         fake_gid = 424242
         with mock.patch("app.storage.grp.getgrnam") as m_getgrnam, \
+                mock.patch("app.storage.os.geteuid", return_value=1000), \
                 mock.patch("app.storage.os.chown") as m_chown:
             m_getgrnam.return_value = mock.Mock(gr_gid=fake_gid)
             _secure_data_path(self.path)
         m_getgrnam.assert_called_once_with(_SERVICE_GROUP)
-        # -1 as the uid arg: never touches ownership, only the group -- see
-        # _secure_data_path's own docstring on why that's deliberate.
+        # -1 as the uid arg: a NON-root process never touches ownership,
+        # only the group -- see _secure_data_path's own docstring on why
+        # that's still correct (only root can safely reassign an owner).
         m_chown.assert_called_once_with(self.path, -1, fake_gid)
 
     def test_missing_service_group_does_not_raise_and_chmod_still_applies(self):
         # e.g. a dev checkout or this very test suite, where no system
         # group named "my-booking" exists at all.
-        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError("no such group")):
+        with mock.patch("app.storage.grp.getgrnam", side_effect=KeyError("no such group")), \
+                mock.patch("app.storage.os.geteuid", return_value=1000):
             try:
                 _secure_data_path(self.path)
             except Exception as exc:
@@ -1181,6 +1193,7 @@ class SecureDataPathTest(unittest.TestCase):
         # target group -- POSIX refuses the chgrp, but the write itself
         # must still succeed.
         with mock.patch("app.storage.grp.getgrnam") as m_getgrnam, \
+                mock.patch("app.storage.os.geteuid", return_value=1000), \
                 mock.patch("app.storage.os.chown", side_effect=PermissionError("not allowed")):
             m_getgrnam.return_value = mock.Mock(gr_gid=1)
             try:
@@ -1190,11 +1203,69 @@ class SecureDataPathTest(unittest.TestCase):
 
     def test_chmod_failure_does_not_raise(self):
         with mock.patch("app.storage.os.chmod", side_effect=OSError("nope")), \
+                mock.patch("app.storage.os.geteuid", return_value=1000), \
                 mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
             try:
                 _secure_data_path(self.path)
             except Exception as exc:
                 self.fail(f"_secure_data_path must swallow a chmod OSError, raised {exc!r}")
+
+    # -- root-only owner chown (2026-07-10 fix) -----------------------------
+
+    def test_root_chowns_the_owner_back_to_the_service_user(self):
+        fake_uid = 131313
+        with mock.patch("app.storage.os.geteuid", return_value=0), \
+                mock.patch("app.storage.pwd.getpwnam") as m_getpwnam, \
+                mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()), \
+                mock.patch("app.storage.os.chown") as m_chown:
+            m_getpwnam.return_value = mock.Mock(pw_uid=fake_uid)
+            _secure_data_path(self.path)
+        m_getpwnam.assert_called_once_with(_SERVICE_USER)
+        m_chown.assert_called_once_with(self.path, fake_uid, -1)
+
+    def test_non_root_never_attempts_the_owner_chown(self):
+        with mock.patch("app.storage.os.geteuid", return_value=1000), \
+                mock.patch("app.storage.pwd.getpwnam") as m_getpwnam, \
+                mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
+            _secure_data_path(self.path)
+        m_getpwnam.assert_not_called()
+
+    def test_missing_service_user_does_not_raise_when_root(self):
+        # e.g. a dev checkout run under fakeroot/a container where uid 0
+        # exists but no "my-booking" system user was ever created.
+        with mock.patch("app.storage.os.geteuid", return_value=0), \
+                mock.patch("app.storage.pwd.getpwnam", side_effect=KeyError("no such user")), \
+                mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()):
+            try:
+                _secure_data_path(self.path)
+            except Exception as exc:
+                self.fail(f"_secure_data_path must swallow a missing service user, raised {exc!r}")
+
+    def test_root_owner_chown_permission_error_does_not_raise(self):
+        with mock.patch("app.storage.os.geteuid", return_value=0), \
+                mock.patch("app.storage.pwd.getpwnam") as m_getpwnam, \
+                mock.patch("app.storage.grp.getgrnam", side_effect=KeyError()), \
+                mock.patch("app.storage.os.chown", side_effect=PermissionError("not allowed")):
+            m_getpwnam.return_value = mock.Mock(pw_uid=1)
+            try:
+                _secure_data_path(self.path)
+            except Exception as exc:
+                self.fail(f"_secure_data_path must swallow an owner-chown PermissionError, raised {exc!r}")
+
+    def test_root_chowns_owner_then_still_chgrps(self):
+        # Both the 2026-07-09 (group) and 2026-07-10 (owner) fixes must
+        # apply together on a root-run write -- neither should short-circuit
+        # the other.
+        fake_uid, fake_gid = 131313, 424242
+        with mock.patch("app.storage.os.geteuid", return_value=0), \
+                mock.patch("app.storage.pwd.getpwnam") as m_getpwnam, \
+                mock.patch("app.storage.grp.getgrnam") as m_getgrnam, \
+                mock.patch("app.storage.os.chown") as m_chown:
+            m_getpwnam.return_value = mock.Mock(pw_uid=fake_uid)
+            m_getgrnam.return_value = mock.Mock(gr_gid=fake_gid)
+            _secure_data_path(self.path)
+        m_chown.assert_any_call(self.path, fake_uid, -1)
+        m_chown.assert_any_call(self.path, -1, fake_gid)
 
 
 class AtomicWriteDirFsyncIntegrationTest(unittest.TestCase):

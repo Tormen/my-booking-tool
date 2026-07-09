@@ -17,6 +17,7 @@ import fcntl
 import grp
 import logging
 import os
+import pwd
 import subprocess
 import tempfile
 import uuid
@@ -339,40 +340,72 @@ def _git_commit_data_file(path: Path, message: str) -> None:
 # must stay readable by this group no matter which OS account performed the
 # write, not just whichever account happened to invoke `my-bt` this time.
 _SERVICE_GROUP = "my-booking"
+_SERVICE_USER = "my-booking"
 
 
 def _secure_data_path(path, mode: int = 0o640) -> None:
     """Best-effort: chmod (default 0640 -- owner rw, GROUP read -- not
-    owner-only 0600) and chgrp to _SERVICE_GROUP. Applied to every CSV file
-    (mode=0o640) and the data directory itself (mode=0o750, needs the
-    execute bit for traversal -- see the mkdir call site) on every
-    write/creation, so permissions self-heal on the next write regardless of
-    who performed a previous one.
+    owner-only 0600), chgrp to _SERVICE_GROUP, and (root only -- see below)
+    chown to _SERVICE_USER. Applied to every CSV file (mode=0o640) and the
+    data directory itself (mode=0o750, needs the execute bit for traversal
+    -- see the mkdir call site) on every write/creation, so permissions
+    self-heal on the next write regardless of who performed a previous one.
 
-    Deliberately never raises. Two different failure modes are logged at two
-    different levels, on purpose:
-      - _SERVICE_GROUP simply doesn't exist on this machine (KeyError from
-        getgrnam) -- entirely normal for a dev checkout or this repo's own
-        test suite, not something an operator needs to see on every single
-        CSV write, so this logs at DEBUG only.
-      - chmod fails outright, or chgrp fails for any OTHER reason (e.g. a
-        real deployment where the group exists but the calling process
-        isn't a member of it and isn't root) -- an actually actionable
-        problem worth surfacing, so this logs at WARNING (same as
+    Deliberately never raises. Failure modes are logged at two different
+    levels, on purpose:
+      - _SERVICE_GROUP/_SERVICE_USER simply don't exist on this machine
+        (KeyError from getgrnam/getpwnam) -- entirely normal for a dev
+        checkout or this repo's own test suite, not something an operator
+        needs to see on every single CSV write, so this logs at DEBUG only.
+      - chmod/chown/chgrp fails outright for any OTHER reason (e.g. a real
+        deployment where the group exists but the calling process isn't a
+        member of it and isn't root) -- an actually actionable problem
+        worth surfacing, so this logs at WARNING (same as
         _git_commit_data_file's own "genuine failures are logged" rule; a
-        missing group is the expected/normal case there, same distinction).
+        missing group/user is the expected/normal case there, same
+        distinction).
     Either way, the write this is securing must never fail just because the
     permissions touch-up couldn't fully complete.
 
-    Note this only changes the GROUP (chown(path, -1, gid)), never the
-    owner -- POSIX lets a file's own owner chgrp it to any group THEY are a
-    member of without root, which is exactly this app's existing model (see
-    README's "add your login to the my-booking group" instruction); forcing
-    ownership itself would need root universally and isn't necessary here."""
+    2026-07-10, the operator, real second production incident on the VPS: chgrp
+    alone turned out NOT to be enough. `my-bt admin gdpr erase` (run as
+    root, same as every other my-bt invocation on this box) writes through
+    this exact _LockedCsv/_atomic_write path -- os.replace() into place
+    makes the NEW file's OWNER whoever performed that write, root in this
+    case, regardless of the chgrp below. At mode 0640 (owner rw, GROUP
+    READ-ONLY), that leaves my-booking.service -- a group MEMBER, never the
+    owner once root has written -- able to read but never write its own
+    users.csv again: "PermissionError: [Errno 13] ... users.csv" the very
+    next time the service tried to set a confirm/reset token. The original
+    2026-07-09 incident this function was written for only ever involved a
+    READ-only consumer (my-booking-watchdog.service), so chgrp+0640 was
+    enough to fix THAT one -- it just never covered a read-WRITE service
+    losing access the same way.
+
+    Fix: chgrp alone can't close this (a non-root process may chgrp to any
+    group it's a member of, but POSIX never lets a non-owner, non-root
+    process take ownership away from someone else -- "forcing ownership
+    would need root universally" is still true). The one case that CAN
+    reliably fix this is also the one case that CAUSES it: root. So when
+    the current process is root (os.geteuid() == 0 -- true for every
+    my-bt admin invocation today), also chown the OWNER back to
+    _SERVICE_USER, restoring exactly the access the service had before that
+    root-run write touched the file. A non-root write leaves ownership
+    alone, same as before -- it already can't do anything else."""
     try:
         os.chmod(path, mode)
     except OSError as exc:
         log.warning("could not chmod %s to %o (%s)", path, mode, exc)
+    if os.geteuid() == 0:
+        try:
+            uid = pwd.getpwnam(_SERVICE_USER).pw_uid
+        except KeyError:
+            log.debug("service user %r does not exist on this machine -- skipping chown of %s", _SERVICE_USER, path)
+        else:
+            try:
+                os.chown(path, uid, -1)
+            except OSError as exc:
+                log.warning("could not chown %s to %r (%s)", path, _SERVICE_USER, exc)
     try:
         gid = grp.getgrnam(_SERVICE_GROUP).gr_gid
     except KeyError:
