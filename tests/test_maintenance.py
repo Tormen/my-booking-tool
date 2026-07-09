@@ -43,6 +43,24 @@ class ReadStateTest(unittest.TestCase):
         maintenance.disable(self.data_dir)  # must not raise
         self.assertFalse(maintenance.read_state(self.data_dir).enabled)
 
+    def test_enable_leaves_no_temp_file_behind(self):
+        # 2026-07-15: enable() writes via atomic_io.atomic_write_text
+        # (temp file + fsync + rename), not a bare write_text() -- confirm
+        # the temp file it creates along the way doesn't linger.
+        maintenance.enable(self.data_dir, message="x")
+        leftovers = [p.name for p in self.data_dir.iterdir() if p.name != "maintenance.json"]
+        self.assertEqual(leftovers, [])
+
+    def test_disable_fsyncs_the_data_dir_after_unlinking(self):
+        # 2026-07-15: the deletion itself should be as durable as the
+        # write was -- see maintenance.disable()'s own comment.
+        from unittest import mock
+
+        maintenance.enable(self.data_dir, message="x")
+        with mock.patch("app.maintenance.fsync_dir") as m_fsync_dir:
+            maintenance.disable(self.data_dir)
+        m_fsync_dir.assert_called_once_with(self.data_dir)
+
 
 class MessageHtmlTest(unittest.TestCase):
     def test_includes_mailto_link_and_teams_note(self):
@@ -154,6 +172,17 @@ class ApplyBannerToFileTest(unittest.TestCase):
         self.path.write_text("<html><body><h1>hi</h1></body></html>", encoding="utf-8")
         result = maintenance.apply_banner_to_file(self.path, False, "a@example.org")
         self.assertFalse(result)
+
+    def test_writes_via_atomic_write_text_leaving_no_temp_file_behind(self):
+        # 2026-07-15: this rewrites the LIVE, publicly-served homepage in
+        # place -- must go through atomic_io.atomic_write_text (temp file
+        # + fsync + rename), not a bare write_text(), since a torn write
+        # here has no fail-open fallback the way the maintenance flag
+        # file does.
+        self.path.write_text("<html><body><h1>hi</h1></body></html>", encoding="utf-8")
+        maintenance.apply_banner_to_file(self.path, True, "a@example.org")
+        leftovers = [p.name for p in self.path.parent.iterdir() if p.name != "index.html"]
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

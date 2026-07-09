@@ -25,6 +25,8 @@ from __future__ import annotations
 import string
 from pathlib import Path
 
+from .atomic_io import atomic_write_text
+
 MANAGED_MARKER = (
     "<!-- MANAGED BY my-bt -- generated from privacy.html.tmpl + settings.toml.\n"
     "     Do NOT hand-edit this file: the next `my-bt setup -i` or\n"
@@ -60,7 +62,10 @@ def write_privacy_html(
     canceled_retention_months: int,
     out_path: Path | str,
 ) -> None:
-    Path(out_path).write_text(
-        render_privacy_html(template_path, retention_months, canceled_retention_months),
-        encoding="utf-8",
+    # 2026-07-15: atomic_write_text, not a bare write_text() -- this is
+    # the live, publicly-served privacy.html at both build time (this
+    # checkout's own site/) and run time ([site].static_site_dir). See
+    # app/atomic_io.py.
+    atomic_write_text(
+        out_path, render_privacy_html(template_path, retention_months, canceled_retention_months),
     )

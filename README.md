@@ -134,6 +134,7 @@ entirely on you (see the disclaimer above).
 ```
 app/                        the application (stdlib-only Python package)
   config.py                 settings.toml + secrets loader
+  atomic_io.py              shared crash-safe file write (temp file + fsync + rename + dir fsync)
   storage.py                CSV read/write, locking, right-to-erasure archival
   slots.py                  weekday/time occurrence math + waitlist-aware capacity
   caldav_client.py          minimal CalDAV client (PROPFIND/REPORT/PUT/DELETE)
@@ -195,48 +196,73 @@ reading a secret, running a command, checking for root) for testing -- see
 2026-07-15, the operator: the VPS this runs on can lose power/hard-reboot at any
 time, unpredictably. The relevant question isn't OS-level sync tuning
 (that only ever protects everything EXCEPT the one write that was
-mid-flight at the exact moment of a crash) -- it's whether `storage.py`'s
-own writes are safe against exactly that write being interrupted. Three
-things, in `app/storage.py`:
+mid-flight at the exact moment of a crash) -- it's whether every write
+this project makes to disk is safe against exactly that write being
+interrupted. Followed up with "yes please ALL writes linked to
+my-booking-tool, my-bt and the site" -- not just `storage.py`'s CSVs.
 
-1. **Every CSV write is atomic** (`_LockedCsv._atomic_write`): write the
-   new content to a temp file in the same directory, `flush()` +
-   `os.fsync()` it (new content durable on disk), THEN `os.replace()` it
-   over the real file (atomic rename -- readers/a concurrent crash only
-   ever see the old, complete file or the new, complete file, never a
-   torn/partial one).
-2. **The directory is fsynced too, after the rename** (`_fsync_dir`,
-   called right after every `os.replace()`). fsyncing the temp file only
-   guarantees the new CONTENT is durable -- on Linux, the rename() itself
-   isn't guaranteed durable until the containing directory's own inode is
-   fsynced as well. Without this, a hard power cut in the narrow window
-   right after `os.replace()` returns could, on some filesystems/mount
-   options, leave the rename uncommitted, so a reboot shows the file as
-   it was before that last write. Not corruption -- the old file is never
-   torn -- just a possible lost last write in that window; this closes
-   it. Best-effort (logs a warning, never raises) since directory-fsync
-   isn't supported on every conceivable mount.
-3. **Multi-file operations are ordered so a crash mid-way is recoverable,
-   not lossy.** Two places touch more than one CSV as separate,
-   non-atomic transactions:
-   - Booking: `upsert_user_for_booking()` (users.csv) always runs BEFORE
-     the matching registrations.csv row is written. A crash between the
-     two just leaves a harmless orphan user row (invisible, self-heals --
-     the upsert is idempotent), never a registration pointing at a user
-     that was never persisted. See that method's own docstring -- this
-     ordering is load-bearing, don't reorder without reading it.
-   - GDPR erasure (`erase_user()`): archives the user + their
-     registrations into `archived/*.csv` FIRST, and only removes the live
-     rows LAST (2026-07-15 -- this used to be the other way round). The
-     old order meant a crash right after the live-removal write
-     permanently lost the erasure record: gone from the live table,
-     never archived, and un-recoverable (a missing `user_id` in
-     `users.csv` makes `erase_user()` return `False`, "nothing to do").
-     Archiving first means a crash mid-operation leaves at worst a
-     harmless DUPLICATE (already archived, still also live) --
-     recoverable by just re-running the erasure, since the archive-append
-     steps skip rows already present and the final live-removal is
-     unconditional either way.
+**`app/atomic_io.py`** is the one shared, crash-safe write primitive
+every module uses (`atomic_write_text()` + `fsync_dir()`): write the new
+content to a temp file in the SAME directory as the target, `flush()` +
+`os.fsync()` it (new content durable on disk), `os.replace()` it over
+the real file (atomic rename -- a reader, or a crash, only ever sees the
+old, complete file or the new, complete file, never a torn/partial one),
+THEN `fsync()` the containing directory too. That last step matters
+because fsyncing the temp file only guarantees the new CONTENT is
+durable -- on Linux, the rename() itself isn't guaranteed durable until
+the directory's own inode is fsynced as well; without it, a hard power
+cut in the narrow window right after `os.replace()` returns could, on
+some filesystems/mount options, leave the rename uncommitted, so a
+reboot shows the file as it was before that last write. Not corruption
+(the old file is never torn), just a possible lost last write in that
+window. Best-effort throughout (logs a warning, never raises) since
+directory-fsync isn't supported on every conceivable mount.
+
+Every file this project writes at runtime goes through this, or through
+`app/storage.py`'s own CSV-specific `_LockedCsv._atomic_write` (same
+pattern, plus locking/sanitization/chmod for CSVs -- it delegates its
+own directory-fsync step to `atomic_io.fsync_dir` rather than
+duplicating it):
+
+- **CSVs** (`users.csv`, `registrations.csv`, `archived/*.csv`) --
+  `_LockedCsv._atomic_write`, `app/storage.py`.
+- **Config/secrets** -- `settings.toml` edits (nginx_access_log,
+  nginx_conf_path) and every secret file (`admin_password_hash`,
+  `erasure_pepper`, `caldav_password`, ...) written by
+  `my-bt admin setup -i`, `app/cli_setup.py`.
+- **Calendar invite format marker** (`.calendar_invite_format_version`)
+  -- `app/calendar_sync.py`'s `resync_if_format_changed()`.
+- **Maintenance mode** -- the `maintenance.json` flag file (`enable()`/
+  `disable()`, the latter also fsyncing the directory after the
+  `unlink()`) and the live homepage banner insert/remove
+  (`apply_banner_to_file()`), `app/maintenance.py`.
+- **Rendered static pages** -- `privacy.html` (build time via
+  `scripts/render-site.py` and run time via `my-bt admin setup -i`) and
+  the initial copy of `index.html`/`impressum.html`/`terms.html` to
+  `[site].static_site_dir`, `app/site_render.py` and `app/cli_setup.py`.
+- **git-snapshot's `.gitignore`** in the data dir, `app/cli_setup.py`.
+
+**Multi-file operations are ordered so a crash mid-way is recoverable,
+not lossy.** Two places touch more than one CSV as separate, non-atomic
+transactions:
+
+- Booking: `upsert_user_for_booking()` (users.csv) always runs BEFORE
+  the matching registrations.csv row is written. A crash between the
+  two just leaves a harmless orphan user row (invisible, self-heals --
+  the upsert is idempotent), never a registration pointing at a user
+  that was never persisted. See that method's own docstring -- this
+  ordering is load-bearing, don't reorder without reading it.
+- GDPR erasure (`erase_user()`): archives the user + their registrations
+  into `archived/*.csv` FIRST, and only removes the live rows LAST
+  (2026-07-15 -- this used to be the other way round). The old order
+  meant a crash right after the live-removal write permanently lost the
+  erasure record: gone from the live table, never archived, and
+  un-recoverable (a missing `user_id` in `users.csv` makes
+  `erase_user()` return `False`, "nothing to do"). Archiving first means
+  a crash mid-operation leaves at worst a harmless DUPLICATE (already
+  archived, still also live) -- recoverable by just re-running the
+  erasure, since the archive-append steps skip rows already present and
+  the final live-removal is unconditional either way.
 
 None of this protects against disk-level corruption (bad sectors, a
 failing drive) or a crash during the retention/erasure/git-snapshot
@@ -244,7 +270,11 @@ failing drive) or a crash during the retention/erasure/git-snapshot
 net on top of the above, not the primary durability mechanism) -- for
 that, see "Off-box encrypted backups" under "Known simplifications"
 below. This is specifically about surviving a hard power loss without a
-half-written booking or a lost erasure record.
+half-written booking, a torn config/secret file, or a lost erasure
+record -- and it applies identically whether a write was triggered from
+the web app or from `my-bt` (registration/cancellation/rename-course/
+gdpr erase/purge/migrate-simplymeet all go through the same `Store`
+class either way; `scripts/my-bt` never touches a CSV file directly).
 
 ## Installing (and reinstalling after a server reinstall)
 

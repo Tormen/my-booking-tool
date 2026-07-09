@@ -25,6 +25,7 @@ from datetime import datetime, time, timezone
 from pathlib import Path
 from typing import Iterable
 
+from .atomic_io import fsync_dir as _fsync_dir
 from .security import sanitize_csv_field
 
 log = logging.getLogger("my_booking.storage")
@@ -482,36 +483,6 @@ class _LockedCsv:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             raise
-
-
-def _fsync_dir(dir_path: Path) -> None:
-    """2026-07-15, the operator, on hard-reboot data safety: fsyncing the temp
-    file (above, before the rename) makes the new CONTENT durable, but on
-    Linux the rename() itself isn't guaranteed durable until the
-    containing directory's own inode is fsynced too -- without this, a
-    hard power cut in the narrow window right after os.replace() returns
-    could, on some filesystems/mount options, leave the rename not yet
-    committed, so a reboot shows the file as it was before this write
-    instead of after. Not corruption (the old file is still intact,
-    never torn -- see _atomic_write's own docstring/comment), just a
-    possible lost last write in that window; this closes it.
-
-    Best-effort like _secure_data_path/_git_commit_data_file: a directory
-    fd can be opened read-only on every real POSIX filesystem this app
-    targets, but must never turn a successful write into a hard failure
-    just because fsync-the-directory isn't supported on some unusual
-    mount (e.g. certain network filesystems)."""
-    try:
-        dir_fd = os.open(str(dir_path), os.O_RDONLY)
-    except OSError as exc:
-        log.warning("could not open %s to fsync it after a write: %s", dir_path, exc)
-        return
-    try:
-        os.fsync(dir_fd)
-    except OSError as exc:
-        log.warning("could not fsync directory %s after a write: %s", dir_path, exc)
-    finally:
-        os.close(dir_fd)
 
 
 def _read_csv_plain(path: Path, fieldnames: list[str]) -> list[dict]:

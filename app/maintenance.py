@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .atomic_io import atomic_write_text, fsync_dir
 from .templates import esc
 
 _FLAG_FILENAME = "maintenance.json"
@@ -119,10 +120,13 @@ def read_state(data_dir: str | Path) -> MaintenanceState:
 def enable(data_dir: str | Path, message: str = "") -> MaintenanceState:
     state = MaintenanceState(enabled=True, message=message, set_at=datetime.now(timezone.utc).isoformat())
     p = flag_path(data_dir)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
-        json.dumps({"enabled": True, "message": state.message, "set_at": state.set_at}),
-        encoding="utf-8",
+    # 2026-07-15: atomic_write_text, not a bare write_text() -- a torn
+    # write here is actually harmless either way (read_state() fails
+    # open to "off" on unreadable/corrupt JSON), but there's no reason
+    # for this one to be the odd one out once every other write in the
+    # project uses the crash-safe pattern. See app/atomic_io.py.
+    atomic_write_text(
+        p, json.dumps({"enabled": True, "message": state.message, "set_at": state.set_at}),
     )
     return state
 
@@ -131,6 +135,12 @@ def disable(data_dir: str | Path) -> None:
     p = flag_path(data_dir)
     if p.exists():
         p.unlink()
+        # 2026-07-15: fsync the directory after the unlink too, same
+        # reasoning as atomic_write_text's own rename -- on Linux a
+        # deletion isn't guaranteed durable across a hard crash until
+        # the containing directory's inode is fsynced. Best-effort, same
+        # as everywhere else fsync_dir is used.
+        fsync_dir(p.parent)
 
 
 def message_html(admin_email: str, custom_message: str = "") -> str:
@@ -189,5 +199,9 @@ def apply_banner_to_file(path: Path, enabled: bool, admin_email: str, message: s
     updated = insert_banner(original, banner_html(admin_email, message)) if enabled else remove_banner(original)
     if updated == original:
         return False
-    path.write_text(updated, encoding="utf-8")
+    # 2026-07-15: atomic_write_text, not a bare write_text() -- this is
+    # the actual LIVE homepage nginx serves; a torn write here (unlike
+    # the flag file above) has no fail-open fallback, so a crash
+    # mid-write would leave a genuinely broken page. See app/atomic_io.py.
+    atomic_write_text(path, updated)
     return True

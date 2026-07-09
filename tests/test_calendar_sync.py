@@ -589,6 +589,14 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
         self.assertEqual(fixed, 1)
         marker = Path(self.data_dir) / ".calendar_invite_format_version"
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), "1")
+        # 2026-07-15: the marker write goes through atomic_io.
+        # atomic_write_text (temp file + fsync + rename), not a bare
+        # write_text() -- confirm its own temp file (see mkstemp's
+        # prefix/suffix in atomic_write_text) isn't left lying around
+        # (other data dir files -- users.csv etc, from self._confirm()
+        # above -- are expected and not what this is checking).
+        leftover_tmps = [p.name for p in Path(self.data_dir).iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftover_tmps, [])
 
     def test_matching_marker_is_a_no_op(self):
         marker = Path(self.data_dir) / ".calendar_invite_format_version"

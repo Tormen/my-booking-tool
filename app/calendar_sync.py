@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from .atomic_io import atomic_write_text
 from .caldav_client import CalDAVClient, CalDAVConflictError, CalDAVError
 from .cancellation import html_to_text
 from .config import Course, Settings
@@ -491,7 +492,11 @@ def resync_if_format_changed(
     if recorded == str(format_version):
         return None
     fixed = resync_all_future_calendar_events(client, calendar_href, store, settings, today=today)
-    marker_path.write_text(f"{format_version}\n", encoding="utf-8")
+    # 2026-07-15: atomic_write_text (temp file + fsync + rename + dir
+    # fsync), not a bare write_text() -- a torn write here on a hard
+    # crash would leave a marker that's neither the old nor the new
+    # version, misreporting drift either way. See app/atomic_io.py.
+    atomic_write_text(marker_path, f"{format_version}\n")
     return fixed
 
 

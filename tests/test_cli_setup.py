@@ -290,6 +290,16 @@ class InteractiveSetupSecretsTest(unittest.TestCase):
         self.assertEqual(path.read_text().strip(), "hunter2")
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
+    def test_accepting_a_missing_secret_leaves_no_temp_file_behind(self):
+        # 2026-07-15: secret files are written via atomic_io.
+        # atomic_write_text (temp file + fsync + rename), not a bare
+        # write_text() -- confirm no temp file lingers next to it.
+        path = self.secrets_dir / "caldav_password"
+        raw = _raw(calendar={"caldav_password_file": str(path)})
+        self._run(raw, answers={"caldav_password": True}, read_secret=lambda label: "hunter2")
+        leftover_tmps = [p.name for p in self.secrets_dir.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftover_tmps, [])
+
     def test_erasure_pepper_auto_generates_valid_hex(self):
         path = self.secrets_dir / "erasure_pepper"
         raw = _raw(privacy={"erasure_pepper_file": str(path), "retention_months": 24, "canceled_retention_months": 6})

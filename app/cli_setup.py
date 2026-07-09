@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import cli_checks, security as app_security, site_render
+from .atomic_io import atomic_write_text
 
 
 def _default_prompt(message: str) -> bool:
@@ -68,16 +69,17 @@ def _add_nginx_access_log_setting(settings_path: str, value: str) -> None:
     m = _NGINX_ACCESS_LOG_LINE_RE.search(text)
     if m is not None:
         text = text[:m.start()] + line + text[m.end():]
-        Path(settings_path).write_text(text, encoding="utf-8")
-        return
-    m = _WATCHDOG_HEADER_RE.search(text)
-    if m is None:
-        if not text.endswith("\n"):
-            text += "\n"
-        text += f"\n[watchdog]\n{line}"
     else:
-        text = text[:m.end()] + line + text[m.end():]
-    Path(settings_path).write_text(text, encoding="utf-8")
+        m = _WATCHDOG_HEADER_RE.search(text)
+        if m is None:
+            if not text.endswith("\n"):
+                text += "\n"
+            text += f"\n[watchdog]\n{line}"
+        else:
+            text = text[:m.end()] + line + text[m.end():]
+    # 2026-07-15: atomic_write_text, not a bare write_text() -- this is
+    # the live settings.toml. See app/atomic_io.py.
+    atomic_write_text(settings_path, text)
 
 
 _SITE_HEADER_RE = re.compile(r"^\[site\][ \t]*\r?\n", re.MULTILINE)
@@ -101,16 +103,17 @@ def _write_nginx_conf_path_setting(settings_path: str, value: str) -> None:
     m = _NGINX_CONF_PATH_LINE_RE.search(text)
     if m is not None:
         text = text[:m.start()] + line + text[m.end():]
-        Path(settings_path).write_text(text, encoding="utf-8")
-        return
-    m = _SITE_HEADER_RE.search(text)
-    if m is None:
-        if not text.endswith("\n"):
-            text += "\n"
-        text += f"\n[site]\n{line}"
     else:
-        text = text[:m.end()] + line + text[m.end():]
-    Path(settings_path).write_text(text, encoding="utf-8")
+        m = _SITE_HEADER_RE.search(text)
+        if m is None:
+            if not text.endswith("\n"):
+                text += "\n"
+            text += f"\n[site]\n{line}"
+        else:
+            text = text[:m.end()] + line + text[m.end():]
+    # 2026-07-15: atomic_write_text, not a bare write_text() -- this is
+    # the live settings.toml. See app/atomic_io.py.
+    atomic_write_text(settings_path, text)
 
 
 def tmpl_path(home: str) -> Path:
@@ -353,8 +356,13 @@ def interactive_setup(
             print_fn(f"[skip] {name}")
             continue
         try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(value + "\n", encoding="utf-8")
+            # 2026-07-15: atomic_write_text (also makes the parent dir),
+            # not a bare write_text() -- a torn write here is a secret
+            # file (e.g. erasure_pepper), and a half-written one is worse
+            # than a missing one. See app/atomic_io.py. chmod/chown below
+            # apply to the real path AFTER the write, same as before --
+            # atomic_write_text's rename doesn't preserve them.
+            atomic_write_text(p, value + "\n")
             p.chmod(0o600)
             if is_root():
                 import grp
@@ -641,7 +649,10 @@ def interactive_setup(
             if not deployed.exists():
                 if prompt(f"Copy {source} to {deployed} now?"):
                     try:
-                        deployed.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                        # 2026-07-15: atomic_write_text, not a bare
+                        # write_text() -- this is a live, publicly-served
+                        # page. See app/atomic_io.py.
+                        atomic_write_text(deployed, source.read_text(encoding="utf-8"))
                         print_fn(f"[ok] wrote {deployed}")
                     except OSError as exc:
                         print_fn(f"[fail] could not write {deployed}: {exc}")
@@ -801,7 +812,7 @@ def interactive_setup(
                 )
                 gitignore = data_dir_path / ".gitignore"
                 if not gitignore.exists():
-                    gitignore.write_text("*.tmp\n", encoding="utf-8")
+                    atomic_write_text(gitignore, "*.tmp\n")
                 result = app_git_snapshot.snapshot(data_dir_path)
                 print_fn(f"[ok] initialized git repo at {data_dir_path} ({result.detail})")
             except OSError as exc:

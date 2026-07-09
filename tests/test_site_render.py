@@ -40,6 +40,15 @@ class RenderPrivacyHtmlTest(unittest.TestCase):
         self.assertIn("kept for 24 months", content)
         self.assertIn("MANAGED BY my-bt", content)
 
+    def test_write_privacy_html_leaves_no_temp_file_behind(self):
+        # 2026-07-15: this is the live, publicly-served privacy.html --
+        # goes through atomic_io.atomic_write_text (temp file + fsync +
+        # rename), not a bare write_text().
+        out_path = Path(self._tmp.name) / "privacy.html"
+        site_render.write_privacy_html(self.tmpl_path, 24, 6, out_path)
+        leftover_tmps = [p.name for p in Path(self._tmp.name).iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftover_tmps, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1197,68 +1197,17 @@ class SecureDataPathTest(unittest.TestCase):
                 self.fail(f"_secure_data_path must swallow a chmod OSError, raised {exc!r}")
 
 
-class FsyncDirTest(unittest.TestCase):
-    """2026-07-15, the operator, on hard-reboot data safety: fsyncing the temp
-    file before os.replace() (already in place) makes the new CONTENT
-    durable, but the rename() itself isn't guaranteed durable on Linux
-    until the containing directory's own inode is fsynced too --
-    _fsync_dir() is the fix, called right after every os.replace() in
-    _atomic_write().
-
-    A bare "was os.fsync called" mock assertion would pass even if a bug
-    fsynced the wrong fd (e.g. the just-renamed file again, instead of
-    its directory) -- these tests resolve the real fd back to a path via
-    /proc/self/fd (Linux-only, matches this app's only deployment target)
-    to prove it's actually the DIRECTORY's fd, not just "fsync was called
-    some number of times"."""
+class AtomicWriteDirFsyncIntegrationTest(unittest.TestCase):
+    """_fsync_dir() itself is now shared code -- see app/atomic_io.py and
+    tests/test_atomic_io.py for its own unit tests (fd-resolves-to-the-
+    right-path, closes after use, missing dir is best-effort). This is
+    just the integration point: a real _LockedCsv write must call it,
+    via os.replace() THEN _fsync_dir(), not the other way round."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir_path = Path(self._tmp.name)
-
-    def test_fsyncs_the_directory_fd_specifically(self):
-        # Resolve the fd back to a path via /proc/self/fd WHILE it's still
-        # open (inside the spy, before _fsync_dir's own finally: closes
-        # it) -- a bare "os.fsync was called" mock assertion would pass
-        # even if a bug fsynced the wrong fd (e.g. some other just-closed
-        # file reusing the same small integer); resolving the live fd to
-        # its real path is what actually proves this targeted the
-        # directory.
-        resolved_paths = []
-        real_fsync = os.fsync
-
-        def spy_fsync(fd):
-            resolved_paths.append(os.path.realpath(os.readlink(f"/proc/self/fd/{fd}")))
-            return real_fsync(fd)
-
-        with mock.patch("app.storage.os.fsync", side_effect=spy_fsync):
-            _fsync_dir(self.dir_path)
-
-        self.assertEqual(resolved_paths, [os.path.realpath(str(self.dir_path))])
-
-    def test_closes_the_directory_fd_afterwards(self):
-        opened_fds = []
-        real_open = os.open
-
-        def spy_open(path, flags, *a, **kw):
-            fd = real_open(path, flags, *a, **kw)
-            opened_fds.append(fd)
-            return fd
-
-        with mock.patch("app.storage.os.open", side_effect=spy_open):
-            _fsync_dir(self.dir_path)
-
-        self.assertEqual(len(opened_fds), 1)
-        with self.assertRaises(OSError):
-            os.fstat(opened_fds[0])  # closed -- no longer a valid fd
-
-    def test_missing_directory_is_best_effort_not_a_crash(self):
-        missing = self.dir_path / "does-not-exist"
-        try:
-            _fsync_dir(missing)
-        except Exception as exc:
-            self.fail(f"_fsync_dir must swallow a missing directory, raised {exc!r}")
 
     def test_atomic_write_fsyncs_the_target_directory(self):
         # End-to-end through the real path Store uses: writing a row via
