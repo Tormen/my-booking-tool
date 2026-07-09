@@ -2174,6 +2174,18 @@ class App:
                 # to in that case, same fallback as title/time_range/location
                 # above).
                 course_cell = f'<a href="/book/{esc(r.course_shortname)}">{esc(title)}</a>' if course else esc(title)
+                # 2026-07-09, the operator: "add a location_url and then use it on
+                # /my in the column location to make those clickable" --
+                # same "only if we actually have something to link to"
+                # fallback as course_cell above: no course.location_url set
+                # (the field's own default) or no course at all just falls
+                # back to the plain text, exactly like today. target="_blank"
+                # so following a map link never navigates away from /my
+                # itself (same as the participation-terms link on /book).
+                location_cell = (
+                    f'<a href="{esc(course.location_url)}" target="_blank" rel="noopener">{esc(location)}</a>'
+                    if course and course.location_url else esc(location)
+                )
                 cancel_id = f"cancel-{esc(r.registration_id)}"
                 # Confirmed or waitlisted are the only cancelable states --
                 # this used to only allow CONFIRMED, which silently made it
@@ -2244,7 +2256,7 @@ class App:
                     )
                 return (
                     f'<tr><td>{course_cell}</td><td class="nowrap">{esc(r.occurrence_date)}</td>'
-                    f"<td>{esc(time_range)}</td><td>{esc(location)}</td>"
+                    f"<td>{esc(time_range)}</td><td>{location_cell}</td>"
                     f"<td>{esc(status_label(r.status))}</td>"
                     f"<td>{actions}</td></tr>"
                 )

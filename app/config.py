@@ -27,6 +27,16 @@ class Course:
     audience: str = "private"  # "private" | "public"
     language: str = "en"
     description: str = ""
+    # Optional map/directions link (2026-07-09, the operator: "add a location_url
+    # and then use it on /my in the column location to make those
+    # clickable"). "" (the default -- key omitted in settings.toml) means
+    # no link at all: /my's Location column falls back to plain text, same
+    # as it always has. Deliberately its own field rather than reusing
+    # `location` as a combined "text (url)" string -- `location` stays
+    # exactly what it's always been (plain display text, also used in the
+    # auto-derived subtitle line/emails), so nothing that already reads
+    # `location` needs to change.
+    location_url: str = ""
     # Optional override for the booking page's subtitle line (rendered as
     # plain text, not rich HTML like `description` -- see
     # app/webapp.py::_book_page). None (the default -- key omitted in
@@ -348,6 +358,7 @@ def load_settings(toml_path: str | Path) -> Settings:
             audience=c.get("audience", "private"),
             language=c.get("language", "en"),
             description=c.get("description", ""),
+            location_url=c.get("location_url", ""),
             subtitle=c.get("subtitle"),
             order_in_all_courses=int(c.get("order_in_all_courses", 0)),
         )

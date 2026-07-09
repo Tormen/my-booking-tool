@@ -2457,6 +2457,51 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self.app.my("GET", environ)
         self.assertIn('<a href="/book/yoga-class-1">Dynamic Ashtanga Vinyasa Yoga</a>', body)
 
+    def test_location_cell_stays_plain_text_without_a_location_url(self):
+        # This class's own "yoga-class-1" course (see setUp) never sets
+        # location_url -- the default, and the whole point of the field
+        # being optional: nothing changes for anyone who doesn't set it.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self.app.my("GET", environ)
+        self.assertIn("<td>Example Community Gym, Room 1</td>", body)
+        self.assertNotIn('<a href="" target="_blank"', body)
+
+    def test_location_cell_links_out_when_location_url_is_set(self):
+        # 2026-07-09, the operator: "add a location_url and then use it on /my in
+        # the column location to make those clickable."
+        store = Store(tempfile.mkdtemp())
+        course = make_course(
+            shortname="yoga-class-2", weekday="wed", capacity=10,
+            location="Trier Studio", location_url="https://maps.example.org/?q=Trier+Studio",
+        )
+        settings = make_settings(courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        app = App(settings, store)
+        app.caldav = CalDAVClient(
+            settings.caldav_url, settings.caldav_username, settings.caldav_password, transport=FakeTransport(),
+        )
+        app._sync = lambda *a, **kw: None
+        with patch("app.webapp.send_mail", side_effect=lambda *a, **kw: None), \
+                patch("app.cancellation.send_mail", side_effect=lambda *a, **kw: None):
+            user = store.upsert_user_for_booking("regular@example.org", "Regular")
+            h, s = hash_secret("hunter22")
+            store.set_password(user.user_id, h, s)
+            sid = webapp._new_session({"kind": "guest", "user_id": user.user_id})
+            environ = {"HTTP_COOKIE": f"session={sid}"}
+            occ_date = build_occurrences(
+                course, settings, datetime.now(timezone.utc), lambda sn, d: 0, lambda start, end: False,
+            )[0].date.isoformat()
+            self._post(
+                app.book, ("yoga-class-2",),
+                {"occurrence_date": occ_date, "name": "Regular", "email": "regular@example.org", "agree": "on"},
+            )
+            _status, _headers, body = app.my("GET", environ)
+        self.assertIn(
+            '<a href="https://maps.example.org/?q=Trier+Studio" target="_blank" rel="noopener">'
+            "Trier Studio</a>",
+            body,
+        )
+
     def test_my_bookings_cancel_button_opens_dialog_with_reason_field(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")

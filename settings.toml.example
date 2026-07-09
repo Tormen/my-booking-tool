@@ -191,10 +191,16 @@ sshd_failure_threshold = 5
 # order_in_all_courses somewhere). Doesn't need to be unique or contiguous
 # -- spacing values out (10, 20, 30, ...) leaves room to slot a new course
 # in later without renumbering everything else.
+# location_url is optional (2026-07-09): a map/directions link for this
+# course's `location` -- when set, /my's own "Location" column for this
+# course's bookings becomes a clickable link (opens in a new tab) instead
+# of plain text. Omit it entirely to keep plain text, exactly as before
+# this existed.
 [[course]]
 shortname   = "example-monday-class"
 title       = "Example Class"
 location    = "Example Community Center, Room 1"
+location_url = "https://maps.example.com/?q=Example+Community+Center"
 weekday     = "mon"
 start_time  = "18:00"
 duration_minutes = 60

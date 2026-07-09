@@ -123,6 +123,30 @@ capacity = 10
         # original relative file order -- stable sort, not re-shuffled.
         self.assertEqual([c.shortname for c in settings.courses], ["tie-b", "tie-a", "tie-c"])
 
+    def test_location_url_defaults_to_empty_string_when_omitted(self):
+        # 2026-07-09, the operator: "add a location_url and then use it on /my in
+        # the column location to make those clickable" -- optional, so an
+        # existing settings.toml with no location_url key anywhere must
+        # keep parsing exactly as before.
+        toml_path = self._write(self._course_block("no-url"))
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.course("no-url").location_url, "")
+
+    def test_location_url_is_parsed_when_present(self):
+        # _course_block doesn't itself support location_url -- appended
+        # directly onto the last [[course]] block's own key=value lines
+        # (still inside that same table, since no new [[course]]/table
+        # header follows) rather than extending that helper just for this
+        # one test.
+        toml_path = self._write(
+            self._course_block("has-url")
+            + '\nlocation_url = "https://maps.example.org/?q=Example+Room"\n'
+        )
+        settings = load_settings(toml_path)
+        self.assertEqual(
+            settings.course("has-url").location_url, "https://maps.example.org/?q=Example+Room",
+        )
+
 
 class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
     """2026-07-07, the operator: "make the reminders (list) a setting. But default
