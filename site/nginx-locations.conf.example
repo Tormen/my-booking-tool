@@ -122,6 +122,17 @@ server {
         limit_conn perip 20;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
+    # 2026-07-10, the operator: browser console showed a 404 for /favicon.ico on
+    # every page. Every modern browser also requests this exact root path
+    # directly, regardless of the <link rel="icon"> tags declared in <head>
+    # (see app/templates.py/site/index.html's own favicon links, which all
+    # point at /favicon/* instead) -- so root/index alone was never enough.
+    # The real file already lives under /favicon/; this just answers that
+    # one extra implicit root-level request with it instead of a 404.
+    location = /favicon.ico {
+        alias /var/www/REPLACE-ME-YOUR-DOMAIN/public_html/favicon/favicon.ico;
+    }
+
     ############################################################
     # Proxied booking app (Python, listening on 127.0.0.1:8811)
     ############################################################
