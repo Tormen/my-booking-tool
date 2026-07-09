@@ -3,8 +3,11 @@
 Design choices:
 - Whole-file lock (fcntl.flock) around read-modify-write cycles: this app is
   small/low-traffic, so simplicity beats row-level locking.
-- Atomic write: write to a temp file in the same directory, then os.replace()
-  -- never leaves a torn/partial CSV on crash or concurrent read.
+- Atomic write: write to a temp file in the same directory, fsync() it, then
+  os.replace() it into place, then fsync() the containing directory too (see
+  _atomic_write/_fsync_dir) -- never leaves a torn/partial CSV on crash or
+  concurrent read, and the rename itself is durable across a hard power loss,
+  not just the new file's content.
 - CSV injection guard applied to every field on write (see security.py).
 """
 from __future__ import annotations
@@ -474,10 +477,41 @@ class _LockedCsv:
                 os.fsync(tmp.fileno())
             _secure_data_path(tmp_path)
             os.replace(tmp_path, self.path)
+            _fsync_dir(self.path.parent)
         except BaseException:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
             raise
+
+
+def _fsync_dir(dir_path: Path) -> None:
+    """2026-07-15, the operator, on hard-reboot data safety: fsyncing the temp
+    file (above, before the rename) makes the new CONTENT durable, but on
+    Linux the rename() itself isn't guaranteed durable until the
+    containing directory's own inode is fsynced too -- without this, a
+    hard power cut in the narrow window right after os.replace() returns
+    could, on some filesystems/mount options, leave the rename not yet
+    committed, so a reboot shows the file as it was before this write
+    instead of after. Not corruption (the old file is still intact,
+    never torn -- see _atomic_write's own docstring/comment), just a
+    possible lost last write in that window; this closes it.
+
+    Best-effort like _secure_data_path/_git_commit_data_file: a directory
+    fd can be opened read-only on every real POSIX filesystem this app
+    targets, but must never turn a successful write into a hard failure
+    just because fsync-the-directory isn't supported on some unusual
+    mount (e.g. certain network filesystems)."""
+    try:
+        dir_fd = os.open(str(dir_path), os.O_RDONLY)
+    except OSError as exc:
+        log.warning("could not open %s to fsync it after a write: %s", dir_path, exc)
+        return
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        log.warning("could not fsync directory %s after a write: %s", dir_path, exc)
+    finally:
+        os.close(dir_fd)
 
 
 def _read_csv_plain(path: Path, fieldnames: list[str]) -> list[dict]:
@@ -523,7 +557,19 @@ class Store:
         both blank (unconfirmed) until they go through /my/confirm/<token>.
         This is also what closes the old account-hijack hole: nothing
         reachable from the booking form can ever change another email's
-        password."""
+        password.
+
+        Crash-safety note (2026-07-15): every booking call site (see
+        app/webapp.py) calls this BEFORE writing the matching row to
+        registrations.csv -- each write is its own separate atomic
+        _LockedCsv transaction, not one cross-file transaction, so a hard
+        crash between the two can happen. This ordering is load-bearing:
+        it guarantees the only inconsistent state a crash can leave behind
+        is a user row with no registration yet (harmless -- invisible,
+        self-heals since this upsert is idempotent), never a registration
+        pointing at a user_id that was never persisted. Flipping this
+        order at a call site would flip that guarantee the wrong way --
+        don't reorder without re-reading this note."""
         email_norm = email.strip().lower()
         with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
             for row in rows:
@@ -1340,35 +1386,57 @@ class Store:
     # never held name/email to begin with, only user_id) move as-is.
 
     def erase_user(self, user_id: str, hashed_email: str) -> bool:
-        """Returns False if the user_id doesn't exist (already erased/never existed)."""
-        archived_user_row = None
-        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
-            keep = []
-            for row in rows:
-                if row["user_id"] == user_id:
-                    archived_user_row = dict(row)
-                    archived_user_row["email"] = hashed_email
-                    archived_user_row["name"] = "[erased]"
-                else:
-                    keep.append(row)
-            if archived_user_row is None:
-                return False
-            write(keep, "erase user")
+        """Returns False if the user_id doesn't exist (already erased/never existed).
 
-        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
-            keep, moving = [], []
-            for row in rows:
-                (moving if row["user_id"] == user_id else keep).append(row)
-            write(keep, "erase user registrations")
+        Crash-safety note (2026-07-15): writes the archived copies FIRST
+        and only removes the live rows last -- 4 separate atomic
+        _LockedCsv transactions, same as before, just reordered. The
+        previous order (live-removal first, archive-writes last) meant a
+        crash right after the first write permanently lost the erasure
+        record: the row was already gone from users.csv and never made it
+        into archived/users.csv, with no way to re-run (a user_id no
+        longer in users.csv makes this return False, "nothing to do").
+        Archiving first means a crash mid-operation leaves, at worst, a
+        harmless DUPLICATE (already archived, still also live) --
+        recoverable by re-running this, since the archive-append steps
+        below skip rows that are already there, and the final live-removal
+        steps are unconditional on user_id regardless of what state they
+        find. A duplicate is a nuisance; a silently lost erasure record
+        is not."""
+        with _LockedCsv(self.users_path, USER_FIELDS, readonly=True) as (rows, _write):
+            user_row = next((row for row in rows if row["user_id"] == user_id), None)
+        if user_row is None:
+            return False
+        archived_user_row = dict(user_row)
+        archived_user_row["email"] = hashed_email
+        archived_user_row["name"] = "[erased]"
+
+        with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
+            moving = [row for row in rows if row["user_id"] == user_id]
 
         with _LockedCsv(self.archived_users_path, USER_FIELDS) as (rows, write):
-            rows.append(archived_user_row)
-            write(rows, "archive erased user")
+            if not any(r["user_id"] == user_id for r in rows):
+                rows.append(archived_user_row)
+                write(rows, "archive erased user")
 
         if moving:
             with _LockedCsv(self.archived_registrations_path, REG_FIELDS) as (rows, write):
-                rows.extend(moving)
-                write(rows, "archive erased user registrations")
+                already = {r["registration_id"] for r in rows}
+                new_rows = [r for r in moving if r["registration_id"] not in already]
+                if new_rows:
+                    rows.extend(new_rows)
+                    write(rows, "archive erased user registrations")
+
+        with _LockedCsv(self.users_path, USER_FIELDS) as (rows, write):
+            keep = [row for row in rows if row["user_id"] != user_id]
+            if len(keep) != len(rows):
+                write(keep, "erase user")
+
+        with _LockedCsv(self.registrations_path, REG_FIELDS) as (rows, write):
+            keep = [row for row in rows if row["user_id"] != user_id]
+            if len(keep) != len(rows):
+                write(keep, "erase user registrations")
+
         return True
 
     def rename_course_shortname(self, old_shortname: str, new_shortname: str) -> int:

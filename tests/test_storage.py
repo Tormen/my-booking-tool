@@ -17,6 +17,7 @@ from app.storage import (
     Store,
     _LockedCsv,
     _SERVICE_GROUP,
+    _fsync_dir,
     _secure_data_path,
     format_display_timestamp,
     status_label,
@@ -117,8 +118,13 @@ class GitAutoCommitTest(StoreTestBase):
         hashed = hash_email_for_erasure("guest@example.org", b"\x00" * 32)
         self.store.erase_user(user.user_id, hashed)
         self.assertFalse((Path(self._tmp.name) / "archived" / ".git").exists())
+        # erase_user() is now several separate commits (2026-07-15:
+        # archive-writes happen BEFORE the live-row removals, for
+        # crash-safety -- see erase_user's own docstring), so the archived
+        # write is no longer necessarily HEAD -- check the whole log, not
+        # just the latest commit.
         out = subprocess.run(
-            ["git", "show", "--stat", "--format=", "HEAD"],
+            ["git", "log", "--stat", "--format="],
             cwd=self._tmp.name, capture_output=True, text=True, check=True,
         )
         self.assertIn("archived", out.stdout)
@@ -709,6 +715,57 @@ class ErasureTest(StoreTestBase):
     def test_erase_unknown_user_returns_false(self):
         self.assertFalse(self.store.erase_user("no-such-id", "erased:x"))
 
+    def test_crash_after_archiving_but_before_live_removal_is_recoverable(self):
+        # 2026-07-15: erase_user() archives FIRST, removes the live rows
+        # LAST -- the reverse of the original order -- specifically so
+        # that a hard crash in the middle leaves a harmless DUPLICATE
+        # (already archived, still also live) rather than losing the
+        # erasure record outright (the old order's real failure mode: a
+        # crash right after the live-removal write meant the row was
+        # gone from users.csv and never made it into the archive, with
+        # no way to re-run since a missing user_id in users.csv just
+        # returns False). Simulates that crash by raising partway through
+        # the live-removal step, then confirms a second call finishes the
+        # job cleanly -- no duplicate archived rows, nothing left live.
+        u = self.store.upsert_user_for_booking("guest@example.com", "Guest Name")
+        reg = self.store.add_registration("c", "2026-01-01", u.user_id, hash_token(new_token()))
+
+        real_replace = os.replace
+        call_count = {"n": 0}
+
+        def flaky_replace(src, dst):
+            call_count["n"] += 1
+            # The 3rd os.replace() inside erase_user() is the first LIVE
+            # -removal write (users.csv) -- both archive writes (1st, 2nd)
+            # must already have landed by the time this "crash" hits.
+            if call_count["n"] == 3:
+                raise OSError("simulated hard crash mid-erasure")
+            return real_replace(src, dst)
+
+        with mock.patch("app.storage.os.replace", side_effect=flaky_replace):
+            with self.assertRaises(OSError):
+                self.store.erase_user(u.user_id, "erased:deadbeef")
+
+        # Archive already has the erased user -- not lost by the "crash".
+        archived_users = self.store.read_users(scope="archived")
+        self.assertEqual(len(archived_users), 1)
+        self.assertEqual(archived_users[0]["email"], "erased:deadbeef")
+        # But the live rows are still there too (the part that didn't
+        # finish) -- a recoverable duplicate, not silent data loss.
+        self.assertIsNotNone(self.store.find_user_by_email("guest@example.com"))
+
+        # Re-running finishes the job: no duplicate archived rows, live
+        # rows now gone.
+        ok = self.store.erase_user(u.user_id, "erased:deadbeef")
+        self.assertTrue(ok)
+        self.assertEqual(len(self.store.read_users(scope="archived")), 1)
+        self.assertEqual(
+            [r["registration_id"] for r in self.store.read_registrations(scope="archived")],
+            [reg.registration_id],
+        )
+        self.assertIsNone(self.store.find_user_by_email("guest@example.com"))
+        self.assertEqual(self.store.registrations_for_user(u.user_id), [])
+
     def test_read_registrations_scope_filters(self):
         u = self.store.upsert_user_for_booking("guest@example.com", "Guest")
         self.store.add_registration("c", "2026-01-01", u.user_id, hash_token(new_token()))
@@ -1138,6 +1195,95 @@ class SecureDataPathTest(unittest.TestCase):
                 _secure_data_path(self.path)
             except Exception as exc:
                 self.fail(f"_secure_data_path must swallow a chmod OSError, raised {exc!r}")
+
+
+class FsyncDirTest(unittest.TestCase):
+    """2026-07-15, the operator, on hard-reboot data safety: fsyncing the temp
+    file before os.replace() (already in place) makes the new CONTENT
+    durable, but the rename() itself isn't guaranteed durable on Linux
+    until the containing directory's own inode is fsynced too --
+    _fsync_dir() is the fix, called right after every os.replace() in
+    _atomic_write().
+
+    A bare "was os.fsync called" mock assertion would pass even if a bug
+    fsynced the wrong fd (e.g. the just-renamed file again, instead of
+    its directory) -- these tests resolve the real fd back to a path via
+    /proc/self/fd (Linux-only, matches this app's only deployment target)
+    to prove it's actually the DIRECTORY's fd, not just "fsync was called
+    some number of times"."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir_path = Path(self._tmp.name)
+
+    def test_fsyncs_the_directory_fd_specifically(self):
+        # Resolve the fd back to a path via /proc/self/fd WHILE it's still
+        # open (inside the spy, before _fsync_dir's own finally: closes
+        # it) -- a bare "os.fsync was called" mock assertion would pass
+        # even if a bug fsynced the wrong fd (e.g. some other just-closed
+        # file reusing the same small integer); resolving the live fd to
+        # its real path is what actually proves this targeted the
+        # directory.
+        resolved_paths = []
+        real_fsync = os.fsync
+
+        def spy_fsync(fd):
+            resolved_paths.append(os.path.realpath(os.readlink(f"/proc/self/fd/{fd}")))
+            return real_fsync(fd)
+
+        with mock.patch("app.storage.os.fsync", side_effect=spy_fsync):
+            _fsync_dir(self.dir_path)
+
+        self.assertEqual(resolved_paths, [os.path.realpath(str(self.dir_path))])
+
+    def test_closes_the_directory_fd_afterwards(self):
+        opened_fds = []
+        real_open = os.open
+
+        def spy_open(path, flags, *a, **kw):
+            fd = real_open(path, flags, *a, **kw)
+            opened_fds.append(fd)
+            return fd
+
+        with mock.patch("app.storage.os.open", side_effect=spy_open):
+            _fsync_dir(self.dir_path)
+
+        self.assertEqual(len(opened_fds), 1)
+        with self.assertRaises(OSError):
+            os.fstat(opened_fds[0])  # closed -- no longer a valid fd
+
+    def test_missing_directory_is_best_effort_not_a_crash(self):
+        missing = self.dir_path / "does-not-exist"
+        try:
+            _fsync_dir(missing)
+        except Exception as exc:
+            self.fail(f"_fsync_dir must swallow a missing directory, raised {exc!r}")
+
+    def test_atomic_write_fsyncs_the_target_directory(self):
+        # End-to-end through the real path Store uses: writing a row via
+        # _LockedCsv must fsync the data directory itself, not just the
+        # temp file, and must do so AFTER os.replace() (the rename is
+        # what needs the directory fsync to be durable, not the write
+        # that preceded it).
+        calls = []
+        real_replace = os.replace
+        real_fsync_dir = _fsync_dir
+
+        def spy_replace(src, dst):
+            calls.append("replace")
+            return real_replace(src, dst)
+
+        def spy_fsync_dir(path):
+            calls.append("fsync_dir")
+            return real_fsync_dir(path)
+
+        path = self.dir_path / "registrations.csv"
+        with mock.patch("app.storage.os.replace", side_effect=spy_replace), \
+                mock.patch("app.storage._fsync_dir", side_effect=spy_fsync_dir):
+            with _LockedCsv(path, REG_FIELDS) as (rows, write):
+                write(rows, "test row")
+        self.assertEqual(calls, ["replace", "fsync_dir"])
 
 
 class LockedCsvWritePermissionsTest(unittest.TestCase):

@@ -190,6 +190,62 @@ reading a secret, running a command, checking for root) for testing -- see
 `tests/test_cli_setup.py`. `site_render.py` runs at both build time
 (`scripts/render-site.py`) and run time (`my-bt admin setup -i`).
 
+## Data durability (hard-reboot / crash safety)
+
+2026-07-15, the operator: the VPS this runs on can lose power/hard-reboot at any
+time, unpredictably. The relevant question isn't OS-level sync tuning
+(that only ever protects everything EXCEPT the one write that was
+mid-flight at the exact moment of a crash) -- it's whether `storage.py`'s
+own writes are safe against exactly that write being interrupted. Three
+things, in `app/storage.py`:
+
+1. **Every CSV write is atomic** (`_LockedCsv._atomic_write`): write the
+   new content to a temp file in the same directory, `flush()` +
+   `os.fsync()` it (new content durable on disk), THEN `os.replace()` it
+   over the real file (atomic rename -- readers/a concurrent crash only
+   ever see the old, complete file or the new, complete file, never a
+   torn/partial one).
+2. **The directory is fsynced too, after the rename** (`_fsync_dir`,
+   called right after every `os.replace()`). fsyncing the temp file only
+   guarantees the new CONTENT is durable -- on Linux, the rename() itself
+   isn't guaranteed durable until the containing directory's own inode is
+   fsynced as well. Without this, a hard power cut in the narrow window
+   right after `os.replace()` returns could, on some filesystems/mount
+   options, leave the rename uncommitted, so a reboot shows the file as
+   it was before that last write. Not corruption -- the old file is never
+   torn -- just a possible lost last write in that window; this closes
+   it. Best-effort (logs a warning, never raises) since directory-fsync
+   isn't supported on every conceivable mount.
+3. **Multi-file operations are ordered so a crash mid-way is recoverable,
+   not lossy.** Two places touch more than one CSV as separate,
+   non-atomic transactions:
+   - Booking: `upsert_user_for_booking()` (users.csv) always runs BEFORE
+     the matching registrations.csv row is written. A crash between the
+     two just leaves a harmless orphan user row (invisible, self-heals --
+     the upsert is idempotent), never a registration pointing at a user
+     that was never persisted. See that method's own docstring -- this
+     ordering is load-bearing, don't reorder without reading it.
+   - GDPR erasure (`erase_user()`): archives the user + their
+     registrations into `archived/*.csv` FIRST, and only removes the live
+     rows LAST (2026-07-15 -- this used to be the other way round). The
+     old order meant a crash right after the live-removal write
+     permanently lost the erasure record: gone from the live table,
+     never archived, and un-recoverable (a missing `user_id` in
+     `users.csv` makes `erase_user()` return `False`, "nothing to do").
+     Archiving first means a crash mid-operation leaves at worst a
+     harmless DUPLICATE (already archived, still also live) --
+     recoverable by just re-running the erasure, since the archive-append
+     steps skip rows already present and the final live-removal is
+     unconditional either way.
+
+None of this protects against disk-level corruption (bad sectors, a
+failing drive) or a crash during the retention/erasure/git-snapshot
+*commit* step itself (`_git_commit_data_file` is a best-effort safety
+net on top of the above, not the primary durability mechanism) -- for
+that, see "Off-box encrypted backups" under "Known simplifications"
+below. This is specifically about surviving a hard power loss without a
+half-written booking or a lost erasure record.
+
 ## Installing (and reinstalling after a server reinstall)
 
 The recommended path is the Fedora RPM -- keep this whole directory somewhere
