@@ -2138,13 +2138,17 @@ class App:
         # is." Same _course_recap_html() every other cancel-confirmation
         # page (admin_cancel/host_cancel) and the booking-confirmation page
         # use -- see that function's own docstring on why it's shared.
+        # 2026-07-16, the operator, screenshot of host_cancel_occurrence: "please
+        # place the reason-box above the course info-box" -- supersedes
+        # the recap-then-reason order above; applied consistently to every
+        # page sharing this layout, not just the one screenshotted.
         body = (
             "<p>Cancel your booking?</p>"
-            + _course_recap_html(course, reg.occurrence_date)
             + """<form method="post" class="card">
           <label>Reason <span class="opt">(optional)</span>
-            <textarea name="message" rows="2" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Yes, cancel it</button>
+            <textarea name="message" rows="2" class="big-input"></textarea></label>"""
+            + _course_recap_html(course, reg.occurrence_date)
+            + """<div class="submit-row"><button type="submit">Yes, cancel it</button>
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
@@ -2202,13 +2206,16 @@ class App:
         # than reinstate" -- "Rebook" picked; see cancellation.py's own
         # note on this same rename for the full scoping (visible text
         # only, routes/functions/params unchanged).
+        # 2026-07-16, the operator: "please place the reason-box above the course
+        # info-box" -- same reorder as guest_cancel()/host_cancel() etc.,
+        # applied here too for the same layout consistency.
         body = (
             "<p>Rebook your booking?</p>"
-            + _course_recap_html(course, reg.occurrence_date)
             + """<form method="post" class="card">
           <label>Optional message <span class="opt">(optional)</span>
-            <textarea name="message" rows="2" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Yes, rebook it</button>
+            <textarea name="message" rows="2" class="big-input"></textarea></label>"""
+            + _course_recap_html(course, reg.occurrence_date)
+            + """<div class="submit-row"><button type="submit">Yes, rebook it</button>
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
@@ -3965,18 +3972,20 @@ class App:
                     )
             location = _admin_overview_redirect_location(form)
             return "302 Found", [("Location", location)], ""
-        # Same recap + "space, then reason, then button" layout as
-        # guest_cancel()/host_cancel() -- see host_cancel()'s docstring for
-        # the full "Can be always the same code" rationale.
+        # Same "reason, then recap, then button" layout as guest_cancel()/
+        # host_cancel() -- see host_cancel()'s docstring for the full "Can
+        # be always the same code" rationale, and for why the reason box
+        # comes BEFORE the recap (2026-07-16, the operator, screenshot: "please
+        # place the reason-box above the course info-box").
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (
             f"<p>About to cancel <b>{esc(user.name if user else '(erased)')}</b> "
             f"({esc(user.email if user else '(erased)')})'s booking.</p>"
-            + recap
             + """<form method="post" class="card">
           <label>Message to them <span class="opt">(optional)</span>
-            <textarea name="message" rows="3" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Cancel this booking</button></div>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>"""
+            + recap
+            + """<div class="submit-row"><button type="submit">Cancel this booking</button></div>
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page(
@@ -4094,14 +4103,18 @@ class App:
         # guest_reinstate(), host_reinstate(), my_confirm_email(), and
         # my_cancel_email_change() -- every other single-submit-button
         # direct-link page in the app.
+        # 2026-07-16, the operator, screenshot of host_cancel_occurrence: "please
+        # place the reason-box above the course info-box ... also for
+        # single cancel (if applicable)" -- this IS that single-cancel
+        # page, same reorder applied.
         body = (
             f"<p>Cancel <b>{esc(user.name if user else '(erased)')}</b> "
             f"({esc(user.email if user else '(erased)')})'s booking?</p>"
-            + recap
             + """<form method="post" class="card">
           <label>Reason <span class="opt">(optional)</span>
-            <textarea name="message" rows="3" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Confirm cancellation</button>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>"""
+            + recap
+            + """<div class="submit-row"><button type="submit">Confirm cancellation</button>
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
@@ -4149,15 +4162,17 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Rebooked", "<p>Registration rebooked and attendee notified.</p>", banner=banner
             )
+        # 2026-07-16, the operator: "please place the reason-box above the course
+        # info-box" -- same reorder as the other cancel/rebook pages.
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (
             f"<p>Rebook <b>{esc(user.name if user else '(erased)')}</b> "
             f"({esc(user.email if user else '(erased)')})'s booking?</p>"
-            + recap
             + """<form method="post" class="card">
           <label>Optional message to them <span class="opt">(optional)</span>
-            <textarea name="message" rows="3" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Confirm rebooking</button>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>"""
+            + recap
+            + """<div class="submit-row"><button type="submit">Confirm rebooking</button>
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
@@ -4226,16 +4241,22 @@ class App:
             u = users_by_id.get(r.user_id)
             who = f"{esc(u.name)} ({esc(u.email)})" if u else "(unknown)"
             rows.append(f"<li>{who} -- {esc(status_label(r.status))}</li>")
+        # 2026-07-16, the operator, screenshot of this exact page: "please place
+        # the reason-box above the course info-box" -- reason label +
+        # textarea now come first, recap box second, same reorder applied
+        # across every cancel/rebook confirmation page sharing this
+        # layout (guest_cancel, guest_reinstate, admin_cancel, host_cancel,
+        # host_reinstate).
         body = (
             f"<p>Cancel <b>EVERY</b> registration for <b>{esc(course.title)}</b> "
             f"on {esc(occurrence_date_str)}? {len(participants)} participant(s) will be "
             "notified by email:</p>"
             f"<ul>{''.join(rows)}</ul>"
-            + recap
             + """<form method="post" class="card">
           <label>Reason <span class="opt">(optional)</span>
-            <textarea name="message" rows="3" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Confirm -- cancel entire session</button>
+            <textarea name="message" rows="3" class="big-input"></textarea></label>"""
+            + recap
+            + """<div class="submit-row"><button type="submit">Confirm -- cancel entire session</button>
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )

@@ -4044,6 +4044,10 @@ class BookingFlowTest(unittest.TestCase):
         # 2026-07-11, the operator (screenshot of this exact page): "please add a
         # 'Never mind' button also here that brings you back to the homepage!"
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
+        # 2026-07-16, the operator: "please place the reason-box above the course
+        # info-box ... also for single cancel (if applicable)" -- this IS
+        # that single-cancel page.
+        self.assertLess(body.index("<textarea"), body.index("What:"))
 
     def test_host_cancel_notifies_both_sides_with_reason(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -4097,6 +4101,11 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<textarea name="message"', body)
         self.assertIn("Confirm -- cancel entire session", body)
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
+        # 2026-07-16, the operator, screenshot of this exact page: "please place
+        # the reason-box above the course info-box" -- the Reason
+        # textarea must render BEFORE the What/When/Where recap box, not
+        # after.
+        self.assertLess(body.index("<textarea"), body.index("What:"))
 
     def test_host_cancel_occurrence_nobody_booked_is_not_an_error(self):
         # Unlike host_cancel()'s own registration_id (invalid = 404), an
