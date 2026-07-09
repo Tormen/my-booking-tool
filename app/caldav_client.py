@@ -61,10 +61,31 @@ class HttpTransport:
             conn.request(method, path, body=body.encode("utf-8") if body else None, headers=headers)
             resp = conn.getresponse()
             data = resp.read().decode("utf-8", errors="replace")
-            # DEBUG-only: method/path/status, never the auth header or the
-            # request/response bodies (those are calendar data, not secret,
-            # but still no reason to duplicate them into the journal).
+            # DEBUG-only: method/path/status, never the auth header (the
+            # request/response bodies are calendar data, not secret, but
+            # still no reason to duplicate them into the journal on every
+            # single successful request).
             log.debug("%s %s -> HTTP %d", method, path, resp.status)
+            if resp.status >= 400:
+                # 2026-07-16, the operator, after a persistent-conflict incident
+                # that 6x-ing the retry count didn't actually explain:
+                # "But there must be another problem with the Calendar.
+                # Please do NOT retry more often!!! But rather collect
+                # DEBUG OUTPUT please!!!" On any error response (a 412
+                # conflict included), log everything needed to root-cause
+                # it later -- our own If-Match/If-None-Match (the etag we
+                # THOUGHT was current), every other request header except
+                # Authorization, and the full (untruncated) response body,
+                # which for a WebDAV/CalDAV error is normally an XML
+                # <D:error> body naming exactly what precondition failed.
+                # Enable via `my-bt -D` / `MY_BOOKING_DEBUG=1` -- see
+                # app/logutil.py.
+                safe_headers = {k: v for k, v in headers.items() if k.lower() != "authorization"}
+                log.debug(
+                    "%s %s -> HTTP %d FAILED -- request headers=%r, response headers=%r, "
+                    "response body=%r",
+                    method, path, resp.status, safe_headers, dict(resp.getheaders()), data,
+                )
             return Response(resp.status, dict(resp.getheaders()), data)
         finally:
             conn.close()
@@ -154,6 +175,28 @@ class CalDAVClient:
                 from .ics import parse_uid
                 uid = parse_uid(data_el.text) or ""
                 etag = etag_el.text if etag_el is not None else ""
+                # 2026-07-16, the operator, diagnosing a persistent-conflict
+                # incident ("there must be another problem with the
+                # Calendar"): put_event()/delete_event() below both ASSUME
+                # this event's href is exactly `<uid>.ics` under
+                # calendar_href, since that's what WE named it when we
+                # created it. If the server ever reports a DIFFERENT href
+                # for this uid (renamed/normalized server-side, percent-
+                # encoding, or a second/duplicate resource with a
+                # colliding UID), a PUT/DELETE built from our own assumed
+                # href wouldn't match the etag we just read for THIS
+                # href -- one possible explanation for a 412 that no
+                # amount of retrying could ever resolve. Deliberately
+                # just logs the raw facts (not an automatic "this is a
+                # mismatch" verdict -- a same-meaning href that merely
+                # differs in percent-encoding would be a false alarm) so
+                # a human can compare them if this happens again with
+                # `my-bt -D` / MY_BOOKING_DEBUG=1 on.
+                href_el = response.find(f"{{{DAV_NS}}}href")
+                log.debug(
+                    "query_events: uid=%r etag=%r reported at href=%r (we'd PUT/DELETE it at %r)",
+                    uid, etag, href_el.text if href_el is not None else None, f"{url}{uid}.ics",
+                )
                 out.append((uid, data_el.text, etag))
         return out
 

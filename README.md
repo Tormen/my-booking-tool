@@ -811,20 +811,49 @@ caller could ever report a partial failure. Fixed two ways:
   that happened to discover it. A clean resync afterwards clears the
   marker automatically.
 
-**Bulk resyncs also now retry harder before giving up**, addressing
-the operator's second ask (*"And the other is: Please make the calendar sync
-work :)"*) alongside the reporting fix. The existing 3-attempts/
-zero-delay retry in `sync_occurrence()` is unchanged for live guest
-booking/cancel requests (must fail fast, it's inside an HTTP response) --
-but the bulk resync path (`resync_all_future_calendar_events()`, used by
-both `-i` and `admin resync-calendar`) now retries up to 6 times with
-increasing backoff (1s, 2s, 3s, 4s, 5s between attempts) before recording
-an occurrence as skipped, giving a concurrent writer up to ~15 extra
-seconds to finish instead of less than one. This is a probabilistic
-mitigation, not a guarantee -- a truly sustained concurrent writer could
-still exhaust all 6 attempts -- but between this and the tracking above,
-if it does happen it will now be loudly and persistently flagged rather
-than silently swallowed.
+**Retrying harder was tried and deliberately reverted (2026-07-16).** An
+earlier version of this gave the bulk resync path (used by both `-i` and
+`admin resync-calendar`) more attempts with increasing backoff than a
+live booking/cancel request gets, reasoning that 3 unrelated occurrences
+conflicting in the same run was probably just an active concurrent
+writer that hadn't finished yet. the operator pushed back: *"But there must be
+another problem with the Calendar. Please do NOT retry more often!!!
+But rather collect DEBUG OUTPUT please!!!"* -- rightly skeptical that
+more patience was the correct fix for something that hit 3 *different*
+occurrences at once, a pattern just as consistent with a real,
+structural bug as with a slow concurrent writer, and one that retrying
+harder can't distinguish. So the bulk resync path now uses the exact
+same `_SYNC_CONFLICT_MAX_ATTEMPTS` (3 attempts, zero delay) as a live
+request -- no special case. In its place, the conflict-handling code now
+collects much richer diagnostics at DEBUG level (enable with `my-bt -D`
+or `MY_BOOKING_DEBUG=1`, see "Logs & debugging" below), so the *next*
+occurrence of this can actually be root-caused instead of just outlasted:
+
+- `sync_occurrence()` logs, on every conflict, both the ETag it attempted
+  with and the server's ETag right after re-reading it -- explicitly
+  flagged `[UNCHANGED -- ...]` if they're identical, which is NOT what a
+  genuinely concurrent writer racing us should produce (that writer's own
+  change should yield a *new* ETag each time). An unchanging ETag across
+  retries points at something else being wrong -- e.g. our own
+  etag-comparison logic, or a mismatch between the href we assume for an
+  event (`<uid>.ics`) and the href the server actually reports it under.
+- `app.caldav_client.query_events()` now also logs each event's uid, etag,
+  and the href the server reported it at, next to the href
+  `put_event()`/`delete_event()` would actually write to -- if those
+  routinely differ, that's a real, structural explanation for a
+  conflict that no amount of retrying could ever resolve.
+- `app.caldav_client.HttpTransport` now logs the full request headers
+  (minus `Authorization`) and the full, untruncated response body/headers
+  on any HTTP error status (412 included), not just the
+  200-char-truncated message that ends up in the warning line -- a
+  WebDAV/CalDAV error body normally names exactly which precondition
+  failed.
+
+None of this is on by default (production runs at `WARNING` unless
+`MY_BOOKING_DEBUG=1` is set -- see "Logs & debugging" below) to avoid
+flooding the journal on every routine request; turn it on ahead of the
+next `my-bt admin resync-calendar -D` (or set `MY_BOOKING_DEBUG=1` in
+the service's environment before a `setup -i`) if this recurs.
 
 The closing "Done." line (2026-07-08) re-checks everything fresh (so it
 reflects whatever the walkthrough just fixed, not the state at the start)
@@ -914,6 +943,24 @@ own `-D`/`--debug` flag (identical effect, `-D` is just easier to remember
 for a one-off command than the env var name): without it, a failing
 command prints one clean line (`error: ...`); with it, the full Python
 traceback.
+
+2026-07-16, the operator, after a persistent CalDAV-conflict incident that
+retrying harder didn't actually explain ("collect DEBUG OUTPUT please!!!"
+-- see "Calendar invite format" above): this mode now also logs, for
+every CalDAV request that comes back an error status (a 412 conflict
+included), the full request headers (minus `Authorization`) and the
+full, untruncated response body/headers -- not just the 200-char-
+truncated message in the warning line. A stale-ETag retry additionally
+logs the ETag it attempted with next to the server's ETag right after
+re-reading it, flagged `[UNCHANGED -- ...]` if they're identical (a
+genuinely concurrent writer should have produced a *different* one).
+And every `query_events()` lookup logs each event's uid/etag next to
+BOTH the href the server reported it at and the href we'd actually
+PUT/DELETE it at, so a mismatch between the two -- one possible
+structural explanation for a conflict no amount of retrying could ever
+resolve -- would be visible. Run `my-bt admin resync-calendar -D` (or
+set `MY_BOOKING_DEBUG=1` before a `setup -i`) if a persistent conflict
+happens again.
 
 To run the service itself in debug mode temporarily:
 

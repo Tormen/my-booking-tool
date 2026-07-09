@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 
 from app.caldav_client import CalDAVClient, CalDAVConflictError, CalDAVError, Response
 
@@ -135,6 +136,74 @@ class CalDAVClientTest(unittest.TestCase):
             "DELETE", "https://dav.mailbox.org/caldav/YogaBookings/", Response(404, {}, "")
         )
         self.client.delete_event("/caldav/YogaBookings/", "some-uid", etag='"old"')  # no raise
+
+    def test_query_events_logs_uid_etag_and_both_hrefs_at_debug(self):
+        # 2026-07-16, the operator: "But there must be another problem with the
+        # Calendar. Please do NOT retry more often!!! But rather collect
+        # DEBUG OUTPUT please!!!" -- one candidate root cause is the
+        # server reporting a different href for an event than the one
+        # put_event()/delete_event() assume (`<uid>.ics`); this just
+        # confirms the raw facts (uid, etag, reported href, assumed
+        # href) actually reach the debug log so a human can compare them
+        # if that turns out to be it.
+        self.transport.script(
+            "REPORT", "https://dav.mailbox.org/caldav/YogaBookings/", Response(207, {}, REPORT_BODY)
+        )
+        with mock.patch("app.caldav_client.log") as m_log:
+            self.client.query_events(
+                "/caldav/YogaBookings/",
+                datetime(2026, 7, 8, tzinfo=timezone.utc),
+                datetime(2026, 7, 9, tzinfo=timezone.utc),
+            )
+        debug_messages = [call.args[0] % call.args[1:] for call in m_log.debug.call_args_list]
+        self.assertTrue(any("example-org-yoga-class-1-2026-07-08@example.org" in msg for msg in debug_messages))
+        self.assertTrue(any('"abc123"' in msg for msg in debug_messages))
+        self.assertTrue(any("/caldav/YogaBookings/example-org-yoga-class-1-2026-07-08.ics" in msg
+                             for msg in debug_messages))
+
+    def test_error_response_is_logged_at_debug_with_headers_and_full_body(self):
+        # Same incident: a 412 (or any error) response's FULL body/headers
+        # (minus Authorization) should reach the debug log via
+        # HttpTransport, not just the 200-char-truncated message that ends
+        # up in the raised exception/warning line.
+        self.transport.script(
+            "PUT", "https://dav.mailbox.org/caldav/YogaBookings/",
+            Response(412, {"ETag": '"server-side"'}, "<D:error xmlns:D=\"DAV:\">full diagnostic detail</D:error>"),
+        )
+        # FakeTransport doesn't run HttpTransport's own logging (it stands
+        # in for the whole transport callable) -- this test exercises
+        # HttpTransport directly instead, which is what production uses.
+        from app.caldav_client import HttpTransport
+
+        class _FakeConn:
+            def __init__(self, *a, **kw):
+                pass
+
+            def request(self, *a, **kw):
+                pass
+
+            def getresponse(self):
+                class _Resp:
+                    status = 412
+                    def read(self_inner):
+                        return b'<D:error xmlns:D="DAV:">full diagnostic detail</D:error>'
+                    def getheaders(self_inner):
+                        return [("ETag", '"server-side"')]
+                return _Resp()
+
+            def close(self):
+                pass
+
+        transport = HttpTransport("user", "pass")
+        with mock.patch("http.client.HTTPSConnection", return_value=_FakeConn()), \
+             mock.patch("app.caldav_client.log") as m_log:
+            resp = transport("PUT", "https://dav.mailbox.org/caldav/YogaBookings/some-uid.ics", body="ICS...")
+        self.assertEqual(resp.status, 412)
+        debug_messages = [call.args[0] % call.args[1:] for call in m_log.debug.call_args_list]
+        self.assertTrue(any("full diagnostic detail" in msg for msg in debug_messages))
+        self.assertTrue(any("FAILED" in msg for msg in debug_messages))
+        # The Authorization header must never appear in a debug log line.
+        self.assertFalse(any("Basic " in msg for msg in debug_messages))
 
 
 if __name__ == "__main__":

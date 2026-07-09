@@ -12,11 +12,9 @@ production one) must never recognize each other's events as "our own".
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Callable
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -44,26 +42,44 @@ log = logging.getLogger("my_booking.calendar_sync")
 # problem if it occasionally takes 2. Zero delay between attempts here --
 # this is the path a live guest booking/cancellation request takes, so it
 # should fail fast rather than make a browser hang for several extra
-# seconds; see _BULK_RESYNC_* just below for the background-job variant.
+# seconds. Used for EVERY caller, including the bulk resync below (see
+# the 2026-07-16 note just below on why that no longer gets a separate,
+# more-patient constant of its own).
+#
+# Diagnostic note for the next incident: sync_occurrence()'s conflict
+# handling logs, at DEBUG level, whether the re-read ETag actually
+# CHANGED between attempts. If it's genuinely a concurrent writer
+# racing us, the ETag should be different (and often different again)
+# on each retry. If the SAME etag keeps getting reported as "current"
+# attempt after attempt, that's NOT what a race looks like -- it points
+# at something else being wrong (e.g. an etag-comparison/encoding bug
+# on our side, or the server naming this resource's href differently
+# than we assume -- see query_events()'s own href note below), which is
+# exactly the "another problem with the Calendar" the operator suspects.
 _SYNC_CONFLICT_MAX_ATTEMPTS = 3
 
-# 2026-07-16, the operator ("Please make the calendar sync work :)"), after a
-# real bulk resync (`setup -i` step 13) hit persistent conflicts on 3
-# DIFFERENT occurrences in the same run, each failing all
-# _SYNC_CONFLICT_MAX_ATTEMPTS retries within under a second (three
-# distinct, unrelated course+date combinations all conflicting at once
-# is far more consistent with real, ONGOING concurrent guest activity on
-# the live site during the resync than three independent coincidences --
-# my-booking.service was mid-upgrade/just-restarted and actively serving
-# real traffic the whole time this ran). Zero-delay retries have no real
-# chance against a writer that's still mid-flight; a background
-# maintenance job (this bulk resync, or `my-bt admin resync-calendar`
-# run by hand) isn't part of anyone's HTTP response, so it can afford to
-# wait a bit and try harder than a live request should. More attempts,
-# with real (increasing) backoff between them -- see
-# resync_all_future_calendar_events()'s own use of these below.
-_BULK_RESYNC_MAX_ATTEMPTS = 6
-_BULK_RESYNC_RETRY_DELAY_SECONDS = 1.0
+# 2026-07-16, the operator ("Please make the calendar sync work :)"): a previous
+# version of this comment introduced _BULK_RESYNC_MAX_ATTEMPTS=6 with
+# increasing backoff, reasoning that 3 DIFFERENT occurrences hitting a
+# persistent conflict in the same run was probably just an active
+# concurrent writer that needed more time. the operator's follow-up, after
+# thinking it over: "But there must be another problem with the
+# Calendar. Please do NOT retry more often!!! But rather collect DEBUG
+# OUTPUT please!!!" -- correctly skeptical that simply retrying longer
+# was the right fix for something that hit 3 unrelated occurrences at
+# once; that pattern is just as consistent with a real, structural bug
+# (e.g. a stale-etag comparison bug of ours, or the server naming
+# resources differently than we assume -- see query_events()'s own
+# note on this) as with "still-mid-flight concurrent writer", and
+# retrying harder does nothing to tell those apart, it just delays
+# finding out. So: reverted back to the SAME 3-attempts/zero-delay
+# behavior as a live request for the bulk resync path too (no special
+# case) -- see _SYNC_CONFLICT_MAX_ATTEMPTS above, now used everywhere.
+# In its place, sync_occurrence()'s conflict handling below now emits
+# much richer DEBUG-level diagnostics (full request/response detail,
+# etag-before-vs-after) so that the NEXT time this happens, enabling
+# `my-bt -D` / `MY_BOOKING_DEBUG=1` actually gives enough to root-cause
+# it, instead of trying to paper over it with more patience.
 
 # 2026-07-09, the operator, the standing rule (see SOLUTION-DESIGN.md section 24):
 # "If we change anything with the CALENDAR INVITE(s) (host and/or
@@ -199,23 +215,21 @@ def sync_occurrence(
     settings: Settings,
     course: Course,
     occurrence_date: date,
-    *,
-    max_attempts: int = _SYNC_CONFLICT_MAX_ATTEMPTS,
-    retry_delay_seconds: float = 0.0,
-    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> None:
     """Call this after every registration/cancellation for the occurrence.
 
-    `max_attempts`/`retry_delay_seconds` (2026-07-16, the operator: "Please make
-    the calendar sync work :)", after a real bulk resync hit persistent
-    conflicts -- see _BULK_RESYNC_MAX_ATTEMPTS's own docstring just above
-    for the incident): every EXISTING caller (a live booking/cancellation
-    request) keeps the old behavior by not passing these -- 3 attempts,
-    zero delay, fail fast rather than hang a guest's browser. The bulk
-    resync below passes more attempts and a real backoff between them,
-    since it's a background job, not part of anyone's HTTP response.
-    `sleep_fn` is injectable so tests can assert on the actual backoff
-    durations without a real test run waiting through them.
+    2026-07-16, the operator: a prior version of this function accepted
+    `max_attempts`/`retry_delay_seconds`/`sleep_fn` overrides so the bulk
+    resync below could retry harder than a live request. Reverted --
+    "But there must be another problem with the Calendar. Please do NOT
+    retry more often!!! But rather collect DEBUG OUTPUT please!!!" Every
+    caller (live booking/cancellation AND the bulk resync) now uses the
+    exact same 3-attempts/zero-delay behavior; see
+    _SYNC_CONFLICT_MAX_ATTEMPTS's own docstring for why more patience
+    isn't the fix being reached for here. The conflict-handling loops
+    below now log much richer DEBUG-level diagnostics instead (etag
+    before/after re-read, full server response) -- see each `except
+    CalDAVConflictError` block.
 
     The invite lists THREE groups: active (confirmed), waiting
     (waitlisted), and canceled (STATUS_CANCELED_BY_GUEST or
@@ -264,20 +278,29 @@ def sync_occurrence(
         # fully-waitlisted occurrence (0 confirmed) has no calendar entry
         # at all until/unless someone gets promoted into a confirmed spot.
         if etag is not None:
-            for attempt in range(1, max_attempts + 1):
+            for attempt in range(1, _SYNC_CONFLICT_MAX_ATTEMPTS + 1):
                 try:
                     client.delete_event(calendar_href, uid, etag)
                     break
-                except CalDAVConflictError:
-                    if attempt == max_attempts:
+                except CalDAVConflictError as exc:
+                    fresh_etag = current_etag()
+                    log.debug(
+                        "conflict deleting calendar event %s (attempt %d/%d): attempted "
+                        "etag=%r, server's current etag now=%r%s -- %s",
+                        uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS, etag, fresh_etag,
+                        " [UNCHANGED -- see _SYNC_CONFLICT_MAX_ATTEMPTS's docstring, this is "
+                        "NOT what a concurrent write should look like]" if fresh_etag == etag else "",
+                        exc,
+                    )
+                    if attempt == _SYNC_CONFLICT_MAX_ATTEMPTS:
                         raise
                     log.warning(
-                        "stale ETag deleting calendar event %s (attempt %d/%d) -- retrying with a fresh one",
-                        uid, attempt, max_attempts,
+                        "stale ETag deleting calendar event %s (attempt %d/%d) -- retrying with a "
+                        "fresh one (run with `my-bt -D` / MY_BOOKING_DEBUG=1 for full diagnostics "
+                        "if this keeps happening)",
+                        uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS,
                     )
-                    if retry_delay_seconds:
-                        sleep_fn(retry_delay_seconds * attempt)
-                    etag = current_etag()
+                    etag = fresh_etag
                     if etag is None:
                         break  # someone else's concurrent change already removed it -- nothing left to do
         return
@@ -366,20 +389,29 @@ def sync_occurrence(
         organizer=settings.caldav_username if course.host_calendar_entry_cc_list else None,
         attendees=course.host_calendar_entry_cc_list,
     )
-    for attempt in range(1, max_attempts + 1):
+    for attempt in range(1, _SYNC_CONFLICT_MAX_ATTEMPTS + 1):
         try:
             client.put_event(calendar_href, uid, event.to_ics(), etag=etag)
             return
-        except CalDAVConflictError:
-            if attempt == max_attempts:
+        except CalDAVConflictError as exc:
+            fresh_etag = current_etag()
+            log.debug(
+                "conflict updating calendar event %s (attempt %d/%d): attempted "
+                "etag=%r, server's current etag now=%r%s -- %s",
+                uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS, etag, fresh_etag,
+                " [UNCHANGED -- see _SYNC_CONFLICT_MAX_ATTEMPTS's docstring, this is "
+                "NOT what a concurrent write should look like]" if fresh_etag == etag else "",
+                exc,
+            )
+            if attempt == _SYNC_CONFLICT_MAX_ATTEMPTS:
                 raise
             log.warning(
-                "stale ETag updating calendar event %s (attempt %d/%d) -- retrying with a fresh one",
-                uid, attempt, max_attempts,
+                "stale ETag updating calendar event %s (attempt %d/%d) -- retrying with a fresh "
+                "one (run with `my-bt -D` / MY_BOOKING_DEBUG=1 for full diagnostics if this keeps "
+                "happening)",
+                uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS,
             )
-            if retry_delay_seconds:
-                sleep_fn(retry_delay_seconds * attempt)
-            etag = current_etag()
+            etag = fresh_etag
 
 
 def resync_after_course_rename(
@@ -457,8 +489,6 @@ def resync_all_future_calendar_events(
     store: Store,
     settings: Settings,
     today: date | None = None,
-    *,
-    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> ResyncResult:
     """Re-syncs every course's future occurrence that currently has a live
     calendar entry (>=1 CONFIRMED registration -- see sync_occurrence's own
@@ -525,14 +555,15 @@ def resync_all_future_calendar_events(
     on -- see record_resync_skips() and app.cli_checks.
     check_calendar_invite_resync_skips().
 
-    2026-07-16, the operator ("Please make the calendar sync work :)"): each
-    occurrence is now given _BULK_RESYNC_MAX_ATTEMPTS attempts with real
-    backoff between them (see that constant's own docstring), not
-    sync_occurrence()'s default zero-delay/3-attempt behavior meant for a
-    live guest request -- this is a background job, so it can afford to
-    wait out a concurrent writer instead of racing it. `sleep_fn` is
-    injectable (threaded down to sync_occurrence()) so tests don't
-    actually wait through the backoff."""
+    2026-07-16, the operator ("Please make the calendar sync work :)"): a prior
+    version of this gave each occurrence extra attempts with backoff here
+    (a background job can afford to wait out a concurrent writer). the operator's
+    follow-up reverted that: "But there must be another problem with the
+    Calendar. Please do NOT retry more often!!! But rather collect DEBUG
+    OUTPUT please!!!" -- so this now uses the exact same
+    sync_occurrence() behavior (3 attempts, zero delay) as a live
+    request, no special-casing. See _SYNC_CONFLICT_MAX_ATTEMPTS's own
+    docstring for the richer DEBUG-level diagnostics added in its place."""
     today = today or date.today()
     today_iso = today.isoformat()
     rows = store.read_registrations(scope="live")
@@ -547,15 +578,12 @@ def resync_all_future_calendar_events(
         })
         for d_iso in dates:
             try:
-                sync_occurrence(
-                    client, calendar_href, store, settings, course, date.fromisoformat(d_iso),
-                    max_attempts=_BULK_RESYNC_MAX_ATTEMPTS,
-                    retry_delay_seconds=_BULK_RESYNC_RETRY_DELAY_SECONDS,
-                    sleep_fn=sleep_fn,
-                )
+                sync_occurrence(client, calendar_href, store, settings, course, date.fromisoformat(d_iso))
             except CalDAVError as exc:
                 log.warning(
-                    "resync: couldn't re-sync %s on %s -- skipping it, not the rest of the batch: %s",
+                    "resync: couldn't re-sync %s on %s -- skipping it, not the rest of the batch: %s "
+                    "(re-run with `my-bt -D` / MY_BOOKING_DEBUG=1 for full request/response "
+                    "diagnostics if this keeps happening)",
                     course.shortname, d_iso, exc,
                 )
                 skipped.append(f"{course.shortname} on {d_iso}: {exc}")
@@ -573,7 +601,6 @@ def resync_if_format_changed(
     *,
     today: date | None = None,
     format_version: int = CALENDAR_INVITE_FORMAT_VERSION,
-    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> ResyncResult | None:
     """Runs resync_all_future_calendar_events() automatically, but only if
     `format_version` (CALENDAR_INVITE_FORMAT_VERSION by default) doesn't
@@ -615,7 +642,7 @@ def resync_if_format_changed(
         recorded = None
     if recorded == str(format_version):
         return None
-    result = resync_all_future_calendar_events(client, calendar_href, store, settings, today=today, sleep_fn=sleep_fn)
+    result = resync_all_future_calendar_events(client, calendar_href, store, settings, today=today)
     # 2026-07-15: atomic_write_text (temp file + fsync + rename + dir
     # fsync), not a bare write_text() -- a torn write here on a hard
     # crash would leave a marker that's neither the old nor the new
