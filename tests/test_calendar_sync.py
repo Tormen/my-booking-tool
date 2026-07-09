@@ -511,6 +511,41 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
         self.assertEqual(fixed, 0)
         self.assertEqual(transport.calls, [])
 
+    def test_a_persistent_conflict_on_one_occurrence_does_not_abort_the_rest(self):
+        # 2026-07-15, real production incident (VPS, `my-bt admin setup -i`'s
+        # new step 13): one occurrence hit a genuinely PERSISTENT
+        # CalDAVConflictError (still a stale ETag after all
+        # _SYNC_CONFLICT_MAX_ATTEMPTS retries -- something else kept
+        # touching that exact event). sync_occurrence() re-raises on its
+        # final attempt; this used to abort the WHOLE batch, silently
+        # skipping every occurrence not yet reached. Now the stuck one is
+        # skipped (logged), everything else still gets resynced.
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        self._confirm("bob@example.org", "2026-07-11", "yoga-class-2")
+        stuck_uid = event_uid(self.settings, "yoga-class-1", date(2026, 7, 10))
+
+        def transport(method, url, body="", extra_headers=None):
+            if method == "REPORT":
+                return Response(207, {}, EMPTY_REPORT)
+            if method == "PUT":
+                if stuck_uid in url:
+                    return Response(412, {}, '<D:error xmlns:D="DAV:"/>')
+                return Response(201, {"etag": '"new"'}, "")
+            raise AssertionError(f"unexpected {method} {url}")
+
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=transport,
+        )
+
+        fixed = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        )
+
+        # Only yoga-class-2's occurrence actually succeeded -- the stuck
+        # yoga-class-1 one doesn't count, but also doesn't raise/abort.
+        self.assertEqual(fixed, 1)
+
 
 class ResyncIfFormatChangedTest(unittest.TestCase):
     """2026-07-14: the "on install" half of the operator's own standing request
@@ -598,6 +633,38 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
 
         self.assertEqual(first, 1)
         self.assertIsNone(second)
+
+    def test_persistent_conflict_on_one_occurrence_still_writes_the_marker(self):
+        # 2026-07-15, the real production incident this closes: before
+        # resync_all_future_calendar_events()'s own per-occurrence
+        # resilience fix, ANY occurrence with a persistent CalDAV conflict
+        # made this whole function raise -- so the marker below was NEVER
+        # written, and every subsequent `setup -i` run hit the exact same
+        # occurrence and failed the exact same way, forever. Now: the
+        # stuck occurrence is skipped (not counted), everything else still
+        # resyncs, and the marker gets written either way.
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        marker = Path(self.data_dir) / ".calendar_invite_format_version"
+
+        def transport(method, url, body="", extra_headers=None):
+            if method == "REPORT":
+                return Response(207, {}, EMPTY_REPORT)
+            if method == "PUT":
+                return Response(412, {}, '<D:error xmlns:D="DAV:"/>')  # always stuck
+            raise AssertionError(f"unexpected {method} {url}")
+
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=transport,
+        )
+
+        fixed = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=1,
+        )
+
+        self.assertEqual(fixed, 0)  # the one occurrence there is never actually succeeded
+        self.assertEqual(marker.read_text(encoding="utf-8").strip(), "1")  # but the marker is still written
 
 
 class GuestInviteAndCancelIcsTest(unittest.TestCase):

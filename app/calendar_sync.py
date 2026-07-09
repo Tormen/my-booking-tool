@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from .caldav_client import CalDAVClient, CalDAVConflictError
+from .caldav_client import CalDAVClient, CalDAVConflictError, CalDAVError
 from .cancellation import html_to_text
 from .config import Course, Settings
 from .ics import VEvent
@@ -397,7 +397,25 @@ def resync_all_future_calendar_events(
     those are the only ones sync_occurrence() would currently keep a
     calendar entry for at all.
 
-    Returns how many occurrences were re-synced."""
+    2026-07-15, real production failure (VPS, `my-bt admin setup -i`'s
+    new step 13 -- see resync_if_format_changed()): one single occurrence
+    hit a PERSISTENT CalDAVConflictError (stale ETag, still conflicting
+    after all _SYNC_CONFLICT_MAX_ATTEMPTS retries -- something else kept
+    touching that exact event, e.g. a real booking/cancellation landing
+    on it concurrently). sync_occurrence() re-raises on its own final
+    attempt; this loop used to let that abort the ENTIRE batch, silently
+    dropping every occurrence not yet reached (and, worse, meaning
+    resync_if_format_changed() never got to write its marker, so the next
+    `setup -i` run would hit the exact same occurrence and fail exactly
+    the same way -- forever, since nothing here ever un-sticks a
+    genuinely persistent conflict). One occurrence's failure now only
+    skips THAT occurrence (logged as a warning) -- every other occurrence
+    still gets its fresh resync, and the count returned only reflects
+    genuine successes.
+
+    Returns how many occurrences were successfully re-synced (excludes
+    any skipped after a persistent CalDAV failure -- see the log for
+    which, if any)."""
     today = today or date.today()
     today_iso = today.isoformat()
     rows = store.read_registrations(scope="live")
@@ -410,7 +428,14 @@ def resync_all_future_calendar_events(
             and r["occurrence_date"] >= today_iso
         })
         for d_iso in dates:
-            sync_occurrence(client, calendar_href, store, settings, course, date.fromisoformat(d_iso))
+            try:
+                sync_occurrence(client, calendar_href, store, settings, course, date.fromisoformat(d_iso))
+            except CalDAVError as exc:
+                log.warning(
+                    "resync: couldn't re-sync %s on %s -- skipping it, not the rest of the batch: %s",
+                    course.shortname, d_iso, exc,
+                )
+                continue
             fixed += 1
     return fixed
 
@@ -433,13 +458,23 @@ def resync_if_format_changed(
     a valid "ran, nothing to do" result) if it ran, or None if the format
     hasn't changed since the last run (nothing to do, marker left alone).
 
-    Writes the new version to the marker only AFTER a successful resync --
-    if resync_all_future_calendar_events() raises (e.g. a CalDAV hiccup),
-    the marker is left at its old value so the next run tries again,
-    instead of silently recording "done" for a resync that didn't actually
-    happen. A missing marker (fresh install, or a data dir that predates
-    this feature) is treated as "definitely stale" -- always resyncs once
-    (a no-op scan if there's nothing booked yet) and writes the marker, so
+    Writes the new version to the marker only AFTER resync_all_future_
+    calendar_events() RETURNS -- if it raises (a hard failure before/
+    outside its own per-occurrence loop, e.g. the CalDAV server being
+    unreachable at all), the marker is left at its old value so the next
+    run tries again, instead of silently recording "done" for a resync
+    that didn't actually happen. A single occurrence with a persistent
+    conflict, on the other hand, no longer counts as a hard failure here
+    -- see that function's own 2026-07-15 docstring update: it's skipped
+    and logged, not raised, so the marker still gets written and every
+    OTHER occurrence still gets resynced; a real production incident hit
+    exactly this (one occurrence stuck in a stale-ETag loop) before that
+    fix, which meant the marker could never be written and every future
+    `setup -i` run failed on the same occurrence, forever.
+
+    A missing marker (fresh install, or a data dir that predates this
+    feature) is treated as "definitely stale" -- always resyncs once (a
+    no-op scan if there's nothing booked yet) and writes the marker, so
     every install ends up with one recorded regardless of history."""
     marker_path = Path(data_dir) / _CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME
     try:
