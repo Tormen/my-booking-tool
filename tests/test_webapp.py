@@ -1017,18 +1017,29 @@ class MySettingsTest(unittest.TestCase):
     # -- auth gating ----------------------------------------------------------
 
     def test_settings_page_requires_login(self):
-        status, _headers, _body = self.app.my_settings("GET", {})
-        self.assertEqual(status, "403 Forbidden")
+        # 2026-07-14, the operator: "Can the page please redirect to login when
+        # the session times out?" -- a missing/expired session now
+        # redirects to /my (the login page) instead of a bare 403.
+        status, headers, _body = self.app.my_settings("GET", {})
+        self.assertEqual(status, "302 Found")
+        self.assertIn(("Location", "/my"), headers)
 
     def test_settings_name_post_requires_login(self):
-        status, _headers, _body = self.app.my_settings_name("POST", self._post_environ({}, {"name": "X"}))
-        self.assertEqual(status, "403 Forbidden")
+        status, headers, _body = self.app.my_settings_name("POST", self._post_environ({}, {"name": "X"}))
+        self.assertEqual(status, "302 Found")
+        self.assertIn(("Location", "/my"), headers)
 
     def test_settings_email_post_requires_login(self):
-        status, _headers, _body = self.app.my_settings_email(
+        status, headers, _body = self.app.my_settings_email(
             "POST", self._post_environ({}, {"email": "x@example.org"})
         )
-        self.assertEqual(status, "403 Forbidden")
+        self.assertEqual(status, "302 Found")
+        self.assertIn(("Location", "/my"), headers)
+
+    def test_settings_email_cancel_post_requires_login(self):
+        status, headers, _body = self.app.my_settings_email_cancel("POST", self._post_environ({}, {}))
+        self.assertEqual(status, "302 Found")
+        self.assertIn(("Location", "/my"), headers)
 
     # -- name change ------------------------------------------------------------
 
@@ -3530,6 +3541,28 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(self.app.my_reinstate, (reg.registration_id,), {"message": ""}, environ)
         reloaded = self.store.find_by_id(reg.registration_id)
         self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
+
+    def test_my_cancel_without_a_session_redirects_to_login_instead_of_403(self):
+        # 2026-07-14, the operator: "Can the page please redirect to login when
+        # the session times out?" -- covers every guest-action endpoint
+        # that used to return a bare "403 Forbidden"/"log in first".
+        status, headers, _body = self._post_with_session(
+            self.app.my_cancel, ("bogus-reg-id",), {"message": ""}, {},
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertIn(("Location", "/my"), headers)
+
+    def test_my_reinstate_without_a_session_redirects_to_login_instead_of_403(self):
+        status, headers, _body = self._post_with_session(
+            self.app.my_reinstate, ("bogus-reg-id",), {"message": ""}, {},
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertIn(("Location", "/my"), headers)
+
+    def test_my_delete_account_without_a_session_redirects_to_login_instead_of_403(self):
+        status, headers, _body = self._post_with_session(self.app.my_delete_account, (), {}, {})
+        self.assertEqual(status, "302 Found")
+        self.assertIn(("Location", "/my"), headers)
 
     def test_my_reinstate_includes_the_optional_comment_in_both_emails(self):
         user, environ = self._login_as_guest("regular@example.org")

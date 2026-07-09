@@ -326,6 +326,27 @@ def _get_session(environ) -> dict | None:
     return None
 
 
+def _login_required_redirect() -> tuple[str, list, str]:
+    """302 to /my (the login page) for a guest-only endpoint hit with no
+    valid session -- most commonly because the session simply timed out
+    while the guest still had the tab open and then clicked something.
+    2026-07-14, the operator: "Can the page please redirect to login when the
+    session times out?" Replaces the old bare "403 Forbidden"/"log in
+    first" plain-text response every my_*() guest-action handler used to
+    return here, which left the guest stuck looking at unstyled error
+    text with no way forward.
+
+    Not `next=`-aware: _safe_next_path()'s own allowlist only covers
+    /courses and /book/<shortname> (the two shapes _session_banner_html()
+    ever generates for an anonymous visitor) -- none of these guest-
+    action endpoints (cancel/reinstate/delete-account/settings/...) are
+    in it, and expanding that allowlist is a separate, deliberate
+    decision this fix doesn't make on its own. Always lands on plain
+    /my; logging back in from there and clicking through again is one
+    extra step, not a dead end."""
+    return "302 Found", [("Location", "/my")], ""
+
+
 def _record_page_view(environ, path: str) -> None:
     """2026-07-13, the operator: "Can I see with my-bt who is currently logged
     in please? (should be user, since when connected and their current /
@@ -2751,7 +2772,7 @@ class App:
             return guard
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+            return _login_required_redirect()
         reg = self.store.find_by_id(registration_id)
         if reg and reg.user_id == session["user_id"]:
             form = self._read_form(environ)
@@ -2810,7 +2831,7 @@ class App:
             return guard
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+            return _login_required_redirect()
         reg = self.store.find_by_id(registration_id)
         if reg and reg.user_id == session["user_id"] and reg.status == STATUS_CANCELED_BY_GUEST:
             form = self._read_form(environ)
@@ -2861,7 +2882,7 @@ class App:
             return guard
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+            return _login_required_redirect()
         user = self.store.find_user_by_id(session["user_id"])
         if user:
             # erase_user_by_email now runs the same promote+calendar-sync
@@ -3174,7 +3195,7 @@ class App:
             return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+            return _login_required_redirect()
         user = self.store.find_user_by_id(session["user_id"])
         if user is None:
             # Stale session pointing at a since-deleted/erased account --
@@ -3196,7 +3217,7 @@ class App:
             return "302 Found", [("Location", "/my/settings")], ""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+            return _login_required_redirect()
         user = self.store.find_user_by_id(session["user_id"])
         if user is None:
             return "302 Found", [("Location", "/my")], ""
@@ -3225,7 +3246,7 @@ class App:
             return "302 Found", [("Location", "/my/settings")], ""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+            return _login_required_redirect()
         user = self.store.find_user_by_id(session["user_id"])
         if user is None:
             return "302 Found", [("Location", "/my")], ""
@@ -3262,7 +3283,7 @@ class App:
             return "302 Found", [("Location", "/my/settings")], ""
         session = _get_session(environ)
         if not session or session.get("kind") != "guest":
-            return "403 Forbidden", [("Content-Type", "text/plain")], "log in first"
+            return _login_required_redirect()
         self.store.clear_pending_email(session["user_id"])
         return "302 Found", [("Location", "/my/settings")], ""
 
