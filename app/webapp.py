@@ -871,7 +871,7 @@ class App:
 
     # -- maintenance mode ------------------------------------------------------
 
-    def _maintenance_response(self, state: maintenance.MaintenanceState):
+    def _maintenance_response(self, state: maintenance.MaintenanceState, environ):
         """503, not 200 -- correctly signals "temporarily unavailable" to
         anything automated (monitoring, a bot) hitting a booking link while
         `my-bt admin site-maintenance on` is active, without touching any other route's
@@ -881,13 +881,18 @@ class App:
         button" -- now that this shows on every guest-facing route (see
         _maintenance_guard), landing here for someone who followed an old
         bookmark/email link left them with nowhere to go but the browser's
-        own Back button. Links to the marketing homepage (settings.base_url),
-        same "Back to {site}" wording _my_login_page() uses."""
+        own Back button. Links to the marketing homepage (settings.base_url).
+
+        2026-07-14, the operator (expanding the always-visible-banner request to
+        "basically ALL pages except for the index.html!"): the plain "Back
+        to {site}" text link is now the same boxed _session_banner_html()
+        banner every other guest-facing page uses, instead of its own
+        one-off wording."""
         body = (
-            f'<div class="card">{maintenance.message_html(self.settings.admin_email, state.message)}'
-            f'<p><a href="{esc(self.settings.base_url)}">Back to {esc(self._site_label())}</a></p></div>'
+            f'<div class="card">{maintenance.message_html(self.settings.admin_email, state.message)}</div>'
         )
-        return "503 Service Unavailable", [("Content-Type", "text/html; charset=utf-8")], page("Maintenance", body)
+        banner = self._session_banner_html(environ)
+        return "503 Service Unavailable", [("Content-Type", "text/html; charset=utf-8")], page("Maintenance", body, banner=banner)
 
     def _maintenance_guard(self, environ) -> tuple[str, list, str] | None:
         """2026-07-10, the operator: "The maintenance banner should be displayed on
@@ -932,7 +937,7 @@ class App:
             _client_ip(environ), self.settings.maintenance_bypass_hostname,
             self.settings.maintenance_bypass_ip_log,
         ):
-            return self._maintenance_response(state)
+            return self._maintenance_response(state, environ)
         return None
 
     # -- /courses --------------------------------------------------------------
@@ -1536,6 +1541,52 @@ class App:
             "</div>"
         )
 
+    def _admin_banner_html(self, environ) -> str:
+        """The same boxed `.session-banner` style as _session_banner_html(),
+        for /admin's own pages (2026-07-14, the operator, expanding the always-
+        visible-banner request: "also /admin should get the same boxed
+        banner, basically ALL pages except for the index.html!").
+
+        Admin sessions are a separate `kind` ("admin", a single shared
+        password -- see admin_login()) from guest sessions, so
+        _session_banner_html() itself doesn't apply here: it only ever
+        recognizes kind=="guest", and would otherwise show a misleading
+        "Not logged in" banner to an admin who very much IS logged in.
+
+        No logout link here (unlike the guest banner) -- there is no
+        admin logout route today; an admin session just sits in the
+        in-memory SESSIONS dict until the process restarts or it's
+        overwritten by a fresh login. Just "Admin" + the homepage link,
+        boxed the same way everywhere else is."""
+        session = _get_session(environ)
+        label = "Admin" if session and session.get("kind") == "admin" else "Not logged in"
+        return (
+            '<div class="session-banner">'
+            f"<span>{label}</span>"
+            f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
+            "</div>"
+        )
+
+    def _homepage_only_banner_html(self) -> str:
+        """The same boxed `.session-banner` style every other page's
+        banner uses, but with just the homepage link -- for a page that
+        IS itself the login form (a "Not logged in / Login" banner sitting
+        above a login form would be redundant -- see _session_banner_html's
+        own docstring) or otherwise has no session state of its own worth
+        reporting.
+
+        2026-07-14, the operator (unhappy with the plain "Back to {site}" text
+        link at the bottom of /my's login page): "Reuse same boxed banner
+        is good" -- reuses the exact CSS box every other banner uses,
+        without the redundant "Not logged in / Login" text this
+        particular page doesn't need. Also used by admin_login() for the
+        same reason (that page IS the admin login form)."""
+        return (
+            '<div class="session-banner">'
+            f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
+            "</div>"
+        )
+
     def _anonymous_banner_html(self, next_path: str = "") -> str:
         """The "not logged in" half of the always-visible top-bar (see
         _session_banner_html()'s own docstring) -- same box, a plain Login
@@ -2016,9 +2067,16 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
+        # 2026-07-14, the operator, expanding the always-visible-banner request:
+        # "also /admin should get the same boxed banner, basically ALL
+        # pages except for the index.html!" -- every page below now gets
+        # the same _session_banner_html() banner /courses and /book use.
+        banner = self._session_banner_html(environ)
         reg = self.store.find_by_guest_token_hash(hash_token(token))
         if reg is None:
-            return "404 Not Found", [("Content-Type", "text/html")], page("Not found", "<p>This link is invalid or already used.</p>")
+            return "404 Not Found", [("Content-Type", "text/html")], page(
+                "Not found", "<p>This link is invalid or already used.</p>", banner=banner
+            )
         course = self.settings.course(reg.course_shortname)
         if method == "POST":
             form = self._read_form(environ)
@@ -2056,7 +2114,9 @@ class App:
                         course, reg.occurrence_date, user, canceled_by="guest", message=message,
                         registration_id=reg.registration_id, reinstate_token=reinstate_token,
                     )
-            return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Your booking has been canceled.</p>")
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Canceled", "<p>Your booking has been canceled.</p>", banner=banner
+            )
         # 2026-07-09, the operator: "This page should look like as described for
         # the admin and like the email ... WHAT WHEN WHERE with emojis and
         # bold font for the keyword followed by the description ... And
@@ -2074,7 +2134,7 @@ class App:
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body, banner=banner)
 
     def guest_reinstate(self, method: str, token: str, environ):
         """No-login "magic link" twin of my_reinstate(), reachable straight
@@ -2097,15 +2157,16 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
+        banner = self._session_banner_html(environ)
         reg = self.store.find_canceled_by_guest_token_hash(hash_token(token))
         if reg is None:
             return "404 Not Found", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This link is invalid or already used.</p>"
+                "Not found", "<p>This link is invalid or already used.</p>", banner=banner
             )
         course = self.settings.course(reg.course_shortname)
         if course is None or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date():
             return "200 OK", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This booking can no longer be rebooked.</p>"
+                "Not found", "<p>This booking can no longer be rebooked.</p>", banner=banner
             )
         if method == "POST":
             form = self._read_form(environ)
@@ -2120,7 +2181,9 @@ class App:
                     course, reg.occurrence_date, user,
                     confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="guest", message=message,
                 )
-            return "200 OK", [("Content-Type", "text/html")], page("Rebooked", "<p>Your booking has been rebooked.</p>")
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Rebooked", "<p>Your booking has been rebooked.</p>", banner=banner
+            )
         # 2026-07-14, the operator: "Please try find a simpler more intuitive word
         # than reinstate" -- "Rebook" picked; see cancellation.py's own
         # note on this same rename for the full scoping (visible text
@@ -2135,7 +2198,7 @@ class App:
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Rebook booking", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Rebook booking", body, banner=banner)
 
     # -- /my (guest self-service) --------------------------------------------
 
@@ -2505,9 +2568,11 @@ class App:
         docstring: a "Login" banner sitting above a login FORM would be
         redundant), which meant it was the one page in the app with no way
         back to the marketing homepage short of editing the URL by hand.
-        Fixed with a plain "Back to {site}" link, same wording convention
-        as the other "Back to ..." links already used elsewhere on /my
-        (e.g. my_settings()'s "Back to my bookings")."""
+
+        2026-07-14, the operator (unhappy with that fix's plain-text-link look):
+        "Reuse same boxed banner is good" -- now the same boxed
+        `.session-banner` style via _homepage_only_banner_html() (see that
+        method's own docstring), not a bare <p> link."""
         login_checked = "checked" if active_tab == "login" else ""
         signup_checked = "checked" if active_tab == "signup" else ""
 
@@ -2565,9 +2630,10 @@ class App:
           </div>
           <div class="tab-panel" id="my-panel-login">{login_body}</div>
           <div class="tab-panel" id="my-panel-signup">{signup_body}</div>
-        </div>
-        <p><a href="{esc(self.settings.base_url)}">Back to {esc(self._site_label())}</a></p>"""
-        return "200 OK", [("Content-Type", "text/html")], page("My bookings", body)
+        </div>"""
+        return "200 OK", [("Content-Type", "text/html")], page(
+            "My bookings", body, banner=self._homepage_only_banner_html()
+        )
 
     def my_reset(self, method: str, environ):
         """Unified "forgot password" + "resend confirmation" flow -- both
@@ -2594,6 +2660,10 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
+        # 2026-07-14, the operator, expanding the always-visible-banner request to
+        # "basically ALL pages except for the index.html!" -- same boxed
+        # banner every other guest-facing page uses.
+        banner = self._session_banner_html(environ)
         lockout_seconds = 0.0
         if method == "POST":
             form = self._read_form(environ)
@@ -2611,7 +2681,7 @@ class App:
                     "<p>If that email has an account with us, we've just sent a link to set/reset your password.</p>"
                     '<p><a href="/my">Back to login</a></p>'
                 )
-                return "200 OK", [("Content-Type", "text/html")], page("Check your email", body)
+                return "200 OK", [("Content-Type", "text/html")], page("Check your email", body, banner=banner)
             log.warning("rate limit blocked: password reset for %s", _masked(email))
             lockout_seconds = max(
                 0.0 if email_ok else login_limiter.retry_after(email_key, now=now),
@@ -2627,7 +2697,7 @@ class App:
         </form>""" + _RESEND_COOLDOWN_SCRIPT
         if lockout_seconds:
             body += _LOCKOUT_COUNTDOWN_SCRIPT
-        return "200 OK", [("Content-Type", "text/html")], page("Forgot your password?", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Forgot your password?", body, banner=banner)
 
     def _set_password_form(self, token: str) -> str:
         return f"""<form method="post" class="card">
@@ -2673,22 +2743,26 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
+        # 2026-07-14, the operator, expanding the always-visible-banner request to
+        # "basically ALL pages except for the index.html!" -- same boxed
+        # banner every other guest-facing page uses.
+        banner = self._session_banner_html(environ)
         token_hash = hash_token(token)
         user = self.store.find_user_by_confirm_token_hash(token_hash)
         if user is not None and self._confirm_token_expired(user):
             body = (f'<p>This link has expired -- confirmation links are only valid for '
                      f'{CONFIRM_TOKEN_TTL_HOURS} hours. '
                      '<a href="/my/reset">Request a new one</a>.</p>')
-            return "200 OK", [("Content-Type", "text/html")], page("Link expired", body)
+            return "200 OK", [("Content-Type", "text/html")], page("Link expired", body, banner=banner)
         if user is None:
             superseded = self.store.find_user_by_prev_confirm_token_hash(token_hash)
             if superseded is not None:
                 body = ('<p>This link has been disabled because a newer link was already '
                         'sent to you -- check your inbox for the latest email.</p>')
-                return "200 OK", [("Content-Type", "text/html")], page("Link replaced", body)
+                return "200 OK", [("Content-Type", "text/html")], page("Link replaced", body, banner=banner)
             body = ('<p>This link is invalid or has already been used. '
                     '<a href="/my/reset">Request a new one</a>.</p>')
-            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body, banner=banner)
 
         pending = [
             r for r in self.store.registrations_for_user(user.user_id)
@@ -2710,7 +2784,8 @@ class App:
             if len(password) < MIN_PASSWORD_LENGTH:
                 err = f'<p class="err">Please choose a password at least {MIN_PASSWORD_LENGTH} characters long.</p>'
                 return "200 OK", [("Content-Type", "text/html")], page(
-                    "Set your password", err + email_note + pending_note + self._set_password_form(token)
+                    "Set your password", err + email_note + pending_note + self._set_password_form(token),
+                    banner=banner,
                 )
             pw_hash, pw_salt = hash_secret(password)
             self.store.set_password(user.user_id, pw_hash, pw_salt)
@@ -2763,11 +2838,11 @@ class App:
             return (
                 "200 OK",
                 [("Content-Type", "text/html; charset=utf-8"), ("Set-Cookie", _session_cookie_header(sid))],
-                page("Account & booking confirmed!", body),
+                page("Account & booking confirmed!", body, banner=banner),
             )
 
         return "200 OK", [("Content-Type", "text/html")], page(
-            "Set your password", email_note + pending_note + self._set_password_form(token)
+            "Set your password", email_note + pending_note + self._set_password_form(token), banner=banner
         )
 
     def my_cancel(self, method: str, registration_id: str, environ):
@@ -3313,21 +3388,25 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
+        # 2026-07-14, the operator, expanding the always-visible-banner request to
+        # "basically ALL pages except for the index.html!" -- same boxed
+        # banner every other guest-facing page uses.
+        banner = self._session_banner_html(environ)
         token_hash = hash_token(token)
         user = self.store.find_user_by_pending_email_token_hash(token_hash)
         if user is not None and self._confirm_email_expired(user):
             body = (f'<p>This link has expired -- email confirmation links are only valid for '
                      f'{CONFIRM_TOKEN_TTL_HOURS} hours. Request the change again from '
                      '<a href="/my/settings">Account settings</a>.</p>')
-            return "200 OK", [("Content-Type", "text/html")], page("Link expired", body)
+            return "200 OK", [("Content-Type", "text/html")], page("Link expired", body, banner=banner)
         if user is None:
             superseded = self.store.find_user_by_prev_pending_email_token_hash(token_hash)
             if superseded is not None:
                 body = ('<p>This link has been disabled because a newer email change request '
                         'was already sent -- check your inbox for the latest email.</p>')
-                return "200 OK", [("Content-Type", "text/html")], page("Link replaced", body)
+                return "200 OK", [("Content-Type", "text/html")], page("Link replaced", body, banner=banner)
             body = '<p>This link is invalid or has already been used.</p>'
-            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body, banner=banner)
 
         new_email = user.pending_email
         if method == "POST":
@@ -3335,7 +3414,7 @@ class App:
             updated = self.store.apply_pending_email(user.user_id)
             if updated is None:
                 body = '<p>This link is invalid or has already been used.</p>'
-                return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+                return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body, banner=banner)
             # the operator: "Logout user before email is changed ... redirect the
             # user back to login page /my" -- kills every session for this
             # account (this browser included), so the link below has to be
@@ -3344,7 +3423,7 @@ class App:
             self._send_email_change_confirmed_emails(old_email, new_email)
             body = (f'<p>Your login email is now <b>{esc(new_email)}</b>.</p>'
                     '<p>Please <a href="/my">log in</a> again with your new email.</p>')
-            return "200 OK", [("Content-Type", "text/html")], page("Email confirmed", body)
+            return "200 OK", [("Content-Type", "text/html")], page("Email confirmed", body, banner=banner)
 
         # 2026-07-11, the operator (screenshot of this exact page): "3x Confirm is
         # 1x too much. Please place the sentance within the box that
@@ -3363,7 +3442,7 @@ class App:
                 '<div class="submit-row"><button type="submit">Confirm change</button>'
                 '<a href="/" class="link-button">Never mind</a></div>'
                 '</form>')
-        return "200 OK", [("Content-Type", "text/html")], page("Confirm email change", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Confirm email change", body, banner=banner)
 
     def my_cancel_email_change(self, method: str, token: str, environ):
         """No-login "cancel this pending email change" landing page,
@@ -3388,16 +3467,20 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
+        # 2026-07-14, the operator, expanding the always-visible-banner request to
+        # "basically ALL pages except for the index.html!" -- same boxed
+        # banner every other guest-facing page uses.
+        banner = self._session_banner_html(environ)
         user = self.store.find_user_by_pending_email_cancel_token_hash(hash_token(token))
         if user is None or not user.pending_email:
             body = '<p>This link is invalid or has already been used.</p>'
-            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body)
+            return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body, banner=banner)
         pending_email = user.pending_email
         if method == "POST":
             self.store.clear_pending_email(user.user_id)
             body = (f'<p>The pending change to <b>{esc(pending_email)}</b> has been canceled. '
                     f'Your login email is still <b>{esc(user.email)}</b>.</p>')
-            return "200 OK", [("Content-Type", "text/html")], page("Change canceled", body)
+            return "200 OK", [("Content-Type", "text/html")], page("Change canceled", body, banner=banner)
         # Same 2026-07-11 fix as my_confirm_email()'s own page -- see that
         # method's comment. Sentence moved inside the button's own box, and
         # states the pending change as a plain fact instead of restating
@@ -3408,7 +3491,7 @@ class App:
                 '<div class="submit-row"><button type="submit">Cancel this change</button>'
                 '<a href="/" class="link-button">Never mind</a></div>'
                 '</form>')
-        return "200 OK", [("Content-Type", "text/html")], page("Cancel email change", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Cancel email change", body, banner=banner)
 
     # -- /admin ---------------------------------------------------------------
 
@@ -3452,7 +3535,13 @@ class App:
         </form>"""
         if lockout_seconds:
             body += _LOCKOUT_COUNTDOWN_SCRIPT
-        return "200 OK", [("Content-Type", "text/html")], page("Admin login", body)
+        # This page IS the admin login form -- same reasoning as
+        # _my_login_page()'s own banner: a "Not logged in" banner sitting
+        # above a login form would be redundant, so just the boxed
+        # homepage link (see _homepage_only_banner_html()'s docstring).
+        return "200 OK", [("Content-Type", "text/html")], page(
+            "Admin login", body, banner=self._homepage_only_banner_html()
+        )
 
     def admin_overview(self, method: str, environ):
         session = _get_session(environ)
@@ -3756,7 +3845,11 @@ class App:
         <tbody>{''.join(rows)}</tbody></table>""" + (
             _SORTABLE_FILTERABLE_TABLE_SCRIPT + _DIALOG_WIRING_SCRIPT + _CANCEL_ENTIRE_SESSION_SCRIPT
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Admin overview", body)
+        # 2026-07-14, the operator: "also /admin should get the same boxed
+        # banner, basically ALL pages except for the index.html!"
+        return "200 OK", [("Content-Type", "text/html")], page(
+            "Admin overview", body, banner=self._admin_banner_html(environ)
+        )
 
     def admin_cancel(self, method: str, registration_id: str, environ):
         session = _get_session(environ)
@@ -3828,7 +3921,9 @@ class App:
           <div class="submit-row"><button type="submit">Cancel this booking</button></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Cancel registration", body)
+        return "200 OK", [("Content-Type", "text/html")], page(
+            "Cancel registration", body, banner=self._admin_banner_html(environ)
+        )
 
     def admin_reinstate(self, method: str, registration_id: str, environ):
         """Host-side twin of my_reinstate() -- undoes a cancellation on ANY
@@ -3887,10 +3982,16 @@ class App:
         way a guest's emailed cancel link is. If that calendar is ever
         shared/exported somewhere less private, treat this the same as any
         other bearer link in it and reconsider."""
+        # 2026-07-14, the operator, expanding the always-visible-banner request to
+        # "basically ALL pages except for the index.html!" -- there's no
+        # "host" session kind (this is a bearer-link, not a login), so this
+        # is _session_banner_html()'s ordinary guest-or-anonymous banner,
+        # same as any other no-login guest-facing page.
+        banner = self._session_banner_html(environ)
         reg = self.store.find_by_id(registration_id)
         if reg is None:
             return "404 Not Found", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This link is invalid.</p>"
+                "Not found", "<p>This link is invalid.</p>", banner=banner
             )
         user = self.store.find_user_by_id(reg.user_id)
         course = self.settings.course(reg.course_shortname)
@@ -3920,7 +4021,9 @@ class App:
                         course, reg.occurrence_date, user, canceled_by="host", message=message,
                         registration_id=registration_id, reinstate_token=reinstate_token,
                     )
-            return "200 OK", [("Content-Type", "text/html")], page("Canceled", "<p>Registration canceled and attendee notified.</p>")
+            return "200 OK", [("Content-Type", "text/html")], page(
+                "Canceled", "<p>Registration canceled and attendee notified.</p>", banner=banner
+            )
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         # 2026-07-11, the operator (screenshot of this exact page): "please add a
         # 'Never mind' button also here that brings you back to the
@@ -3944,7 +4047,7 @@ class App:
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Cancel booking", body, banner=banner)
 
     def host_reinstate(self, method: str, registration_id: str, environ):
         """No-login "magic link" twin of admin_reinstate(), reachable
@@ -3957,10 +4060,13 @@ class App:
         that method's own docstring on why that's an adequate boundary
         here) -- no separate token needed, unlike guest_reinstate()'s
         /reinstate/<token>."""
+        # Same reasoning as host_cancel() above: no "host" session kind,
+        # just the ordinary guest-or-anonymous banner.
+        banner = self._session_banner_html(environ)
         reg = self.store.find_by_id(registration_id)
         if reg is None:
             return "404 Not Found", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This link is invalid.</p>"
+                "Not found", "<p>This link is invalid.</p>", banner=banner
             )
         user = self.store.find_user_by_id(reg.user_id)
         course = self.settings.course(reg.course_shortname)
@@ -3970,7 +4076,7 @@ class App:
             or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date()
         ):
             return "200 OK", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This booking can no longer be rebooked.</p>"
+                "Not found", "<p>This booking can no longer be rebooked.</p>", banner=banner
             )
         if method == "POST":
             form = self._read_form(environ)
@@ -3983,7 +4089,7 @@ class App:
                     confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host", message=message,
                 )
             return "200 OK", [("Content-Type", "text/html")], page(
-                "Rebooked", "<p>Registration rebooked and attendee notified.</p>"
+                "Rebooked", "<p>Registration rebooked and attendee notified.</p>", banner=banner
             )
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (
@@ -3997,7 +4103,7 @@ class App:
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Rebook booking", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Rebook booking", body, banner=banner)
 
     def host_cancel_occurrence(self, method: str, course_shortname: str, occurrence_date_str: str, environ):
         """"Cancel the entire session" -- no-login "magic link" twin of
@@ -4028,10 +4134,13 @@ class App:
         single registration_id, a (course, date) pair can legitimately have
         nothing left to cancel (e.g. the link tapped twice) without being
         an invalid link."""
+        # Same reasoning as host_cancel() above: no "host" session kind,
+        # just the ordinary guest-or-anonymous banner.
+        banner = self._session_banner_html(environ)
         course = self.settings.course(course_shortname)
         if course is None:
             return "404 Not Found", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This link is invalid (course no longer configured).</p>"
+                "Not found", "<p>This link is invalid (course no longer configured).</p>", banner=banner
             )
         participants = find_cancelable_registrations_for_occurrence(self.store, course_shortname, occurrence_date_str)
         if method == "POST":
@@ -4042,6 +4151,7 @@ class App:
                 "Canceled",
                 f"<p>{len(result.canceled)} registration(s) for <b>{esc(course.title)}</b> "
                 f"on {esc(occurrence_date_str)} canceled, every participant notified.</p>",
+                banner=banner,
             )
         recap = _course_recap_html(course, occurrence_date_str)
         if not participants:
@@ -4050,6 +4160,7 @@ class App:
                 f"<p>Nobody is currently booked for <b>{esc(course.title)}</b> on "
                 f"{esc(occurrence_date_str)} -- nothing to cancel.</p>" + recap
                 + '<p><a href="/" class="link-button">Back to home</a></p>',
+                banner=banner,
             )
         users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
         rows = []
@@ -4070,4 +4181,4 @@ class App:
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Cancel entire session", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Cancel entire session", body, banner=banner)

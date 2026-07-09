@@ -1188,10 +1188,12 @@ cause confusing side effects (an attendee stuck "logged in" against their
 wishes, or a broken JSON parse) for no real benefit.
 
 Each blocked request gets the same 503 maintenance page, which includes
-a "Back to `{yourdomain}`" link (2026-07-10, the operator: "the maintenance page
+a way back to `{yourdomain}` (2026-07-10, the operator: "the maintenance page
 should have a back link or button") -- so clicking "Login" on the static
 homepage during maintenance either shows this page (with a way back) or,
-for the recognized bypass IP, works completely normally.
+for the recognized bypass IP, works completely normally. 2026-07-14: this
+is now the same boxed banner every other guest-facing page uses, not a
+one-off "Back to `{yourdomain}`" text link.
 
 **What gets written:** `on`/`off` also directly insert/remove an
 idempotent, clearly-marked banner (HTML comments delimit it, so re-running
@@ -1297,7 +1299,7 @@ Course order on this page (2026-07-09) follows each `[[course]]`'s optional
 course order exactly as before this existed (a tie falls back to file
 order, not a re-shuffle). See `settings.toml.example` for the field itself.
 
-### Logged-in banner (`/courses`, `/book/<shortname>`, `/my`)
+### Logged-in banner (every page except `site/index.html`)
 
 All three pages (2026-07-06, and `/my` too as of 2026-07-09) show a small
 "Logged in as x@example.org · My bookings · booking.example.org · Log out" banner
@@ -1337,13 +1339,33 @@ bookings page (in top-bar) :(". A link back to the exact page you're
 already looking at isn't a shortcut, just clutter -- `/courses` and
 `/book` still show it since it's a genuine link elsewhere from there.
 
-`/my`'s own ANONYMOUS view (the Login/Sign up form) deliberately shows no
-banner at all -- a "Login" banner sitting above a login form would be
-redundant. That left it as the one page in the app with no way back to
-the marketing homepage short of editing the URL by hand (2026-07-10,
-the operator: "we miss a back to https://booking.example.org here") -- fixed with a plain
-"Back to `{yourdomain}`" link below the tabs, same wording the maintenance
-page's own back-link uses (see "Maintenance mode" above).
+`/my`'s own ANONYMOUS view (the Login/Sign up form) and `/admin`'s own
+login form deliberately skip the "Not logged in / Login" text -- a
+"Login" banner sitting above a login FORM would be redundant -- but
+still get the same boxed `.session-banner` style with just the homepage
+link (`_homepage_only_banner_html()`). That used to leave `/my`'s login
+page as the one page in the app with no way back to the marketing
+homepage short of editing the URL by hand (2026-07-10, the operator: "we miss a
+back to https://booking.example.org here"), first fixed with a plain "Back to
+`{yourdomain}`" text link, then (2026-07-14, the operator: "Reuse same boxed
+banner is good") upgraded to the same box.
+
+2026-07-14, the operator, expanding this further: "also /admin should get the
+same boxed banner, basically ALL pages except for the index.html!" --
+every remaining page in the app (every guest/host magic link --
+`/cancel/<token>`, `/reinstate/<token>`, `/host-cancel/<id>`,
+`/host-reinstate/<id>`, `/host-cancel-occurrence/<shortname>/<date>` --
+plus `/my/reset`, `/my/confirm/<token>`, `/my/confirm-email/<token>`,
+`/my/cancel-email-change/<token>`, `/admin/login`, and `/admin` itself)
+now shows the same boxed banner. `/admin`'s own pages (`admin_overview()`,
+`admin_cancel()`, `admin_reinstate()`) use a separate `_admin_banner_html()`
+variant instead of `_session_banner_html()` -- admin sessions are a
+different `kind` ("admin", a single shared password) that
+`_session_banner_html()` doesn't recognize, and showing "Not logged in"
+to an admin who genuinely is logged in would be misleading. That admin
+banner has no logout link -- there's no admin logout route today (an
+admin session just sits in memory until the process restarts or a fresh
+login overwrites it) -- just an "Admin" label and the homepage link.
 
 Logging out (`POST /my/logout`, the one form every banner above shares)
 redirects to the homepage (`settings.base_url`), not `/my` (2026-07-11,

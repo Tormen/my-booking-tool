@@ -391,11 +391,14 @@ class MaintenanceModeTest(unittest.TestCase):
 
     def test_maintenance_response_links_back_to_the_homepage(self):
         # 2026-07-10, the operator: "the maintenance page should have a back link
-        # or button."
+        # or button." 2026-07-14: now the same boxed _session_banner_html()
+        # banner every other guest-facing page uses, not a one-off "Back
+        # to {site}" text link -- see _maintenance_response()'s docstring.
         maintenance.enable(self.store.data_dir, message="down")
         app = App(make_settings(), self.store)
         _status, _headers, body = app.courses("GET", {})
-        self.assertIn(f'<a href="{app.settings.base_url}">Back to example.org</a>', body)
+        self.assertIn('class="session-banner"', body)
+        self.assertIn(f'<a href="{app.settings.base_url}">example.org</a>', body)
 
 
 class MaintenanceScopeTest(unittest.TestCase):
@@ -749,19 +752,26 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn("Not logged in", body)
 
     def test_my_page_anonymous_view_has_no_redundant_login_banner(self):
-        # Deliberately NOT given the anonymous "Login" banner -- this page
-        # already IS the Login/Sign up form (_my_login_page()), so a
-        # "Login" link banner above it would be redundant.
+        # Deliberately NOT given the full anonymous "Not logged in /
+        # Login" banner -- this page already IS the Login/Sign up form
+        # (_my_login_page()), so a "Login" link above it would be
+        # redundant. 2026-07-14: it DOES now get the same boxed
+        # .session-banner style (via _homepage_only_banner_html()), just
+        # without that redundant "Not logged in"/"Login" text -- see
+        # _my_login_page()'s own docstring.
         _status, _headers, body = self.app.my("GET", {})
-        self.assertNotIn('class="session-banner"', body)
+        banner = body[body.index('<div class="session-banner">') : body.index("</div>") + len("</div>")]
+        self.assertNotIn("Not logged in", banner)
+        self.assertNotIn("Login", banner)  # the tab label below says "Login" -- that's fine, this banner shouldn't
         self.assertIn('id="my-tab-login"', body)
 
     def test_my_page_anonymous_view_still_links_back_to_the_homepage(self):
         # 2026-07-10, the operator (screenshot of /my's login page): "we miss a
-        # back to https://booking.example.org here" -- no session-banner on this
-        # page (see the test above), so it needs its own explicit link.
+        # back to https://booking.example.org here". 2026-07-14: "Reuse same boxed
+        # banner is good" -- now the boxed banner's own homepage link
+        # (see the test above), not a bare "Back to {site}" <p> link.
         _status, _headers, body = self.app.my("GET", {})
-        self.assertIn(f'<a href="{self.settings.base_url}">Back to example.org</a>', body)
+        self.assertIn(f'<a href="{self.settings.base_url}">example.org</a>', body)
 
     def test_page_width_matches_the_homepage_photos_container(self):
         # 2026-07-11, the operator (screenshot comparing the static homepage's own
@@ -977,6 +987,79 @@ class SessionBannerTest(unittest.TestCase):
         environ = self._login_environ("regular@example.org")
         _status, _headers, body = self.app.courses("GET", environ)
         self.assertIn(f'<a href="{self.settings.base_url}">', body)
+
+
+class AlwaysVisibleBannerRolloutTest(unittest.TestCase):
+    """2026-07-14, the operator, expanding the always-visible-banner request:
+    "also /admin should get the same boxed banner, basically ALL pages
+    except for the index.html!" -- spot-checks a representative page from
+    each remaining category that didn't already have one (guest magic
+    links, host magic links, admin login/overview, /my/reset,
+    /my/confirm(-email), /my/cancel-email-change). Every _room_-specific
+    banner rename/wording test lives closer to its own feature (e.g.
+    SessionBannerTest, MaintenanceModeTest); this class only confirms the
+    box itself now shows up everywhere it didn't before."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings()
+        self.app = App(self.settings, self.store)
+
+    def test_guest_cancel_bogus_token_shows_banner(self):
+        _status, _headers, body = self.app.guest_cancel("GET", "bogus-token", {})
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("Not logged in", body)
+
+    def test_guest_reinstate_bogus_token_shows_banner(self):
+        _status, _headers, body = self.app.guest_reinstate("GET", "bogus-token", {})
+        self.assertIn('class="session-banner"', body)
+
+    def test_host_cancel_bogus_id_shows_banner(self):
+        _status, _headers, body = self.app.host_cancel("GET", "bogus-reg-id", {})
+        self.assertIn('class="session-banner"', body)
+
+    def test_host_reinstate_bogus_id_shows_banner(self):
+        _status, _headers, body = self.app.host_reinstate("GET", "bogus-reg-id", {})
+        self.assertIn('class="session-banner"', body)
+
+    def test_host_cancel_occurrence_unknown_course_shows_banner(self):
+        _status, _headers, body = self.app.host_cancel_occurrence("GET", "no-such-course", "2026-07-01", {})
+        self.assertIn('class="session-banner"', body)
+
+    def test_my_reset_form_shows_banner(self):
+        _status, _headers, body = self.app.my_reset("GET", {})
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("Not logged in", body)
+
+    def test_my_confirm_invalid_token_shows_banner(self):
+        _status, _headers, body = self.app.my_confirm("GET", "bogus-token", {})
+        self.assertIn('class="session-banner"', body)
+
+    def test_my_confirm_email_invalid_token_shows_banner(self):
+        _status, _headers, body = self.app.my_confirm_email("GET", "bogus-token", {})
+        self.assertIn('class="session-banner"', body)
+
+    def test_my_cancel_email_change_invalid_token_shows_banner(self):
+        _status, _headers, body = self.app.my_cancel_email_change("GET", "bogus-token", {})
+        self.assertIn('class="session-banner"', body)
+
+    def test_admin_login_page_shows_boxed_homepage_link_only(self):
+        # This page IS the admin login form -- same reasoning as /my's own
+        # login page: no redundant "Not logged in" text, just the box +
+        # homepage link (see _homepage_only_banner_html()'s docstring).
+        _status, _headers, body = self.app.admin_login("GET", {})
+        self.assertIn('class="session-banner"', body)
+        self.assertNotIn("Not logged in", body)
+        self.assertIn(f'<a href="{self.settings.base_url}">', body)
+
+    def test_admin_overview_shows_admin_banner_when_logged_in(self):
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('class="session-banner"', body)
+        self.assertIn("<span>Admin</span>", body)
 
 
 class MySettingsTest(unittest.TestCase):
