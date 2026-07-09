@@ -9,7 +9,8 @@ from pathlib import Path
 
 from app.caldav_client import CalDAVClient, CalDAVConflictError, Response
 from app.calendar_sync import (
-    _SYNC_CONFLICT_MAX_ATTEMPTS, event_uid, guest_cancel_ics, guest_invite_ics,
+    CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME, ResyncResult, _SYNC_CONFLICT_MAX_ATTEMPTS, event_uid,
+    guest_cancel_ics, guest_invite_ics, record_resync_skips,
     resync_after_course_rename, resync_all_future_calendar_events, resync_if_format_changed, sync_occurrence,
 )
 from app.ics import parse_uid
@@ -22,6 +23,18 @@ from .helpers import make_course, make_settings
 
 EMPTY_REPORT = """<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"></D:multistatus>"""
+
+# 2026-07-16: resync_all_future_calendar_events()/resync_if_format_changed()
+# now retry a persistently-conflicting occurrence with REAL backoff
+# (_BULK_RESYNC_RETRY_DELAY_SECONDS -- see calendar_sync.py's own docstring
+# on why: "Please make the calendar sync work :)" after 3 occurrences hit
+# persistent conflicts in one real run) -- every test below that exercises
+# a genuine, unresolved conflict must inject this no-op in place of the
+# real time.sleep, or the test suite would actually wait through the full
+# backoff (discovered the hard way: this file's own test run jumped from
+# ~1s to ~30s the first time this change landed without it).
+def _no_sleep(_seconds: float) -> None:
+    pass
 
 
 def _report_with_event(uid: str, etag: str = '"e1"') -> str:
@@ -443,11 +456,12 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
         self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
         client, transport = self._client()
 
-        fixed = resync_all_future_calendar_events(
-            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 1)
+        self.assertEqual(result.fixed, 1)
+        self.assertEqual(result.skipped, [])
         methods = [m for m, _u, _b, _h in transport.calls]
         self.assertIn("PUT", methods)
 
@@ -456,11 +470,11 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
         self._confirm("bob@example.org", "2026-07-11", "yoga-class-2")
         client, transport = self._client()
 
-        fixed = resync_all_future_calendar_events(
-            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 2)
+        self.assertEqual(result.fixed, 2)
         put_urls = [u for m, u, _b, _h in transport.calls if m == "PUT"]
         self.assertTrue(any(event_uid(self.settings, "yoga-class-1", date(2026, 7, 10)) in u for u in put_urls))
         self.assertTrue(any(event_uid(self.settings, "yoga-class-2", date(2026, 7, 11)) in u for u in put_urls))
@@ -473,42 +487,42 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
         self.store.add_registration("yoga-class-1", "2026-07-10", user.user_id, "tok-hash", status=STATUS_WAITLISTED)
         client, transport = self._client()
 
-        fixed = resync_all_future_calendar_events(
-            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 0)
+        self.assertEqual(result.fixed, 0)
         self.assertEqual(transport.calls, [])
 
     def test_past_occurrences_are_not_touched(self):
         self._confirm("alice@example.org", "2026-07-01", "yoga-class-1")  # before self.today
         client, transport = self._client()
 
-        fixed = resync_all_future_calendar_events(
-            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 0)
+        self.assertEqual(result.fixed, 0)
         self.assertEqual(transport.calls, [])
 
     def test_today_itself_is_touched(self):
         self._confirm("alice@example.org", self.today.isoformat(), "yoga-class-1")
         client, transport = self._client()
 
-        fixed = resync_all_future_calendar_events(
-            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 1)
+        self.assertEqual(result.fixed, 1)
 
     def test_no_confirmed_registrations_anywhere_touches_nothing(self):
         client, transport = self._client()
 
-        fixed = resync_all_future_calendar_events(
-            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 0)
+        self.assertEqual(result.fixed, 0)
         self.assertEqual(transport.calls, [])
 
     def test_a_persistent_conflict_on_one_occurrence_does_not_abort_the_rest(self):
@@ -519,7 +533,8 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
         # touching that exact event). sync_occurrence() re-raises on its
         # final attempt; this used to abort the WHOLE batch, silently
         # skipping every occurrence not yet reached. Now the stuck one is
-        # skipped (logged), everything else still gets resynced.
+        # skipped (logged AND recorded in result.skipped), everything else
+        # still gets resynced.
         self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
         self._confirm("bob@example.org", "2026-07-11", "yoga-class-2")
         stuck_uid = event_uid(self.settings, "yoga-class-1", date(2026, 7, 10))
@@ -538,13 +553,58 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
             transport=transport,
         )
 
-        fixed = resync_all_future_calendar_events(
-            client, "/caldav/Bookings/", self.store, self.settings, today=self.today,
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=_no_sleep,
         )
 
         # Only yoga-class-2's occurrence actually succeeded -- the stuck
-        # yoga-class-1 one doesn't count, but also doesn't raise/abort.
-        self.assertEqual(fixed, 1)
+        # yoga-class-1 one doesn't count, but also doesn't raise/abort --
+        # it shows up in `skipped` instead.
+        self.assertEqual(result.fixed, 1)
+        self.assertEqual(len(result.skipped), 1)
+        self.assertIn("yoga-class-1", result.skipped[0])
+        self.assertIn("2026-07-10", result.skipped[0])
+
+    def test_persistent_conflict_retries_with_real_backoff_before_giving_up(self):
+        # 2026-07-16, the operator ("Please make the calendar sync work :)"),
+        # after a real bulk resync hit persistent conflicts on 3
+        # occurrences that each failed all 3 (the LIVE-request attempt
+        # count) zero-delay retries within under a second -- far more
+        # consistent with an ACTIVE concurrent writer that just hadn't
+        # finished yet than a truly unrecoverable conflict. The bulk
+        # resync now gives each occurrence _BULK_RESYNC_MAX_ATTEMPTS (6)
+        # tries with increasing backoff between them, not sync_occurrence's
+        # default (3, zero delay) -- confirms both the attempt count and
+        # the actual backoff durations passed to sleep_fn.
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        client, transport = self._client()
+
+        put_attempts = {"n": 0}
+
+        def flaky_transport(method, url, body="", extra_headers=None):
+            if method == "REPORT":
+                return Response(207, {}, EMPTY_REPORT)
+            if method == "PUT":
+                put_attempts["n"] += 1
+                return Response(412, {}, '<D:error xmlns:D="DAV:"/>')
+            raise AssertionError(f"unexpected {method} {url}")
+
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=flaky_transport,
+        )
+        sleeps: list[float] = []
+
+        result = resync_all_future_calendar_events(
+            client, "/caldav/Bookings/", self.store, self.settings, today=self.today, sleep_fn=sleeps.append,
+        )
+
+        self.assertEqual(result.fixed, 0)
+        self.assertEqual(len(result.skipped), 1)
+        self.assertEqual(put_attempts["n"], 6)  # _BULK_RESYNC_MAX_ATTEMPTS
+        # Increasing backoff (retry_delay_seconds * attempt), one sleep
+        # between each of the 5 retries following the first failure.
+        self.assertEqual(sleeps, [1.0, 2.0, 3.0, 4.0, 5.0])
 
 
 class ResyncIfFormatChangedTest(unittest.TestCase):
@@ -581,12 +641,13 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
         self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
         client, transport = self._client()
 
-        fixed = resync_if_format_changed(
+        result = resync_if_format_changed(
             client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
-            today=self.today, format_version=1,
+            today=self.today, format_version=1, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 1)
+        self.assertEqual(result.fixed, 1)
+        self.assertEqual(result.skipped, [])
         marker = Path(self.data_dir) / ".calendar_invite_format_version"
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), "1")
         # 2026-07-15: the marker write goes through atomic_io.
@@ -604,12 +665,12 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
         self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
         client, transport = self._client()
 
-        fixed = resync_if_format_changed(
+        result = resync_if_format_changed(
             client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
-            today=self.today, format_version=1,
+            today=self.today, format_version=1, sleep_fn=_no_sleep,
         )
 
-        self.assertIsNone(fixed)
+        self.assertIsNone(result)
         self.assertEqual(transport.calls, [])
 
     def test_stale_marker_triggers_a_resync_and_updates_the_marker(self):
@@ -618,12 +679,12 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
         self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
         client, transport = self._client()
 
-        fixed = resync_if_format_changed(
+        result = resync_if_format_changed(
             client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
-            today=self.today, format_version=2,
+            today=self.today, format_version=2, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 1)
+        self.assertEqual(result.fixed, 1)
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), "2")
 
     def test_running_twice_in_a_row_only_resyncs_the_first_time(self):
@@ -632,14 +693,14 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
 
         first = resync_if_format_changed(
             client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
-            today=self.today, format_version=1,
+            today=self.today, format_version=1, sleep_fn=_no_sleep,
         )
         second = resync_if_format_changed(
             client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
-            today=self.today, format_version=1,
+            today=self.today, format_version=1, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(first, 1)
+        self.assertEqual(first.fixed, 1)
         self.assertIsNone(second)
 
     def test_persistent_conflict_on_one_occurrence_still_writes_the_marker(self):
@@ -649,8 +710,9 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
         # made this whole function raise -- so the marker below was NEVER
         # written, and every subsequent `setup -i` run hit the exact same
         # occurrence and failed the exact same way, forever. Now: the
-        # stuck occurrence is skipped (not counted), everything else still
-        # resyncs, and the marker gets written either way.
+        # stuck occurrence is skipped (not counted, but recorded in
+        # result.skipped), everything else still resyncs, and the marker
+        # gets written either way.
         self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
         marker = Path(self.data_dir) / ".calendar_invite_format_version"
 
@@ -666,13 +728,73 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
             transport=transport,
         )
 
-        fixed = resync_if_format_changed(
+        result = resync_if_format_changed(
             client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
-            today=self.today, format_version=1,
+            today=self.today, format_version=1, sleep_fn=_no_sleep,
         )
 
-        self.assertEqual(fixed, 0)  # the one occurrence there is never actually succeeded
+        self.assertEqual(result.fixed, 0)  # the one occurrence there is never actually succeeded
+        self.assertEqual(len(result.skipped), 1)
         self.assertEqual(marker.read_text(encoding="utf-8").strip(), "1")  # but the marker is still written
+        # 2026-07-15/16: resync_if_format_changed() also calls
+        # record_resync_skips(), so this stays visible in a LATER
+        # `admin health`/`admin setup` run too -- not just this one's own
+        # printed output. See RecordResyncSkipsTest / app.cli_checks.
+        # check_calendar_invite_resync_skips.
+        skip_marker = Path(self.data_dir) / CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
+        self.assertTrue(skip_marker.exists())
+        self.assertIn("yoga-class-1", skip_marker.read_text(encoding="utf-8"))
+
+    def test_a_clean_resync_after_a_previous_skip_clears_the_skip_marker(self):
+        # The skip marker must reflect the LATEST attempt, not accumulate
+        # forever -- once a previously-stuck occurrence resyncs cleanly
+        # (or simply no longer exists), the marker should be removed.
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        skip_marker = Path(self.data_dir) / CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
+        skip_marker.write_text("stale leftover entry\n", encoding="utf-8")
+
+        client, transport = self._client()
+        result = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=1, sleep_fn=_no_sleep,
+        )
+
+        self.assertEqual(result.skipped, [])
+        self.assertFalse(skip_marker.exists())
+
+
+class RecordResyncSkipsTest(unittest.TestCase):
+    """record_resync_skips() itself -- called by both resync_if_format_
+    changed() (automatic) and `my-bt admin resync-calendar` (manual, see
+    scripts/my-bt::cmd_admin_resync_calendar) after every real resync
+    attempt, so app.cli_checks.check_calendar_invite_resync_skips() can
+    keep flagging an unresolved conflict long after the run that
+    discovered it."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = self._tmp.name
+        self.marker_path = Path(self.data_dir) / CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
+
+    def test_writes_the_skipped_lines_when_present(self):
+        result = ResyncResult(fixed=2, skipped=["yoga-class-1 on 2026-07-10: boom"])
+        record_resync_skips(self.data_dir, result)
+        self.assertEqual(self.marker_path.read_text(encoding="utf-8").strip(), "yoga-class-1 on 2026-07-10: boom")
+
+    def test_multiple_skips_are_one_per_line(self):
+        result = ResyncResult(fixed=0, skipped=["a: boom", "b: bang"])
+        record_resync_skips(self.data_dir, result)
+        self.assertEqual(self.marker_path.read_text(encoding="utf-8").splitlines(), ["a: boom", "b: bang"])
+
+    def test_clean_result_removes_an_existing_marker(self):
+        self.marker_path.write_text("stale\n", encoding="utf-8")
+        record_resync_skips(self.data_dir, ResyncResult(fixed=3, skipped=[]))
+        self.assertFalse(self.marker_path.exists())
+
+    def test_clean_result_with_no_existing_marker_is_a_no_op(self):
+        record_resync_skips(self.data_dir, ResyncResult(fixed=3, skipped=[]))  # must not raise
+        self.assertFalse(self.marker_path.exists())
 
 
 class GuestInviteAndCancelIcsTest(unittest.TestCase):

@@ -682,6 +682,9 @@ something seems off, or after any install/reinstall (this is what plain
 - Whether the data directory actually supports directory fsync (see
   "Data durability" above) -- a marker-file/local-fd probe, no network
   call, same reasoning as the calendar-invite-format check below.
+- Whether any occurrence failed to resync on the last calendar-invite
+  resync attempt (persistent CalDAV conflict) -- a marker-file check, no
+  network call, see "Per-occurrence resync failures" below.
 
 Each line is `[OK]`/`[WARN]`/`[FAIL]` with a one-line fix where relevant;
 **exits non-zero if anything is `[WARN]` or `[FAIL]`** (2026-07-10 --
@@ -774,6 +777,54 @@ perform what it safely can:
   all checks pass now": "setup and health should BOTH (a) repeat any
   warn or error at the end (b) ... exit 1 to FAIL on any warning or
   error").
+
+**Per-occurrence resync failures are now tracked and surfaced, not just
+counted (2026-07-16).** On a real production run, a bulk resync hit
+persistent CalDAV conflicts (HTTP 412, likely from concurrent live-guest
+traffic during the same upgrade) on 3 occurrences, logged only as a
+`WARNING` each -- yet `setup -i` still printed `[ok] calendar invite
+format changed -- resynced 6 upcoming occurrence(s)` and exited 0. the operator:
+*"-- 13. Calendar invite format -- says 'OK' but if you look at the
+output... I am NOT so sure!"* and *"!! this did not get noticed !!"*.
+Root cause: `resync_all_future_calendar_events()`/
+`resync_if_format_changed()` used to return a plain `int` (occurrences
+fixed), which structurally discarded which occurrences failed -- no
+caller could ever report a partial failure. Fixed two ways:
+
+- Both functions now return a `ResyncResult(fixed, skipped)` dataclass
+  instead of a bare `int`. `setup -i`'s step 13 now prints `[warn]
+  ... resynced N upcoming occurrence(s), but M FAILED (persistent CalDAV
+  conflict)`, naming each failed occurrence, whenever `skipped` is
+  non-empty -- it can no longer print `[ok]` or let the run exit 0 while
+  hiding a real failure. `my-bt admin resync-calendar` (the manual,
+  network-only command) prints the same failure list and now `exit(1)`s
+  if anything was skipped, instead of always exiting 0.
+- Skips are also persisted to a `.calendar_invite_resync_skipped` marker
+  file in the data dir (`app.calendar_sync.record_resync_skips()`),
+  parallel to the existing format-version marker, and read back by a new
+  structured Check, `cli_checks.check_calendar_invite_resync_skips()` --
+  step 13 of `admin health`/`admin setup` (no CalDAV round-trip, no
+  gating on CalDAV being configured, since the marker only exists after a
+  real resync ran). This is what actually closes the gap the operator found: the
+  skip stays a `[warn]` -- counted, repeated in the summary, exit-1 --
+  in *every later* `admin health`/`admin setup` run, not just the one run
+  that happened to discover it. A clean resync afterwards clears the
+  marker automatically.
+
+**Bulk resyncs also now retry harder before giving up**, addressing
+the operator's second ask (*"And the other is: Please make the calendar sync
+work :)"*) alongside the reporting fix. The existing 3-attempts/
+zero-delay retry in `sync_occurrence()` is unchanged for live guest
+booking/cancel requests (must fail fast, it's inside an HTTP response) --
+but the bulk resync path (`resync_all_future_calendar_events()`, used by
+both `-i` and `admin resync-calendar`) now retries up to 6 times with
+increasing backoff (1s, 2s, 3s, 4s, 5s between attempts) before recording
+an occurrence as skipped, giving a concurrent writer up to ~15 extra
+seconds to finish instead of less than one. This is a probabilistic
+mitigation, not a guarantee -- a truly sustained concurrent writer could
+still exhaust all 6 attempts -- but between this and the tracking above,
+if it does happen it will now be loudly and persistently flagged rather
+than silently swallowed.
 
 The closing "Done." line (2026-07-08) re-checks everything fresh (so it
 reflects whatever the walkthrough just fixed, not the state at the start)

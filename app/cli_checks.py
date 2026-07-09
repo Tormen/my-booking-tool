@@ -325,6 +325,44 @@ def check_calendar_invite_format(raw: dict, data_dir: str | Path) -> list[Check]
     )]
 
 
+def check_calendar_invite_resync_skips(data_dir: str | Path) -> list[Check]:
+    """2026-07-15/16, the operator, from a real production `setup -i` run: 3
+    occurrences hit persistent CalDAV conflicts during a resync (see
+    app.calendar_sync.resync_all_future_calendar_events's own docstring),
+    got skipped, and the run still printed "[ok] ... resynced 6 upcoming
+    occurrence(s)" then "Done -- all checks pass now" -- because the
+    marker check above only ever asks "did an attempt happen for the
+    current format version", never "did every occurrence in that attempt
+    actually succeed". "-- 13. Calendar invite format -- says 'OK' but
+    if you look at the output... I am NOT so sure!"
+
+    This is that second question, as its own re-checkable Check: reads
+    app.calendar_sync.CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME (written
+    by resync_if_format_changed()/record_resync_skips() after every real
+    resync attempt, automatic or manual via `my-bt admin resync-
+    calendar`) -- no network call, so this is exactly as safe to run from
+    plain `admin health` as check_calendar_invite_format() above. A
+    missing/empty marker means the last attempt (if any) was fully
+    clean -- `warn` (not `fail`): a stuck occurrence needs a human to
+    look at the CalDAV server, not something this tool can force-fix by
+    retrying harder, but it's still a real, actionable gap, same
+    reasoning as every other warn-that-exits-1 check here."""
+    from . import calendar_sync as app_calendar_sync
+
+    marker_path = Path(data_dir) / app_calendar_sync.CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
+    try:
+        lines = [ln for ln in marker_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        lines = []
+    if not lines:
+        return [("calendar invite resync", "ok", "no unresolved conflicts from the last resync attempt")]
+    return [(
+        "calendar invite resync", "warn",
+        f"{len(lines)} occurrence(s) failed to resync on the last attempt (persistent CalDAV "
+        "conflict) -- run `my-bt admin resync-calendar` to retry: " + "; ".join(lines),
+    )]
+
+
 def check_systemd() -> list[Check]:
     if not shutil.which("systemctl"):
         return [("systemd", "warn", "systemctl not found -- skipping (not on the target server?)")]

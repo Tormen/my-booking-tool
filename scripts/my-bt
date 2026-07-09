@@ -671,8 +671,21 @@ def cmd_admin_resync_calendar(args) -> None:
     settings = app_config.load_settings(args.settings)
     caldav = app_cancel_flow.build_caldav_client(settings)
     href = app_cancel_flow.calendar_href(caldav, settings)
-    fixed = app_calendar_sync.resync_all_future_calendar_events(caldav, href, _store(args), settings, today=date.today())
-    print(f"{fixed} upcoming occurrence(s) re-synced")
+    result = app_calendar_sync.resync_all_future_calendar_events(
+        caldav, href, _store(args), settings, today=date.today(),
+    )
+    app_calendar_sync.record_resync_skips(args.data_dir, result)
+    print(f"{result.fixed} upcoming occurrence(s) re-synced")
+    if result.skipped:
+        # 2026-07-15/16, the operator, from a real run where this went unnoticed
+        # entirely: a persistent CalDAV conflict must be loud here, not
+        # just a WARNING line in the log -- and this command must exit
+        # nonzero so a script/cron wrapper actually notices too, same
+        # "any warning -> exit 1" policy as `admin setup`/`admin health`.
+        print(f"{len(result.skipped)} occurrence(s) FAILED to resync (persistent CalDAV conflict):")
+        for line in result.skipped:
+            print(f"  - {line}")
+        sys.exit(1)
 
 
 def _cmd_cancel_occurrence(args, settings, store) -> None:
@@ -1348,6 +1361,17 @@ def cmd_admin_health(args) -> None:
     # configured yet.
     if raw:
         checks.extend(cli_checks.check_calendar_invite_format(raw, data_dir))
+
+    # 2026-07-15/16, the operator, from a real production run: 3 occurrences hit
+    # persistent CalDAV conflicts during a resync, got skipped, and NEITHER
+    # of the checks above caught it -- check_calendar_invite_format() only
+    # asks "did an attempt happen for the current format version", never
+    # "did every occurrence in that attempt actually succeed". Marker-file
+    # read only (no network call), same as check_calendar_invite_format
+    # just above -- always safe to run, not gated behind `if raw:` either,
+    # though in practice the marker only ever exists after a real resync
+    # attempt ran.
+    checks.extend(cli_checks.check_calendar_invite_resync_skips(data_dir))
 
     # -- maintenance mode ---------------------------------------------------------
     # 2026-07-11, the operator: "maintenance happens enough often that it is

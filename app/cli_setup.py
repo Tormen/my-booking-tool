@@ -157,6 +157,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "directory_fsync_support": cli_checks.check_directory_fsync_support(data_dir),
         "maintenance": cli_checks.check_maintenance_mode(data_dir),
         "calendar_invite_format": cli_checks.check_calendar_invite_format(raw, data_dir),
+        "calendar_invite_resync_skips": cli_checks.check_calendar_invite_resync_skips(data_dir),
     }
 
 
@@ -279,6 +280,7 @@ def print_report(
         show(calendar_format_checks)
     else:
         print_fn("   [SKIP] caldav_url/username/password not fully configured yet -- not checked")
+    show(report["calendar_invite_resync_skips"])
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 
@@ -898,11 +900,31 @@ def interactive_setup(
             caldav = app_cancel_flow.build_caldav_client(settings)
             href = app_cancel_flow.calendar_href(caldav, settings)
             store = Store(data_dir)
-            fixed = app_calendar_sync.resync_if_format_changed(caldav, href, store, settings, data_dir)
-            if fixed is None:
+            result = app_calendar_sync.resync_if_format_changed(caldav, href, store, settings, data_dir)
+            if result is None:
                 print_fn("[ok] calendar invite format unchanged since the last resync -- nothing to do")
+            elif result.skipped:
+                # 2026-07-15/16, the operator, from a real run that hit exactly
+                # this: "-- 13. Calendar invite format -- says 'OK' but
+                # if you look at the output... I am NOT so sure!" --
+                # `fixed` alone (the old message here) hid the fact that
+                # some occurrences were SKIPPED after a persistent CalDAV
+                # conflict -- this must never print [ok] when that
+                # happened, even though the marker itself still gets
+                # written (see resync_if_format_changed's own docstring
+                # for why). record_resync_skips() (already called inside
+                # resync_if_format_changed) is what makes this visible
+                # again later too, in `admin health`/`admin setup` --
+                # see cli_checks.check_calendar_invite_resync_skips.
+                print_fn(
+                    f"[warn] calendar invite format changed -- resynced {result.fixed} upcoming "
+                    f"occurrence(s), but {len(result.skipped)} FAILED (persistent CalDAV conflict):"
+                )
+                for line in result.skipped:
+                    print_fn(f"       - {line}")
+                print_fn("       run `my-bt admin resync-calendar` to retry these")
             else:
-                print_fn(f"[ok] calendar invite format changed -- resynced {fixed} upcoming occurrence(s)")
+                print_fn(f"[ok] calendar invite format changed -- resynced {result.fixed} upcoming occurrence(s)")
         except Exception as exc:  # noqa: BLE001 -- config/network/CalDAV failure, report don't crash
             print_fn(f"[warn] couldn't check/resync calendar invite format: {exc}")
 

@@ -1664,5 +1664,49 @@ class CheckCalendarInviteFormatTest(unittest.TestCase):
         self.assertEqual(level, "ok")
 
 
+class CheckCalendarInviteResyncSkipsTest(unittest.TestCase):
+    """2026-07-15/16, the operator, from a real production run: 3 occurrences hit
+    persistent CalDAV conflicts during a resync, got skipped, and the run
+    still printed "[ok] ... resynced 6 upcoming occurrence(s)" then "Done
+    -- all checks pass now" -- because check_calendar_invite_format()
+    above only ever asks "did an attempt happen", never "did every
+    occurrence in that attempt actually succeed". "-- 13. Calendar
+    invite format -- says 'OK' but if you look at the output... I am NOT
+    so sure!" This is that second question, no network call, always safe
+    to check -- no gating on CalDAV being configured at all, unlike
+    check_calendar_invite_format above (the marker only ever exists after
+    a real resync ran, so there's nothing to gate)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = Path(self._tmp.name)
+
+    def test_no_marker_at_all_is_ok(self):
+        checks = cli_checks.check_calendar_invite_resync_skips(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(label, "calendar invite resync")
+        self.assertEqual(level, "ok")
+
+    def test_empty_marker_is_ok(self):
+        (self.data_dir / ".calendar_invite_resync_skipped").write_text("", encoding="utf-8")
+        checks = cli_checks.check_calendar_invite_resync_skips(self.data_dir)
+        self.assertEqual(checks[0][1], "ok")
+
+    def test_marker_with_entries_is_a_warn_naming_the_count_and_occurrences(self):
+        (self.data_dir / ".calendar_invite_resync_skipped").write_text(
+            "yoga-class-1 on 2026-07-10: HTTP 412\nyoga-class-2 on 2026-07-11: HTTP 412\n",
+            encoding="utf-8",
+        )
+        checks = cli_checks.check_calendar_invite_resync_skips(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("2 occurrence(s)", detail)
+        self.assertIn("yoga-class-1 on 2026-07-10", detail)
+        self.assertIn("resync-calendar", detail)
+
+
 if __name__ == "__main__":
     unittest.main()

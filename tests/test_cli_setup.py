@@ -1030,9 +1030,30 @@ erasure_pepper_file = "{secrets / 'erasure_pepper'}"
         self.assertEqual(prompt.asked_matching("resync"), [])
 
     def test_format_changed_reports_the_resync_count(self):
-        lines, _prompt, _mock = self._run(return_value=3)
+        from app.calendar_sync import ResyncResult
+
+        lines, _prompt, _mock = self._run(return_value=ResyncResult(fixed=3))
         text = "\n".join(lines)
         self.assertIn("resynced 3 upcoming occurrence(s)", text)
+
+    def test_format_changed_with_skips_warns_and_names_them(self):
+        # 2026-07-15/16, the operator, from a real production run: 3 occurrences
+        # hit persistent CalDAV conflicts and got skipped, yet this step
+        # printed "[ok] ... resynced 6 upcoming occurrence(s)" with no
+        # hint anything had failed. "-- 13. Calendar invite format --
+        # says 'OK' but if you look at the output... I am NOT so sure!"
+        from app.calendar_sync import ResyncResult
+
+        lines, _prompt, _mock = self._run(
+            return_value=ResyncResult(fixed=6, skipped=["lux-fri-yoga on 2026-07-10: HTTP 412"]),
+        )
+        text = "\n".join(lines)
+        self.assertIn("[warn]", text)
+        self.assertIn("resynced 6", text)
+        self.assertIn("1 FAILED", text)
+        self.assertIn("lux-fri-yoga on 2026-07-10", text)
+        self.assertIn("resync-calendar", text)
+        self.assertNotIn("[ok] calendar invite format changed", text)
 
     def test_caldav_failure_is_a_warning_not_a_crash(self):
         lines, _prompt, _mock = self._run(side_effect=RuntimeError("PROPFIND -> HTTP 401"))

@@ -12,12 +12,15 @@ production one) must never recognize each other's events as "our own".
 from __future__ import annotations
 
 import logging
+import time
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
-from .atomic_io import atomic_write_text
+from .atomic_io import atomic_write_text, fsync_dir
 from .caldav_client import CalDAVClient, CalDAVConflictError, CalDAVError
 from .cancellation import html_to_text
 from .config import Course, Settings
@@ -38,8 +41,29 @@ log = logging.getLogger("my_booking.calendar_sync")
 # retry a few seconds later succeeded on its own in that incident, i.e.
 # genuinely transient, so this many attempts (re-reading a fresh ETag each
 # time) is cheap insurance against exactly that, not a sign of a deeper
-# problem if it occasionally takes 2.
+# problem if it occasionally takes 2. Zero delay between attempts here --
+# this is the path a live guest booking/cancellation request takes, so it
+# should fail fast rather than make a browser hang for several extra
+# seconds; see _BULK_RESYNC_* just below for the background-job variant.
 _SYNC_CONFLICT_MAX_ATTEMPTS = 3
+
+# 2026-07-16, the operator ("Please make the calendar sync work :)"), after a
+# real bulk resync (`setup -i` step 13) hit persistent conflicts on 3
+# DIFFERENT occurrences in the same run, each failing all
+# _SYNC_CONFLICT_MAX_ATTEMPTS retries within under a second (three
+# distinct, unrelated course+date combinations all conflicting at once
+# is far more consistent with real, ONGOING concurrent guest activity on
+# the live site during the resync than three independent coincidences --
+# my-booking.service was mid-upgrade/just-restarted and actively serving
+# real traffic the whole time this ran). Zero-delay retries have no real
+# chance against a writer that's still mid-flight; a background
+# maintenance job (this bulk resync, or `my-bt admin resync-calendar`
+# run by hand) isn't part of anyone's HTTP response, so it can afford to
+# wait a bit and try harder than a live request should. More attempts,
+# with real (increasing) backoff between them -- see
+# resync_all_future_calendar_events()'s own use of these below.
+_BULK_RESYNC_MAX_ATTEMPTS = 6
+_BULK_RESYNC_RETRY_DELAY_SECONDS = 1.0
 
 # 2026-07-09, the operator, the standing rule (see SOLUTION-DESIGN.md section 24):
 # "If we change anything with the CALENDAR INVITE(s) (host and/or
@@ -67,6 +91,54 @@ CALENDAR_INVITE_FORMAT_VERSION = 1
 # docstring on the 2026-07-15 incident -- doesn't just vanish, unreported,
 # into a raw print_fn() line that nothing else re-checks).
 CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME = ".calendar_invite_format_version"
+
+# 2026-07-15/16, the operator, on a real production `setup -i` run: 3 occurrences
+# hit persistent CalDAV conflicts (stale ETag, still conflicting after
+# every retry) during a resync, got skipped (see resync_all_future_
+# calendar_events()'s own 2026-07-15 docstring update), and the run still
+# printed "[ok] calendar invite format changed -- resynced 6 upcoming
+# occurrence(s)" and finished with "Done -- all checks pass now" --
+# because that message only ever reported the SUCCESS count, never
+# whether anything was skipped. "-- 13. Calendar invite format -- says
+# 'OK' but if you look at the output... I am NOT so sure!" This marker
+# records exactly which occurrences (if any) were skipped on the LAST
+# resync attempt, so app.cli_checks.check_calendar_invite_resync_skips()
+# can keep flagging it in every later `admin health`/`admin setup` run
+# too -- not just the one run where it happened, which is easy to miss
+# in a long interactive walkthrough's scrollback.
+CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME = ".calendar_invite_resync_skipped"
+
+
+@dataclass
+class ResyncResult:
+    """Return type for resync_all_future_calendar_events()/resync_if_
+    format_changed() -- `fixed` alone (the old plain-int return value)
+    silently lost exactly the information the operator needed: whether
+    EVERYTHING resynced cleanly, or some occurrences were skipped after
+    a persistent CalDAV conflict. `skipped` is one human-readable line
+    per skipped occurrence (course + date + the error that caused it),
+    matching what's already logged via log.warning() below -- empty
+    means a fully clean run."""
+    fixed: int
+    skipped: list[str] = field(default_factory=list)
+
+
+def record_resync_skips(data_dir: str | Path, result: ResyncResult) -> None:
+    """Persists `result.skipped` (if any) to CALENDAR_INVITE_RESYNC_
+    SKIPPED_MARKER_NAME under `data_dir`, or removes that marker if the
+    run was fully clean -- so a LATER `my-bt admin health`/`admin setup`
+    (deliberately network-free, never re-runs the actual resync) can
+    still see "the last resync attempt left N occurrence(s) unresolved"
+    long after the run that discovered it. Called by both
+    resync_if_format_changed() (the automatic path) and `my-bt admin
+    resync-calendar` (the manual one) -- either is a real "attempt", so
+    either should update this record."""
+    marker_path = Path(data_dir) / CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
+    if result.skipped:
+        atomic_write_text(marker_path, "\n".join(result.skipped) + "\n")
+    elif marker_path.exists():
+        marker_path.unlink()
+        fsync_dir(marker_path.parent)
 
 
 def _self_or_guest(r: Registration, users_by_id: dict[str, User]) -> str:
@@ -127,8 +199,23 @@ def sync_occurrence(
     settings: Settings,
     course: Course,
     occurrence_date: date,
+    *,
+    max_attempts: int = _SYNC_CONFLICT_MAX_ATTEMPTS,
+    retry_delay_seconds: float = 0.0,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> None:
     """Call this after every registration/cancellation for the occurrence.
+
+    `max_attempts`/`retry_delay_seconds` (2026-07-16, the operator: "Please make
+    the calendar sync work :)", after a real bulk resync hit persistent
+    conflicts -- see _BULK_RESYNC_MAX_ATTEMPTS's own docstring just above
+    for the incident): every EXISTING caller (a live booking/cancellation
+    request) keeps the old behavior by not passing these -- 3 attempts,
+    zero delay, fail fast rather than hang a guest's browser. The bulk
+    resync below passes more attempts and a real backoff between them,
+    since it's a background job, not part of anyone's HTTP response.
+    `sleep_fn` is injectable so tests can assert on the actual backoff
+    durations without a real test run waiting through them.
 
     The invite lists THREE groups: active (confirmed), waiting
     (waitlisted), and canceled (STATUS_CANCELED_BY_GUEST or
@@ -177,17 +264,19 @@ def sync_occurrence(
         # fully-waitlisted occurrence (0 confirmed) has no calendar entry
         # at all until/unless someone gets promoted into a confirmed spot.
         if etag is not None:
-            for attempt in range(1, _SYNC_CONFLICT_MAX_ATTEMPTS + 1):
+            for attempt in range(1, max_attempts + 1):
                 try:
                     client.delete_event(calendar_href, uid, etag)
                     break
                 except CalDAVConflictError:
-                    if attempt == _SYNC_CONFLICT_MAX_ATTEMPTS:
+                    if attempt == max_attempts:
                         raise
                     log.warning(
                         "stale ETag deleting calendar event %s (attempt %d/%d) -- retrying with a fresh one",
-                        uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS,
+                        uid, attempt, max_attempts,
                     )
+                    if retry_delay_seconds:
+                        sleep_fn(retry_delay_seconds * attempt)
                     etag = current_etag()
                     if etag is None:
                         break  # someone else's concurrent change already removed it -- nothing left to do
@@ -277,17 +366,19 @@ def sync_occurrence(
         organizer=settings.caldav_username if course.host_calendar_entry_cc_list else None,
         attendees=course.host_calendar_entry_cc_list,
     )
-    for attempt in range(1, _SYNC_CONFLICT_MAX_ATTEMPTS + 1):
+    for attempt in range(1, max_attempts + 1):
         try:
             client.put_event(calendar_href, uid, event.to_ics(), etag=etag)
             return
         except CalDAVConflictError:
-            if attempt == _SYNC_CONFLICT_MAX_ATTEMPTS:
+            if attempt == max_attempts:
                 raise
             log.warning(
                 "stale ETag updating calendar event %s (attempt %d/%d) -- retrying with a fresh one",
-                uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS,
+                uid, attempt, max_attempts,
             )
+            if retry_delay_seconds:
+                sleep_fn(retry_delay_seconds * attempt)
             etag = current_etag()
 
 
@@ -366,7 +457,9 @@ def resync_all_future_calendar_events(
     store: Store,
     settings: Settings,
     today: date | None = None,
-) -> int:
+    *,
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> ResyncResult:
     """Re-syncs every course's future occurrence that currently has a live
     calendar entry (>=1 CONFIRMED registration -- see sync_occurrence's own
     "0 confirmed = no event at all" rule), recomputing each one's
@@ -418,16 +511,33 @@ def resync_all_future_calendar_events(
     the same way -- forever, since nothing here ever un-sticks a
     genuinely persistent conflict). One occurrence's failure now only
     skips THAT occurrence (logged as a warning) -- every other occurrence
-    still gets its fresh resync, and the count returned only reflects
-    genuine successes.
+    still gets its fresh resync.
 
-    Returns how many occurrences were successfully re-synced (excludes
-    any skipped after a persistent CalDAV failure -- see the log for
-    which, if any)."""
+    2026-07-15/16, the operator, on a real production run where exactly this
+    happened to 3 occurrences: the plain-int return value this used to
+    have made the skip itself invisible to every caller -- `setup -i`
+    printed "[ok] ... resynced 6 upcoming occurrence(s)" with no hint 3
+    others were skipped, and "Done -- all checks pass now" right below
+    it. "-- 13. Calendar invite format -- says 'OK' but if you look at
+    the output... I am NOT so sure!" Returns a ResyncResult now instead:
+    `fixed` is still the success count, but `skipped` (one line per
+    skipped occurrence) is what actually gets checked/reported from here
+    on -- see record_resync_skips() and app.cli_checks.
+    check_calendar_invite_resync_skips().
+
+    2026-07-16, the operator ("Please make the calendar sync work :)"): each
+    occurrence is now given _BULK_RESYNC_MAX_ATTEMPTS attempts with real
+    backoff between them (see that constant's own docstring), not
+    sync_occurrence()'s default zero-delay/3-attempt behavior meant for a
+    live guest request -- this is a background job, so it can afford to
+    wait out a concurrent writer instead of racing it. `sleep_fn` is
+    injectable (threaded down to sync_occurrence()) so tests don't
+    actually wait through the backoff."""
     today = today or date.today()
     today_iso = today.isoformat()
     rows = store.read_registrations(scope="live")
     fixed = 0
+    skipped: list[str] = []
     for course in settings.courses:
         dates = sorted({
             r["occurrence_date"] for r in rows
@@ -437,15 +547,21 @@ def resync_all_future_calendar_events(
         })
         for d_iso in dates:
             try:
-                sync_occurrence(client, calendar_href, store, settings, course, date.fromisoformat(d_iso))
+                sync_occurrence(
+                    client, calendar_href, store, settings, course, date.fromisoformat(d_iso),
+                    max_attempts=_BULK_RESYNC_MAX_ATTEMPTS,
+                    retry_delay_seconds=_BULK_RESYNC_RETRY_DELAY_SECONDS,
+                    sleep_fn=sleep_fn,
+                )
             except CalDAVError as exc:
                 log.warning(
                     "resync: couldn't re-sync %s on %s -- skipping it, not the rest of the batch: %s",
                     course.shortname, d_iso, exc,
                 )
+                skipped.append(f"{course.shortname} on {d_iso}: {exc}")
                 continue
             fixed += 1
-    return fixed
+    return ResyncResult(fixed=fixed, skipped=skipped)
 
 
 def resync_if_format_changed(
@@ -457,14 +573,16 @@ def resync_if_format_changed(
     *,
     today: date | None = None,
     format_version: int = CALENDAR_INVITE_FORMAT_VERSION,
-) -> int | None:
+    sleep_fn: Callable[[float], None] = time.sleep,
+) -> ResyncResult | None:
     """Runs resync_all_future_calendar_events() automatically, but only if
     `format_version` (CALENDAR_INVITE_FORMAT_VERSION by default) doesn't
     match what's recorded in a small marker file under `data_dir` -- see
     that constant's own docstring for the full "on install" story. Returns
-    the resync count (same as resync_all_future_calendar_events(), so 0 is
-    a valid "ran, nothing to do" result) if it ran, or None if the format
-    hasn't changed since the last run (nothing to do, marker left alone).
+    the ResyncResult (same as resync_all_future_calendar_events(), so a
+    fixed=0 result is a valid "ran, nothing to do" outcome) if it ran, or
+    None if the format hasn't changed since the last run (nothing to do,
+    marker left alone).
 
     Writes the new version to the marker only AFTER resync_all_future_
     calendar_events() RETURNS -- if it raises (a hard failure before/
@@ -480,6 +598,12 @@ def resync_if_format_changed(
     fix, which meant the marker could never be written and every future
     `setup -i` run failed on the same occurrence, forever.
 
+    Also calls record_resync_skips() -- see its own docstring -- so a
+    skip discovered HERE stays visible in every later `admin health`/
+    `admin setup` run too, not just this one's own printed output
+    (2026-07-15/16: the previous version of this function returned a
+    plain int, which silently dropped exactly that information).
+
     A missing marker (fresh install, or a data dir that predates this
     feature) is treated as "definitely stale" -- always resyncs once (a
     no-op scan if there's nothing booked yet) and writes the marker, so
@@ -491,13 +615,14 @@ def resync_if_format_changed(
         recorded = None
     if recorded == str(format_version):
         return None
-    fixed = resync_all_future_calendar_events(client, calendar_href, store, settings, today=today)
+    result = resync_all_future_calendar_events(client, calendar_href, store, settings, today=today, sleep_fn=sleep_fn)
     # 2026-07-15: atomic_write_text (temp file + fsync + rename + dir
     # fsync), not a bare write_text() -- a torn write here on a hard
     # crash would leave a marker that's neither the old nor the new
     # version, misreporting drift either way. See app/atomic_io.py.
     atomic_write_text(marker_path, f"{format_version}\n")
-    return fixed
+    record_resync_skips(data_dir, result)
+    return result
 
 
 # -- Emailed guest invite/cancel attachments (2026-07-09, the operator: "Can you
