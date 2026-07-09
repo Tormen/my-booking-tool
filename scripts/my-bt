@@ -1286,6 +1286,7 @@ def cmd_admin_health(args) -> None:
         checks.append((f"data dir ({data_dir})", "ok", "exists and writable"))
     checks.extend(cli_checks.check_data_dir_git(data_dir))
     checks.extend(cli_checks.check_data_dir_ownership(data_dir))
+    checks.extend(cli_checks.check_directory_fsync_support(data_dir))
 
     # -- configured log file, if any ---------------------------------------------
     log_file = app_config.peek_log_file(args.settings) if raw else None

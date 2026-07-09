@@ -13,7 +13,44 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from app.atomic_io import atomic_write_text, fsync_dir
+from app.atomic_io import atomic_write_text, fsync_dir, probe_dir_fsync_support
+
+
+class ProbeDirFsyncSupportTest(unittest.TestCase):
+    """2026-07-15, the operator, on fsync_dir()'s own best-effort/never-raises
+    design: "that's the correct call for availability ... but it's also
+    the kind of failure that's invisible until the one time it matters
+    ... worth a one-time capability probe at startup". probe_dir_fsync_
+    support() is that probe -- same underlying operation as fsync_dir(),
+    but meant to be called once and reacted to loudly on a False result
+    (see app.cli_checks.check_directory_fsync_support and
+    app.serve.main's startup check), not silently logged and moved past."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir_path = Path(self._tmp.name)
+
+    def test_true_when_fsync_actually_works(self):
+        self.assertTrue(probe_dir_fsync_support(self.dir_path))
+
+    def test_false_when_directory_is_missing(self):
+        self.assertFalse(probe_dir_fsync_support(self.dir_path / "does-not-exist"))
+
+    def test_false_when_fsync_itself_fails(self):
+        # e.g. the ENOTSUP/EINVAL an unusual mount (some network
+        # filesystems, certain container overlay setups) could raise --
+        # this is exactly the silent-degradation scenario the probe
+        # exists to catch instead of just logging a WARNING nobody reads.
+        with mock.patch("app.atomic_io.os.fsync", side_effect=OSError("Operation not supported")):
+            self.assertFalse(probe_dir_fsync_support(self.dir_path))
+
+    def test_never_raises_even_on_failure(self):
+        with mock.patch("app.atomic_io.os.fsync", side_effect=OSError("nope")):
+            try:
+                probe_dir_fsync_support(self.dir_path)
+            except Exception as exc:
+                self.fail(f"probe_dir_fsync_support must not raise, raised {exc!r}")
 
 
 class FsyncDirTest(unittest.TestCase):
@@ -64,16 +101,24 @@ class FsyncDirTest(unittest.TestCase):
     def test_missing_directory_is_best_effort_not_a_crash(self):
         missing = self.dir_path / "does-not-exist"
         try:
-            fsync_dir(missing)
+            result = fsync_dir(missing)
         except Exception as exc:
             self.fail(f"fsync_dir must swallow a missing directory, raised {exc!r}")
+        self.assertFalse(result)
 
     def test_fsync_failure_is_best_effort_not_a_crash(self):
         with mock.patch("app.atomic_io.os.fsync", side_effect=OSError("nope")):
             try:
-                fsync_dir(self.dir_path)
+                result = fsync_dir(self.dir_path)
             except Exception as exc:
                 self.fail(f"fsync_dir must swallow an os.fsync OSError, raised {exc!r}")
+        self.assertFalse(result)
+
+    def test_success_returns_true(self):
+        # 2026-07-15: the return value is what probe_dir_fsync_support()
+        # (below) is built on -- a silent None here would make that
+        # capability probe meaningless.
+        self.assertTrue(fsync_dir(self.dir_path))
 
 
 class AtomicWriteTextTest(unittest.TestCase):

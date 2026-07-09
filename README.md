@@ -264,6 +264,34 @@ transactions:
   erasure, since the archive-append steps skip rows already present and
   the final live-removal is unconditional either way.
 
+**Directory fsync support is a one-time capability probe, not just a
+routine log line.** `fsync_dir()` is deliberately best-effort on every
+individual write -- an unsupported mount must never turn a successful
+write into a crash, so a failure there is only ever a quiet WARNING.
+2026-07-15, the operator, reviewing that: "that's the correct call for
+availability ... but it's also the kind of failure that's invisible
+until the one time it matters -- if the actual production mount
+silently doesn't support directory fsync, every write since deploy has
+been getting the weaker guarantee with nobody the wiser. Worth a
+one-time capability probe at startup ... log loudly ... rather than
+relying on someone noticing a warning line in a log nobody tails."
+Two places react loudly to `app.atomic_io.probe_dir_fsync_support()`
+instead:
+
+- **At process startup** -- `app/serve.py`'s
+  `check_directory_fsync_support_at_startup()` runs the probe once when
+  `my-booking.service` starts, logs at ERROR (not the routine WARNING)
+  if it fails, and best-effort emails `admin_email` (reusing the same
+  mechanism `app/watchdog.py` already uses, not bolted onto watchdog's
+  own 15-minute timer -- that would re-alert on a persistent condition
+  every single run instead of once per restart). A failed alert EMAIL
+  itself is swallowed (logged as a warning) so an unreachable SMTP
+  server at boot can never block the app from actually starting.
+- **Any time via `my-bt admin setup`/`admin health`** --
+  `app.cli_checks.check_directory_fsync_support`, participating in the
+  same fails/warns/repeated-summary/exit-1 policy as every other check
+  there, so it's re-checkable on demand, not just once at boot.
+
 None of this protects against disk-level corruption (bad sectors, a
 failing drive) or a crash during the retention/erasure/git-snapshot
 *commit* step itself (`_git_commit_data_file` is a best-effort safety
@@ -651,6 +679,9 @@ something seems off, or after any install/reinstall (this is what plain
 - Whether the data directory (`--data-dir`) is already protected by its
   own, separate git repository (see "Data dir git snapshot" below) --
   `admin setup -i` offers to initialize one.
+- Whether the data directory actually supports directory fsync (see
+  "Data durability" above) -- a marker-file/local-fd probe, no network
+  call, same reasoning as the calendar-invite-format check below.
 
 Each line is `[OK]`/`[WARN]`/`[FAIL]` with a one-line fix where relevant;
 **exits non-zero if anything is `[WARN]` or `[FAIL]`** (2026-07-10 --

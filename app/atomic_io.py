@@ -64,7 +64,7 @@ def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> N
         raise
 
 
-def fsync_dir(dir_path: str | Path) -> None:
+def fsync_dir(dir_path: str | Path) -> bool:
     """fsync a directory's own inode, e.g. right after an os.replace()
     into it. fsyncing the temp file (above) only guarantees the new
     CONTENT is durable -- on Linux, the rename() itself isn't guaranteed
@@ -79,15 +79,49 @@ def fsync_dir(dir_path: str | Path) -> None:
     directory fd can be opened read-only on every real POSIX filesystem
     this app targets, but this must never turn a successful write into a
     hard failure just because fsync-the-directory isn't supported on
-    some unusual mount (e.g. certain network filesystems)."""
+    some unusual mount (e.g. certain network filesystems) -- every
+    per-write call site here IGNORES the return value for exactly that
+    reason. Returns True/False (fsync actually succeeded or not) so it
+    can ALSO serve as the basis of a one-time startup capability probe --
+    see probe_dir_fsync_support() below, which is the one place this
+    return value is meant to be looked at."""
     try:
         dir_fd = os.open(str(dir_path), os.O_RDONLY)
     except OSError as exc:
         log.warning("could not open %s to fsync it after a write: %s", dir_path, exc)
-        return
+        return False
     try:
         os.fsync(dir_fd)
     except OSError as exc:
         log.warning("could not fsync directory %s after a write: %s", dir_path, exc)
+        return False
     finally:
         os.close(dir_fd)
+    return True
+
+
+def probe_dir_fsync_support(dir_path: str | Path) -> bool:
+    """One-time capability probe, meant to be called ONCE (at process
+    startup, or from a `my-bt admin setup`/`admin health` check) rather
+    than trusted to a routine per-write log line.
+
+    2026-07-15, the operator, reviewing fsync_dir()'s best-effort/never-raises
+    design: "that's the correct call for availability ... but it's also
+    the kind of failure that's invisible until the one time it matters
+    -- if the actual production mount silently doesn't support directory
+    fsync, every write since deploy has been getting the weaker
+    guarantee with nobody the wiser. Worth a one-time capability probe
+    at startup ... log loudly ... rather than relying on someone
+    noticing a warning line in a log nobody tails."
+
+    Same underlying operation as fsync_dir() (open the directory
+    read-only, fsync it, close it) -- the difference is entirely in what
+    CALLERS do with a False result: fsync_dir()'s own per-write callers
+    ignore it and move on (an unsupported mount must never turn a
+    successful write into a crash); this function's callers are expected
+    to react loudly -- see app.cli_checks.check_directory_fsync_support
+    (surfaced through `my-bt admin setup`/`admin health`, with the operator's
+    own standing "any warning -> exit 1" policy) and app.serve.main's
+    startup check (logs at ERROR level and emails admin_email once per
+    service start, not just a routine WARNING)."""
+    return fsync_dir(dir_path)

@@ -154,6 +154,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "watchdog_nginx_access": cli_checks.check_watchdog_nginx_access(raw),
         "data_dir_git": cli_checks.check_data_dir_git(data_dir),
         "data_dir_ownership": cli_checks.check_data_dir_ownership(data_dir),
+        "directory_fsync_support": cli_checks.check_directory_fsync_support(data_dir),
         "maintenance": cli_checks.check_maintenance_mode(data_dir),
         "calendar_invite_format": cli_checks.check_calendar_invite_format(raw, data_dir),
     }
@@ -267,6 +268,7 @@ def print_report(
     print_fn("\n11. Data dir git snapshot (hourly auto-commit safety net) and file ownership:")
     show(report["data_dir_git"])
     show(report["data_dir_ownership"])
+    show(report["directory_fsync_support"])
 
     print_fn("\n12. Maintenance mode (`my-bt admin site-maintenance on/off/status`):")
     show(report["maintenance"])
@@ -843,6 +845,18 @@ def interactive_setup(
             mismatched = sorted(Path(data_dir).glob("*.csv"))
             run(["chown", "my-booking:my-booking", *[str(p) for p in mismatched]])
             print_fn("[ok] ownership fixed")
+
+    # 11c. Directory fsync support -- informational only, same reasoning
+    # as maintenance mode/CalDAV below: there's nothing `my-bt` can fix
+    # here (an unsupported mount is an OS/infrastructure fact, not a
+    # misconfiguration this tool caused or can chown/edit its way out
+    # of), just surfacing it clearly instead of leaving it to a routine
+    # WARNING line in the app's own log that nobody tails (2026-07-15,
+    # the operator -- see cli_checks.check_directory_fsync_support's own
+    # docstring for the exact quote).
+    print_fn("\n-- 11c. Directory fsync support --")
+    for label, level, detail in cli_checks.check_directory_fsync_support(data_dir):
+        print_fn(f"[{level}] {label}: {detail}")
 
     # 12. Maintenance mode -- informational only, same reasoning as CalDAV
     # above: there's no safe "fix" to offer here (it's a deliberate toggle,

@@ -133,6 +133,42 @@ def check_data_dir_git(data_dir: str | Path) -> list[Check]:
     return [(f"data dir git snapshot ({data_dir})", "ok", "git repo present -- hourly snapshot timer keeps it committed")]
 
 
+def check_directory_fsync_support(data_dir: str | Path) -> list[Check]:
+    """Whether `data_dir` actually supports directory fsync -- the thing
+    `app.atomic_io.fsync_dir()` relies on, after every write's temp-file
+    rename, to make the rename itself durable across a hard power loss
+    (see that module's own docstring). fsync_dir() is deliberately
+    best-effort on every individual write (an unsupported mount must
+    never turn a successful write into a crash), which means a silently
+    unsupported mount would otherwise never surface anywhere except a
+    routine WARNING line in the app's own log.
+
+    2026-07-15, the operator, on exactly that: "that's the correct call for
+    availability ... but it's also the kind of failure that's invisible
+    until the one time it matters -- if the actual production mount
+    silently doesn't support directory fsync, every write since deploy
+    has been getting the weaker guarantee with nobody the wiser. Worth a
+    one-time capability probe ... rather than relying on someone
+    noticing a warning line in a log nobody tails." This is that probe,
+    wired into `my-bt admin setup`/`admin health` so it's re-checked on
+    every real run of either -- not just once at process startup (see
+    app/serve.py's own startup check for that half)."""
+    data_dir = Path(data_dir)
+    if not data_dir.exists():
+        return [(f"directory fsync support ({data_dir})", "warn",
+                  "data dir doesn't exist yet -- created on first booking/run, not checked")]
+    from .atomic_io import probe_dir_fsync_support
+
+    if probe_dir_fsync_support(data_dir):
+        return [(f"directory fsync support ({data_dir})", "ok",
+                  "directory fsync works -- atomic writes get their full crash-safety guarantee")]
+    return [(
+        f"directory fsync support ({data_dir})", "warn",
+        "directory fsync is NOT supported on this mount -- every atomic write here still can't be "
+        "torn/partial, but a rename can silently roll back on a hard power loss (see app/atomic_io.py)",
+    )]
+
+
 def check_data_dir_ownership(data_dir: str | Path) -> list[Check]:
     """Whether every `*.csv` directly in `data_dir` is actually owned by
     the `my-booking` system user -- the one every systemd unit

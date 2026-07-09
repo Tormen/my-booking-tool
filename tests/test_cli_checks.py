@@ -1376,6 +1376,45 @@ class CheckDataDirGitTest(unittest.TestCase):
         self.assertEqual(checks[0][1], "ok")
 
 
+class CheckDirectoryFsyncSupportTest(unittest.TestCase):
+    """2026-07-15, the operator, on fsync_dir()'s best-effort/never-raises
+    design: "worth a one-time capability probe ... rather than relying
+    on someone noticing a warning line in a log nobody tails." This is
+    the re-checkable-any-time half of that (see app.serve's startup
+    check for the other half) -- surfaced through `my-bt admin setup`/
+    `admin health` so a stale/unsupported mount keeps showing up, with
+    the operator's own standing "any warning -> exit 1" policy applying to it
+    same as every other check here."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = Path(self._tmp.name)
+
+    def test_missing_data_dir_is_a_warn_not_a_crash(self):
+        missing = self.data_dir / "not-created-yet"
+        checks = cli_checks.check_directory_fsync_support(missing)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("doesn't exist yet", detail)
+
+    def test_supported_is_ok(self):
+        checks = cli_checks.check_directory_fsync_support(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "ok")
+        self.assertIn("fsync works", detail)
+
+    def test_unsupported_is_a_warn(self):
+        with patch("app.atomic_io.probe_dir_fsync_support", return_value=False):
+            checks = cli_checks.check_directory_fsync_support(self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("NOT supported", detail)
+
+
 class CheckDataDirOwnershipTest(unittest.TestCase):
     """2026-07-08 incident: scripts/migrate-simplymeet-history.py --commit
     run from a root shell left users.csv/registrations.csv root-owned +
