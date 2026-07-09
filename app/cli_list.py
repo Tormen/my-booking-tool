@@ -1,7 +1,7 @@
 """Logic behind `my-bt list`'s --upcoming/--past filtering, party-info
 annotation, (2026-07-13) its default clean/readable view, and (2026-07-13)
 git-style short registration ids (scripts/my-bt) -- deliberately NOT in that
-script, for the same reason app/cli_history.py isn't: scripts/my-bt has no
+script, for the same reason app/cli_checks.py isn't: scripts/my-bt has no
 .py extension and lives outside `app/`, so unittest can't import it
 directly. See tests/test_cli_list.py.
 """
@@ -449,20 +449,28 @@ def resolve_short_id(
 
 
 def merge_archived_for_display(store, settings, live_users: list[dict], archived_regs: list[dict]) -> list[dict]:
-    """Read-only equivalent of `my-bt admin dearchive`/Store.
-    merge_archived_registrations: for each LIVE user, finds any archived
-    (erased) identity sharing their email hash (find_archived_user_ids_
-    for_email) and re-labels those archived rows with the LIVE user_id --
-    WITHOUT writing anything to disk.
+    """For each LIVE user, finds any archived (erased) identity sharing
+    their email hash (find_archived_user_ids_for_email) and re-labels
+    those archived rows with the LIVE user_id -- WITHOUT writing anything
+    to disk.
 
     2026-07-13, the operator: "/admin should [be] non-mutating" -- both `my-bt
     list --all`/`--past` and app/webapp.py's admin_overview() call this
     instead of the previous behavior (silently rewriting the CSVs on
-    every page/command load). `dearchive` remains the one deliberate,
-    explicit action that actually persists a merge.
+    every page/command load).
 
-    Same duplicate-avoidance rule as Store.merge_archived_registrations
-    (2026-07-10, the operator's own bug report): an archived row is DROPPED
+    2026-07-14, the operator: the former `my-bt admin dearchive` command (and
+    Store.merge_archived_registrations, the mutating method backing it)
+    were removed entirely -- "a clear GDPR violation": permanently
+    re-attaching pre-erasure history onto a live, identifiable account
+    undoes the point of an Art. 17 erasure. This function is unaffected
+    and stays exactly as-is: it's read-only, nothing is ever persisted,
+    and the operator explicitly confirmed this on removing dearchive: "the
+    implicit functionality of this baked into /admin and my-bt list
+    should stay."
+
+    Same duplicate-avoidance rule the removed mutating method used to
+    have (2026-07-10, the operator's own bug report): an archived row is DROPPED
     entirely -- not relabeled, not shown at all -- if the live account it
     would relabel onto already has its own live row for that exact
     (course_shortname, occurrence_date). Showing both would look like two

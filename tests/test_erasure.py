@@ -3,8 +3,8 @@ import unittest
 from datetime import date
 
 from app.caldav_client import CalDAVClient, Response
-from app.erasure import erase_user_by_email
-from app.security import hash_token, is_erased_email, new_token
+from app.erasure import erase_user_by_email, find_archived_user_ids_for_email
+from app.security import hash_email_for_erasure, hash_token, is_erased_email, new_token
 from app.storage import STATUS_CANCELED_BY_GUEST, STATUS_CONFIRMED, STATUS_WAITLISTED, Store
 
 from .helpers import make_course, make_settings
@@ -171,6 +171,56 @@ class ErasureCalendarSyncTest(unittest.TestCase):
         ok = erase_user_by_email(self.store, self.settings, "guest2@example.com", today=date(2027, 1, 1))
         self.assertTrue(ok)
         self.assertEqual(self.transport.calls, [])
+
+
+class FindArchivedUserIdsForEmailTest(unittest.TestCase):
+    """find_archived_user_ids_for_email() -- how the READ-ONLY merges
+    (app.cli_list.merge_archived_for_display, used by `/admin` and
+    `my-bt list --all`/`--past`) find a re-booked guest's pre-erasure
+    identity from their current, live email alone. 2026-07-14: moved here
+    from tests/test_cli_history.py, which tested it alongside
+    app.cli_history.run_merge() -- that module (and the `my-bt admin
+    dearchive` command it backed) was removed entirely as "a clear GDPR
+    violation" (the operator) for permanently re-linking supposedly-erased
+    history onto a live, identifiable account. This function itself
+    stays -- it's read-only (finds ids, moves nothing) and the display-
+    time merges that use it were explicitly kept: "the implicit
+    functionality of this baked into /admin and my-bt list should
+    stay." """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings()
+
+    def _erase(self, email: str, name: str = "Guest"):
+        user = self.store.upsert_user_for_booking(email, name)
+        self.store.add_registration("c", "2026-01-01", user.user_id, hash_token(new_token()))
+        hashed = hash_email_for_erasure(user.email, self.settings.erasure_pepper)
+        self.store.erase_user(user.user_id, hashed)
+        return user.user_id
+
+    def test_finds_archived_user_after_rebooking(self):
+        old_id = self._erase("guest@example.com")
+        found = find_archived_user_ids_for_email(self.store, self.settings, "guest@example.com")
+        self.assertEqual(found, [old_id])
+
+    def test_no_match_when_never_erased(self):
+        self.store.upsert_user_for_booking("guest@example.com", "Guest")
+        found = find_archived_user_ids_for_email(self.store, self.settings, "guest@example.com")
+        self.assertEqual(found, [])
+
+    def test_no_match_for_unrelated_email(self):
+        self._erase("guest@example.com")
+        found = find_archived_user_ids_for_email(self.store, self.settings, "nobody@example.com")
+        self.assertEqual(found, [])
+
+    def test_finds_multiple_archived_identities_same_email(self):
+        old1 = self._erase("guest@example.com")
+        old2 = self._erase("guest@example.com")
+        found = find_archived_user_ids_for_email(self.store, self.settings, "guest@example.com")
+        self.assertEqual(set(found), {old1, old2})
 
 
 if __name__ == "__main__":

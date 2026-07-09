@@ -317,15 +317,23 @@ Installed on PATH as `my-bt`. Run `my-bt --help` / `my-bt <command> --help`
 / `my-bt admin --help` for the full option list -- every subcommand and
 flag has its own short help text. Frequently-used commands (`list`,
 `users`, `show`, `stats`, `cancel`, `status`) live at the top level;
-rarer, heavier site-administration actions (`hash-password`, `erase`,
-`dearchive`, `gdpr`, `maintenance`, `git-snapshot`, `watchdog-check`,
-`setup`, `health`) are grouped under `my-bt admin` (2026-07-13
-restructuring, `gdpr`/`watchdog-check` added 2026-07-14) so they don't
-clutter the commands you reach for daily. The nightly/hourly/periodic
-systemd timers (retention, git-snapshot, watchdog) all now run their work
-through these same `my-bt admin` subcommands rather than invoking the
-`app.*` modules directly, so the on-demand and scheduled paths can never
-drift apart.
+rarer, heavier site-administration actions (`hash-password`, `gdpr`
+[including `erase`, moved here 2026-07-14], `maintenance`, `git-snapshot`,
+`watchdog-check`, `setup`, `health`) are grouped under `my-bt admin`
+(2026-07-13 restructuring, `gdpr`/`watchdog-check` added 2026-07-14) so
+they don't clutter the commands you reach for daily. The nightly/hourly/
+periodic systemd timers (retention, git-snapshot, watchdog) all now run
+their work through these same `my-bt admin` subcommands rather than
+invoking the `app.*` modules directly, so the on-demand and scheduled
+paths can never drift apart.
+
+**Removed 2026-07-14 (GDPR violation):** `my-bt admin dearchive`
+(formerly `my-bt merge`) used to permanently re-attach an erased
+attendee's pre-erasure booking history onto their new live account --
+undoing the point of a GDPR Art. 17 erasure by re-linking data it had
+de-linked. It's gone entirely now. The read-only equivalent (`/admin`
+and `my-bt list --all`/`--past` merging pre-erasure history into the
+display on the fly, nothing written to disk) is unaffected and stays.
 
 `list`/`show` all include a "party" column (guest bookings, 2026-07 -- see
 "Guests" under "Booking page layout" below): "+N guest(s)" on the leader's
@@ -338,7 +346,7 @@ my-bt --version                         # package version + git commit it was bu
 my-bt list                              # today + future, live only (default -- mimics /admin's own table)
 my-bt list --all                        # every date, live + archived (pre-erasure history merged in
                                          # on the fly for any live user -- nothing written to disk;
-                                         # `my-bt admin dearchive` is what actually persists a merge)
+                                         # this is display-only, nothing persists a merge -- see GDPR notes)
 my-bt list --past                       # same merge as --all, occurrence_date strictly before today only
 my-bt list --year 2026 --course example-monday-class
 my-bt list --status waitlisted --email guest@example.com
@@ -360,10 +368,8 @@ my-bt cancel --date 2026-08-01 --course example-monday-class  # --course only ne
 my-bt status                            # live server summary: up/running, maintenance mode, logged-in users
 
 my-bt admin hash-password                # prompts (hidden input), prints the admin_password_hash value
-my-bt admin erase --email guest@example.com          # asks for confirmation
-my-bt admin erase --email guest@example.com --yes    # scripted/non-interactive
-my-bt admin dearchive --email guest@example.com          # asks for confirmation
-my-bt admin dearchive --email guest@example.com --yes    # scripted/non-interactive
+my-bt admin gdpr erase --email guest@example.com          # asks for confirmation
+my-bt admin gdpr erase --email guest@example.com --yes    # scripted/non-interactive
 my-bt admin gdpr                         # overview: retention window(s) + counts past due (bookings+accounts)
 my-bt admin gdpr bookings                # list every registration + the date it would be purged
 my-bt admin gdpr bookings --purge        # actually delete rows past their retention window
@@ -381,7 +387,7 @@ my-bt admin setup                        # guided post-install steps -- see belo
 my-bt admin setup --interactive          # ...or -i: be walked through them
 my-bt admin health                       # full install-health diagnostic -- see below
 
-my-bt -D admin erase --email guest@example.com   # -D/--debug: full traceback on
+my-bt -D admin gdpr erase --email guest@example.com   # -D/--debug: full traceback on
                                             # error instead of one clean line
                                             # (same as MY_BOOKING_DEBUG=1,
                                             # just for this one command)
@@ -397,7 +403,7 @@ section), aborting the build on any failure. Run
 `python3 -m unittest discover` directly from a checkout if you want to run
 it by hand.
 
-`my-bt admin erase` only touches the CSVs (no CalDAV dependency by design,
+`my-bt admin gdpr erase` only touches the CSVs (no CalDAV dependency by design,
 so it works even if your CalDAV/SMTP provider is unreachable); if the
 erased attendee had a future confirmed/waitlisted booking, the app's own
 cancellation path re-syncs the calendar the next time it touches that
@@ -414,15 +420,17 @@ you also display the history in the /admin page") -- purely a display-time
 merge, computed fresh on every page load/query, nothing written to disk
 (2026-07-13: this used to actually rewrite the CSVs on every `/admin` page
 load; it doesn't anymore -- see `app/cli_list.py::merge_archived_for_display`).
-`my-bt admin dearchive --email ...` (renamed from `my-bt merge`, `my-bt
-history` dropped entirely -- folded into `list --all`/`--past`) is the one
-command that still actually PERSISTS a merge: it moves the archived
-registration rows onto the live user_id (re-parented, `registration_id`
-unchanged) and removes them from the archive. It never touches the
-archived user row itself -- that old identity's name stays `[erased]` and
-email stays the hash, forever; only the registrations (which never held
-name/email, just a user_id) move. Idempotent: running it again once
-everything's already merged is a no-op.
+This is the only merge behavior that exists: `my-bt admin dearchive`
+(renamed from `my-bt merge`; `my-bt history` was dropped entirely earlier,
+folded into `list --all`/`--past`) used to be a command that actually
+PERSISTED a merge -- rewriting the archived registration rows onto the
+live user_id for real. Removed entirely 2026-07-14 (the operator: "a clear GDPR
+violation") -- permanently re-linking booking history to a live,
+identifiable account undoes the point of the Art. 17 erasure that
+de-linked it in the first place. The display-time merge above was kept:
+it writes nothing, and never touches the archived user row either way
+(that old identity's name stays `[erased]` and email stays the hash,
+forever, regardless of which merge behavior is in play).
 
 `my-bt cancel --registration-id ...` is the CLI equivalent of the web
 admin's cancel button (`/admin` -> Cancel): same status transition (->
@@ -433,7 +441,7 @@ an attendee who hasn't yet clicked their account-confirmation email link
 (`pending_confirmation`), not just confirmed/waitlisted (2026-07-13 fix --
 this used to be uncancelable by any path). Unlike the web admin path it
 does NOT promote the next waitlisted person or re-sync the calendar (no
-CalDAV dependency here by design, same reasoning as `my-bt admin erase`) --
+CalDAV dependency here by design, same reasoning as `my-bt admin gdpr erase`) --
 use the web admin, or restart `my-booking.service` (which re-syncs
 lazily), if the calendar needs to reflect this immediately.
 
@@ -559,7 +567,7 @@ actionable gap -- e.g. a missing nginx `location` block silently makes a
 whole route unreachable -- so `my-bt admin health && <next step>` in a
 script/cron/CI context now actually catches it instead of quietly
 continuing). Only a fully clean report exits 0. Deliberately doesn't touch
-the network/CalDAV (same reasoning as `admin erase` -- no CalDAV
+the network/CalDAV (same reasoning as `admin gdpr erase` -- no CalDAV
 dependency by design), so it still works to narrow things down even if
 your CalDAV/SMTP provider itself is unreachable.
 
@@ -841,7 +849,7 @@ guest ONE warning email this many days before their account would reach
 account-creation date if they've never logged in again since booking).
 Separately, and regardless of whether that warning is enabled: the same
 `--purge` run also actually ERASES (archives with a hashed email, same
-mechanism as `/my`'s own self-erasure and `my-bt admin erase`) every
+mechanism as `/my`'s own self-erasure and `my-bt admin gdpr erase`) every
 account already past its `retention_months` deadline -- tied exactly to
 that setting, no separate on/off switch, since this is the actual
 GDPR-mandated limit rather than a courtesy notice. A guest can still
@@ -870,7 +878,7 @@ git checkout -- with TWO layers committing to it:
 
 Both are a cheap, local safety net on top of whatever off-box backup you
 already run (see "Known simplifications" below -- that's still your own
-job), useful for recovering from an accidental `my-bt admin erase`, a bad
+job), useful for recovering from an accidental `my-bt admin gdpr erase`, a bad
 manual CSV edit, or a botched migration. `my-bt admin git-snapshot
 [--dry-run]` runs the hourly layer's logic on demand; `my-bt admin setup
 -i` offers to initialize the repo (`git init`, a `.gitignore` excluding
@@ -896,7 +904,7 @@ dealbreaker. Weigh this against the safety net the snapshot itself
 provides before deciding either way.
 
 **Right to erasure** (Art. 17): an attendee can delete their own account from
-`/my`, or you can run `my-bt admin erase --email ...` on their behalf. Either way:
+`/my`, or you can run `my-bt admin gdpr erase --email ...` on their behalf. Either way:
 any future confirmed/waitlisted booking is canceled first (freeing the spot
 for the waitlist), then the user row and all their registration rows move
 from the live CSVs into `data/archived/{users,registrations}.csv` with the
@@ -918,15 +926,15 @@ both show their pre-erasure registrations merged onto that new live
 user_id automatically -- purely a DISPLAY-TIME merge (2026-07-13: this used
 to actually rewrite the CSVs on every `/admin` page load; it doesn't
 anymore, see `app/cli_list.py::merge_archived_for_display`), computed
-fresh on every load/query, nothing written to disk. `my-bt admin
-dearchive --email ...` (renamed from `my-bt merge`; `my-bt history`
-dropped entirely, folded into `list --all`/`--past`) is the one command
-that still actually PERSISTS a merge, for anyone managing the archive
-outside the web admin -- it calls `app/cli_history.py::run_merge`, the
-same underlying move the display-time helper mimics without writing.
-None of these ever un-erase the old identity itself: the archived user row
-keeps its hashed email and `[erased]` name forever; only the registration
-rows (which never held name/email) get re-parented.
+fresh on every load/query, nothing written to disk. This is the ONLY
+form of "merge" this software does: there used to also be a `my-bt admin
+dearchive` command that PERSISTED this merge for real (rewriting the
+live registrations.csv to re-attach pre-erasure history to a live,
+identifiable account) -- removed entirely 2026-07-14 as a GDPR violation:
+permanently re-linking history that an Art. 17 erasure had deliberately
+de-linked defeats the point of the erasure. The display-time merge above
+was kept (it writes nothing, and the underlying archived identity is
+never touched or de-anonymized either way).
 
 **DPIA (Data Protection Impact Assessment):** whether you need one depends
 on your own scale, data categories, and risk profile -- this is a

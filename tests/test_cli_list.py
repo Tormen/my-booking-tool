@@ -474,9 +474,10 @@ class MergeArchivedForDisplayTest(unittest.TestCase):
         self.settings = make_settings()
 
     def _erase(self, email: str) -> tuple[str, str]:
-        """Same erasure simulation as tests/test_cli_history.py's own
-        helper: creates a user with one booking, then erases them for
-        real (hashing with this test's own erasure_pepper)."""
+        """Same erasure simulation as tests/test_erasure.py's own
+        FindArchivedUserIdsForEmailTest helper: creates a user with one
+        booking, then erases them for real (hashing with this test's own
+        erasure_pepper)."""
         user = self.store.upsert_user_for_booking(email, "Guest")
         reg = self.store.add_registration("c", "2026-01-01", user.user_id, hash_token(new_token()))
         hashed = hash_email_for_erasure(user.email, self.settings.erasure_pepper)

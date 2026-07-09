@@ -1,5 +1,5 @@
 """Logic behind `my-bt cancel` (scripts/my-bt) -- deliberately NOT in that
-script, for the same reason app/cli_history.py isn't: scripts/my-bt has no
+script, for the same reason app/cli_checks.py isn't: scripts/my-bt has no
 .py extension and lives outside `app/`, so unittest can't import it
 directly. Anything here beyond trivial argument parsing belongs in this
 module so it's unit-tested the normal way (see tests/test_cli_cancel.py).

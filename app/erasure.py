@@ -77,9 +77,13 @@ def find_archived_user_ids_for_email(store: Store, settings: Settings, email: st
 
     This is the exact lookup app/webapp.py's admin_overview() does inline
     for its display-only "N (incl. M pre-erasure)" merge -- factored out
-    here so `my-bt history`/`my-bt merge` (app/cli_history.py) compute the
-    same thing the same way, rather than re-deriving the hash logic a
-    second time somewhere else."""
+    here so it and app.cli_list.merge_archived_for_display (used by
+    `my-bt list --all`/`--past`) compute the same thing the same way,
+    rather than re-deriving the hash logic a second time somewhere else.
+    (2026-07-14: this function's own mutating counterpart, `my-bt admin
+    dearchive`, was removed as a GDPR violation -- see
+    app.cli_list.merge_archived_for_display's own docstring -- but this
+    read-only lookup is unaffected and still used by both callers above.)"""
     hashed = hash_email_for_erasure(email, settings.erasure_pepper)
     return [
         u["user_id"] for u in store.read_users(scope="archived")

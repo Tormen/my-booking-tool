@@ -97,6 +97,17 @@ class BareCommandHelpParserTest(unittest.TestCase):
         self.assertEqual(args.func, my_bt_mod.cmd_admin_gdpr_accounts)
         self.assertTrue(args.purge)
 
+    def test_admin_gdpr_erase_leaf_command_sets_func(self):
+        # 2026-07-14, the operator: "And lets move this to my-admin gdpr please:
+        # erase manually erase an attendee's data (GDPR Art. 17)." --
+        # moved from `admin erase` to sit alongside bookings/accounts.
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "gdpr", "erase", "--email", "guest@example.com", "--yes"])
+        self.assertTrue(hasattr(args, "func"))
+        self.assertEqual(args.func, my_bt_mod.cmd_erase)
+        self.assertEqual(args.email, "guest@example.com")
+        self.assertTrue(args.yes)
+
 
 class BareCommandMainBehaviorTest(unittest.TestCase):
     """Drives my_bt_mod.main() directly (patching sys.argv), the same way
@@ -134,7 +145,7 @@ class BareCommandMainBehaviorTest(unittest.TestCase):
         # as an error -- this fix only covers the "no sub-command given
         # at all" case, not every argparse failure.
         old_argv = sys.argv
-        sys.argv = ["my-bt", "admin", "erase"]
+        sys.argv = ["my-bt", "admin", "gdpr", "erase"]
         err = io.StringIO()
         try:
             with contextlib.redirect_stderr(err):

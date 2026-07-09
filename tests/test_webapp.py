@@ -3193,12 +3193,13 @@ class BookingFlowTest(unittest.TestCase):
         # registration alongside the live account's own rows.
         #
         # 2026-07-13, the operator: "/admin should [be] non-mutating" -- this used
-        # to physically rewrite the archived row's user_id on disk
-        # (Store.merge_archived_registrations); now it's purely a
-        # display-time merge (see cli_list.merge_archived_for_display) --
-        # nothing on disk changes just from loading this page. `my-bt
-        # admin dearchive` is the one explicit action that still persists
-        # a real merge.
+        # to physically rewrite the archived row's user_id on disk; now
+        # it's purely a display-time merge (see
+        # cli_list.merge_archived_for_display) -- nothing on disk changes
+        # just from loading this page. (2026-07-14: the one command that
+        # used to persist a real merge, `my-bt admin dearchive`, was
+        # removed entirely as a GDPR violation -- this display-time merge
+        # is unaffected and is now the ONLY merge behavior left.)
         #
         # Pre- and post-erasure bookings are for DIFFERENT occurrence dates
         # here (see test_admin_overview_merge_drops_a_row_that_would_

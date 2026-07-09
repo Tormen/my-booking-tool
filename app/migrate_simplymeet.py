@@ -7,7 +7,7 @@ below).
 This module holds all the parsing/mapping/decision logic; the script
 itself (scripts/migrate-simplymeet-history.py) is a thin CLI wrapper --
 same "testable app/ module + thin script" split as every other my-bt
-subcommand (see app/cli_history.py's docstring), and for the same reason:
+subcommand (see app/cli_checks.py's docstring), and for the same reason:
 unittest needs an importable module, and the script lives outside `app/`
 with argument parsing that isn't worth unit-testing directly.
 

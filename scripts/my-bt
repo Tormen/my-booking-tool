@@ -31,7 +31,6 @@ try:
     from app import calendar_sync as app_calendar_sync
     from app import cancel_flow as app_cancel_flow
     from app import cli_cancel as app_cli_cancel
-    from app import cli_history as app_cli_history
     from app import cli_list as app_cli_list
     from app import cli_show as app_cli_show
     from app import cli_stats as app_cli_stats
@@ -565,47 +564,18 @@ def cmd_erase(args) -> None:
     print("erased" if ok else "no such user (nothing to erase)")
 
 
-def cmd_dearchive(args) -> None:
-    """`my-bt admin dearchive --email ...` -- permanently moves an
-    attendee's pre-erasure registrations (parked under an old, erased identity
-    sharing this email's hash) onto their current live account, so they
-    show up as normal history everywhere from then on (not just in
-    `list`'s own on-the-fly merged view). Explicit and one-shot -- nothing
-    is ever moved as a side effect of anything else.
-
-    The old, archived identity itself is untouched: its name stays
-    "[erased]" and email stays the hash forever -- only the registration
-    rows (which never held name/email, just a user_id) move. Renamed from
-    `my-bt merge` 2026-07-13 (moved under `admin`, same behavior)."""
-    if not args.yes:
-        confirm = input(
-            f"Merge pre-erasure booking history into the live account for {args.email}? "
-            "Type 'yes' to confirm: "
-        )
-        if confirm.strip().lower() != "yes":
-            print("aborted")
-            return
-
-    settings = app_config.load_settings(args.settings)
-    store = _store(args)
-    live_user = store.find_user_by_email(args.email)
-    if live_user is None:
-        print(f"error: no live account with that email ({args.email}) -- nothing to merge into", file=sys.stderr)
-        sys.exit(1)
-
-    archived_user_ids = app_erasure.find_archived_user_ids_for_email(store, settings, live_user.email)
-    if not archived_user_ids:
-        print("no archived history for this email")
-        return
-
-    result = app_cli_history.run_merge(store, archived_user_ids, live_user.user_id)
-    if result.moved_count == 0:
-        print("no archived registrations to merge (0 matched)")
-        return
-
-    print(f"merged {result.moved_count} registration(s) into {live_user.user_id}:")
-    for r in sorted(result.moved_registrations, key=lambda r: (r["occurrence_date"], r["course_shortname"])):
-        print(f"  {r['occurrence_date']}  {r['course_shortname']}  ({r['status']})")
+# 2026-07-14, the operator: "lets remove this command from my-bt admin please as
+# this is a clear GDPR violation" -- `my-bt admin dearchive` (formerly
+# `my-bt merge`) used to permanently re-attach an erased identity's
+# pre-erasure booking history onto a live, identifiable account, i.e.
+# deliberately re-linking data that Art. 17 erasure had de-linked.
+# Removed entirely -- app.cli_history.run_merge/MergeResult and
+# Store.merge_archived_registrations() (the only things that ever called
+# it) are gone too, see their own removal. The READ-ONLY equivalent
+# (on-the-fly, nothing persisted -- `/admin` and `my-bt list --all`/
+# `--past` via app.cli_list.merge_archived_for_display) explicitly stays;
+# the operator: "the implicit functionality of this baked into /admin and my-bt
+# list should stay."
 
 
 def cmd_admin_rename_course(args) -> None:
@@ -886,15 +856,20 @@ def cmd_cancel(args) -> None:
 def cmd_admin_gdpr(args) -> None:
     """`my-bt admin gdpr` -- GDPR overview: the configured retention
     window(s), then how many bookings/accounts currently sit past them.
-    Read-only, touches nothing. See `admin gdpr bookings` / `admin gdpr
-    accounts` for the per-row listing (each with its own --purge to act).
+    Read-only, touches nothing. See `admin gdpr erase` for manual Art. 17
+    erasure, and `admin gdpr bookings` / `admin gdpr accounts` for the
+    per-row listing (each with its own --purge to act).
 
     2026-07-14, the operator, restructuring the former top-level `gdpr-retention`
     (renamed 2026-07-13 from `purge-retention`) into this shape: "add:
     my-bt admin gdpr this by default tells you the set retention period on
     top and then gives you status on accounts and bookings (OVERVIEW /
     stats)." Moved under `admin` (site-administration) rather than staying
-    top-level, since it now covers accounts too, not just bookings."""
+    top-level, since it now covers accounts too, not just bookings.
+    `erase` (formerly its own top-level-under-admin command) joined this
+    group the same day, same reasoning: "lets move this to my-admin gdpr
+    please" -- it's GDPR machinery too, no reason for it to sit apart
+    from `bookings`/`accounts`."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
     today = date.today()
@@ -1633,6 +1608,72 @@ def _zsh_join(specs: list[str], indent: str) -> str:
     return "\n".join(lines)
 
 
+def _zsh_case_block(name: str, sp: argparse.ArgumentParser, depth: int, indent: str) -> str:
+    """One RAW '{name}) ... ;;' case body for the zsh completion
+    dispatcher, RECURSIVELY handling however many further levels of
+    subcommands `sp` itself has -- `indent` is the indentation of the
+    "{name})" line itself; each nested level indents 4 spaces further,
+    matching this file's existing visual style.
+
+    2026-07-14: this used to be hardcoded for EXACTLY one extra level of
+    nesting below the top level (my-bt <cmd> -> <cmd>'s own direct
+    sub-commands, e.g. `admin hash-password`) -- fine while every
+    top-level command's children were themselves leaves, but broke
+    silently the moment `admin gdpr` got its OWN nested sub-commands
+    (`bookings`/`accounts`/`erase`, a THIRD level, added the same day):
+    `my-bt admin gdpr -h` always listed them correctly (plain argparse
+    introspection, unaffected by this bug), but zsh tab-completion after
+    `my-bt admin gdpr ` showed nothing -- confirmed by the operator on the real
+    VPS. Rewritten to recurse to whatever depth the real argparse tree
+    actually has. Depth-suffixed zsh state names (cmd0/args0, cmd1/args1,
+    cmd2/args2, ...) mean a nested `_arguments -C` call at any depth can
+    never shadow an ancestor level's $state, however deep the tree
+    grows next."""
+    nested = _zsh_subparser_choices(sp)
+    if not nested:
+        own_opts = _zsh_option_specs(sp) + _zsh_positional_specs(sp)
+        body = (
+            f"_arguments -s \\\n{_zsh_join(own_opts, indent + '      ')}"
+            if own_opts else "_arguments -s"
+        )
+        return f"{indent}{name})\n{indent}  {body}\n{indent}  ;;"
+
+    # body_indent: local -a / _arguments -C / case $state in / closing esac.
+    # branch_indent (2 deeper): the cmd{depth}) / args{depth}) labels, and
+    # each CHILD's own "{name})" label (one recursive level in).
+    # deep_indent (2 deeper still): _describe / case $words[1] in / its esac.
+    body_indent = indent + "  "
+    branch_indent = indent + "    "
+    deep_indent = indent + "      "
+
+    entries = "\n".join(f"{body_indent}{e}" for e in _zsh_subcommand_entries(sp))
+    dispatch = _zsh_join(
+        _zsh_option_specs(sp) + [f"'1: :->cmd{depth}'", f"'*::arg:->args{depth}'"], indent=body_indent
+    )
+    child_cases = "\n".join(
+        _zsh_case_block(cname, csp, depth + 1, branch_indent)
+        for cname, csp in nested.items()
+    )
+    return f"""{indent}{name})
+{body_indent}local -a _mb_sub_cmds{depth}
+{body_indent}_mb_sub_cmds{depth}=(
+{entries}
+{body_indent})
+{body_indent}_arguments -C \\
+{dispatch}
+{body_indent}case $state in
+{branch_indent}cmd{depth})
+{deep_indent}_describe '{name} sub-command' _mb_sub_cmds{depth}
+{deep_indent};;
+{branch_indent}args{depth})
+{deep_indent}case $words[1] in
+{child_cases}
+{deep_indent}esac
+{deep_indent};;
+{body_indent}esac
+{indent}  ;;"""
+
+
 def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
     """Builds a complete, self-contained `#compdef my-bt` zsh completion
     script by walking `parser`'s own argparse tree -- see the module-level
@@ -1669,55 +1710,7 @@ def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
         _zsh_option_specs(parser) + ["'1: :->cmd'", "'*::arg:->args'"], indent="    "
     )
 
-    leaf_cases = []
-    for name, sp in top_choices.items():
-        nested = _zsh_subparser_choices(sp)
-        if not nested:
-            own_opts = _zsh_option_specs(sp) + _zsh_positional_specs(sp)
-            body = (
-                f"          _arguments -s \\\n{_zsh_join(own_opts, '            ')}"
-                if own_opts else "          _arguments -s"
-            )
-            leaf_cases.append(f"""        {name})
-{body}
-          ;;""")
-            continue
-        # Exactly one level deeper (my-bt admin <sub>, my-bt gdpr-retention
-        # purge): same '1: :->state' / '*::arg:->state_args' dispatch
-        # pattern as the top level, just nested one case deeper.
-        nested_entries = "\n".join(f"          {e}" for e in _zsh_subcommand_entries(sp))
-        nested_dispatch = _zsh_join(
-            _zsh_option_specs(sp) + ["'1: :->subcmd'", "'*::subarg:->subargs'"], indent="          "
-        )
-        nested_cases = []
-        for nname, nsp in nested.items():
-            nopts = _zsh_option_specs(nsp) + _zsh_positional_specs(nsp)
-            nbody = (
-                f"              _arguments -s \\\n{_zsh_join(nopts, '                ')}"
-                if nopts else "              _arguments -s"
-            )
-            nested_cases.append(f"""            {nname})
-{nbody}
-              ;;""")
-        nested_cases_str = "\n".join(nested_cases)
-        leaf_cases.append(f"""        {name})
-          local -a _mb_sub_cmds
-          _mb_sub_cmds=(
-{nested_entries}
-          )
-          _arguments -C \\
-{nested_dispatch}
-          case $state in
-            subcmd)
-              _describe '{name} sub-command' _mb_sub_cmds
-              ;;
-            subargs)
-              case $words[1] in
-{nested_cases_str}
-              esac
-              ;;
-          esac
-          ;;""")
+    leaf_cases = [_zsh_case_block(name, sp, depth=0, indent="        ") for name, sp in top_choices.items()]
     leaf_cases_str = "\n".join(leaf_cases)
 
     return f"""#compdef my-bt
@@ -1989,32 +1982,21 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_hash_password)
 
     sp = _add_subcommand(
-        admin_sub, "erase", "manually erase an attendee's data (GDPR Art. 17).",
-        "Same effect as an attendee self-erasing via /my, just host-initiated.",
-    )
-    sp.add_argument("--email", required=True, help="the attendee's login email")
-    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    sp.set_defaults(func=cmd_erase)
-
-    sp = _add_subcommand(
-        admin_sub, "dearchive",
-        "permanently move an attendee's pre-erasure registration history onto their "
-        "live account (renamed from `merge`).",
-        "Unlike `my-bt list --all`'s own on-the-fly merge (nothing persisted), "
-        "this one actually writes to disk.",
-    )
-    sp.add_argument("--email", required=True, help="the attendee's CURRENT (live) login email")
-    sp.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    sp.set_defaults(func=cmd_dearchive)
-
-    sp = _add_subcommand(
         admin_sub, "gdpr",
-        "GDPR retention: overview + per-item expiry lists for bookings and accounts.",
+        "GDPR: manual erasure, retention overview, and per-item expiry lists for bookings and accounts.",
         "Bare `admin gdpr` only reports (retention window + counts past due); nothing is "
-        "ever purged without an explicit `bookings --purge` / `accounts --purge`.",
+        "ever purged/erased without an explicit `erase` / `bookings --purge` / `accounts --purge`.",
     )
     sp.set_defaults(func=cmd_admin_gdpr)
     gdpr_sub = sp.add_subparsers(dest="gdpr_command")
+    ge = _add_subcommand(
+        gdpr_sub, "erase", "manually erase an attendee's data (GDPR Art. 17).",
+        "Same effect as an attendee self-erasing via /my, just host-initiated. "
+        "2026-07-14: moved here from `admin erase` to sit alongside the rest of GDPR.",
+    )
+    ge.add_argument("--email", required=True, help="the attendee's login email")
+    ge.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    ge.set_defaults(func=cmd_erase)
     gb = _add_subcommand(
         gdpr_sub, "bookings", "list registrations and the date each would be purged.",
         "Add --purge to actually delete rows past their retention window now -- the same "
