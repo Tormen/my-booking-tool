@@ -322,7 +322,7 @@ class CoursesPageTest(unittest.TestCase):
 
 
 class MaintenanceModeTest(unittest.TestCase):
-    """`my-bt maintenance on` (see app/maintenance.py + scripts/my-bt) blocks
+    """`my-bt admin site-maintenance on` (see app/maintenance.py + scripts/my-bt) blocks
     every GUEST-facing route via a data-dir flag file checked fresh on
     every request (app.webapp.App._maintenance_guard). Originally scoped
     to only /courses and /book/<shortname> (2026-07-10: the operator asked to gate

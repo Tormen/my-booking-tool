@@ -546,7 +546,7 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
 
     def test_maintenance_banner_alone_does_not_trigger_a_vimdiff_offer(self):
         # 2026-07-10, the operator, looking at a vimdiff setup -i offered him where
-        # the ONLY difference was the maintenance banner `my-bt maintenance
+        # the ONLY difference was the maintenance banner `my-bt admin site-maintenance
         # on` had inserted into the live index.html: "my-bt setup -i should
         # know about the maintenance mode and ignore any change linked to
         # this, and should not propose this vimdiff if this is the only

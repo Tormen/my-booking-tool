@@ -997,12 +997,15 @@ def cmd_git_snapshot(args) -> None:
 
 
 def cmd_maintenance(args) -> None:
-    """`my-bt maintenance on|off|status [-m/--message TEXT]` -- sitewide
-    maintenance toggle (2026-07-10, the operator: "add my-bt commands to set /
-    unset a maintenance mode"). The actual state/rendering logic lives in
-    app/maintenance.py (see its own module docstring for the full design
-    -- a data-dir JSON flag file, not settings.toml, so it takes effect on
-    the very next request with no service restart).
+    """`my-bt admin site-maintenance on|off|status [-m/--message TEXT]` --
+    sitewide maintenance toggle (2026-07-10, the operator: "add my-bt commands to
+    set / unset a maintenance mode"; renamed from `admin maintenance`
+    2026-07-14, the operator: "rename my-bt admin site-maintenance to my-bt admin
+    site-maintenance" -- disambiguates from any future per-course/per-
+    feature "maintenance" concept). The actual state/rendering logic
+    lives in app/maintenance.py (see its own module docstring for the
+    full design -- a data-dir JSON flag file, not settings.toml, so it
+    takes effect on the very next request with no service restart).
 
     `on` (optionally with -m/--message for something specific like
     "back Monday") does two things: writes the flag file the running app
@@ -1063,7 +1066,7 @@ def cmd_maintenance(args) -> None:
 
     if enabling:
         print("maintenance mode: ON -- attendee-facing pages now show a maintenance page. "
-              "Run `my-bt maintenance off` to reopen the site.")
+              "Run `my-bt admin site-maintenance off` to reopen the site.")
     else:
         print("maintenance mode: off -- the site is open again.")
 
@@ -1115,7 +1118,7 @@ def _print_live_status(payload: dict) -> None:
         print("!" * len(banner))
         since = _fmt_ts(mnt.get("set_at")) if mnt.get("set_at") else "(unknown time)"
         print(f"since {since}" + (f': "{mnt["message"]}"' if mnt.get("message") else ""))
-        print("Run `my-bt maintenance off` to reopen the site.")
+        print("Run `my-bt admin site-maintenance off` to reopen the site.")
     else:
         print("maintenance mode: off")
 
@@ -2053,7 +2056,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_admin_resync_calendar)
 
     sp = _add_subcommand(
-        admin_sub, "maintenance",
+        admin_sub, "site-maintenance",
         "set/unset sitewide maintenance mode (blocks new bookings, banners index.html).",
         "The 'status' choice for the positional argument below just reports "
         "the current state without changing it.",

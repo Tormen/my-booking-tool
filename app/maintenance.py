@@ -1,5 +1,6 @@
-"""Sitewide maintenance mode: `my-bt maintenance on/off/status` (see
-scripts/my-bt). While ON, the running web app blocks every guest-facing
+"""Sitewide maintenance mode: `my-bt admin site-maintenance on/off/status`
+(renamed from `admin maintenance` 2026-07-14, the operator: "rename my-bt admin
+maintenance to my-bt admin site-maintenance" -- see scripts/my-bt). While ON, the running web app blocks every guest-facing
 route -- /courses, /book/<shortname>, /cancel/<token>, /reinstate/<token>,
 and every /my/* endpoint (login, signup, reset, confirm, cancel, reinstate,
 settings, delete-account, ...) -- and shows a 503 maintenance page instead
@@ -36,7 +37,7 @@ wouldn't take effect until a service restart -- the whole point of a
 maintenance toggle is that it takes effect on the very next request.
 
 This module also renders the identical message as a banner that
-`my-bt maintenance on/off` inserts into / removes from the TOP of the
+`my-bt admin site-maintenance on/off` inserts into / removes from the TOP of the
 live, deployed index.html at [site].static_site_dir (2026-07-10, the operator:
 "the my-bt should not modify the package installed TEMPLATE folder site"
 -- this used to ALSO patch this checkout's own HOME/site/index.html, but
@@ -65,6 +66,15 @@ _FLAG_FILENAME = "maintenance.json"
 # if already present, insert fresh if not, remove cleanly either way)
 # without ever touching anything else in a hand-authored file we don't
 # otherwise own.
+#
+# 2026-07-14: the CLI command itself was renamed `admin maintenance` ->
+# `admin site-maintenance`, but this literal string is deliberately LEFT
+# AS-IS -- _BANNER_BLOCK_RE below matches an already-live banner against
+# THIS exact constant, so if a maintenance window happened to be active
+# on the real site at the moment this rename shipped, changing the text
+# here would make the next `off` unable to find/remove that already-
+# inserted (old-text) banner. It's just a human-readable HTML comment
+# either way -- no functional loss in leaving the old command name in it.
 _BANNER_START = "<!-- MAINTENANCE-BANNER:START (managed by `my-bt maintenance` -- do not hand-edit, your changes will be overwritten) -->"
 _BANNER_END = "<!-- MAINTENANCE-BANNER:END -->"
 # The leading `\n?` mirrors the trailing one: insert_banner() always adds

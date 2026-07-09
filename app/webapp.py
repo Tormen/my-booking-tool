@@ -874,7 +874,7 @@ class App:
     def _maintenance_response(self, state: maintenance.MaintenanceState):
         """503, not 200 -- correctly signals "temporarily unavailable" to
         anything automated (monitoring, a bot) hitting a booking link while
-        `my-bt maintenance on` is active, without touching any other route's
+        `my-bt admin site-maintenance on` is active, without touching any other route's
         status code.
 
         2026-07-10, the operator: "the maintenance page should have a back link or

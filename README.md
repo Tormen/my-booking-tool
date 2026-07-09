@@ -145,7 +145,7 @@ app/                        the application (stdlib-only Python package)
   retention.py              GDPR Art. 5(1)(e) purge job (the "cronjob")
   git_snapshot.py           hourly auto-commit of the data dir to its own git repo
   site_render.py            renders site/privacy.html -- see "Static-site pages"
-  maintenance.py            `my-bt admin maintenance on/off/status` -- see "Maintenance mode"
+  maintenance.py            `my-bt admin site-maintenance on/off/status` -- see "Maintenance mode"
   cli_checks.py             `my-bt admin health`/`admin setup` health checks -- pure, unit-tested
   cli_setup.py              `my-bt admin setup`/`admin setup -i` report + walkthrough logic
   version.py                `my-bt --version` (package version + git commit)
@@ -378,9 +378,9 @@ my-bt admin gdpr accounts                # list every live account + the date it
 my-bt admin gdpr accounts --purge        # send any due warning emails + erase accounts already past their deadline
                                           # (same job the nightly systemd timer already runs; unconditional --
                                           # runs regardless of whether the warning email is even enabled)
-my-bt admin maintenance on [-m "back Monday"]  # block new bookings, banner site/index.html
-my-bt admin maintenance off                    # reopen bookings, remove the banner
-my-bt admin maintenance status                 # report current state, touches nothing
+my-bt admin site-maintenance on [-m "back Monday"]  # block new bookings, banner site/index.html
+my-bt admin site-maintenance off                    # reopen bookings, remove the banner
+my-bt admin site-maintenance status                 # report current state, touches nothing
 my-bt admin git-snapshot [--dry-run]     # commit data-dir changes now (same as the hourly timer)
 my-bt admin watchdog-check               # run the "strange usage patterns" sweep now (same as the periodic timer)
 my-bt admin setup                        # guided post-install steps -- see below
@@ -1136,7 +1136,7 @@ ideally at the same time as each course's booking link starts pointing at
   never to repoint `static_site_dir` itself, since that's a deliberate
   architectural choice this tool has no business overriding.
 
-## Maintenance mode (`my-bt admin maintenance on|off|status`) (2026-07-10)
+## Maintenance mode (`my-bt admin site-maintenance on|off|status`) (2026-07-10)
 
 A sitewide toggle for planned downtime: "add my-bt commands to set/unset
 a maintenance mode ... a downtime warning right at the top of
@@ -1144,10 +1144,10 @@ a maintenance mode ... a downtime warning right at the top of
 should result in a page version of this maintenance message."
 
 ```
-my-bt admin maintenance on                    # enable, no custom message
-my-bt admin maintenance on -m "back Monday"   # enable with a custom message
-my-bt admin maintenance off                   # disable
-my-bt admin maintenance status                # report current state, changes nothing
+my-bt admin site-maintenance on                    # enable, no custom message
+my-bt admin site-maintenance on -m "back Monday"   # enable with a custom message
+my-bt admin site-maintenance off                   # disable
+my-bt admin site-maintenance status                # report current state, changes nothing
 ```
 
 State lives in a small JSON flag file in the data dir (`maintenance.json`),

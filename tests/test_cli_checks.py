@@ -1123,7 +1123,7 @@ class CheckStaticPagesDeployedTest(unittest.TestCase):
         # the ONLY difference was the maintenance banner: "my-bt setup -i
         # should know about the maintenance mode and ignore any change
         # linked to this, and should not propose this vimdiff if this is
-        # the only difference." -- `my-bt maintenance on` inserts the
+        # the only difference." -- `my-bt admin site-maintenance on` inserts the
         # banner directly into the LIVE deployed index.html (by design, so
         # it shows up immediately), so the deployed copy legitimately
         # differs from the checkout for as long as maintenance stays on.

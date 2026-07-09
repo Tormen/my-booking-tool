@@ -36,7 +36,7 @@ static_site_dir = "/var/www/example.org"
 # a hard FAILURE, not a warning -- setting this path is you telling us this
 # file is real and matters. Comment out / remove to skip this check entirely.
 # nginx_conf_path = "/etc/nginx/conf.d/nginx-locations.conf"
-# Optional: while `my-bt maintenance on` is blocking every guest-facing
+# Optional: while `my-bt admin site-maintenance on` is blocking every guest-facing
 # page for everyone (see README.md "Maintenance mode" for the exact route
 # list), a request whose (nginx-forwarded) client IP matches
 # EITHER of these two still gets through as normal -- handy so you can

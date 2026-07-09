@@ -98,7 +98,7 @@ _CALDAV_CHECK_TIMEOUT = 5.0
 
 
 def check_maintenance_mode(data_dir: str | Path) -> list[Check]:
-    """Whether sitewide maintenance mode (`my-bt maintenance on/off`, see
+    """Whether sitewide maintenance mode (`my-bt admin site-maintenance on/off`, see
     app/maintenance.py) is currently ON -- reported as "warn", not silence,
     even though it's a perfectly normal, deliberate state to be in: the
     whole point is that leaving it on by accident shouldn't go unnoticed
@@ -111,7 +111,7 @@ def check_maintenance_mode(data_dir: str | Path) -> list[Check]:
     detail = f"ON since {state.set_at}" if state.set_at else "ON"
     if state.message:
         detail += f' -- message: "{state.message}"'
-    detail += " -- `my-bt maintenance off` to reopen bookings"
+    detail += " -- `my-bt admin site-maintenance off` to reopen bookings"
     return [("maintenance mode", "warn", detail)]
 
 
@@ -802,7 +802,7 @@ def _resolve_static_source(home: str, name: str) -> Path | None:
 
 
 def _diffable_static_page_text(text: str) -> str:
-    """Strips `my-bt maintenance on`'s banner block (if present) before
+    """Strips `my-bt admin site-maintenance on`'s banner block (if present) before
     comparing a deployed static page against this checkout's own source
     (2026-07-10, the operator, looking at a vimdiff `setup -i` offered him: "my-bt
     setup -i should know about the maintenance mode and ignore any change

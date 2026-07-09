@@ -264,7 +264,7 @@ def print_report(
     show(report["data_dir_git"])
     show(report["data_dir_ownership"])
 
-    print_fn("\n12. Maintenance mode (`my-bt maintenance on/off/status`):")
+    print_fn("\n12. Maintenance mode (`my-bt admin site-maintenance on/off/status`):")
     show(report["maintenance"])
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
@@ -639,7 +639,7 @@ def interactive_setup(
                         print_fn(f"[fail] could not write {deployed}: {exc}")
                 continue
             # cli_checks._diffable_static_page_text() strips
-            # `my-bt maintenance on`'s banner block before comparing
+            # `my-bt admin site-maintenance on`'s banner block before comparing
             # (2026-07-10, the operator: "my-bt setup -i should know about the
             # maintenance mode and ignore any change linked to this, and
             # should not propose this vimdiff if this is the only
@@ -829,7 +829,7 @@ def interactive_setup(
     # above: there's no safe "fix" to offer here (it's a deliberate toggle,
     # not a misconfiguration), just surfacing whether it's currently ON so
     # it doesn't stay on by accident, unnoticed, after a real maintenance
-    # window ends. Use `my-bt maintenance off` directly, not this
+    # window ends. Use `my-bt admin site-maintenance off` directly, not this
     # walkthrough, to turn it off.
     print_fn("\n-- 12. Maintenance mode --")
     for label, level, detail in cli_checks.check_maintenance_mode(data_dir):
