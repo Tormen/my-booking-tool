@@ -69,15 +69,33 @@ class BareCommandHelpParserTest(unittest.TestCase):
         self.assertTrue(hasattr(args, "func"))
         self.assertEqual(args.func, my_bt_mod.cmd_admin_resync_calendar)
 
-    def test_gdpr_retention_group_unaffected_already_had_its_own_func(self):
-        # gdpr-retention's own subparsers (dest="gdpr_command") was never
-        # required=True -- it already has func set at its own level
-        # (cmd_gdpr_retention), so a bare `my-bt gdpr-retention` was never
-        # part of this bug. Confirms the fix didn't touch this group.
+    def test_admin_gdpr_group_unaffected_already_had_its_own_func(self):
+        # 2026-07-14: `admin gdpr` (formerly the top-level `gdpr-retention`,
+        # moved/renamed per the operator's own restructure -- see
+        # cmd_admin_gdpr's docstring) has its own nested subparsers
+        # (dest="gdpr_command") that was never required=True -- it already
+        # has func set at its own level (cmd_admin_gdpr), so a bare
+        # `my-bt admin gdpr` was never part of the original bare-command
+        # bug this test class covers. Confirms the fix didn't touch this
+        # group.
         parser = my_bt_mod.build_parser()
-        args = parser.parse_args(["gdpr-retention"])
+        args = parser.parse_args(["admin", "gdpr"])
         self.assertTrue(hasattr(args, "func"))
-        self.assertEqual(args.func, my_bt_mod.cmd_gdpr_retention)
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_gdpr)
+
+    def test_admin_gdpr_bookings_leaf_command_sets_func(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "gdpr", "bookings"])
+        self.assertTrue(hasattr(args, "func"))
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_gdpr_bookings)
+        self.assertFalse(args.purge)
+
+    def test_admin_gdpr_accounts_leaf_command_sets_func(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "gdpr", "accounts", "--purge"])
+        self.assertTrue(hasattr(args, "func"))
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_gdpr_accounts)
+        self.assertTrue(args.purge)
 
 
 class BareCommandMainBehaviorTest(unittest.TestCase):

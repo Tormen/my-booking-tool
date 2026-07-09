@@ -5,7 +5,16 @@ Description=my-booking GDPR retention purge (one-shot; triggered by the .timer)
 Type=oneshot
 User=my-booking
 Group=my-booking
-ExecStart=/usr/bin/python3 -m app.retention --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking
+# 2026-07-14, the operator: "Can the timer then please call my-bt admin ...."
+# -- two ExecStart= lines run in sequence (systemd's own documented
+# multi-ExecStart behavior for Type=oneshot), one per `my-bt admin gdpr`
+# leaf, rather than the old direct `python3 -m app.retention` (which ran
+# both run_purge() and send_account_deletion_warnings() together with no
+# way to invoke either on demand -- see `my-bt admin gdpr bookings`/
+# `accounts` for that). --purge on each makes both act instead of just
+# reporting, same as this timer always did.
+ExecStart=/opt/my-booking/bin/my-bt --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking admin gdpr bookings --purge
+ExecStart=/opt/my-booking/bin/my-bt --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking admin gdpr accounts --purge
 WorkingDirectory=/opt/my-booking
 Environment=PYTHONPATH=/opt/my-booking
 NoNewPrivileges=true

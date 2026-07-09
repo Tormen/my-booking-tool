@@ -41,8 +41,9 @@ try:
     from app import retention as app_retention
     from app import security as app_security
     from app import version as app_version
+    from app import watchdog as app_watchdog
     from app.logutil import configure_logging
-    from app.storage import Store
+    from app.storage import Store, User
 except ImportError as exc:  # pragma: no cover
     print(f"error: could not import the app package from {HOME} ({exc}).", file=sys.stderr)
     print("Set MY_BOOKING_HOME if it's installed somewhere else.", file=sys.stderr)
@@ -882,49 +883,94 @@ def cmd_cancel(args) -> None:
     print(f"  notified: {'yes (both participant and admin emailed)' if result.emailed else 'no (course no longer configured in settings.toml)'}")
 
 
-def cmd_gdpr_retention(args) -> None:
-    """`my-bt gdpr-retention` -- shows what WOULD be purged under the
-    current GDPR storage-limitation policy (app/retention.py's own
-    docstring has the three separate clocks: 24mo after occurrence,
-    6mo after cancellation, 48h for an abandoned pending-confirmation
-    signup) -- counts only by default, or every matching row with
-    -V/--verbose. Read-only; nothing is deleted here.
+def cmd_admin_gdpr(args) -> None:
+    """`my-bt admin gdpr` -- GDPR overview: the configured retention
+    window(s), then how many bookings/accounts currently sit past them.
+    Read-only, touches nothing. See `admin gdpr bookings` / `admin gdpr
+    accounts` for the per-row listing (each with its own --purge to act).
 
-    2026-07-13, the operator: renamed from `my-bt purge-retention` and split into
-    a status-by-default/explicit-action shape ("this shows then by
-    default the status of the data in terms of GDPR... and the command
-    will get a purge subcommand that would then do the purge"). Run
-    `my-bt gdpr-retention purge` to actually delete them -- there's
-    already a nightly systemd timer doing this automatically (see
-    systemd/my-booking-retention.timer), this is just the on-demand/
-    inspect-first equivalent."""
+    2026-07-14, the operator, restructuring the former top-level `gdpr-retention`
+    (renamed 2026-07-13 from `purge-retention`) into this shape: "add:
+    my-bt admin gdpr this by default tells you the set retention period on
+    top and then gives you status on accounts and bookings (OVERVIEW /
+    stats)." Moved under `admin` (site-administration) rather than staying
+    top-level, since it now covers accounts too, not just bookings."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
     today = date.today()
-    matches = [r for r in store.all_registrations() if app_retention.should_purge(r, today, settings)]
-    print(f"{len(matches)} row(s) would be purged (run `my-bt gdpr-retention purge` to actually delete them)")
-    if args.verbose and matches:
-        rows = [
-            {
-                "registration_id": r.registration_id, "course": r.course_shortname,
-                "date": r.occurrence_date, "status": r.status,
-                "registered_at": r.registered_at, "canceled_at": r.canceled_at,
-            }
-            for r in matches
-        ]
-        _print_rows(rows, args.format)
+    print(
+        f"registration retention: {settings.retention_months} months after occurrence "
+        f"({settings.canceled_retention_months} months after cancellation; "
+        f"{settings.pending_confirmation_hours}h for an unconfirmed signup)"
+    )
+    print(f"account retention: {settings.retention_months} months of inactivity (last login, or account creation if never logged back in)")
+    bookings_due = sum(1 for r in store.all_registrations() if app_retention.should_purge(r, today, settings))
+    print(f"{bookings_due} booking row(s) past their retention window (see `admin gdpr bookings`)")
+    accounts_due = sum(
+        1 for row in store.read_users(scope="live")
+        if (d := app_retention.account_deletion_date(User(**row), settings)) is not None and d <= today
+    )
+    print(f"{accounts_due} account(s) past their retention window (see `admin gdpr accounts`)")
 
 
-def cmd_gdpr_retention_purge(args) -> None:
-    """`my-bt gdpr-retention purge` -- actually deletes every row past its
-    GDPR retention window (see app/retention.py). Same job the nightly
-    systemd timer runs (systemd/my-booking-retention.timer) -- this just
-    runs it on demand. See `my-bt gdpr-retention` (no subcommand) to
-    inspect what this would do first, without changing anything."""
+def cmd_admin_gdpr_bookings(args) -> None:
+    """`my-bt admin gdpr bookings` -- lists every registration and the
+    date it would be (or already was) purged under the GDPR
+    storage-limitation policy (app/retention.py's own docstring has the
+    three separate clocks: 24mo after occurrence, 6mo after cancellation,
+    48h for an abandoned pending-confirmation signup). Add --purge to
+    actually delete rows past their window now -- the same job the
+    nightly systemd timer runs (systemd/my-booking-retention.timer), just
+    on demand. Read-only without --purge."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
-    purged = app_retention.run_purge(store, settings)
-    print(f"purged {purged} row(s)")
+    if args.purge:
+        purged = app_retention.run_purge(store, settings)
+        print(f"purged {purged} row(s)")
+        return
+    today = date.today()
+    rows = [
+        {
+            "registration_id": r.registration_id, "course": r.course_shortname,
+            "date": r.occurrence_date, "status": r.status,
+            "purge_date": app_retention.registration_purge_date(r, settings).isoformat(),
+            "past_due": "yes" if app_retention.should_purge(r, today, settings) else "no",
+        }
+        for r in store.all_registrations()
+    ]
+    _print_rows(rows, args.format)
+
+
+def cmd_admin_gdpr_accounts(args) -> None:
+    """`my-bt admin gdpr accounts` -- lists every live account and the
+    date it reaches `retention_months` of inactivity. Add --purge to
+    actually act now: sends any due deletion-warning emails (see
+    app.retention.send_account_deletion_warnings -- a courtesy notice,
+    only if [privacy].how_many_days_before_account_deletion_send_warning_mail
+    is configured) AND erases every account already past its deadline
+    (app.retention.purge_dormant_accounts -- always runs, regardless of
+    whether the warning is enabled; 2026-07-14, the operator: "yes regardless"
+    and "tied to retention_months exactly, this is the GDPR law").
+    Read-only without --purge."""
+    settings = app_config.load_settings(args.settings)
+    store = _store(args)
+    if args.purge:
+        warned = app_retention.send_account_deletion_warnings(store, settings)
+        caldav = app_cancel_flow.build_caldav_client(settings)
+        erased = app_retention.purge_dormant_accounts(store, settings, caldav=caldav)
+        print(f"{warned} warning email(s) sent, {erased} dormant account(s) erased")
+        return
+    today = date.today()
+    rows = [
+        {
+            "user_id": row["user_id"], "email": row["email"], "name": row["name"],
+            "last_login_at": row["last_login_at"] or "(never)",
+            "deletion_date": d.isoformat() if (d := app_retention.account_deletion_date(User(**row), settings)) else "(no activity signal)",
+            "past_due": "yes" if d is not None and d <= today else "no",
+        }
+        for row in store.read_users(scope="live")
+    ]
+    _print_rows(rows, args.format)
 
 
 def cmd_git_snapshot(args) -> None:
@@ -1129,6 +1175,31 @@ def cmd_status(args) -> None:
         print(f"live process: NOT RESPONDING -- {error}")
         sys.exit(1)
     _print_live_status(payload)
+
+
+def cmd_admin_watchdog_check(args) -> None:
+    """`my-bt admin watchdog-check` -- runs the exact same "strange usage
+    patterns" sweep the systemd timer runs (systemd/my-booking-watchdog.timer,
+    every [watchdog].window_minutes) right now, on demand: nginx access-log
+    bursts, app-log rate-limiter rejections, a pending-signup burst, and
+    sshd failed-password bursts (see app/watchdog.py's own module
+    docstring for all four). Emails settings.admin_email ONE combined
+    alert if anything fired, same as the timer -- this is not a dry run.
+
+    2026-07-14, the operator: "Same for any other script we have lets integrate
+    this into the admin as subcommand(s) please" -- watchdog had no CLI
+    equivalent before this; see systemd/my-booking-watchdog.service for
+    the timer now calling this instead of `python3 -m app.watchdog`
+    directly."""
+    settings = app_config.load_settings(args.settings)
+    store = _store(args)
+    alerts = app_watchdog.check_now(store, settings)
+    if alerts:
+        print(f"{len(alerts)} alert(s) fired (emailed to {settings.admin_email}):")
+        for a in alerts:
+            print(f"- {a}")
+    else:
+        print("nothing unusual found")
 
 
 def cmd_admin_health(args) -> None:
@@ -1884,25 +1955,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_cancel, _help_parser=sp)
 
     sp = _add_subcommand(
-        sub, "gdpr-retention",
-        "GDPR storage-limitation status: what would be purged, and when "
-        "(see `purge` to act on it).",
-        "Read-only by default -- nothing is deleted unless you run the `purge` subcommand.",
-    )
-    sp.add_argument(
-        "-V", "--verbose", action="store_true",
-        help="also list every row that would be purged, not just the count",
-    )
-    format_arg(sp)
-    sp.set_defaults(func=cmd_gdpr_retention)
-    gdpr_sub = sp.add_subparsers(dest="gdpr_command")
-    gp = _add_subcommand(
-        gdpr_sub, "purge", "actually delete every row past its retention window.",
-        "Irreversible -- run plain `gdpr-retention` first to see what this would remove.",
-    )
-    gp.set_defaults(func=cmd_gdpr_retention_purge)
-
-    sp = _add_subcommand(
         sub, "status",
         "live server summary: up/running, maintenance mode, logged-in users "
         "(see `my-bt admin health` for the full settings/secrets/systemd/SELinux/nginx report).",
@@ -1956,6 +2008,31 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_dearchive)
 
     sp = _add_subcommand(
+        admin_sub, "gdpr",
+        "GDPR retention: overview + per-item expiry lists for bookings and accounts.",
+        "Bare `admin gdpr` only reports (retention window + counts past due); nothing is "
+        "ever purged without an explicit `bookings --purge` / `accounts --purge`.",
+    )
+    sp.set_defaults(func=cmd_admin_gdpr)
+    gdpr_sub = sp.add_subparsers(dest="gdpr_command")
+    gb = _add_subcommand(
+        gdpr_sub, "bookings", "list registrations and the date each would be purged.",
+        "Add --purge to actually delete rows past their retention window now -- the same "
+        "job the nightly systemd timer runs (systemd/my-booking-retention.timer).",
+    )
+    gb.add_argument("--purge", action="store_true", help="actually delete rows past their retention window, instead of just listing them")
+    format_arg(gb)
+    gb.set_defaults(func=cmd_admin_gdpr_bookings)
+    ga = _add_subcommand(
+        gdpr_sub, "accounts", "list accounts and the date each reaches retention_months of inactivity.",
+        "Add --purge to send any due warning emails and erase every account already past "
+        "its deadline -- same job the nightly systemd timer runs.",
+    )
+    ga.add_argument("--purge", action="store_true", help="actually send due warnings and erase overdue accounts, instead of just listing them")
+    format_arg(ga)
+    ga.set_defaults(func=cmd_admin_gdpr_accounts)
+
+    sp = _add_subcommand(
         admin_sub, "rename-course",
         "migrate registrations.csv + the calendar after renaming a course's shortname in settings.toml.",
         "Run AFTER settings.toml already has --to as a real [[course]] shortname -- "
@@ -1990,6 +2067,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--dry-run", action="store_true", help="report what would be committed, without staging/committing")
     sp.set_defaults(func=cmd_git_snapshot)
+
+    sp = _add_subcommand(
+        admin_sub, "watchdog-check",
+        "run the \"strange usage patterns\" sweep now (same as the periodic timer).",
+        "Emails settings.admin_email a combined alert if anything fired -- not a dry run.",
+    )
+    sp.set_defaults(func=cmd_admin_watchdog_check)
 
     sp = _add_subcommand(
         admin_sub, "setup", "show (or --interactive: be walked through) post-install setup steps.",

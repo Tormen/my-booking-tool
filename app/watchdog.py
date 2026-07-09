@@ -307,6 +307,29 @@ def _sshd_lines_since(window_minutes: int) -> list[str]:
     return proc.stdout.splitlines()
 
 
+def check_now(store: Store, settings: Settings) -> list[str]:
+    """Gathers everything run_watchdog() needs straight from the real
+    filesystem/journald (log files, the sshd journal, the exported
+    fail2ban ban list) and runs it -- the one place that real I/O happens,
+    factored out of main() below so `my-bt admin watchdog-check`
+    (scripts/my-bt) can run the exact same check on demand, not just from
+    the systemd timer. Returns the same alert-string list run_watchdog()
+    itself returns (empty if everything's quiet)."""
+    app_log_lines = _read_lines(settings.log_file)
+    nginx_log_lines = _read_lines(settings.watchdog_nginx_access_log)
+    sshd_log_lines = (
+        _sshd_lines_since(settings.watchdog_window_minutes) if settings.watchdog_sshd_failure_threshold > 0 else []
+    )
+    banned_ips = _read_fail2ban_banned_ips()
+    return run_watchdog(
+        store, settings,
+        app_log_lines=app_log_lines,
+        nginx_log_lines=nginx_log_lines,
+        sshd_log_lines=sshd_log_lines,
+        banned_ips=banned_ips,
+    )
+
+
 def main() -> None:  # pragma: no cover - exercised via systemd, not tests
     import argparse
 
@@ -321,19 +344,7 @@ def main() -> None:  # pragma: no cover - exercised via systemd, not tests
     settings = load_settings(args.settings)
     configure_logging(settings.log_file)
     store = Store(args.data_dir)
-
-    app_log_lines = _read_lines(settings.log_file)
-    nginx_log_lines = _read_lines(settings.watchdog_nginx_access_log)
-    sshd_log_lines = _sshd_lines_since(settings.watchdog_window_minutes) if settings.watchdog_sshd_failure_threshold > 0 else []
-    banned_ips = _read_fail2ban_banned_ips()
-
-    run_watchdog(
-        store, settings,
-        app_log_lines=app_log_lines,
-        nginx_log_lines=nginx_log_lines,
-        sshd_log_lines=sshd_log_lines,
-        banned_ips=banned_ips,
-    )
+    check_now(store, settings)
 
 
 if __name__ == "__main__":  # pragma: no cover

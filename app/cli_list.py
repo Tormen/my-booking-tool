@@ -265,7 +265,8 @@ def build_clean_registration_view(
     "registered" column (registration timestamp) is now OMITTED unless
     `verbose=True` (scripts/my-bt's cmd_list wires this to -V/--verbose,
     the same "adds more detail on top of the summary" axis already used
-    by `gdpr-retention -V` and the old `status -V` -- a separate axis
+    by the old `gdpr-retention -V` (now `admin gdpr bookings`'s own
+    always-detailed listing) and the old `status -V` -- a separate axis
     from -r/--raw, which swaps the shape rather than adding to it; see
     raw_arg()'s own comment in scripts/my-bt). `rows` is already sorted
     by occurrence_date by the caller (cmd_list) before this runs, so the
@@ -358,7 +359,7 @@ def build_clean_user_view(
       also the timestamp" -- joined/last_login are date-only
       (_format_display_date) unless `verbose=True` (scripts/my-bt's
       cmd_users wires this to a new -V/--verbose flag, same "more detail
-      on top of the summary" axis as `list -V`/`gdpr-retention -V`), in
+      on top of the summary" axis as `list -V`/the old `gdpr-retention -V`), in
       which case the full format_display_timestamp() rendering (date, or
       date_HHMM.SS when there's a real time-of-day) is used instead."""
     last_course_by_user = last_course_by_user or {}

@@ -4,8 +4,15 @@ from dataclasses import replace
 from datetime import date, datetime, timezone
 from unittest.mock import patch
 
-from app.retention import run_purge, send_account_deletion_warnings, should_purge
-from app.security import hash_token, new_token
+from app.retention import (
+    account_deletion_date,
+    purge_dormant_accounts,
+    registration_purge_date,
+    run_purge,
+    send_account_deletion_warnings,
+    should_purge,
+)
+from app.security import hash_token, is_erased_email, new_token
 from app.storage import STATUS_PENDING_CONFIRMATION, USER_FIELDS, Store, _LockedCsv
 
 from .helpers import make_settings
@@ -181,9 +188,10 @@ class SendAccountDeletionWarningsTest(unittest.TestCase):
         self.assertEqual(warned, 0)
 
     def test_does_not_warn_once_already_past_the_deletion_date(self):
-        # No real deletion-enforcement job exists yet (see this function's
-        # own docstring) -- an overdue account just never gets touched by
-        # this warning either, rather than re-warning forever.
+        # This warning is a courtesy notice only (see
+        # purge_dormant_accounts() for the actual enforcement, tested
+        # separately below) -- an overdue account just never gets a
+        # warning here either, rather than re-warning forever.
         self._make_user("overdue@example.org", last_login_at="2020-01-01T00:00:00+00:00")
         warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
         self.assertEqual(warned, 0)
@@ -229,6 +237,147 @@ class SendAccountDeletionWarningsTest(unittest.TestCase):
         self._make_user("blank@example.org", last_login_at="", created_at="")
         warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
         self.assertEqual(warned, 0)
+
+
+class AccountDeletionDateTest(unittest.TestCase):
+    """account_deletion_date() -- the shared date-projection helper both
+    send_account_deletion_warnings() and purge_dormant_accounts() (below)
+    call, so a listing/warning/purge can never disagree on the date for
+    the same account."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings(retention_months=24)
+
+    def _make_user(self, email: str, last_login_at: str = "", created_at: str = ""):
+        user = self.store.upsert_user_for_booking(email, "Guest")
+        _set_user_row(self.store, user.user_id, last_login_at=last_login_at, created_at=created_at)
+        return self.store.find_user_by_id(user.user_id)
+
+    def test_projects_from_last_login(self):
+        user = self._make_user("a@example.org", last_login_at="2026-01-11T00:00:00+00:00")
+        self.assertEqual(account_deletion_date(user, self.settings), date(2028, 1, 11))
+
+    def test_falls_back_to_created_at(self):
+        user = self._make_user("b@example.org", last_login_at="", created_at="2026-01-11T00:00:00+00:00")
+        self.assertEqual(account_deletion_date(user, self.settings), date(2028, 1, 11))
+
+    def test_none_when_no_activity_signal_at_all(self):
+        user = self._make_user("c@example.org", last_login_at="", created_at="")
+        self.assertIsNone(account_deletion_date(user, self.settings))
+
+
+class RegistrationPurgeDateTest(unittest.TestCase):
+    """registration_purge_date() -- forward-projected counterpart to
+    should_purge(), for `my-bt admin gdpr bookings`'s per-row listing.
+    Must agree with should_purge() exactly (same rules, just expressed as
+    a date instead of a yes/no)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings(retention_months=24, canceled_retention_months=6)
+
+    def _reg(self, occurrence_date, status="confirmed"):
+        u = self.store.upsert_user_for_booking(f"{occurrence_date}-{status}@x.com", "X")
+        r = self.store.add_registration("c", occurrence_date, u.user_id, hash_token(new_token()))
+        if status != "confirmed":
+            self.store.cancel(r.registration_id, canceled_by="guest")
+            r = self.store.find_by_id(r.registration_id)
+        return r
+
+    def test_confirmed_row_projects_occurrence_date_plus_retention_months(self):
+        reg = self._reg("2027-06-01")
+        self.assertEqual(registration_purge_date(reg, self.settings), date(2029, 6, 1))
+
+    def test_canceled_row_uses_the_earlier_of_the_two_windows(self):
+        reg = self._reg("2027-11-01", status="canceled_by_guest")
+        reg = replace(reg, canceled_at="2027-05-01T00:00:00+00:00")
+        self.store.replace_all_registrations([reg])
+        reg = self.store.find_by_id(reg.registration_id)
+        # occurrence-based window: 2027-11-01 + 24mo = 2029-11-01
+        # canceled-based window: 2027-05-01 + 6mo = 2027-11-01 -- earlier, wins
+        self.assertEqual(registration_purge_date(reg, self.settings), date(2027, 11, 1))
+
+    def test_pending_confirmation_row_projects_registered_at_plus_hours(self):
+        settings = make_settings(retention_months=24, pending_confirmation_hours=48)
+        u = self.store.upsert_user_for_booking("pending@x.com", "X")
+        reg = self.store.add_registration("c", "2099-01-01", u.user_id, "", status=STATUS_PENDING_CONFIRMATION)
+        reg = replace(reg, registered_at="2027-01-01T00:00:00+00:00")
+        self.store.replace_all_registrations([reg])
+        reg = self.store.find_by_id(reg.registration_id)
+        self.assertEqual(registration_purge_date(reg, settings), date(2027, 1, 3))
+
+    def test_agrees_with_should_purge_at_the_boundary(self):
+        reg = self._reg("2026-01-01")
+        reg = self.store.find_by_id(reg.registration_id)
+        today = date(2028, 1, 1)
+        self.assertTrue(should_purge(reg, today, self.settings))
+        self.assertLessEqual(registration_purge_date(reg, self.settings), today)
+
+
+class PurgeDormantAccountsTest(unittest.TestCase):
+    """purge_dormant_accounts() -- the actual account-erasure enforcement
+    (2026-07-14, the operator: "now we also need the account purge after the same
+    duration"). Runs regardless of whether the warning email is enabled
+    or was ever sent (the operator: "yes regardless"), tied exactly to
+    retention_months (the operator: "this is the GDPR law")."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.today = date(2028, 1, 1)
+
+    def _make_user(self, email: str, last_login_at: str = "", created_at: str = ""):
+        user = self.store.upsert_user_for_booking(email, "Guest")
+        _set_user_row(self.store, user.user_id, last_login_at=last_login_at, created_at=created_at)
+        return user
+
+    def test_erases_an_account_past_its_deadline(self):
+        settings = make_settings(retention_months=24, account_deletion_warning_days=0)
+        self._make_user("overdue@example.org", last_login_at="2020-01-01T00:00:00+00:00")
+        purged = purge_dormant_accounts(self.store, settings, today=self.today)
+        self.assertEqual(purged, 1)
+        self.assertEqual(self.store.read_users(scope="live"), [])
+        archived = self.store.read_users(scope="archived")
+        self.assertEqual(len(archived), 1)
+        self.assertTrue(is_erased_email(archived[0]["email"]))
+
+    def test_runs_regardless_of_whether_the_warning_email_is_enabled(self):
+        # account_deletion_warning_days=0 (the warning feature entirely
+        # off) must not stop the actual purge -- these are independent.
+        settings = make_settings(retention_months=24, account_deletion_warning_days=0)
+        self._make_user("overdue@example.org", last_login_at="2020-01-01T00:00:00+00:00")
+        purged = purge_dormant_accounts(self.store, settings, today=self.today)
+        self.assertEqual(purged, 1)
+
+    def test_runs_even_if_no_warning_was_ever_sent(self):
+        settings = make_settings(retention_months=24, account_deletion_warning_days=30)
+        user = self._make_user("overdue@example.org", last_login_at="2020-01-01T00:00:00+00:00")
+        reloaded = self.store.find_user_by_id(user.user_id)
+        self.assertEqual(reloaded.deletion_warning_sent_at, "")  # never warned
+        purged = purge_dormant_accounts(self.store, settings, today=self.today)
+        self.assertEqual(purged, 1)
+
+    def test_does_not_erase_an_account_not_yet_past_its_deadline(self):
+        settings = make_settings(retention_months=24)
+        self._make_user("active@example.org", last_login_at="2027-03-01T00:00:00+00:00")
+        purged = purge_dormant_accounts(self.store, settings, today=self.today)
+        self.assertEqual(purged, 0)
+        self.assertEqual(len(self.store.read_users(scope="live")), 1)
+
+    def test_returns_the_number_erased_across_multiple_accounts(self):
+        settings = make_settings(retention_months=24)
+        self._make_user("overdue1@example.org", last_login_at="2020-01-01T00:00:00+00:00")
+        self._make_user("overdue2@example.org", last_login_at="2020-06-01T00:00:00+00:00")
+        self._make_user("active@example.org", last_login_at="2027-03-01T00:00:00+00:00")
+        purged = purge_dormant_accounts(self.store, settings, today=self.today)
+        self.assertEqual(purged, 2)
+        self.assertEqual(len(self.store.read_users(scope="live")), 1)
 
 
 if __name__ == "__main__":

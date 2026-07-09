@@ -316,11 +316,16 @@ Remove them yourself, on purpose, if you really want to: `sudo rm -rf
 Installed on PATH as `my-bt`. Run `my-bt --help` / `my-bt <command> --help`
 / `my-bt admin --help` for the full option list -- every subcommand and
 flag has its own short help text. Frequently-used commands (`list`,
-`users`, `show`, `stats`, `cancel`, `status`, `gdpr-retention`) live at the
-top level; rarer, heavier site-administration actions (`hash-password`,
-`erase`, `dearchive`, `maintenance`, `git-snapshot`, `setup`, `health`) are
-grouped under `my-bt admin` (2026-07-13 restructuring) so they don't
-clutter the commands you reach for daily.
+`users`, `show`, `stats`, `cancel`, `status`) live at the top level;
+rarer, heavier site-administration actions (`hash-password`, `erase`,
+`dearchive`, `gdpr`, `maintenance`, `git-snapshot`, `watchdog-check`,
+`setup`, `health`) are grouped under `my-bt admin` (2026-07-13
+restructuring, `gdpr`/`watchdog-check` added 2026-07-14) so they don't
+clutter the commands you reach for daily. The nightly/hourly/periodic
+systemd timers (retention, git-snapshot, watchdog) all now run their work
+through these same `my-bt admin` subcommands rather than invoking the
+`app.*` modules directly, so the on-demand and scheduled paths can never
+drift apart.
 
 `list`/`show` all include a "party" column (guest bookings, 2026-07 -- see
 "Guests" under "Booking page layout" below): "+N guest(s)" on the leader's
@@ -352,11 +357,6 @@ my-bt cancel --registration-id <id> -m "course canceled"     # optional message 
 my-bt cancel --date 2026-08-01                                # cancel EVERY live registration on one occurrence
 my-bt cancel --date 2026-08-01 --course example-monday-class  # --course only needed if that date is ambiguous
 
-my-bt gdpr-retention                    # GDPR storage-limitation status: counts only
-my-bt gdpr-retention -V                 # ...also lists the actual rows
-my-bt gdpr-retention purge              # actually delete rows past their retention window
-                                         # (same job the nightly systemd timer already runs)
-
 my-bt status                            # live server summary: up/running, maintenance mode, logged-in users
 
 my-bt admin hash-password                # prompts (hidden input), prints the admin_password_hash value
@@ -364,10 +364,19 @@ my-bt admin erase --email guest@example.com          # asks for confirmation
 my-bt admin erase --email guest@example.com --yes    # scripted/non-interactive
 my-bt admin dearchive --email guest@example.com          # asks for confirmation
 my-bt admin dearchive --email guest@example.com --yes    # scripted/non-interactive
+my-bt admin gdpr                         # overview: retention window(s) + counts past due (bookings+accounts)
+my-bt admin gdpr bookings                # list every registration + the date it would be purged
+my-bt admin gdpr bookings --purge        # actually delete rows past their retention window
+                                          # (same job the nightly systemd timer already runs)
+my-bt admin gdpr accounts                # list every live account + the date it reaches retention_months of inactivity
+my-bt admin gdpr accounts --purge        # send any due warning emails + erase accounts already past their deadline
+                                          # (same job the nightly systemd timer already runs; unconditional --
+                                          # runs regardless of whether the warning email is even enabled)
 my-bt admin maintenance on [-m "back Monday"]  # block new bookings, banner site/index.html
 my-bt admin maintenance off                    # reopen bookings, remove the banner
 my-bt admin maintenance status                 # report current state, touches nothing
 my-bt admin git-snapshot [--dry-run]     # commit data-dir changes now (same as the hourly timer)
+my-bt admin watchdog-check               # run the "strange usage patterns" sweep now (same as the periodic timer)
 my-bt admin setup                        # guided post-install steps -- see below
 my-bt admin setup --interactive          # ...or -i: be walked through them
 my-bt admin health                       # full install-health diagnostic -- see below
@@ -813,21 +822,31 @@ change them to whatever you determine is appropriate; there's no single
 number this software can pick for you, just the Art. 5(1)(e) "no longer
 than necessary" principle it's built around. The nightly systemd timer
 (`my-booking-retention.timer`, 03:30) is the cronjob-equivalent that
-enforces it; `my-bt gdpr-retention` lets you preview what the next run
-would remove (counts only by default, `-V`/`--verbose` to also list the
-actual rows) -- `my-bt gdpr-retention purge` runs the purge on demand.
+enforces it, by running `my-bt admin gdpr bookings --purge` and `my-bt
+admin gdpr accounts --purge` (2026-07-14: moved under `admin gdpr`,
+replacing the old top-level `gdpr-retention`, since it now covers
+accounts too -- see below). `my-bt admin gdpr` gives you the overview
+(retention window(s) + counts past due); `my-bt admin gdpr bookings` /
+`my-bt admin gdpr accounts` list every row/account and the date it would
+be (or was) purged; add `--purge` to either to actually act on demand,
+same as the nightly timer.
 
-**Account-deletion warning email** (2026-07-09): optional
-`how_many_days_before_account_deletion_send_warning_mail` in
-`[privacy]` -- 0, a blank string, or leaving it commented out (the
-default) disables this entirely. When set, the same nightly timer
-sends a guest ONE warning email this many days before their account
-would reach `retention_months` of inactivity (last login, falling back
-to account-creation date if they've never logged in again since
-booking). Note this is a WARNING only -- there is no automated job that
-actually erases an account once that deadline passes, only this email
-and the registration-row purge above; a guest keeps their account
-indefinitely unless they delete it themselves via `/my`.
+**Account-deletion warning + purge** (2026-07-09 warning email,
+2026-07-14 the actual enforcement): optional
+`how_many_days_before_account_deletion_send_warning_mail` in `[privacy]`
+-- 0, a blank string, or leaving it commented out (the default) disables
+the WARNING only. When set, `my-bt admin gdpr accounts --purge` sends a
+guest ONE warning email this many days before their account would reach
+`retention_months` of inactivity (last login, falling back to
+account-creation date if they've never logged in again since booking).
+Separately, and regardless of whether that warning is enabled: the same
+`--purge` run also actually ERASES (archives with a hashed email, same
+mechanism as `/my`'s own self-erasure and `my-bt admin erase`) every
+account already past its `retention_months` deadline -- tied exactly to
+that setting, no separate on/off switch, since this is the actual
+GDPR-mandated limit rather than a courtesy notice. A guest can still
+avoid this by logging in before their deadline (which resets the clock),
+or by deleting their own account sooner via `/my`.
 
 **Data dir git snapshot** -- a separate git repository, rooted at
 `/var/lib/my-booking/.git` -- entirely independent of this project's own

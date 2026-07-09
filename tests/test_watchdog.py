@@ -7,6 +7,7 @@ from app.storage import STATUS_PENDING_CONFIRMATION, Store
 from app.watchdog import (
     check_app_log_rate_limit_blocks,
     check_nginx_bursts,
+    check_now,
     check_pending_signup_burst,
     check_sshd_failures,
     run_watchdog,
@@ -226,6 +227,50 @@ class RunWatchdogTest(unittest.TestCase):
             alerts = run_watchdog(self.store, settings, now=NOW)
         self.assertEqual(alerts, [])
         mock_send.assert_not_called()
+
+
+class CheckNowTest(unittest.TestCase):
+    """check_now() -- the real-I/O gathering step factored out of main()
+    2026-07-14 so `my-bt admin watchdog-check` (scripts/my-bt) can run the
+    exact same sweep on demand, not just from the systemd timer. Patches
+    every real-I/O helper so this stays a pure unit test."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def test_gathers_every_source_and_forwards_to_run_watchdog(self):
+        settings = make_settings(
+            watchdog_rate_limit_block_threshold=1, watchdog_sshd_failure_threshold=1,
+        )
+        with (
+            patch("app.watchdog._read_lines", side_effect=lambda path: [f"line-from-{path}"]) as mock_read,
+            patch("app.watchdog._sshd_lines_since", return_value=["sshd-line"]) as mock_sshd,
+            patch("app.watchdog._read_fail2ban_banned_ips", return_value=frozenset({"203.0.113.5"})) as mock_banned,
+            patch("app.watchdog.run_watchdog", return_value=["some alert"]) as mock_run,
+        ):
+            result = check_now(self.store, settings)
+        self.assertEqual(result, ["some alert"])
+        mock_read.assert_any_call(settings.log_file)
+        mock_read.assert_any_call(settings.watchdog_nginx_access_log)
+        mock_sshd.assert_called_once_with(settings.watchdog_window_minutes)
+        mock_banned.assert_called_once()
+        _store_arg, _settings_arg = mock_run.call_args[0]
+        kwargs = mock_run.call_args[1]
+        self.assertEqual(kwargs["sshd_log_lines"], ["sshd-line"])
+        self.assertEqual(kwargs["banned_ips"], frozenset({"203.0.113.5"}))
+
+    def test_skips_sshd_journal_when_threshold_disabled(self):
+        settings = make_settings(watchdog_sshd_failure_threshold=0)
+        with (
+            patch("app.watchdog._read_lines", return_value=[]),
+            patch("app.watchdog._sshd_lines_since") as mock_sshd,
+            patch("app.watchdog._read_fail2ban_banned_ips", return_value=frozenset()),
+            patch("app.watchdog.run_watchdog", return_value=[]),
+        ):
+            check_now(self.store, settings)
+        mock_sshd.assert_not_called()
 
 
 if __name__ == "__main__":
