@@ -399,18 +399,19 @@ def send_cancellation_emails(
     # the operator's own inbox.
     admin_message_line = f"\nMessage: {message}\n" if message else ""
     admin_message_line_html = message_html(message) if message else ""
+    admin_reinstate_link_html = f'<p>Reinstate this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
     send_mail(
         settings, settings.admin_email, subject,
-        f"{admin_intro}\n"
-        f"{admin_message_line}"
-        f"\n{details}\n"
-        f"Reinstate this booking: {host_reinstate_url}\n",
-        html_body=html_email_body(
-            intro_html(admin_intro)
-            + admin_message_line_html
-            + recap_html
-            + f'<p>Reinstate this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
+        render_template(
+            load_email_template(settings, "cancel_email_admin.txt"),
+            intro=admin_intro, message_line=admin_message_line, details=details,
+            reinstate_url=host_reinstate_url,
         ),
+        html_body=html_email_body(render_template(
+            load_email_template(settings, "cancel_email_admin.html"),
+            intro=intro_html(admin_intro), message_line=admin_message_line_html,
+            recap=recap_html, reinstate_link=admin_reinstate_link_html,
+        )),
     )
 
 
@@ -458,13 +459,18 @@ def send_reinstatement_emails(
         intro = f"{participant_who} reinstated this booking -- {status_phrase}:"
         # 2026-07-08, the operator: same "Dear NAME," greeting as
         # send_cancellation_emails' own participant copy above.
+        manage_link_html = f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
         send_mail(
             settings, user.email, subject,
-            f"Dear {user.name},\n\n{intro}\n\n{details}\nManage your bookings: {my_url}\n",
-            html_body=html_email_body(
-                greeting_html(user.name) + intro_html(intro) + recap_html
-                + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+            render_template(
+                load_email_template(settings, "reinstate_email.txt"),
+                name=user.name, intro=intro, details=details, manage_url=my_url,
             ),
+            html_body=html_email_body(render_template(
+                load_email_template(settings, "reinstate_email.html"),
+                greeting=greeting_html(user.name), intro=intro_html(intro),
+                recap=recap_html, manage_link=manage_link_html,
+            )),
             ics_attachment=ics_attachment,
             bcc_addrs=settings.bcc_attendee_email_list,
         )
@@ -472,6 +478,9 @@ def send_reinstatement_emails(
     admin_intro = f"{admin_who} reinstated this booking -- {status_phrase}:"
     send_mail(
         settings, settings.admin_email, subject,
-        f"{admin_intro}\n\n{details}\n",
-        html_body=html_email_body(intro_html(admin_intro) + recap_html),
+        render_template(load_email_template(settings, "reinstate_email_admin.txt"), intro=admin_intro, details=details),
+        html_body=html_email_body(render_template(
+            load_email_template(settings, "reinstate_email_admin.html"),
+            intro=intro_html(admin_intro), recap=recap_html,
+        )),
     )

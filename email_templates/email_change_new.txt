@@ -1,0 +1,9 @@
+Your {{site}} login is changing from {{old_email}} to {{new_email}}.
+
+Click below to confirm:
+
+{{confirm_url}}
+
+This link expires in {{ttl_hours}} hours. Once confirmed, {{new_email}} becomes your login email and {{old_email}} will no longer have access to this account.
+
+If you're not expecting this, you can safely ignore this email -- nothing changes unless this link is clicked.

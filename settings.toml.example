@@ -11,14 +11,16 @@ static_site_dir = "/var/www/example.org"
 # Optional. 2026-07-09, the operator: "Add a settings.toml variable:
 # email_templates_folder = and place all email templates into the
 # settings.toml [directory] to easily change something there if needed."
-# Every guest-facing email that's been converted to use this (currently:
-# cancel_email.txt/.html -- see app/email_templates.py and this repo's own
-# email_templates/ directory) reads a matching file HERE first if it
-# exists; a missing file here (or leaving this unset entirely) falls back
-# to this repo's own built-in copy, so you only need to place the SPECIFIC
-# template(s) you actually want to customize. Templates use {{macro}}/
-# {{variable}} placeholders -- see the built-in email_templates/*.txt/.html
-# files for what each one supports.
+# Every guest-facing email (booking confirmed/waitlisted, canceled,
+# reinstated, promoted-from-waitlist, account confirm/reset, email-change
+# -- 2026-07-14: swept across all of them, not just the cancel_email
+# pilot) reads a matching file HERE first if it exists; a missing file
+# here (or leaving this unset entirely) falls back to this repo's own
+# built-in copy under email_templates/, so you only need to place the
+# SPECIFIC template(s) you actually want to customize. Templates use
+# {{macro}}/{{variable}} placeholders -- see app/email_templates.py and
+# the built-in email_templates/*.txt/.html files for what each one
+# supports.
 # email_templates_folder = "/opt/my-booking/email_templates"
 # Absolute path to the REAL, currently-deployed nginx vhost conf file for
 # this site -- wherever nginx actually loads it from on this box, NOT this

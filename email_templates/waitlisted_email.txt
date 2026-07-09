@@ -1,0 +1,6 @@
+{{greeting}}{{intro}}
+
+{{details}}
+Manage your bookings: {{manage_url}}
+Leave the waitlist directly: {{cancel_url}}
+{{account_line}}

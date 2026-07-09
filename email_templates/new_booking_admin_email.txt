@@ -1,0 +1,1 @@
+{{who}} {{verb}} {{course_title}} on {{occ_date}}.

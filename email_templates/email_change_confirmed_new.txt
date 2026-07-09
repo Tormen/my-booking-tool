@@ -1,0 +1,1 @@
+Your {{site}} booking account's login email is now {{new_email}}. Use this address to log in from now on.

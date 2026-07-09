@@ -1,0 +1,5 @@
+Your {{site}} login is changing from {{old_email}} to {{new_email}}.
+
+If you're OK with this, no action is needed here -- once {{new_email}} confirms via its own emailed link, {{old_email}} will no longer have access to the account.
+
+If you're NOT OK with this, cancel it here (no login needed): {{cancel_url}}

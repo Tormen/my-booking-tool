@@ -1,0 +1,4 @@
+{{intro}}
+{{message_line}}
+{{details}}
+Reinstate this booking: {{reinstate_url}}

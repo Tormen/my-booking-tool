@@ -119,6 +119,7 @@ from .cancellation import (
     send_cancellation_emails, send_reinstatement_emails,
 )
 from .config import Settings
+from .email_templates import load_email_template, render_template
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
 from .security import (
@@ -1261,44 +1262,45 @@ class App:
         # plain, non-bold line ahead of intro_html()'s bold status
         # sentence, and why this is guest-facing only, never the admin
         # copies in this method's own siblings.
-        greeting = f"Dear {user.name},\n\n"
+        greeting_html_val = greeting_html(user.name)
         if status == STATUS_WAITLISTED:
             intro = (
                 "You're on the waitlist -- full for now, but you'll be confirmed automatically "
                 "by email if a spot opens up:"
             )
+            manage_link_html = f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+            leave_link_html = f'<p>Leave the waitlist directly: <a href="{cancel_url}">{cancel_url}</a></p>'
             send_mail(
                 self.settings, user.email, f"Waitlisted: {course.title} on {occ_date}",
-                f"{greeting}"
-                f"{intro}\n\n"
-                f"{details}\n"
-                f"Manage your bookings: {my_url}\n"
-                f"Leave the waitlist directly: {cancel_url}\n"
-                f"{account_line}",
-                html_body=html_email_body(
-                    greeting_html(user.name) + intro_html(intro) + f"{recap_html}"
-                    f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
-                    f'<p>Leave the waitlist directly: <a href="{cancel_url}">{cancel_url}</a></p>'
-                    f"{account_line_html}"
+                render_template(
+                    load_email_template(self.settings, "waitlisted_email.txt"),
+                    greeting=f"Dear {user.name},\n\n", intro=intro, details=details,
+                    manage_url=my_url, cancel_url=cancel_url, account_line=account_line,
                 ),
+                html_body=html_email_body(render_template(
+                    load_email_template(self.settings, "waitlisted_email.html"),
+                    greeting=greeting_html_val, intro=intro_html(intro), recap=recap_html,
+                    manage_link=manage_link_html, leave_link=leave_link_html, account_line=account_line_html,
+                )),
                 bcc_addrs=self.settings.bcc_attendee_email_list,
             )
         else:
             ics_filename, ics_text = calendar_sync.guest_invite_ics(self.settings, course, date.fromisoformat(occ_date))
+            intro = "Your spot is confirmed:"
+            manage_link_html = f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
+            cancel_link_html = f'<p>Cancel this booking directly: <a href="{cancel_url}">{cancel_url}</a></p>'
             send_mail(
                 self.settings, user.email, f"Booking confirmed: {course.title} on {occ_date}",
-                f"{greeting}"
-                "Your spot is confirmed:\n\n"
-                f"{details}\n"
-                f"Manage your bookings: {my_url}\n"
-                f"Cancel this booking directly: {cancel_url}\n"
-                f"{account_line}",
-                html_body=html_email_body(
-                    greeting_html(user.name) + intro_html("Your spot is confirmed:") + f"{recap_html}"
-                    f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
-                    f'<p>Cancel this booking directly: <a href="{cancel_url}">{cancel_url}</a></p>'
-                    f"{account_line_html}"
+                render_template(
+                    load_email_template(self.settings, "booking_confirmed_email.txt"),
+                    greeting=f"Dear {user.name},\n\n", intro=intro, details=details,
+                    manage_url=my_url, cancel_url=cancel_url, account_line=account_line,
                 ),
+                html_body=html_email_body(render_template(
+                    load_email_template(self.settings, "booking_confirmed_email.html"),
+                    greeting=greeting_html_val, intro=intro_html(intro), recap=recap_html,
+                    manage_link=manage_link_html, cancel_link=cancel_link_html, account_line=account_line_html,
+                )),
                 ics_attachment=(ics_filename, ics_text, "PUBLISH"),
                 bcc_addrs=self.settings.bcc_attendee_email_list,
             )
@@ -1313,11 +1315,15 @@ class App:
         _send_booking_result_guest_email() but consolidates the admin
         notification)."""
         self._send_booking_result_guest_email(user, course, occ_date, status, cancel_token)
+        who = f"{user.name} <{user.email}>"
+        verb = "joined the waitlist for" if status == STATUS_WAITLISTED else "booked"
         send_mail(
             self.settings, self.settings.admin_email,
             f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
-            f"{user.name} <{user.email}> {'joined the waitlist for' if status == STATUS_WAITLISTED else 'booked'} "
-            f"{course.title} on {occ_date}.",
+            render_template(
+                load_email_template(self.settings, "new_booking_admin_email.txt"),
+                who=who, verb=verb, course_title=course.title, occ_date=occ_date,
+            ),
         )
 
     def _already_booked_guests_note(self, already_booked: list[str]) -> str:
@@ -1376,11 +1382,15 @@ class App:
             who = f"{leader.name} <{leader.email}> (+ guest(s): {guest_list})"
         else:
             who = f"{leader.name} <{leader.email}>"
+        status_word = "waitlisted" if status == STATUS_WAITLISTED else "confirmed"
         send_mail(
             self.settings, self.settings.admin_email,
             f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
-            f"{who} {verb} {course.title} on {occ_date} "
-            f"(party of {len(users)}, all {'waitlisted' if status == STATUS_WAITLISTED else 'confirmed'} together).",
+            render_template(
+                load_email_template(self.settings, "new_booking_party_admin_email.txt"),
+                who=who, verb=verb, course_title=course.title, occ_date=occ_date,
+                party_size=str(len(users)), status_word=status_word,
+            ),
         )
 
     def _book_with_guests(
@@ -1608,13 +1618,11 @@ class App:
         # guest-facing email, not a wall of bare instructions.
         send_mail(
             self.settings, user.email, subject,
-            f"Dear {user.name},\n\n"
-            f"Please click below to {verb}:\n\n{confirm_url}\n\n"
-            f"This link expires in {CONFIRM_TOKEN_TTL_HOURS} hours. If you requested this more "
-            "than once, only the link in this latest email will work -- any earlier one is "
-            "no longer valid.\n\n"
-            "If you didn't request this, you can safely ignore this email.\n\n"
-            f"Thanks,\n{site}",
+            render_template(
+                load_email_template(self.settings, "confirm_email.txt"),
+                name=user.name, verb=verb, confirm_url=confirm_url,
+                ttl_hours=str(CONFIRM_TOKEN_TTL_HOURS), site=site,
+            ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
 
@@ -3035,21 +3043,19 @@ class App:
         cancel_url = f"{self.settings.base_url}/my/cancel-email-change/{cancel_token}"
         send_mail(
             self.settings, new_email, f"Confirm your new email for your {site} account",
-            f"Your {site} login is changing from {user.email} to {new_email}.\n\n"
-            f"Click below to confirm:\n\n{confirm_url}\n\n"
-            f"This link expires in {CONFIRM_TOKEN_TTL_HOURS} hours. Once confirmed, {new_email} "
-            f"becomes your login email and {user.email} will no longer have access to this "
-            "account.\n\nIf you're not expecting this, you can safely ignore this email -- "
-            "nothing changes unless this link is clicked.",
+            render_template(
+                load_email_template(self.settings, "email_change_new.txt"),
+                site=site, old_email=user.email, new_email=new_email, confirm_url=confirm_url,
+                ttl_hours=str(CONFIRM_TOKEN_TTL_HOURS),
+            ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
         send_mail(
             self.settings, user.email, f"Email change requested for your {site} account",
-            f"Your {site} login is changing from {user.email} to {new_email}.\n\n"
-            "If you're OK with this, no action is needed here "
-            f"-- once {new_email} confirms via its own emailed link, {user.email} will no longer "
-            f"have access to the account.\n\nIf you're NOT OK with this, cancel it here (no login "
-            f"needed): {cancel_url}",
+            render_template(
+                load_email_template(self.settings, "email_change_current.txt"),
+                site=site, old_email=user.email, new_email=new_email, cancel_url=cancel_url,
+            ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
 
@@ -3062,14 +3068,18 @@ class App:
         site = self._site_label()
         send_mail(
             self.settings, new_email, f"Your {site} login email is now confirmed",
-            f"Your {site} booking account's login email is now {new_email}. Use this address to "
-            "log in from now on.",
+            render_template(
+                load_email_template(self.settings, "email_change_confirmed_new.txt"),
+                site=site, new_email=new_email,
+            ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
         send_mail(
             self.settings, old_email, f"Your {site} login email has changed",
-            f"Your {site} booking account's login email has changed from this address to "
-            f"{new_email}. This address can no longer be used to log in.",
+            render_template(
+                load_email_template(self.settings, "email_change_confirmed_old.txt"),
+                site=site, new_email=new_email,
+            ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
 

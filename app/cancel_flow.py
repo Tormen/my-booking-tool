@@ -33,6 +33,7 @@ from .cancellation import (
     booking_details_text, course_recap_html, html_email_body, intro_html, send_cancellation_emails,
 )
 from .config import Settings
+from .email_templates import load_email_template, render_template
 from .emailer import send_mail
 from .security import hash_token, new_token
 from .storage import (
@@ -188,16 +189,19 @@ def cancel_and_promote(
             ics_filename, ics_text = calendar_sync.guest_invite_ics(
                 settings, course, date.fromisoformat(occurrence_date_str)
             )
+            details = booking_details_text(course, occurrence_date_str)
+            recap_html = course_recap_html(course, occurrence_date_str)
+            manage_link_html = f'<p>Manage or cancel this booking: <a href="{my_url}">{my_url}</a></p>'
             send_mail(
                 settings, user.email, f"You're in! {course.title} on {occurrence_date_str}",
-                f"{intro}\n\n"
-                + booking_details_text(course, occurrence_date_str)
-                + f"\nManage or cancel this booking: {my_url}\n",
-                html_body=html_email_body(
-                    intro_html(intro)
-                    + course_recap_html(course, occurrence_date_str)
-                    + f'<p>Manage or cancel this booking: <a href="{my_url}">{my_url}</a></p>'
+                render_template(
+                    load_email_template(settings, "promoted_email.txt"),
+                    intro=intro, details=details, manage_url=my_url,
                 ),
+                html_body=html_email_body(render_template(
+                    load_email_template(settings, "promoted_email.html"),
+                    intro=intro_html(intro), recap=recap_html, manage_link=manage_link_html,
+                )),
                 ics_attachment=(ics_filename, ics_text, "PUBLISH"),
                 bcc_addrs=settings.bcc_attendee_email_list,
             )
@@ -211,13 +215,19 @@ def cancel_and_promote(
             names = ", ".join(f"{u.name} <{u.email}>" for u in promoted_users)
             verb = "were" if len(promoted_users) > 1 else "was"
             admin_intro = f"{names} {verb} promoted from the waitlist to confirmed for:"
+            admin_details = booking_details_text(course, occurrence_date_str)
+            admin_recap_html = course_recap_html(course, occurrence_date_str)
             send_mail(
                 settings, settings.admin_email,
                 f"Promoted from waitlist: {course.title} on {occurrence_date_str}",
-                f"{admin_intro}\n\n" + booking_details_text(course, occurrence_date_str),
-                html_body=html_email_body(
-                    intro_html(admin_intro) + course_recap_html(course, occurrence_date_str)
+                render_template(
+                    load_email_template(settings, "promoted_admin_email.txt"),
+                    intro=admin_intro, details=admin_details,
                 ),
+                html_body=html_email_body(render_template(
+                    load_email_template(settings, "promoted_admin_email.html"),
+                    intro=intro_html(admin_intro), recap=admin_recap_html,
+                )),
             )
     if sync_fn is not None:
         sync_fn(course_shortname, occurrence_date_str)

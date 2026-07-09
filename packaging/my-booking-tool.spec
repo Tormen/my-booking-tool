@@ -102,8 +102,12 @@ install -m 755 scripts/my-bt %{buildroot}/opt/my-booking/bin/my-bt
 # installed layout. %config(noreplace): these are genuinely hand-editable
 # wording, same treatment as site/privacy.html.tmpl below -- an upgrade
 # must not silently clobber a customized template.
+# 2026-07-14: glob rather than naming each file -- the template set grew
+# from 1 pair (cancel_email) to a full sweep across every guest-facing
+# email the same day, and a plain wildcard here means the NEXT template
+# added doesn't also require a spec edit to actually ship.
 install -d %{buildroot}/opt/my-booking/email_templates
-install -m 644 email_templates/cancel_email.txt email_templates/cancel_email.html \
+install -m 644 email_templates/*.txt email_templates/*.html \
   %{buildroot}/opt/my-booking/email_templates/
 
 # `my-bt --version` (app/version.py) reads this -- written by
@@ -346,8 +350,8 @@ exit 0
 /usr/local/bin/my-bt
 %attr(755,root,root) /opt/my-booking/bin/my-bt
 %{_datadir}/zsh/site-functions/_my-bt
-%config(noreplace) /opt/my-booking/email_templates/cancel_email.txt
-%config(noreplace) /opt/my-booking/email_templates/cancel_email.html
+%config(noreplace) /opt/my-booking/email_templates/*.txt
+%config(noreplace) /opt/my-booking/email_templates/*.html
 %config(noreplace) /opt/my-booking/site/privacy.html.tmpl
 %config(noreplace) /opt/my-booking/site/nginx-locations.conf
 /opt/my-booking/site/nginx-locations.conf.example
