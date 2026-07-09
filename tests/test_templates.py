@@ -98,7 +98,34 @@ class IdInputWidthTest(unittest.TestCase):
         # .id-input must be a NARROWER cap layered on top of .big-input's
         # own width:100%, not a replacement for its font-size/padding.
         html = page("Some title", "<p>body</p>")
-        self.assertIn('.big-input{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em}', html)
+        self.assertIn(
+            '.big-input{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em;display:block}',
+            html,
+        )
+
+
+class BigInputDisplayBlockTest(unittest.TestCase):
+    """2026-07-09, the operator (screenshot of /my's login form, Email box visibly
+    wider/further left than the Password box below it): "the 2 boxes
+    should be aligned!", then "This is a regression. This was already nice
+    before." Root cause: `label{display:block;margin-top:.6em}` (see
+    templates.py's own <style> block) puts each "Email <input>"/"Password
+    <input>" label on its own block, but the INPUT itself defaults to
+    inline-block, sitting on the SAME line as its label's text -- so
+    "Email" (5 chars) vs "Password" (8 chars) push their respective inputs
+    to different starting x-positions. Before `.id-input{max-width:50ch}`
+    existed (2026-07-08), `.big-input`'s uncapped `width:100%` was too wide
+    to fit next to ANY label text and always wrapped onto its own line
+    below it -- both fields' inputs ended up flush-left and equal-width by
+    accident. Capping the width let the (now narrower) input fit on the
+    same line as its label, un-masking this latent misalignment. Fix:
+    `display:block` forces every `.big-input` onto its own line
+    unconditionally, regardless of label text length or width, restoring
+    the pre-regression alignment for good rather than by accident."""
+
+    def test_big_input_is_forced_onto_its_own_line(self):
+        html = page("Some title", "<p>body</p>")
+        self.assertIn("display:block", html.split(".big-input{", 1)[1].split("}", 1)[0])
 
 
 if __name__ == "__main__":

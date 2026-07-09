@@ -156,7 +156,7 @@ label{{display:block;margin-top:.6em}}
 .subtitle{{color:#444;margin:-.4em 0 1em;font-size:1.2em;font-weight:500}}
 .req{{color:#b00020}}
 .hint{{color:#555;margin:.1em 0 0;font-style:italic}}
-.big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em}}
+.big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em;display:block}}
 .id-input{{max-width:50ch}}
 .dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5em;margin:.4em 0}}
 .date-btn{{position:relative;display:block}}
