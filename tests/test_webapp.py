@@ -2768,7 +2768,7 @@ class BookingFlowTest(unittest.TestCase):
         )
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Canceled:"))
         self.assertNotIn("/reinstate/", admin_mail)
-        self.assertIn("Reinstate this booking: https://example.org/host-reinstate/", admin_mail)
+        self.assertIn("Rebook this booking: https://example.org/host-reinstate/", admin_mail)
 
     def test_my_cancel_reinstate_link_actually_reinstates_the_booking(self):
         # End-to-end: the token embedded in the participant's cancellation
@@ -3494,7 +3494,7 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
         _status, _headers, body = self.app.my("GET", environ)
         self.assertIn(f'<form method="post" action="/my/reinstate/{reg.registration_id}"', body)
-        self.assertIn("Reinstate", body)
+        self.assertIn("Rebook", body)
 
     def test_my_bookings_reinstate_button_opens_dialog_with_message_field(self):
         # 2026-07-10, the operator: "Reinstate should, LIKE CANCEL, also ask for a
@@ -3507,14 +3507,14 @@ class BookingFlowTest(unittest.TestCase):
         reinstate_id = f"reinstate-{reg.registration_id}"
         self.assertIn(f'<dialog id="{reinstate_id}-dialog" class="card">', body)
         self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{reinstate_id}-form">', body)
-        self.assertIn("Confirm reinstatement", body)
+        self.assertIn("Confirm rebooking", body)
 
     def test_my_bookings_table_has_no_reinstate_button_before_canceling(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         _status, _headers, body = self.app.my("GET", environ)
         self.assertNotIn("/my/reinstate/", body)
-        self.assertNotIn(">Reinstate<", body)
+        self.assertNotIn(">Rebook<", body)
 
     def test_my_bookings_table_has_no_reinstate_button_for_a_host_canceled_booking(self):
         # 2026-07-14, the operator (screenshot of a "Canceled by host" row still
@@ -3528,7 +3528,7 @@ class BookingFlowTest(unittest.TestCase):
         self.store.cancel(reg.registration_id, canceled_by="host")
         _status, _headers, body = self.app.my("GET", environ)
         self.assertNotIn("/my/reinstate/", body)
-        self.assertNotIn(">Reinstate<", body)
+        self.assertNotIn(">Rebook<", body)
 
     def test_my_reinstate_is_a_no_op_for_a_host_canceled_booking(self):
         # Server-side guard matching the button-hiding above -- a crafted/
@@ -3573,12 +3573,12 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(
             self.app.my_reinstate, (reg.registration_id,), {"message": "sorry, changed my mind"}, environ
         )
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
         self.assertIn("Message: sorry, changed my mind", participant_mail)
         # 2026-07-08, the operator: same participant-only "Dear NAME," greeting as
         # the cancellation email -- the admin copy right below stays bare.
         self.assertTrue(participant_mail.startswith("Dear Regular,\n\n"))
-        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Reinstated:"))
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Rebooked:"))
         self.assertIn("Message: sorry, changed my mind", admin_mail)
         self.assertFalse(admin_mail.startswith("Dear"))
 
@@ -3589,7 +3589,7 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
         self.sent_emails.clear()
         self._post_with_session(self.app.my_reinstate, (reg.registration_id,), {"message": ""}, environ)
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
         self.assertNotIn("Message:", participant_mail)
 
     def test_my_reinstate_confirms_again_when_capacity_allows(self):
@@ -3608,8 +3608,8 @@ class BookingFlowTest(unittest.TestCase):
         to_addrs = [t for t, _, _ in self.sent_emails]
         self.assertIn("regular@example.org", to_addrs)
         self.assertIn("admin@example.org", to_addrs)
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
-        self.assertIn("You reinstated this booking", participant_mail)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
+        self.assertIn("You rebooked this booking", participant_mail)
         self.assertIn("you're confirmed again", participant_mail)
 
     def test_my_reinstate_waitlists_when_capacity_is_now_taken(self):
@@ -3628,7 +3628,7 @@ class BookingFlowTest(unittest.TestCase):
         self.sent_emails.clear()
         self._post_with_session(self.app.my_reinstate, (reg1.registration_id,), {}, env1)
         self.assertEqual(self.store.find_by_id(reg1.registration_id).status, STATUS_WAITLISTED)
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "first@example.org" and s.startswith("Reinstated:"))
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "first@example.org" and s.startswith("Rebooked:"))
         self.assertIn("you're back on the waitlist", participant_mail)
 
     def test_my_reinstate_ignores_someone_elses_registration(self):
@@ -3677,9 +3677,9 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(
             self.app.admin_reinstate, (reg.registration_id,), {"message": "welcome back"}, admin_environ
         )
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
         self.assertIn("Message: welcome back", participant_mail)
-        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Reinstated:"))
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Rebooked:"))
         self.assertIn("Message: welcome back", admin_mail)
 
     def test_admin_reinstate_confirms_again_and_notifies_both_sides(self):
@@ -3696,10 +3696,10 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(status, "302 Found")
         self.assertEqual(dict(headers)["Location"], "/admin")
         self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
-        self.assertIn("The host reinstated this booking", participant_mail)
-        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Reinstated:"))
-        self.assertIn("You reinstated this booking", admin_mail)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
+        self.assertIn("The host rebooked this booking", participant_mail)
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Rebooked:"))
+        self.assertIn("You rebooked this booking", admin_mail)
 
     def test_admin_reinstate_redirect_preserves_past_query_param(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -3739,7 +3739,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("17h15 - 18h55", body)
         self.assertIn("Example Community Gym, Room 1", body)
         self.assertIn('<textarea name="message" rows="2" class="big-input">', body)
-        self.assertIn("Yes, reinstate it", body)
+        self.assertIn("Yes, rebook it", body)
         # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
@@ -3773,7 +3773,7 @@ class BookingFlowTest(unittest.TestCase):
         token = participant_mail.split("/reinstate/")[1].split("\n")[0].strip()
         self.sent_emails.clear()
         self._post(self.app.guest_reinstate, (token,), {"message": "sorry, my mistake"})
-        reinstated_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
+        reinstated_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
         self.assertIn("Message: sorry, my mistake", reinstated_mail)
 
     def test_guest_reinstate_rejects_a_past_occurrence(self):
@@ -3782,7 +3782,7 @@ class BookingFlowTest(unittest.TestCase):
         token = new_token()
         self.store.cancel(reg.registration_id, canceled_by="guest", reinstate_token_hash=hash_token(token))
         _status, _headers, body = self.app.guest_reinstate("GET", token, {})
-        self.assertIn("can no longer be reinstated", body)
+        self.assertIn("can no longer be rebooked", body)
         self._post(self.app.guest_reinstate, (token,), {"message": ""})
         self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_GUEST)
 
@@ -3814,8 +3814,8 @@ class BookingFlowTest(unittest.TestCase):
         status, _headers, body = self._post(self.app.host_reinstate, (reg.registration_id,), {"message": "welcome back"})
         self.assertIn("200", status)
         self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CONFIRMED)
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Reinstated:"))
-        self.assertIn("The host reinstated this booking", participant_mail)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
+        self.assertIn("The host rebooked this booking", participant_mail)
         self.assertIn("Message: welcome back", participant_mail)
 
     def test_host_reinstate_rejects_a_past_occurrence(self):
@@ -3823,7 +3823,7 @@ class BookingFlowTest(unittest.TestCase):
         reg = self.store.add_registration("yoga-class-1", "2020-01-01", user.user_id, hash_token(new_token()))
         self.store.cancel(reg.registration_id, canceled_by="host")
         _status, _headers, body = self.app.host_reinstate("GET", reg.registration_id, {})
-        self.assertIn("can no longer be reinstated", body)
+        self.assertIn("can no longer be rebooked", body)
 
     # -- /host-cancel: no-login "magic link" from the calendar event -------
 

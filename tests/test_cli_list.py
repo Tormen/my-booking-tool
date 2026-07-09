@@ -276,7 +276,7 @@ class BuildCleanUserViewTest(unittest.TestCase):
     def test_verbose_shows_full_timestamp(self):
         result = build_clean_user_view([self.row], verbose=True)
         self.assertEqual(result[0]["joined"], "2026-01-01")  # midnight -- date only either way
-        self.assertEqual(result[0]["last_login"], "2026-07-01_0930.00")
+        self.assertEqual(result[0]["last_login"], "2026-07-01 09h30.00")
 
     def test_never_logged_in_shows_placeholder(self):
         rows = [{"user_id": "u1", "name": "Ada", "email": "ada@example.com", "created_at": "", "last_login_at": ""}]

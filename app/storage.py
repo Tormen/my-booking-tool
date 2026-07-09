@@ -111,7 +111,17 @@ def format_display_timestamp(iso_str: str) -> str:
     no real time-of-day) for every imported row. A real now_iso()-stamped
     registration is for all practical purposes never exactly midnight, so
     exact 00:00:00 is treated as "no real time recorded" and rendered as
-    just the date, rather than a misleadingly precise-looking "_0000.00"."""
+    just the date, rather than a misleadingly precise-looking "_0000.00".
+
+    2026-07-14, the operator (screenshot of /admin's Registered column): "In the
+    GUI please split the timestamp with a space between date and time"
+    then "(and add a 'h' between HH and MM)" -- the date/time separator
+    changed from "_" to " ", and HHMM from bare digits to HH"h"MM (e.g.
+    "2026-07-08_1149.54" -> "2026-07-08 11h49.54"), matching the "17h15"
+    convention already used everywhere else in this app for a time-of-day.
+    The new space is a real line-break opportunity in an HTML table cell
+    -- see app/webapp.py::admin_overview's own `class="nowrap"` on the
+    one HTML table cell that renders this."""
     if not iso_str:
         return iso_str
     try:
@@ -120,7 +130,12 @@ def format_display_timestamp(iso_str: str) -> str:
         return iso_str
     if dt.time() == time(0, 0, 0):
         return dt.strftime("%Y-%m-%d")
-    return dt.strftime("%Y-%m-%d_%H%M.%S")
+    # 2026-07-14, the operator: "In the GUI please split the timestamp with a
+    # space between date and time." then "(and add a 'h' between HH and
+    # MM)" -- "2026-07-08_1149.54" -> "2026-07-08 11h49.54", matching the
+    # "17h15"-style HH"h"MM convention already used everywhere else in
+    # this app for a time-of-day (course start times, occurrence display).
+    return dt.strftime("%Y-%m-%d %Hh%M.%S")
 
 
 @dataclass

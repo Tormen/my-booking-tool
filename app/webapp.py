@@ -2105,7 +2105,7 @@ class App:
         course = self.settings.course(reg.course_shortname)
         if course is None or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date():
             return "200 OK", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This booking can no longer be reinstated.</p>"
+                "Not found", "<p>This booking can no longer be rebooked.</p>"
             )
         if method == "POST":
             form = self._read_form(environ)
@@ -2120,18 +2120,22 @@ class App:
                     course, reg.occurrence_date, user,
                     confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="guest", message=message,
                 )
-            return "200 OK", [("Content-Type", "text/html")], page("Reinstated", "<p>Your booking has been reinstated.</p>")
+            return "200 OK", [("Content-Type", "text/html")], page("Rebooked", "<p>Your booking has been rebooked.</p>")
+        # 2026-07-14, the operator: "Please try find a simpler more intuitive word
+        # than reinstate" -- "Rebook" picked; see cancellation.py's own
+        # note on this same rename for the full scoping (visible text
+        # only, routes/functions/params unchanged).
         body = (
-            "<p>Reinstate your booking?</p>"
+            "<p>Rebook your booking?</p>"
             + _course_recap_html(course, reg.occurrence_date)
             + """<form method="post" class="card">
           <label>Optional message <span class="opt">(optional)</span>
             <textarea name="message" rows="2" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Yes, reinstate it</button>
+          <div class="submit-row"><button type="submit">Yes, rebook it</button>
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Reinstate booking", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Rebook booking", body)
 
     # -- /my (guest self-service) --------------------------------------------
 
@@ -2288,15 +2292,15 @@ class App:
                     actions += (
                         f'<form method="post" action="/my/reinstate/{esc(r.registration_id)}" id="{reinstate_id}-form">'
                         f'<button type="submit" class="confirm-dialog-btn" data-dialog="{reinstate_id}-dialog">'
-                        "Reinstate</button>"
+                        "Rebook</button>"
                         "</form>"
                         f'<dialog id="{reinstate_id}-dialog" class="card">'
                         f"<p><b>Are you sure?</b></p>"
-                        f"<p>Reinstate your booking for <b>{esc(title)}</b> on {esc(r.occurrence_date)}?</p>"
+                        f"<p>Rebook your booking for <b>{esc(title)}</b> on {esc(r.occurrence_date)}?</p>"
                         f'<label>Optional message <textarea name="message" rows="2" class="big-input" '
                         f'form="{reinstate_id}-form"></textarea></label>'
                         '<div class="submit-row">'
-                        f'<button type="submit" form="{reinstate_id}-form">Confirm reinstatement</button> '
+                        f'<button type="submit" form="{reinstate_id}-form">Confirm rebooking</button> '
                         f'<button type="button" class="dialog-close-btn" data-dialog="{reinstate_id}-dialog">Never mind</button>'
                         "</div></dialog>"
                     )
@@ -3690,16 +3694,16 @@ class App:
                         f'<form method="post" action="/admin/reinstate/{esc(r.registration_id)}" id="{reinstate_id}-form">'
                         f'{past_field}'
                         f'<button type="submit" class="confirm-dialog-btn" data-dialog="{reinstate_id}-dialog">'
-                        "Reinstate</button>"
+                        "Rebook</button>"
                         "</form>"
                         f'<dialog id="{reinstate_id}-dialog" class="card">'
                         f"<p><b>Are you sure?</b></p>"
-                        f"<p>Reinstate <b>{esc(user.name)}</b> ({esc(user.email)})'s booking for <b>{esc(title)}</b> "
+                        f"<p>Rebook <b>{esc(user.name)}</b> ({esc(user.email)})'s booking for <b>{esc(title)}</b> "
                         f"on {esc(r.occurrence_date)}? They'll be notified by email.</p>"
                         f'<label>Optional message to them <textarea name="message" rows="2" class="big-input" '
                         f'form="{reinstate_id}-form"></textarea></label>'
                         '<div class="submit-row">'
-                        f'<button type="submit" form="{reinstate_id}-form">Confirm reinstatement</button> '
+                        f'<button type="submit" form="{reinstate_id}-form">Confirm rebooking</button> '
                         f'<button type="button" class="dialog-close-btn" data-dialog="{reinstate_id}-dialog">Never mind</button>'
                         "</div></dialog>"
                     )
@@ -3721,7 +3725,13 @@ class App:
             rows.append(
                 f"<tr><td>{esc(status_label(r.status))}</td><td>{esc(r.course_shortname)}</td>"
                 f'<td class="nowrap">{esc(r.occurrence_date)}</td>{name_cell}{email_cell}'
-                f"<td>{esc(format_display_timestamp(r.registered_at))}</td><td>{esc(times_cell)}</td>"
+                # 2026-07-14, the operator: "both date and time should be
+                # non-linebreakable" -- format_display_timestamp() now
+                # returns a real space between date/time ("2026-07-08
+                # 11h49.54"), which is a line-break opportunity in an
+                # HTML table cell; nowrap keeps it on one line, same class
+                # occurrence_date's own cell already uses above.
+                f'<td class="nowrap">{esc(format_display_timestamp(r.registered_at))}</td><td>{esc(times_cell)}</td>'
                 f"<td>{esc(party_cell)}</td>"
                 f"<td>{actions}</td></tr>"
             )
@@ -3960,7 +3970,7 @@ class App:
             or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date()
         ):
             return "200 OK", [("Content-Type", "text/html")], page(
-                "Not found", "<p>This booking can no longer be reinstated.</p>"
+                "Not found", "<p>This booking can no longer be rebooked.</p>"
             )
         if method == "POST":
             form = self._read_form(environ)
@@ -3973,21 +3983,21 @@ class App:
                     confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host", message=message,
                 )
             return "200 OK", [("Content-Type", "text/html")], page(
-                "Reinstated", "<p>Registration reinstated and attendee notified.</p>"
+                "Rebooked", "<p>Registration rebooked and attendee notified.</p>"
             )
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (
-            f"<p>Reinstate <b>{esc(user.name if user else '(erased)')}</b> "
+            f"<p>Rebook <b>{esc(user.name if user else '(erased)')}</b> "
             f"({esc(user.email if user else '(erased)')})'s booking?</p>"
             + recap
             + """<form method="post" class="card">
           <label>Optional message to them <span class="opt">(optional)</span>
             <textarea name="message" rows="3" class="big-input"></textarea></label>
-          <div class="submit-row"><button type="submit">Confirm reinstatement</button>
+          <div class="submit-row"><button type="submit">Confirm rebooking</button>
             <a href="/" class="link-button">Never mind</a></div>
         </form>"""
         )
-        return "200 OK", [("Content-Type", "text/html")], page("Reinstate booking", body)
+        return "200 OK", [("Content-Type", "text/html")], page("Rebook booking", body)
 
     def host_cancel_occurrence(self, method: str, course_shortname: str, occurrence_date_str: str, environ):
         """"Cancel the entire session" -- no-login "magic link" twin of

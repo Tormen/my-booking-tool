@@ -399,7 +399,14 @@ def send_cancellation_emails(
     # the operator's own inbox.
     admin_message_line = f"\nMessage: {message}\n" if message else ""
     admin_message_line_html = message_html(message) if message else ""
-    admin_reinstate_link_html = f'<p>Reinstate this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
+    # 2026-07-14, the operator: "Please try find a simpler more intuitive word
+    # than reinstate" -- picked "Rebook" (visible text only; the
+    # underlying route/function/variable names -- reinstate_token,
+    # /host-reinstate/<id>, send_reinstatement_emails, reinstated_by,
+    # etc. -- are deliberately UNCHANGED, since /host-reinstate/<id> and
+    # /reinstate/<token> are real URLs already sitting in guests'
+    # already-sent emails; renaming those would break old links).
+    admin_reinstate_link_html = f'<p>Rebook this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
     send_mail(
         settings, settings.admin_email, subject,
         render_template(
@@ -451,12 +458,12 @@ def send_reinstatement_emails(
     only ever attached to the participant's copy."""
     details = booking_details_text(course, occ_date, message)
     recap_html = course_recap_html(course, occ_date, message)
-    subject = f"Reinstated: {course.title} on {occ_date}"
+    subject = f"Rebooked: {course.title} on {occ_date}"
     my_url = f"{settings.base_url}/my"
     status_phrase = "you're confirmed again" if confirmed else "you're back on the waitlist"
     if user:
         participant_who = "You" if reinstated_by == "guest" else "The host"
-        intro = f"{participant_who} reinstated this booking -- {status_phrase}:"
+        intro = f"{participant_who} rebooked this booking -- {status_phrase}:"
         # 2026-07-08, the operator: same "Dear NAME," greeting as
         # send_cancellation_emails' own participant copy above.
         manage_link_html = f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
@@ -475,7 +482,7 @@ def send_reinstatement_emails(
             bcc_addrs=settings.bcc_attendee_email_list,
         )
     admin_who = "You" if reinstated_by == "host" else (f"{user.name} <{user.email}>" if user else "The attendee")
-    admin_intro = f"{admin_who} reinstated this booking -- {status_phrase}:"
+    admin_intro = f"{admin_who} rebooked this booking -- {status_phrase}:"
     send_mail(
         settings, settings.admin_email, subject,
         render_template(load_email_template(settings, "reinstate_email_admin.txt"), intro=admin_intro, details=details),

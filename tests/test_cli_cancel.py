@@ -164,7 +164,7 @@ class CancelRegistrationTest(unittest.TestCase):
         user, reg = self._book("guest@example.org", "Guest")
         cancel_registration(self.store, self.settings, reg.registration_id)
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org")
-        self.assertIn(f"Reinstate this booking: https://example.org/host-reinstate/{reg.registration_id}", admin_mail)
+        self.assertIn(f"Rebook this booking: https://example.org/host-reinstate/{reg.registration_id}", admin_mail)
         # The reinstate_token itself is still minted/stored (harmless, just
         # unused by any email now) -- confirm it's still a real, working
         # token rather than silently dropped.

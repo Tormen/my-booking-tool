@@ -459,33 +459,36 @@ since this is always host-initiated, each one also gets a short apology
 next occurrence, to keep them engaged despite the cancellation.
 
 **Undoing a cancellation:** both the attendee's own `/my` page and the web
-admin's `/admin` overview show a "Reinstate" button on any canceled
-booking whose occurrence is still in the future (2026-07-10). It's an
-undo, not a reschedule to a different date -- it puts the SAME
-registration back to confirmed (or waitlisted, if the class filled up in
-the meantime), re-checking capacity fresh at the moment you click it.
-Attendees can only reinstate their own bookings; the admin can reinstate
-anyone's (handy when an attendee cancels by mistake and asks you to fix it).
-Same confirm-dialog-with-optional-comment flow as Cancel -- whatever you
-type is emailed to the other side in a light-grey box, and the admin's
-own dialog shows the attendee's email address next to their name so you can
+admin's `/admin` overview show a "Rebook" button (2026-07-10; relabeled
+from "Reinstate" 2026-07-14, the operator: "Please try find a simpler more
+intuitive word than reinstate" -- the underlying routes/functions below
+still say "reinstate", only the visible text changed) on any canceled
+booking whose occurrence is still in the future. It's an undo, not a
+reschedule to a different date -- it puts the SAME registration back to
+confirmed (or waitlisted, if the class filled up in the meantime),
+re-checking capacity fresh at the moment you click it. Attendees can
+only rebook their own bookings; the admin can rebook anyone's (handy
+when an attendee cancels by mistake and asks you to fix it). Same
+confirm-dialog-with-optional-comment flow as Cancel -- whatever you type
+is emailed to the other side in a light-grey box, and the admin's own
+dialog shows the attendee's email address next to their name so you can
 tell same-named attendees apart before acting.
 
-Every cancellation email also carries its own no-login "Reinstate" link
-straight to a dedicated page (same What/When/Where recap + optional
-comment + confirm button as the popup, just as a real page since email
-can't open one) -- the participant's copy links to `/reinstate/<token>`
-(a fresh, single-use token minted at that specific cancellation -- not
-the original booking's own cancel token, whose plaintext is never kept
-around), and the admin's own copy links to `/host-reinstate/<reg_id>`,
-gated the same way `/host-cancel/<reg_id>` already is (an unguessable
-ID, no login wall). **New nginx locations** (`/reinstate/`,
-`/host-reinstate/`) are needed for these -- see
+Every cancellation email also carries its own no-login "Rebook this
+booking" link straight to a dedicated page (same What/When/Where recap +
+optional comment + confirm button as the popup, just as a real page
+since email can't open one) -- the participant's copy links to
+`/reinstate/<token>` (a fresh, single-use token minted at that specific
+cancellation -- not the original booking's own cancel token, whose
+plaintext is never kept around), and the admin's own copy links to
+`/host-reinstate/<reg_id>`, gated the same way `/host-cancel/<reg_id>`
+already is (an unguessable ID, no login wall). **New nginx locations**
+(`/reinstate/`, `/host-reinstate/`) are needed for these -- see
 `nginx/my-booking.conf`; `my-bt admin health` flags them if missing.
 No CLI equivalent yet.
 
 **Submission feedback (2026-07-11):** every form in the app -- Cancel,
-Reinstate, booking, account settings, delete-account, login/signup,
+Rebook, booking, account settings, delete-account, login/signup,
 all of it -- disables every button on the page and relabels the one you
 clicked "Please wait..." the instant it's submitted. This is a plain
 (non-AJAX) form POST followed by a full-page redirect, so there's a real

@@ -899,7 +899,11 @@ class FormatDisplayTimestampTest(unittest.TestCase):
     wherever you currently have this format ... YYYY-MM-DD_HHMM.SS"."""
 
     def test_formats_a_now_iso_style_timestamp(self):
-        self.assertEqual(format_display_timestamp("2026-07-07T00:47:57+00:00"), "2026-07-07_0047.57")
+        # 2026-07-14, the operator: "In the GUI please split the timestamp with a
+        # space between date and time" then "(and add a 'h' between HH
+        # and MM)" -- format changed from "2026-07-07_0047.57" to
+        # "2026-07-07 00h47.57".
+        self.assertEqual(format_display_timestamp("2026-07-07T00:47:57+00:00"), "2026-07-07 00h47.57")
 
     def test_blank_input_stays_blank(self):
         # canceled_at is "" for any registration that was never canceled --
@@ -925,7 +929,7 @@ class FormatDisplayTimestampTest(unittest.TestCase):
         # EXACT 00:00:00 is treated as the placeholder; a real registration
         # that happens to fall in the first minute of a day must still
         # render its real time.
-        self.assertEqual(format_display_timestamp("2025-10-18T00:00:01+00:00"), "2025-10-18_0000.01")
+        self.assertEqual(format_display_timestamp("2025-10-18T00:00:01+00:00"), "2025-10-18 00h00.01")
 
 
 class StatusLabelTest(unittest.TestCase):

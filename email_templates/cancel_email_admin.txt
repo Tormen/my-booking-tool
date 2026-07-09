@@ -1,4 +1,4 @@
 {{intro}}
 {{message_line}}
 {{details}}
-Reinstate this booking: {{reinstate_url}}
+Rebook this booking: {{reinstate_url}}
