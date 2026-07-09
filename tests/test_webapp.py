@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from http import cookies
 from unittest.mock import patch
 from urllib.parse import urlencode
@@ -2708,6 +2709,25 @@ class BookingFlowTest(unittest.TestCase):
             (t, s, b) for t, s, b in self.sent_email_bcc if t == "regular@example.org" and s.startswith("Booking confirmed:")
         )
         self.assertEqual(bcc_addrs, ("watcher1@example.org", "watcher2@example.org"))
+
+    def test_custom_email_templates_folder_overrides_the_cancel_email_wording(self):
+        # 2026-07-09, the operator: "place all email templates into settings.toml
+        # [directory] to easily change something there if needed" --
+        # end-to-end confirmation that pointing email_templates_folder at
+        # a real directory containing just a customized cancel_email.txt
+        # actually changes what a real /my/cancel email says, without
+        # touching app/cancellation.py at all.
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        (Path(tmpdir.name) / "cancel_email.txt").write_text("CUSTOM WORDING -- {{intro}} -- {{details}}")
+        self.app.settings = dataclasses.replace(self.settings, email_templates_folder=tmpdir.name)
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.sent_emails.clear()
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
+        self.assertTrue(participant_mail.startswith("CUSTOM WORDING -- You canceled this booking:"))
 
     def test_my_cancel_email_offers_a_reinstate_link_to_the_participant(self):
         # 2026-07-10: originally a plain "book again" link ("With the

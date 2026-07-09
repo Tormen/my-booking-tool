@@ -93,6 +93,19 @@ install -d %{buildroot}/opt/my-booking/bin
 install -m 644 app/*.py %{buildroot}/opt/my-booking/app/
 install -m 755 scripts/my-bt %{buildroot}/opt/my-booking/bin/my-bt
 
+# 2026-07-09, the operator: "place all email templates into settings.toml
+# [directory] to easily change something there if needed" -- installed
+# one level up from app/ (i.e. directly under /opt/my-booking, mirroring
+# site/ below) so app/email_templates.py's own Path(__file__)-relative
+# default resolution (".../app/email_templates.py" -> parent.parent)
+# finds this same directory whether running from a dev checkout or this
+# installed layout. %config(noreplace): these are genuinely hand-editable
+# wording, same treatment as site/privacy.html.tmpl below -- an upgrade
+# must not silently clobber a customized template.
+install -d %{buildroot}/opt/my-booking/email_templates
+install -m 644 email_templates/cancel_email.txt email_templates/cancel_email.html \
+  %{buildroot}/opt/my-booking/email_templates/
+
 # `my-bt --version` (app/version.py) reads this -- written by
 # scripts/build-rpm.sh from `git rev-parse` in the checkout being
 # packaged. Always create it (falling back to a clear placeholder) so
@@ -333,6 +346,8 @@ exit 0
 /usr/local/bin/my-bt
 %attr(755,root,root) /opt/my-booking/bin/my-bt
 %{_datadir}/zsh/site-functions/_my-bt
+%config(noreplace) /opt/my-booking/email_templates/cancel_email.txt
+%config(noreplace) /opt/my-booking/email_templates/cancel_email.html
 %config(noreplace) /opt/my-booking/site/privacy.html.tmpl
 %config(noreplace) /opt/my-booking/site/nginx-locations.conf
 /opt/my-booking/site/nginx-locations.conf.example

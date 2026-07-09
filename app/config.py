@@ -160,6 +160,17 @@ class Settings:
     # account that has never logged in again since booking.
     account_deletion_warning_days: int = 0
 
+    # Optional (2026-07-09, the operator: "Add a settings.toml variable:
+    # email_templates_folder = and place all email templates into the
+    # settings.toml [directory] to easily change something there if
+    # needed"). "" (the default -- key omitted) means every email uses
+    # this repo's own built-in email_templates/ copy unconditionally; when
+    # set, a matching file THERE takes priority over the built-in one, per
+    # template file, so you only need to copy the specific templates you
+    # actually want to customize -- see app/email_templates.py's own
+    # docstring for the full macro/variable mechanism this enables.
+    email_templates_folder: str = ""
+
     courses: tuple[Course, ...] = field(default_factory=tuple)
 
     # Calendar-invite VALARM reminders (minutes before start) -- see
@@ -415,6 +426,7 @@ def load_settings(toml_path: str | Path) -> Settings:
         admin_email=site["admin_email"],
         base_url=site["base_url"].rstrip("/"),
         static_site_dir=(site.get("static_site_dir") or None),
+        email_templates_folder=site.get("email_templates_folder", ""),
         maintenance_bypass_hostname=(site.get("maintenance_bypass_hostname") or None),
         maintenance_bypass_ip_log=(site.get("maintenance_bypass_ip_log") or None),
         caldav_url=cal["caldav_url"],

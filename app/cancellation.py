@@ -18,6 +18,7 @@ import html
 import re
 
 from .config import Course, Settings
+from .email_templates import load_email_template, render_template
 from .emailer import send_mail
 
 # Moved here from app/webapp.py (2026-07-06, alongside the rest of this
@@ -355,23 +356,32 @@ def send_cancellation_emails(
         # 2026-07-08, the operator: guest-facing emails should greet by name, same
         # as _send_confirm_email() already did -- see greeting_html()'s own
         # docstring. Participant copy only, never the admin copy below.
+        #
+        # 2026-07-09, the operator: "Add support for MAKROS in the templates ...
+        # the cancel_email.html [and .txt] for instance should DEFINE how
+        # the final email is assembled" -- this participant copy is the
+        # pilot conversion: every piece below is computed exactly as
+        # before (nothing about WHAT each macro renders changed), but the
+        # ASSEMBLY ORDER now lives in email_templates/cancel_email.txt/
+        # .html (see app/email_templates.py) instead of being hardcoded
+        # Python string concatenation, so it can be edited without
+        # touching this file at all. The admin copy just below is NOT
+        # converted yet -- see this module's own note in SOLUTION-DESIGN.md.
+        manage_link_html = f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
         send_mail(
             settings, user.email, subject,
-            f"Dear {user.name},\n\n"
-            f"{intro_text}\n"
-            f"{resubscribe_line}"
-            f"{message_line}"
-            f"\n{details}\n"
-            f"Manage your bookings: {my_url}\n"
-            f"{apology_line}",
-            html_body=html_email_body(
-                greeting_html(user.name) + intro_html(intro_text)
-                + resubscribe_line_html
-                + message_line_html
-                + recap_html
-                + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
-                + apology_line_html
+            render_template(
+                load_email_template(settings, "cancel_email.txt"),
+                name=user.name, intro=intro_text, resubscribe_line=resubscribe_line,
+                message_line=message_line, details=details, manage_url=my_url,
+                apology_line=apology_line,
             ),
+            html_body=html_email_body(render_template(
+                load_email_template(settings, "cancel_email.html"),
+                greeting=greeting_html(user.name), intro=intro_html(intro_text),
+                resubscribe_line=resubscribe_line_html, message_line=message_line_html,
+                recap=recap_html, manage_link=manage_link_html, apology_line=apology_line_html,
+            )),
             ics_attachment=ics_attachment,
             bcc_addrs=settings.bcc_attendee_email_list,
         )
