@@ -58,7 +58,14 @@ _SYNC_CONFLICT_MAX_ATTEMPTS = 3
 # `my-bt admin resync-calendar` by hand every time.
 CALENDAR_INVITE_FORMAT_VERSION = 1
 
-_CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME = ".calendar_invite_format_version"
+# Public (no leading underscore) -- app.cli_checks.check_calendar_invite_
+# format() also needs to read this same marker file (a cheap, local,
+# no-network re-check of whether the last resync actually finished, shown
+# in `my-bt admin setup`/`admin health`/`setup -i`'s own reports so a
+# resync that silently failed -- see resync_if_format_changed()'s own
+# docstring on the 2026-07-15 incident -- doesn't just vanish, unreported,
+# into a raw print_fn() line that nothing else re-checks).
+CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME = ".calendar_invite_format_version"
 
 
 def _self_or_guest(r: Registration, users_by_id: dict[str, User]) -> str:
@@ -476,7 +483,7 @@ def resync_if_format_changed(
     feature) is treated as "definitely stale" -- always resyncs once (a
     no-op scan if there's nothing booked yet) and writes the marker, so
     every install ends up with one recorded regardless of history."""
-    marker_path = Path(data_dir) / _CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME
+    marker_path = Path(data_dir) / CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME
     try:
         recorded = marker_path.read_text(encoding="utf-8").strip()
     except OSError:

@@ -637,17 +637,26 @@ perform what it safely can:
   commit) -- not gated behind root, since this only needs filesystem
   write access to the data directory, which the `my-booking` group
   already grants. See "Data dir git snapshot" below.
-- Calendar invite format (2026-07-14, `-i` only -- not part of plain
-  `admin setup`'s report): if CalDAV is fully configured, automatically
-  re-syncs every future occurrence's HOST calendar event (same as
-  `my-bt admin resync-calendar`, run by hand) whenever
-  `app.calendar_sync.CALENDAR_INVITE_FORMAT_VERSION` has changed since
-  the last time this ran -- covers the "on install" half of the standing
-  calendar-invite-format rule (see SOLUTION-DESIGN.md section 24); the
-  "next time you touch it" half was already automatic. Never prompts --
-  idempotent and a no-op once caught up, so there's nothing for a human
-  to weigh in on. Best-effort: a network/CalDAV hiccup is a `[warn]`,
-  not a crash.
+- Calendar invite format (2026-07-14, `-i` only): if CalDAV is fully
+  configured, automatically re-syncs every future occurrence's HOST
+  calendar event (same as `my-bt admin resync-calendar`, run by hand)
+  whenever `app.calendar_sync.CALENDAR_INVITE_FORMAT_VERSION` has changed
+  since the last time this ran -- covers the "on install" half of the
+  standing calendar-invite-format rule (see SOLUTION-DESIGN.md section
+  24); the "next time you touch it" half was already automatic. Never
+  prompts -- idempotent and a no-op once caught up, so there's nothing
+  for a human to weigh in on. Best-effort: a network/CalDAV hiccup is a
+  `[warn]`, not a crash. The read-only half of this (has the marker
+  caught up with the current format version?) is a proper structured
+  Check (`cli_checks.check_calendar_invite_format()`), so it's also
+  step 13 of plain `admin setup`'s report and part of `admin health` --
+  a stale marker counts towards fails/warns, gets repeated in the
+  "Warnings/failures, repeated from above" summary, and causes exit 1
+  on either command, same as any other check here (2026-07-15, the operator,
+  after a `[warn]` here didn't stop `setup -i` from reporting "Done --
+  all checks pass now": "setup and health should BOTH (a) repeat any
+  warn or error at the end (b) ... exit 1 to FAIL on any warning or
+  error").
 
 The closing "Done." line (2026-07-08) re-checks everything fresh (so it
 reflects whatever the walkthrough just fixed, not the state at the start)

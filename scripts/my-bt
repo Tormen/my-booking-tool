@@ -1334,6 +1334,20 @@ def cmd_admin_health(args) -> None:
     if raw:
         checks.extend(cli_checks.check_nginx_conf_deployed(raw))
 
+    # -- calendar invite format ----------------------------------------------------
+    # 2026-07-15, the operator (real production `setup -i` run): the marker-file
+    # check was printed as a raw "[warn] ..." line inside interactive_setup()
+    # only, never a structured Check -- so it didn't count towards fails/
+    # warns, wasn't repeated in the "Still need attention" summary, and
+    # `setup -i` still exited "Done -- all checks pass now." right below its
+    # own contradictory warning. Marker-file read only, no network call, so
+    # unlike check_nginx_conf_deployed just above this isn't gated any
+    # tighter than `if raw:` -- check_calendar_invite_format() itself
+    # returns [] (shown as SKIP by print_report()) when CalDAV isn't fully
+    # configured yet.
+    if raw:
+        checks.extend(cli_checks.check_calendar_invite_format(raw, data_dir))
+
     # -- maintenance mode ---------------------------------------------------------
     # 2026-07-11, the operator: "maintenance happens enough often that it is
     # annoying to have to check what this warning was about.. so please do

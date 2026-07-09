@@ -152,6 +152,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "data_dir_git": cli_checks.check_data_dir_git(data_dir),
         "data_dir_ownership": cli_checks.check_data_dir_ownership(data_dir),
         "maintenance": cli_checks.check_maintenance_mode(data_dir),
+        "calendar_invite_format": cli_checks.check_calendar_invite_format(raw, data_dir),
     }
 
 
@@ -266,6 +267,13 @@ def print_report(
 
     print_fn("\n12. Maintenance mode (`my-bt admin site-maintenance on/off/status`):")
     show(report["maintenance"])
+
+    print_fn("\n13. Calendar invite format (marker file, no network call):")
+    calendar_format_checks = report["calendar_invite_format"]
+    if calendar_format_checks:
+        show(calendar_format_checks)
+    else:
+        print_fn("   [SKIP] caldav_url/username/password not fully configured yet -- not checked")
 
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 

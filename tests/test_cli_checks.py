@@ -1566,5 +1566,64 @@ class CheckCaldavCalendarsTest(unittest.TestCase):
         self.assertEqual(len(checks), 1)
 
 
+class CheckCalendarInviteFormatTest(unittest.TestCase):
+    """2026-07-15: the read-only half of the calendar-invite-format story
+    (does the marker on disk match app.calendar_sync.
+    CALENDAR_INVITE_FORMAT_VERSION?) as a proper structured Check -- see
+    this function's own docstring in app/cli_checks.py for why (a raw
+    print_fn() line during `setup -i` didn't count towards fails/warns or
+    get repeated at the end, so a real stale-marker warning went
+    unnoticed under a "Done -- all checks pass now" line)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = Path(self._tmp.name)
+        self.password_file = self.data_dir / "caldav_password"
+        self.password_file.write_text("hunter2", encoding="utf-8")
+
+    def _raw(self, **overrides) -> dict:
+        cal = {
+            "caldav_url": "https://dav.mailbox.org/caldav/",
+            "caldav_username": "calendar@example.org",
+            "caldav_password_file": str(self.password_file),
+        }
+        cal.update(overrides)
+        return {"calendar": cal}
+
+    def test_not_configured_is_a_noop(self):
+        self.assertEqual(cli_checks.check_calendar_invite_format({"calendar": {}}, self.data_dir), [])
+
+    def test_partially_configured_is_a_noop(self):
+        raw = self._raw(caldav_username=None)
+        self.assertEqual(cli_checks.check_calendar_invite_format(raw, self.data_dir), [])
+
+    def test_no_marker_yet_is_a_warn(self):
+        checks = cli_checks.check_calendar_invite_format(self._raw(), self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(label, "calendar invite format")
+        self.assertEqual(level, "warn")
+        self.assertIn("resync-calendar", detail)
+
+    def test_stale_marker_is_a_warn_naming_the_recorded_version(self):
+        (self.data_dir / ".calendar_invite_format_version").write_text("0\n", encoding="utf-8")
+        checks = cli_checks.check_calendar_invite_format(self._raw(), self.data_dir)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("'0'", detail)
+
+    def test_matching_marker_is_ok(self):
+        from app import calendar_sync as app_calendar_sync
+
+        (self.data_dir / ".calendar_invite_format_version").write_text(
+            f"{app_calendar_sync.CALENDAR_INVITE_FORMAT_VERSION}\n", encoding="utf-8",
+        )
+        checks = cli_checks.check_calendar_invite_format(self._raw(), self.data_dir)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "ok")
+
+
 if __name__ == "__main__":
     unittest.main()

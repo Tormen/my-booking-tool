@@ -62,17 +62,42 @@ class PrintReportTest(unittest.TestCase):
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
-    def test_prints_all_twelve_numbered_steps(self):
+    def test_prints_all_thirteen_numbered_steps(self):
         lines: list[str] = []
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         text = "\n".join(lines)
-        for n in range(1, 13):
+        for n in range(1, 14):
             self.assertIn(f"{n}.", text)
 
     def test_caldav_not_configured_shows_skip(self):
         lines: list[str] = []
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         self.assertTrue(any("SKIP" in ln and "caldav_url" in ln for ln in lines))
+
+    def test_stale_calendar_invite_format_marker_is_a_warn_that_fails_the_report(self):
+        # 2026-07-15, the operator, from a real `setup -i` run: a stale marker was
+        # printed as a raw "[warn] ..." line that never became a structured
+        # Check, so it didn't count towards fails/warns and didn't stop the
+        # closing line from claiming "all checks pass now" -- see
+        # app/cli_checks.check_calendar_invite_format()'s own docstring. A
+        # stale/mismatched marker must now show up as a [WARN] line here AND
+        # bump the returned warns count, same as any other check.
+        data_dir = Path(self._tmp.name) / "data"
+        data_dir.mkdir()
+        (data_dir / ".calendar_invite_format_version").write_text("0\n")
+        password_file = self.home / "caldav_password"
+        password_file.write_text("secret")
+        raw = _raw(calendar={
+            "caldav_url": "https://caldav.example.org/",
+            "caldav_username": "bot",
+            "caldav_password_file": str(password_file),
+        })
+        lines: list[str] = []
+        fails, warns = cli_setup.print_report(
+            raw, self.settings_path, str(self.home), print_fn=lines.append, data_dir=str(data_dir),
+        )
+        self.assertTrue(any("WARN" in ln and "calendar invite format" in ln for ln in lines))
+        self.assertGreaterEqual(warns, 1)
 
     def test_reports_missing_secret(self):
         lines: list[str] = []

@@ -248,6 +248,47 @@ def check_caldav_calendars(raw: dict) -> list[Check]:
     return checks
 
 
+def check_calendar_invite_format(raw: dict, data_dir: str | Path) -> list[Check]:
+    """2026-07-15, the operator, after watching a real `setup -i` run print
+    "[warn] couldn't check/resync calendar invite format: ..." and then,
+    a few lines later, "Done -- all checks pass now" anyway: "setup and
+    health should BOTH (a) repeat any warn or error at the end (b) ...
+    exit 1 to FAIL on any warning or error ... you classified this as a
+    warning, but for me this is an error." The resync ATTEMPT (a live
+    CalDAV write) only ever happens in `setup -i` -- see
+    app.calendar_sync.resync_if_format_changed() -- but whether it
+    actually SUCCEEDED is a cheap, local, no-network fact: does the
+    `.calendar_invite_format_version` marker under `data_dir` match
+    app.calendar_sync.CALENDAR_INVITE_FORMAT_VERSION right now? This is
+    that fact, as a real re-checkable Check -- included in build_report()
+    (so plain `setup`/`admin health`, and `setup -i`'s own FRESH final
+    re-check, all see it, repeat it, and factor it into the exit code),
+    unlike the previous version of this feature, which only ever printed
+    an un-recorded, un-recounted line during the walkthrough itself.
+
+    A no-op (empty list, matching every other CalDAV-adjacent check's own
+    "not configured yet" convention) if CalDAV isn't fully configured --
+    nothing to be stale about yet."""
+    cal = raw.get("calendar", {})
+    if not cal.get("caldav_url") or not cal.get("caldav_username") or not cal.get("caldav_password_file"):
+        return []
+    from . import calendar_sync as app_calendar_sync
+
+    marker_path = Path(data_dir) / app_calendar_sync.CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME
+    try:
+        recorded = marker_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        recorded = None
+    current = str(app_calendar_sync.CALENDAR_INVITE_FORMAT_VERSION)
+    if recorded == current:
+        return [("calendar invite format", "ok", f"up to date (v{current})")]
+    return [(
+        "calendar invite format", "warn",
+        f"not yet resynced to the current format (v{current}, marker says {recorded!r}) -- "
+        "run `my-bt admin setup -i` or `my-bt admin resync-calendar`",
+    )]
+
+
 def check_systemd() -> list[Check]:
     if not shutil.which("systemctl"):
         return [("systemd", "warn", "systemctl not found -- skipping (not on the target server?)")]
