@@ -166,9 +166,18 @@ class UsersScopeArgsTest(unittest.TestCase):
         self.assertEqual(args.scope, "all")
 
     def test_live_and_all_are_mutually_exclusive(self):
+        # argparse itself prints its own usage+error text straight to the
+        # real stderr on a mutually-exclusive-group violation, before ever
+        # raising -- left uncaptured, this leaks into the %check build log
+        # as unrelated-looking noise (the operator, screenshot of a real rpmbuild
+        # log: "one test is not silent :)"). Same io.StringIO()-via-
+        # contextlib.redirect_stderr suppression already used just below in
+        # BareCommandMainBehaviorTest.test_genuine_error_still_exits_
+        # nonzero_with_error_text for the exact same reason.
         parser = my_bt_mod.build_parser()
-        with self.assertRaises(SystemExit):
-            parser.parse_args(["users", "--live", "--all"])
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["users", "--live", "--all"])
 
     def _run_users(self, store_dir, extra_argv):
         parser = my_bt_mod.build_parser()
