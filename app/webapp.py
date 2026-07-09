@@ -244,6 +244,20 @@ def _safe_next_path(raw: str) -> str:
     return ""
 
 
+def _admin_overview_redirect_location(form: dict) -> str:
+    """Where admin_cancel()/admin_reinstate() send the operator back to
+    after a POST -- the exact `?scope=...` view they were looking at when
+    they clicked Cancel/Reinstate (carried through as a hidden `scope`
+    field, see admin_overview()'s own row-rendering `scope_field`), not
+    always plain `/admin`. Only "past"/"all" are ever valid values here
+    (see admin_overview()'s own scope-parsing comment) -- anything else
+    (missing, or a hand-edited/stale "1" from before the 2026-07-14
+    three-way rework) falls back to plain `/admin`, same as an
+    unrecognized `?scope=` on a GET does."""
+    scope = form.get("scope")
+    return f"/admin?scope={scope}" if scope in ("past", "all") else "/admin"
+
+
 def _latest_logged_ip(path: str | None) -> str | None:
     """Last non-empty line of an IP-tracking log file (e.g. the operator's own
     /home/me/my-ip.log, kept fresh by infrastructure outside this app) --
@@ -3547,7 +3561,22 @@ class App:
         session = _get_session(environ)
         if not session or session.get("kind") != "admin":
             return "302 Found", [("Location", "/admin/login")], ""
-        show_past = "past=1" in environ.get("QUERY_STRING", "")
+        # 2026-07-14, the operator, screenshot of the old binary "include past"
+        # text-link toggle: "please improve by providing selectors like
+        # for my-bt list: (so NOT a drop down list, but directly
+        # accessible 1-click possibilities to change): All, Only Past,
+        # Only Future and make it so only one of the selectors can be
+        # active at one time. And the active one should be visibly
+        # marked! So by default 'Only Future' should be active and
+        # marked." -- same 3-way mutually-exclusive shape `my-bt list`'s
+        # own --live/--past/--all flags already use (see scripts/my-bt's
+        # scope_args()), just as ?scope=... query-string links instead of
+        # CLI flags. "future" (today-or-later, live rows only) is the
+        # default -- unset or any unrecognized value falls back to it,
+        # same as an unrecognized my-bt list scope would.
+        scope = parse_qs(environ.get("QUERY_STRING", "")).get("scope", ["future"])[0]
+        if scope not in ("past", "all"):
+            scope = "future"
         today = datetime.now(timezone.utc).date()
         # scope="all" (not all_registrations()/find_user_by_id(), which are
         # live-only) so an erased guest's past registrations still show up
@@ -3620,17 +3649,30 @@ class App:
             for r in all_regs
         ]
         times_total_by_user, times_upto_now_by_user = cli_list.compute_times_booked_counts(raw_all_regs, today)
-        regs = all_regs if show_past else [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
+        # "future" (default): today-or-later, live rows only -- unchanged
+        # from the old default view. "past": strictly-before-today live
+        # rows, PLUS every archived row (an erased guest's booking was
+        # already force-canceled before archiving, so it's never part of
+        # the future view regardless of its own occurrence_date -- see
+        # the "Read live and archived separately" comment above). "all":
+        # everything, exactly like the old show_past=True view did.
+        if scope == "all":
+            regs = all_regs
+        elif scope == "past":
+            regs = [r for r in live_regs if date.fromisoformat(r.occurrence_date) < today] + archived_regs
+        else:
+            regs = [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
         # 2026-07-08, the operator: "include past should by default show the
-        # newest first" -- today-or-future (the default view) stays
-        # ascending (soonest upcoming session first, unchanged); toggling
-        # "include past" on flips to descending (most recent booking
-        # first) instead, same asc-for-upcoming/desc-for-past split as
-        # /my's own Upcoming/Past tables (see my()'s _table() calls).
+        # newest first" -- the future-only view stays ascending (soonest
+        # upcoming session first, unchanged); both past-containing views
+        # (past/all) sort descending (most recent booking first) instead,
+        # same asc-for-upcoming/desc-for-past split as /my's own
+        # Upcoming/Past tables (see my()'s _table() calls).
         # data-default-sort below (which drives the on-load indicator --
         # see _SORTABLE_FILTERABLE_TABLE_SCRIPT) must match this, or the
         # arrow would silently lie about which way the rows are ordered.
-        regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname), reverse=show_past)
+        sort_desc = scope in ("past", "all")
+        regs.sort(key=lambda r: (r.occurrence_date, r.course_shortname), reverse=sort_desc)
         # Guest bookings (2026-07): "Host (+N guest(s))"/"Guest of <name>"
         # per row -- live AND archived, so an erased party member's row
         # still counts toward the still-live leader's own count. Computed
@@ -3721,7 +3763,7 @@ class App:
                 ) or (
                     date.fromisoformat(r.occurrence_date) < today
                 )
-                past_field = '<input type="hidden" name="past" value="1">' if show_past else ""
+                scope_field = f'<input type="hidden" name="scope" value="{scope}">' if scope != "future" else ""
                 # "Cancel entire session" (2026-07-13, the operator: "the checkbox
                 # ... Cancel ALL reservations for this date ... SHOW who
                 # would all then receive this cancel email") -- an
@@ -3752,7 +3794,7 @@ class App:
                     )
                 actions = (
                     f'<form method="post" action="/admin/cancel/{esc(r.registration_id)}" id="{cancel_id}-form">'
-                    f'{past_field}'
+                    f'{scope_field}'
                     f'<button type="submit" class="confirm-dialog-btn cancel-btn" data-dialog="{cancel_id}-dialog" '
                     f'data-occurrence="{esc(occurrence_key)}" {"disabled" if disabled else ""}>Cancel</button>'
                     "</form>"
@@ -3781,7 +3823,7 @@ class App:
                     reinstate_id = f"admin-reinstate-{esc(r.registration_id)}"
                     actions += (
                         f'<form method="post" action="/admin/reinstate/{esc(r.registration_id)}" id="{reinstate_id}-form">'
-                        f'{past_field}'
+                        f'{scope_field}'
                         f'<button type="submit" class="confirm-dialog-btn" data-dialog="{reinstate_id}-dialog">'
                         "Rebook</button>"
                         "</form>"
@@ -3824,9 +3866,25 @@ class App:
                 f"<td>{esc(party_cell)}</td>"
                 f"<td>{actions}</td></tr>"
             )
-        toggle = '<a href="/admin">today + future only</a>' if show_past else '<a href="/admin?past=1">include past</a>'
+        # One-click, mutually-exclusive selectors (2026-07-14, the operator: "so
+        # NOT a drop down list, but directly accessible 1-click
+        # possibilities to change") -- the active one is a plain,
+        # non-clickable <span class="scope-active"> (visibly marked, per
+        # the operator's own requirement, and there's no point linking to the
+        # view you're already on); the other two are plain links to the
+        # same page with a different ?scope=.
+        def _scope_selector(value: str, label: str) -> str:
+            if value == scope:
+                return f'<span class="scope-active">{esc(label)}</span>'
+            href = "/admin" if value == "future" else f"/admin?scope={value}"
+            return f'<a href="{href}">{esc(label)}</a>'
+
+        scope_selectors = " &middot; ".join(
+            _scope_selector(value, label)
+            for value, label in (("all", "All"), ("past", "Only Past"), ("future", "Only Future"))
+        )
         table_id = "admin-overview-table"
-        body = f"""<p>{toggle}</p>
+        body = f"""<p class="scope-selector">{scope_selectors}</p>
         <div class="table-tools">
           <input type="search" id="{table_id}-filter" class="big-input id-input" placeholder="Filter...">
         </div>
@@ -3834,7 +3892,7 @@ class App:
         <thead><tr>
           <th>Status<span class="sort-indicator"></span></th>
           <th>Course<span class="sort-indicator"></span></th>
-          <th data-default-sort="{'desc' if show_past else 'asc'}">Date<span class="sort-indicator"></span></th>
+          <th data-default-sort="{'desc' if sort_desc else 'asc'}">Date<span class="sort-indicator"></span></th>
           <th>Name<span class="sort-indicator"></span></th>
           <th>Email<span class="sort-indicator"></span></th>
           <th>Registered<span class="sort-indicator"></span></th>
@@ -3887,7 +3945,7 @@ class App:
             # single-cancel path just below.
             if form.get("cancel_entire_session") == "1":
                 self._cancel_occurrence(reg.course_shortname, reg.occurrence_date, message=message)
-                location = "/admin?past=1" if form.get("past") == "1" else "/admin"
+                location = _admin_overview_redirect_location(form)
                 return "302 Found", [("Location", location)], ""
             reinstate_token = new_token()
             changed = self.store.cancel(
@@ -3905,7 +3963,7 @@ class App:
                         course, reg.occurrence_date, user, canceled_by="host", message=message,
                         registration_id=registration_id, reinstate_token=reinstate_token,
                     )
-            location = "/admin?past=1" if form.get("past") == "1" else "/admin"
+            location = _admin_overview_redirect_location(form)
             return "302 Found", [("Location", location)], ""
         # Same recap + "space, then reason, then button" layout as
         # guest_cancel()/host_cancel() -- see host_cancel()'s docstring for
@@ -3955,7 +4013,7 @@ class App:
                     course, reg.occurrence_date, user,
                     confirmed=(updated.status == STATUS_CONFIRMED), reinstated_by="host", message=message,
                 )
-        location = "/admin?past=1" if form.get("past") == "1" else "/admin"
+        location = _admin_overview_redirect_location(form)
         return "302 Found", [("Location", location)], ""
 
     def host_cancel(self, method: str, registration_id: str, environ):

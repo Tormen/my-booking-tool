@@ -3041,13 +3041,16 @@ class BookingFlowTest(unittest.TestCase):
 
     def test_admin_overview_past_view_sorts_newest_first_by_default(self):
         # 2026-07-08, the operator: "sorting: include past should by default show
-        # the newest first please" -- today-or-future (the default view)
-        # stays ascending; "include past" flips to descending.
+        # the newest first please" -- the future-only default view stays
+        # ascending; both past-containing views (Only Past/All) flip to
+        # descending. 2026-07-14: "include past" became the dedicated
+        # ?scope=past view (see admin_overview()'s own scope-parsing
+        # comment).
         user, environ = self._login_as_guest("regular@example.org")
         for d in ["2026-01-01", "2026-02-01", "2026-03-01"]:
             self._import_past(user.user_id, d, f"past-{d}")
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         self.assertIn('<th data-default-sort="desc">Date<span class="sort-indicator"></span></th>', body)
         first = body.index("2026-03-01")
@@ -3062,6 +3065,98 @@ class BookingFlowTest(unittest.TestCase):
         environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
         self.assertIn('<th data-default-sort="asc">Date<span class="sort-indicator"></span></th>', body)
+
+    # -- 2026-07-14: All/Only Past/Only Future one-click selectors ----------
+    #
+    # the operator, screenshot of the old binary "include past" text link: "please
+    # improve by providing selectors like for my-bt list: (so NOT a drop
+    # down list, but directly accessible 1-click possibilities to change):
+    # All, Only Past, Only Future and make it so only one of the selectors
+    # can be active at one time. And the active one should be visibly
+    # marked! So by default 'Only Future' should be active and marked."
+
+    def test_default_view_marks_only_future_active_and_the_other_two_are_links(self):
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('<span class="scope-active">Only Future</span>', body)
+        self.assertIn('<a href="/admin?scope=all">All</a>', body)
+        self.assertIn('<a href="/admin?scope=past">Only Past</a>', body)
+        # Exactly one marked active -- never zero, never more than one.
+        self.assertEqual(body.count('class="scope-active"'), 1)
+
+    def test_scope_all_marks_all_active(self):
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('<span class="scope-active">All</span>', body)
+        self.assertIn('<a href="/admin">Only Future</a>', body)
+        self.assertIn('<a href="/admin?scope=past">Only Past</a>', body)
+        self.assertEqual(body.count('class="scope-active"'), 1)
+
+    def test_scope_past_marks_only_past_active(self):
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('<span class="scope-active">Only Past</span>', body)
+        self.assertIn('<a href="/admin">Only Future</a>', body)
+        self.assertIn('<a href="/admin?scope=all">All</a>', body)
+        self.assertEqual(body.count('class="scope-active"'), 1)
+
+    def test_unrecognized_scope_value_falls_back_to_only_future(self):
+        # A hand-edited or stale URL (e.g. the old ?past=1) shouldn't 500
+        # or silently show a blank page -- falls back to the same default
+        # as no query string at all.
+        admin_sid = webapp._new_session({"kind": "admin"})
+        environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=bogus"}
+        _status, _headers, body = self.app.admin_overview("GET", environ)
+        self.assertIn('<span class="scope-active">Only Future</span>', body)
+
+    def test_only_past_view_shows_past_rows_and_excludes_future_ones(self):
+        # The genuinely NEW mode: unlike the old binary toggle (today+future
+        # vs. everything), "Only Past" must show past rows WITHOUT the
+        # still-upcoming ones.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._import_past(user.user_id, "2026-01-01", "past-reg")
+        self._book("regular@example.org", name="Regular", occ_date=self._other_occ_date())
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn("2026-01-01", body)
+        self.assertNotIn(self._other_occ_date(), body)
+
+    def test_only_future_view_excludes_past_rows(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._import_past(user.user_id, "2026-01-01", "past-reg")
+        self._book("regular@example.org", name="Regular", occ_date=self._other_occ_date())
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertNotIn("2026-01-01", body)
+        self.assertIn(self._other_occ_date(), body)
+
+    def test_all_view_shows_both_past_and_future_rows(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._import_past(user.user_id, "2026-01-01", "past-reg")
+        self._book("regular@example.org", name="Regular", occ_date=self._other_occ_date())
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn("2026-01-01", body)
+        self.assertIn(self._other_occ_date(), body)
+
+    def test_only_past_view_sorts_newest_first(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        for d in ["2026-01-01", "2026-02-01", "2026-03-01"]:
+            self._import_past(user.user_id, d, f"past-{d}")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn('<th data-default-sort="desc">Date<span class="sort-indicator"></span></th>', body)
+        first = body.index("2026-03-01")
+        second = body.index("2026-02-01")
+        third = body.index("2026-01-01")
+        self.assertTrue(first < second < third, "expected newest-first row order")
 
     def test_admin_overview_times_booked_header_has_explanatory_subtitle(self):
         # the operator, screenshot of /admin: "please add a small subtitle
@@ -3110,7 +3205,7 @@ class BookingFlowTest(unittest.TestCase):
         self._import_past(user.user_id, datetime.now(timezone.utc).date().isoformat(), "today-session")
         self._import_past(user.user_id, "2027-01-01", "future-session")
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         self.assertIn("<td>1/2</td>", body)
 
@@ -3121,7 +3216,7 @@ class BookingFlowTest(unittest.TestCase):
         user, environ = self._login_as_guest("regular@example.org")
         self._import_past(user.user_id, "2026-01-01", "past-session")
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         cancel_start = body.index("admin-cancel-")
         button_html = body[body.index("<button", cancel_start):body.index("</button>", cancel_start) + 1]
@@ -3225,7 +3320,7 @@ class BookingFlowTest(unittest.TestCase):
         reg = self.store.registrations_for_user(user.user_id)[0]
         erase_user_by_email(self.store, self.settings, "erased-guest@example.org", today=date.fromisoformat(self.occ_date))
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         self.assertIn("[erased]", body)
         self.assertIn('class="hash-cell"', body)
@@ -3252,7 +3347,7 @@ class BookingFlowTest(unittest.TestCase):
         no_past_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", no_past_environ)
         self.assertNotIn("[erased]", body)
-        past_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        past_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", past_environ)
         self.assertIn("[erased]", body)
 
@@ -3276,7 +3371,7 @@ class BookingFlowTest(unittest.TestCase):
         self._import_past(user.user_id, datetime.now(timezone.utc).date().isoformat(), "erased-guest2-reg")
         erase_user_by_email(self.store, self.settings, "erased-guest2@example.org")
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         # times-booked column should show 1/1 (one up-to-now, one total),
         # not 0/0, for the erased row -- see the "N/M" format's own comment
@@ -3344,7 +3439,7 @@ class BookingFlowTest(unittest.TestCase):
         live_user = self.store.find_user_by_email(email)
 
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
 
         # Both registrations SHOW as the live account's own -- the archived
@@ -3373,7 +3468,7 @@ class BookingFlowTest(unittest.TestCase):
         live_user = self.store.find_user_by_email(email)
 
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, first_body = self.app.admin_overview("GET", admin_environ)
         _status, _headers, second_body = self.app.admin_overview("GET", admin_environ)
 
@@ -3401,7 +3496,7 @@ class BookingFlowTest(unittest.TestCase):
         live_user = self.store.find_user_by_email(email)
 
         admin_sid = webapp._new_session({"kind": "admin"})
-        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
 
         # Only ONE row survives for this course+date -- not two.
@@ -3475,20 +3570,21 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(status, "302 Found")
         self.assertEqual(dict(headers)["Location"], "/admin")
 
-    def test_admin_cancel_redirect_preserves_past_query_param(self):
-        # The admin table's own Cancel form carries a hidden past=1 field
-        # when reached from the "include past" view, so canceling from
-        # there doesn't silently drop the admin back to today+future only.
+    def test_admin_cancel_redirect_preserves_scope_query_param(self):
+        # The admin table's own Cancel form carries a hidden `scope` field
+        # (see admin_overview()'s own row-rendering `scope_field`) when
+        # reached from a non-default (Only Past/All) view, so canceling
+        # from there doesn't silently drop the admin back to Only Future.
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         status, headers, _body = self._post_with_session(
-            self.app.admin_cancel, (reg.registration_id,), {"message": "", "past": "1"}, admin_environ
+            self.app.admin_cancel, (reg.registration_id,), {"message": "", "scope": "all"}, admin_environ
         )
         self.assertEqual(status, "302 Found")
-        self.assertEqual(dict(headers)["Location"], "/admin?past=1")
+        self.assertEqual(dict(headers)["Location"], "/admin?scope=all")
 
     def test_admin_cancel_resubmission_does_not_send_duplicate_emails(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -3527,7 +3623,7 @@ class BookingFlowTest(unittest.TestCase):
         self._login_as_guest("regular@example.org")
         self._import_past(self.store.find_user_by_email("regular@example.org").user_id, "2026-01-01", "past-reg")
         admin_sid = webapp._new_session({"kind": "admin"})
-        environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "past=1"}
+        environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
         # "cancel-entire-checkbox" alone would also match the always-loaded
         # wiring script (_CANCEL_ENTIRE_SESSION_SCRIPT) -- check for the
@@ -3799,7 +3895,7 @@ class BookingFlowTest(unittest.TestCase):
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Rebooked:"))
         self.assertIn("You rebooked this booking", admin_mail)
 
-    def test_admin_reinstate_redirect_preserves_past_query_param(self):
+    def test_admin_reinstate_redirect_preserves_scope_query_param(self):
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
@@ -3807,10 +3903,10 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         status, headers, _body = self._post_with_session(
-            self.app.admin_reinstate, (reg.registration_id,), {"past": "1"}, admin_environ
+            self.app.admin_reinstate, (reg.registration_id,), {"scope": "all"}, admin_environ
         )
         self.assertEqual(status, "302 Found")
-        self.assertEqual(dict(headers)["Location"], "/admin?past=1")
+        self.assertEqual(dict(headers)["Location"], "/admin?scope=all")
 
     def test_admin_reinstate_does_nothing_for_a_past_occurrence(self):
         user, environ = self._login_as_guest("regular@example.org")
