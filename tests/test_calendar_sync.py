@@ -5,11 +5,12 @@ calendar_sync.py's own docstring for what's being tested here."""
 import tempfile
 import unittest
 from datetime import date
+from pathlib import Path
 
 from app.caldav_client import CalDAVClient, CalDAVConflictError, Response
 from app.calendar_sync import (
     _SYNC_CONFLICT_MAX_ATTEMPTS, event_uid, guest_cancel_ics, guest_invite_ics,
-    resync_after_course_rename, resync_all_future_calendar_events, sync_occurrence,
+    resync_after_course_rename, resync_all_future_calendar_events, resync_if_format_changed, sync_occurrence,
 )
 from app.ics import parse_uid
 from app.storage import (
@@ -509,6 +510,94 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
 
         self.assertEqual(fixed, 0)
         self.assertEqual(transport.calls, [])
+
+
+class ResyncIfFormatChangedTest(unittest.TestCase):
+    """2026-07-14: the "on install" half of the operator's own standing request
+    (2026-07-09: "maybe either on install or on the next moment you touch
+    this calendar invite again ?") -- resync_if_format_changed() only
+    actually resyncs (and only ever the once) when
+    CALENDAR_INVITE_FORMAT_VERSION doesn't match a marker file recorded
+    under the data dir, so `my-bt setup -i` can call this unconditionally
+    on every run without re-syncing every single time it's invoked."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.data_dir = self._tmp.name
+        self.store = Store(self.data_dir)
+        self.course = make_course(shortname="yoga-class-1", capacity=14)
+        self.settings = make_settings(courses=(self.course,), booking_calendar="Bookings", base_url="https://example.org")
+        self.today = date(2026, 7, 8)
+
+    def _client(self, report_body: str = EMPTY_REPORT):
+        transport = FakeTransport(report_body)
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=transport,
+        )
+        return client, transport
+
+    def _confirm(self, email: str, occurrence_date: str, course: str) -> None:
+        user = self.store.upsert_user_for_booking(email, email.split("@")[0].title())
+        self.store.add_registration(course, occurrence_date, user.user_id, "tok-hash", status=STATUS_CONFIRMED)
+
+    def test_no_marker_yet_runs_once_and_writes_it(self):
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        client, transport = self._client()
+
+        fixed = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=1,
+        )
+
+        self.assertEqual(fixed, 1)
+        marker = Path(self.data_dir) / ".calendar_invite_format_version"
+        self.assertEqual(marker.read_text(encoding="utf-8").strip(), "1")
+
+    def test_matching_marker_is_a_no_op(self):
+        marker = Path(self.data_dir) / ".calendar_invite_format_version"
+        marker.write_text("1\n", encoding="utf-8")
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        client, transport = self._client()
+
+        fixed = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=1,
+        )
+
+        self.assertIsNone(fixed)
+        self.assertEqual(transport.calls, [])
+
+    def test_stale_marker_triggers_a_resync_and_updates_the_marker(self):
+        marker = Path(self.data_dir) / ".calendar_invite_format_version"
+        marker.write_text("1\n", encoding="utf-8")
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        client, transport = self._client()
+
+        fixed = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=2,
+        )
+
+        self.assertEqual(fixed, 1)
+        self.assertEqual(marker.read_text(encoding="utf-8").strip(), "2")
+
+    def test_running_twice_in_a_row_only_resyncs_the_first_time(self):
+        self._confirm("alice@example.org", "2026-07-10", "yoga-class-1")
+        client, transport = self._client()
+
+        first = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=1,
+        )
+        second = resync_if_format_changed(
+            client, "/caldav/Bookings/", self.store, self.settings, self.data_dir,
+            today=self.today, format_version=1,
+        )
+
+        self.assertEqual(first, 1)
+        self.assertIsNone(second)
 
 
 class GuestInviteAndCancelIcsTest(unittest.TestCase):

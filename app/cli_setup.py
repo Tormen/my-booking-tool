@@ -835,6 +835,44 @@ def interactive_setup(
     for label, level, detail in cli_checks.check_maintenance_mode(data_dir):
         print_fn(f"[{level}] {label}: {detail}")
 
+    # 13. Calendar invite format -- the "on install" half of the operator's own
+    # standing request (2026-07-09: "If we change anything with the
+    # CALENDAR INVITE(s) ... Please ensure that the existing (future)
+    # calendar invites are updated as well (maybe either on install or on
+    # the next moment you touch this calendar invite again ?)"). Unlike
+    # every other step above, this one never prompts -- it's idempotent
+    # (a no-op once the marker matches CALENDAR_INVITE_FORMAT_VERSION, see
+    # that constant's own docstring in app/calendar_sync.py) and touches
+    # nothing outside the app's own normal job (re-describing the
+    # operator's own live CalDAV events, exactly as sync_occurrence()
+    # already does on every booking/cancellation) -- so there's nothing
+    # here for a human to weigh in on, unlike e.g. rewriting nginx config.
+    # Best-effort, same as the CalDAV calendar-name check above: a
+    # transient network hiccup, or CalDAV not fully configured yet, must
+    # not crash the rest of this walkthrough.
+    print_fn("\n-- 13. Calendar invite format --")
+    caldav_cal = raw.get("calendar", {})
+    if not caldav_cal.get("caldav_url") or not caldav_cal.get("caldav_username") or not caldav_cal.get("caldav_password_file"):
+        print_fn("[skip] caldav_url/username/password not fully configured yet -- not checked")
+    else:
+        try:
+            from . import calendar_sync as app_calendar_sync
+            from . import cancel_flow as app_cancel_flow
+            from .config import load_settings
+            from .storage import Store
+
+            settings = load_settings(settings_path)
+            caldav = app_cancel_flow.build_caldav_client(settings)
+            href = app_cancel_flow.calendar_href(caldav, settings)
+            store = Store(data_dir)
+            fixed = app_calendar_sync.resync_if_format_changed(caldav, href, store, settings, data_dir)
+            if fixed is None:
+                print_fn("[ok] calendar invite format unchanged since the last resync -- nothing to do")
+            else:
+                print_fn(f"[ok] calendar invite format changed -- resynced {fixed} upcoming occurrence(s)")
+        except Exception as exc:  # noqa: BLE001 -- config/network/CalDAV failure, report don't crash
+            print_fn(f"[warn] couldn't check/resync calendar invite format: {exc}")
+
     # 2026-07-08, the operator: "would be better if 'Done' would reflect if there
     # were any problems." -- previously this was a flat "Done." no matter
     # how many [warn]/[fail] lines had just scrolled by above, so a real

@@ -579,11 +579,12 @@ your CalDAV/SMTP provider itself is unreachable.
 
 ### `my-bt admin setup` / `my-bt admin setup --interactive`
 
-The same checks `admin health` runs, reorganized as an 11-step guided
-post-install list (secrets, `.rpmnew` merge, a `settings.toml` values
-summary, nginx, group membership, systemd, SELinux, the static site, live
-CalDAV calendar names, the watchdog's nginx access log, and the data dir
-git snapshot) -- this is the single source of truth for those steps now;
+The same checks `admin health` runs, reorganized as a guided post-install
+list (secrets, `.rpmnew` merge, a `settings.toml` values summary, nginx,
+group membership, systemd, SELinux, the static site, live CalDAV calendar
+names, the watchdog's nginx access log, the data dir git snapshot, and
+`-i`-only, the calendar invite format) -- this is the single source of
+truth for those steps now;
 `%post` and `scripts/install.sh` just
 point here instead of each keeping their own copy of the text (which used
 to drift out of sync). The logic itself lives in `app/cli_checks.py` (the
@@ -636,6 +637,17 @@ perform what it safely can:
   commit) -- not gated behind root, since this only needs filesystem
   write access to the data directory, which the `my-booking` group
   already grants. See "Data dir git snapshot" below.
+- Calendar invite format (2026-07-14, `-i` only -- not part of plain
+  `admin setup`'s report): if CalDAV is fully configured, automatically
+  re-syncs every future occurrence's HOST calendar event (same as
+  `my-bt admin resync-calendar`, run by hand) whenever
+  `app.calendar_sync.CALENDAR_INVITE_FORMAT_VERSION` has changed since
+  the last time this ran -- covers the "on install" half of the standing
+  calendar-invite-format rule (see SOLUTION-DESIGN.md section 24); the
+  "next time you touch it" half was already automatic. Never prompts --
+  idempotent and a no-op once caught up, so there's nothing for a human
+  to weigh in on. Best-effort: a network/CalDAV hiccup is a `[warn]`,
+  not a crash.
 
 The closing "Done." line (2026-07-08) re-checks everything fresh (so it
 reflects whatever the walkthrough just fixed, not the state at the start)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,26 @@ log = logging.getLogger("my_booking.calendar_sync")
 # time) is cheap insurance against exactly that, not a sign of a deeper
 # problem if it occasionally takes 2.
 _SYNC_CONFLICT_MAX_ATTEMPTS = 3
+
+# 2026-07-09, the operator, the standing rule (see SOLUTION-DESIGN.md section 24):
+# "If we change anything with the CALENDAR INVITE(s) (host and/or
+# attendee): Please ensure that the existing (future) calendar invites are
+# updated as well (maybe either on install or on the next moment you touch
+# this calendar invite again ?)." The "next moment you touch it again" half
+# is already free (sync_occurrence() always recomputes from scratch). This
+# constant plus resync_if_format_changed() below cover the "on install"
+# half: bump this integer by 1 in the SAME commit as any change to what
+# sync_occurrence() puts in the HOST event's description (new line,
+# reworded line, removed line -- anything visible on the operator's own
+# calendar entry). resync_if_format_changed() compares this against a
+# marker file under the data dir and re-syncs every future occurrence
+# automatically, once, the next time `my-bt setup -i` runs -- so an
+# operator upgrading the package and re-running setup gets existing
+# invites caught up without having to separately remember to run
+# `my-bt admin resync-calendar` by hand every time.
+CALENDAR_INVITE_FORMAT_VERSION = 1
+
+_CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME = ".calendar_invite_format_version"
 
 
 def _self_or_guest(r: Registration, users_by_id: dict[str, User]) -> str:
@@ -391,6 +412,44 @@ def resync_all_future_calendar_events(
         for d_iso in dates:
             sync_occurrence(client, calendar_href, store, settings, course, date.fromisoformat(d_iso))
             fixed += 1
+    return fixed
+
+
+def resync_if_format_changed(
+    client: CalDAVClient,
+    calendar_href: str,
+    store: Store,
+    settings: Settings,
+    data_dir: str | Path,
+    *,
+    today: date | None = None,
+    format_version: int = CALENDAR_INVITE_FORMAT_VERSION,
+) -> int | None:
+    """Runs resync_all_future_calendar_events() automatically, but only if
+    `format_version` (CALENDAR_INVITE_FORMAT_VERSION by default) doesn't
+    match what's recorded in a small marker file under `data_dir` -- see
+    that constant's own docstring for the full "on install" story. Returns
+    the resync count (same as resync_all_future_calendar_events(), so 0 is
+    a valid "ran, nothing to do" result) if it ran, or None if the format
+    hasn't changed since the last run (nothing to do, marker left alone).
+
+    Writes the new version to the marker only AFTER a successful resync --
+    if resync_all_future_calendar_events() raises (e.g. a CalDAV hiccup),
+    the marker is left at its old value so the next run tries again,
+    instead of silently recording "done" for a resync that didn't actually
+    happen. A missing marker (fresh install, or a data dir that predates
+    this feature) is treated as "definitely stale" -- always resyncs once
+    (a no-op scan if there's nothing booked yet) and writes the marker, so
+    every install ends up with one recorded regardless of history."""
+    marker_path = Path(data_dir) / _CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME
+    try:
+        recorded = marker_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        recorded = None
+    if recorded == str(format_version):
+        return None
+    fixed = resync_all_future_calendar_events(client, calendar_href, store, settings, today=today)
+    marker_path.write_text(f"{format_version}\n", encoding="utf-8")
     return fixed
 
 

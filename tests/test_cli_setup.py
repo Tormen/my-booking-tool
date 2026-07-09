@@ -903,6 +903,109 @@ class InteractiveSetupCaldavTest(unittest.TestCase):
         self.assertEqual(prompt.asked_matching("CalDAV"), [])
 
 
+class InteractiveSetupCalendarInviteFormatTest(unittest.TestCase):
+    """Step 13, 2026-07-14 -- the "on install" half of the operator's own standing
+    request (2026-07-09: "maybe either on install or on the next moment
+    you touch this calendar invite again ?"). Never prompts (see the step's
+    own comment in app/cli_setup.py for why) -- just calls
+    app.calendar_sync.resync_if_format_changed() and reports what it did.
+    A REAL, valid settings.toml is needed here (unlike most other tests in
+    this file, which get away with the placeholder "x" since they never
+    reach load_settings()) -- load_settings() itself is exercised for
+    real, only CalDAVClient/resync_if_format_changed are mocked."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        secrets = self.home / "secrets"
+        secrets.mkdir()
+        for name in ("caldav_password", "smtp_password", "admin_password_hash"):
+            (secrets / name).write_text("s3cr3t\n", encoding="utf-8")
+        (secrets / "erasure_pepper").write_text("aa" * 32 + "\n", encoding="utf-8")  # must be valid hex
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text(f"""
+[site]
+timezone = "Europe/Berlin"
+admin_email = "admin@example.org"
+base_url = "https://example.org"
+
+[calendar]
+caldav_url = "https://dav.example.org/"
+caldav_username = "calendar@example.org"
+caldav_password_file = "{secrets / 'caldav_password'}"
+booking_calendar = "Bookings"
+conflict_calendars = ["Bookings"]
+
+[smtp]
+host = "smtp.example.org"
+port = 465
+username = "calendar@example.org"
+password_file = "{secrets / 'smtp_password'}"
+from_address = "admin@example.org"
+
+[admin]
+password_hash_file = "{secrets / 'admin_password_hash'}"
+
+[privacy]
+erasure_pepper_file = "{secrets / 'erasure_pepper'}"
+""", encoding="utf-8")
+        self.raw = _raw(calendar={
+            "caldav_url": "https://dav.example.org/",
+            "caldav_username": "calendar@example.org",
+            "caldav_password_file": str(secrets / "caldav_password"),
+            "booking_calendar": "Bookings",
+            "conflict_calendars": ["Bookings"],
+        })
+
+    def _run(self, **patches):
+        lines: list[str] = []
+        prompt = FakePrompts()
+        with patch("app.cancel_flow.build_caldav_client", return_value=object()), \
+             patch("app.cancel_flow.calendar_href", return_value="/caldav/Bookings/"), \
+             patch("app.calendar_sync.resync_if_format_changed", **patches) as mock_resync:
+            cli_setup.interactive_setup(
+                self.raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lines.append,
+            )
+        return lines, prompt, mock_resync
+
+    def test_not_configured_shows_skip(self):
+        lines: list[str] = []
+        prompt = FakePrompts()
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lines.append,
+        )
+        self.assertTrue(any("skip" in ln and "caldav_url" in ln for ln in lines))
+
+    def test_format_unchanged_reports_nothing_to_do_and_never_prompts(self):
+        # This step never calls `prompt` at all -- see its own comment in
+        # app/cli_setup.py -- unlike step 4/11 (nginx/git-snapshot) just
+        # above it, which always ask unconditionally regardless of what
+        # this test cares about.
+        lines, prompt, _mock = self._run(return_value=None)
+        text = "\n".join(lines)
+        self.assertIn("unchanged since the last resync", text)
+        self.assertEqual(prompt.asked_matching("calendar"), [])
+        self.assertEqual(prompt.asked_matching("resync"), [])
+
+    def test_format_changed_reports_the_resync_count(self):
+        lines, _prompt, _mock = self._run(return_value=3)
+        text = "\n".join(lines)
+        self.assertIn("resynced 3 upcoming occurrence(s)", text)
+
+    def test_caldav_failure_is_a_warning_not_a_crash(self):
+        lines, _prompt, _mock = self._run(side_effect=RuntimeError("PROPFIND -> HTTP 401"))
+        text = "\n".join(lines)
+        self.assertIn("[warn]", text)
+        self.assertIn("401", text)
+
+
 class InteractiveSetupWatchdogTest(unittest.TestCase):
     """Step 10 -- unlike step 9 (CalDAV), there IS a safe auto-fix here
     (setfacl), so this DOES prompt/act, mirroring the SELinux/group-
