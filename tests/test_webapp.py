@@ -2621,7 +2621,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("admin@example.org", to_addrs)
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", participant_mail)
-        self.assertIn("Message: can't make it", participant_mail)
+        # 2026-07-09, the operator (b): guest-initiated cancels label the message
+        # from the ATTENDEE's own point of view -- they sent it to the host.
+        self.assertIn("Message you sent to the host: can't make it", participant_mail)
         # 2026-07-08, the operator: guest-facing emails greet by name -- the admin
         # copy right below deliberately does NOT (it's a receipt to the
         # operator's own inbox, not a letter -- see greeting_html()'s
@@ -2648,7 +2650,12 @@ class BookingFlowTest(unittest.TestCase):
         self.sent_emails.clear()
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
-        self.assertIn("If this was a mistake, you can reinstate it here: https://example.org/reinstate/", participant_mail)
+        # 2026-07-09, the operator (c): a prominent standalone sentence, not a
+        # plain "If this was a mistake, you can reinstate it here:" line.
+        self.assertIn(
+            "In case this was a mistake, you can easily resubscribe: https://example.org/reinstate/",
+            participant_mail,
+        )
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Canceled:"))
         self.assertNotIn("/reinstate/", admin_mail)
         self.assertIn("Reinstate this booking: https://example.org/host-reinstate/", admin_mail)
@@ -2719,7 +2726,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("admin@example.org", to_addrs)
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", participant_mail)
-        self.assertIn("Message: car trouble", participant_mail)
+        # 2026-07-09, the operator (b): guest-initiated cancels label the message
+        # from the ATTENDEE's own point of view -- they sent it to the host.
+        self.assertIn("Message you sent to the host: car trouble", participant_mail)
         admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
         self.assertIn("Regular <regular@example.org> canceled this booking:", admin_mail)
 
@@ -3227,9 +3236,17 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("admin@example.org", to_addrs)
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
         self.assertIn("The host canceled this booking:", participant_mail)
-        self.assertIn("Message: course canceled this week", participant_mail)
+        # 2026-07-09, the operator (b): host-initiated cancels label the message
+        # from the ATTENDEE's point of view -- it came from the host.
+        self.assertIn("Message from the host: course canceled this week", participant_mail)
+        # 2026-07-09, the operator (c): no reinstate link at all for a host-
+        # initiated cancel's participant copy.
+        self.assertNotIn("/reinstate/", participant_mail)
         admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
-        self.assertIn("You canceled this booking:", admin_mail)
+        # 2026-07-09, the operator (a): "I am the host, so the email should not say
+        # YOU canceled the meeting!!" -- the admin copy must name WHO was
+        # canceled, not just say "You".
+        self.assertIn("You canceled Regular <regular@example.org>'s booking:", admin_mail)
 
     def test_admin_cancel_redirects_to_admin_after_post(self):
         # 2026-07-10 fix, real incident: the admin overview's own Cancel
@@ -3331,7 +3348,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("regular@example.org", to_addrs)
         self.assertIn("second@example.org", to_addrs)
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
-        self.assertIn("Message: venue flooded", participant_mail)
+        self.assertIn("Message from the host: venue flooded", participant_mail)
 
     def test_admin_cancel_without_checkbox_still_only_cancels_the_one_row(self):
         # Regression guard for the new branch in admin_cancel(): absent (or
@@ -3688,7 +3705,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("admin@example.org", to_addrs)
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
         self.assertIn("The host canceled this booking:", participant_mail)
-        self.assertIn("Message: instructor is sick", participant_mail)
+        self.assertIn("Message from the host: instructor is sick", participant_mail)
 
     def test_host_cancel_unknown_registration_is_404_not_redirect(self):
         status, _headers, body = self.app.host_cancel("GET", "00000000-0000-0000-0000-000000000000", {})
@@ -3756,8 +3773,11 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("regular@example.org", to_addrs)
         self.assertIn("second@example.org", to_addrs)
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
-        self.assertIn("Message: venue flooded", participant_mail)
+        self.assertIn("Message from the host: venue flooded", participant_mail)
         self.assertIn("exception rather than the rule", participant_mail)
+        # 2026-07-09, the operator (c): no reinstate link for a host-initiated
+        # cancel's participant copy, even for the whole-occurrence path.
+        self.assertNotIn("/reinstate/", participant_mail)
 
     def test_host_cancel_occurrence_resubmission_does_not_send_duplicate_emails(self):
         self._login_as_guest("regular@example.org")

@@ -168,7 +168,7 @@ def greeting_html(name: str) -> str:
     return f'<p style="margin:0 0 .5em">Dear {html.escape(name, quote=True)},</p>'
 
 
-def message_html(message: str) -> str:
+def message_html(message: str, label: str = "Message:") -> str:
     """The optional free-text comment collected by Cancel's and Reinstate's
     own confirm dialogs (2026-07-10, the operator: "Reinstate should, LIKE CANCEL,
     also ask for a COMMENT to be sent with the email to the other" then
@@ -180,10 +180,19 @@ def message_html(message: str) -> str:
     distinct from the operator-authored course description. Blank message
     renders nothing at all, same as the old plain-`<p>` version this
     replaces -- every call site already only calls this when there IS a
-    message to show."""
+    message to show.
+
+    `label` (2026-07-09, the operator, on send_cancellation_emails's participant
+    copy: "if the Attendee canceled, you label it as: Message you sent to
+    the host: and if ... the host canceled, you label it as: 'Message from
+    the host:'") defaults to the plain "Message:" every other caller
+    (send_reinstatement_emails, the admin copy of a cancellation) still
+    wants -- only send_cancellation_emails's participant copy passes a
+    direction-aware one."""
     return (
         '<div style="background:#f2f2f2;border:1px solid #ddd;border-radius:8px;'
-        f'padding:.8em 1.2em;margin:.6em 0"><b>Message:</b> {html.escape(message, quote=True)}</div>'
+        f'padding:.8em 1.2em;margin:.6em 0"><b>{html.escape(label, quote=True)}</b> '
+        f'{html.escape(message, quote=True)}</div>'
     )
 
 
@@ -250,12 +259,6 @@ def send_cancellation_emails(
     from your calendar" attachment on their own admin-copy email would be
     redundant at best, confusing at worst.
 
-    `message`, if any, is threaded straight into booking_details_text()/
-    course_recap_html() (2026-07-11) rather than concatenated on
-    afterward -- see those two functions' own docstrings for why (the operator:
-    the old layout put "Message: ..." AFTER the whole course description;
-    it belongs ABOVE it instead, and should vanish entirely when blank).
-
     2026-07-13, the operator: any cancellation the HOST initiates (canceled_by=
     "host" -- a single booking via `/admin`/`my-bt cancel`, or an entire
     occurrence via cancel_flow.cancel_occurrence) gets a short apology +
@@ -267,28 +270,71 @@ def send_cancellation_emails(
     course's normal booking page, which lists whichever occurrence is next)
     rather than computing one specific date here -- this module has no
     calendar-conflict/capacity-lookup machinery to compute that itself (see
-    app/slots.py), and the booking page already does that correctly."""
-    details = booking_details_text(course, occ_date, message)
-    recap_html = course_recap_html(course, occ_date, message)
+    app/slots.py), and the booking page already does that correctly.
+
+    2026-07-09, the operator, three-part wording redesign (screenshot of a real
+    host-initiated cancellation email):
+    (a) "I am the host, so the email should not say YOU canceled the
+    meeting!! ... my-bt should not be able to do an attendee cancel, like
+    admin should not be able to do that" -- traced to the ADMIN copy's
+    intro, which named the attendee when the GUEST canceled but just said
+    "You" for a host-initiated cancel, never actually naming who got
+    canceled. Fixed: the admin copy's intro now always names the attendee
+    ("You canceled NAME <email>'s booking:") when canceled_by=="host", same
+    as it already did (from the other direction) when canceled_by=="guest".
+    Confirmed separately that `my-bt`/`/admin` can never masquerade as an
+    attendee cancel -- every host-side call site is hardcoded to
+    canceled_by="host" (see Store.cancel()'s own vocabulary) -- so this was
+    purely a wording gap, not a real permission bug.
+    (b) "Please place the message box right after the 'You canceled the
+    below meeting.' and if the Attendee canceled, you label it as: Message
+    you sent to the host: and if ... the host canceled, you label it as:
+    'Message from the host:'" -- the participant copy's message block
+    (message_html(), given a direction-aware label) now sits right after
+    the intro line, before the What/When/Where recap, instead of being
+    baked into course_recap_html() between Where and the description. The
+    admin copy's message block moves the same way, but keeps the plain
+    "Message:" label -- there's no "direction" to convey to the operator
+    themselves.
+    (c) "In host cancelations there should NOT be a Reinstate link. And in
+    attendee cancellations: The link should be more prominent and as a
+    sentance ... right after the 'You canceled the below meeting.': In
+    case this was a mistake with this link you can easily resubscribe:
+    ..." -- the participant's reinstate link is now omitted entirely when
+    canceled_by=="host" (even though `reinstate_token` is still minted by
+    every caller, same as before -- see _send_cancellation_emails's own
+    docstring), and reworded into its own prominent sentence placed right
+    after the intro when canceled_by=="guest". The ADMIN copy's own
+    `/host-reinstate/<id>` link is untouched either way -- the operator
+    undoing their own mistake is a separate, still-useful action
+    regardless of who initiated the cancellation."""
+    details = booking_details_text(course, occ_date)
+    recap_html = course_recap_html(course, occ_date)
     subject = f"Canceled: {course.title} on {occ_date}"
     my_url = f"{settings.base_url}/my"
     host_reinstate_url = f"{settings.base_url}/host-reinstate/{registration_id}"
     if user:
         participant_who = "You" if canceled_by == "guest" else "The host"
-        # 2026-07-10: superseded the earlier plain "book again" link with a
-        # real reinstate-this-exact-booking one, now that a dedicated
-        # no-login page exists for it -- reinstating (same registration,
-        # same party) is strictly better than starting a fresh booking
-        # from scratch, so there's no reason to offer both.
-        reinstate_line = ""
-        reinstate_line_html = ""
-        if reinstate_token:
+        intro_text = f"{participant_who} canceled this booking:"
+
+        # 2026-07-09 (c): a prominent standalone sentence for a guest's OWN
+        # cancellation only -- host-initiated cancels get no participant
+        # reinstate link at all (see this function's own docstring).
+        resubscribe_line = ""
+        resubscribe_line_html = ""
+        if canceled_by == "guest" and reinstate_token:
             guest_reinstate_url = f"{settings.base_url}/reinstate/{reinstate_token}"
-            reinstate_line = f"If this was a mistake, you can reinstate it here: {guest_reinstate_url}\n"
-            reinstate_line_html = (
-                f'<p>If this was a mistake, you can reinstate it here: '
+            resubscribe_line = f"In case this was a mistake, you can easily resubscribe: {guest_reinstate_url}\n"
+            resubscribe_line_html = (
+                f'<p>In case this was a mistake, you can easily resubscribe: '
                 f'<a href="{guest_reinstate_url}">{guest_reinstate_url}</a></p>'
             )
+
+        # 2026-07-09 (b): direction-aware label, right after the intro line.
+        message_label = "Message you sent to the host:" if canceled_by == "guest" else "Message from the host:"
+        message_line = f"\n{message_label} {message}\n" if message else ""
+        message_line_html = message_html(message, label=message_label) if message else ""
+
         apology_line = ""
         apology_line_html = ""
         if canceled_by == "host":
@@ -312,25 +358,46 @@ def send_cancellation_emails(
         send_mail(
             settings, user.email, subject,
             f"Dear {user.name},\n\n"
-            f"{participant_who} canceled this booking:\n\n{details}\n"
+            f"{intro_text}\n"
+            f"{resubscribe_line}"
+            f"{message_line}"
+            f"\n{details}\n"
             f"Manage your bookings: {my_url}\n"
-            f"{reinstate_line}"
             f"{apology_line}",
             html_body=html_email_body(
-                greeting_html(user.name) + intro_html(f"{participant_who} canceled this booking:") + recap_html
+                greeting_html(user.name) + intro_html(intro_text)
+                + resubscribe_line_html
+                + message_line_html
+                + recap_html
                 + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
-                + reinstate_line_html
                 + apology_line_html
             ),
             ics_attachment=ics_attachment,
         )
-    admin_who = "You" if canceled_by == "host" else (f"{user.name} <{user.email}>" if user else "The attendee")
+    # 2026-07-09 (a): host-initiated cancels now name the attendee here too
+    # (unless there's no user to name at all), instead of the previous bare
+    # "You canceled this booking:" that never said WHO. Guest-initiated
+    # cancels are unchanged -- that branch already named the attendee.
+    if canceled_by == "host":
+        admin_intro = f"You canceled {user.name} <{user.email}>'s booking:" if user else "You canceled this booking:"
+    else:
+        admin_who = f"{user.name} <{user.email}>" if user else "The attendee"
+        admin_intro = f"{admin_who} canceled this booking:"
+    # 2026-07-09 (b): same reposition as the participant copy above, kept
+    # as the plain "Message:" label -- there's no "direction" to convey to
+    # the operator's own inbox.
+    admin_message_line = f"\nMessage: {message}\n" if message else ""
+    admin_message_line_html = message_html(message) if message else ""
     send_mail(
         settings, settings.admin_email, subject,
-        f"{admin_who} canceled this booking:\n\n{details}\n"
+        f"{admin_intro}\n"
+        f"{admin_message_line}"
+        f"\n{details}\n"
         f"Reinstate this booking: {host_reinstate_url}\n",
         html_body=html_email_body(
-            intro_html(f"{admin_who} canceled this booking:") + recap_html
+            intro_html(admin_intro)
+            + admin_message_line_html
+            + recap_html
             + f'<p>Reinstate this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
         ),
     )

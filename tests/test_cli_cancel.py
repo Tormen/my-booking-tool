@@ -116,11 +116,18 @@ class CancelRegistrationTest(unittest.TestCase):
 
         participant_mail = next(b for t, s, b in self.sent_emails if t == "guest@example.org")
         self.assertIn("The host canceled this booking:", participant_mail)
-        self.assertIn("Message: course canceled", participant_mail)
+        # 2026-07-09, the operator (b): host-initiated cancels label the message
+        # from the ATTENDEE's point of view -- it came from the host.
+        self.assertIn("Message from the host: course canceled", participant_mail)
         self.assertIn("What: Yoga", participant_mail)
+        # 2026-07-09, the operator (c): no reinstate link for a host-initiated
+        # cancel's participant copy -- `my-bt cancel` is always host-side.
+        self.assertNotIn("/reinstate/", participant_mail)
 
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org")
-        self.assertIn("You canceled this booking:", admin_mail)
+        # 2026-07-09, the operator (a): the admin copy must name WHO was canceled,
+        # not just say "You".
+        self.assertIn("You canceled Guest <guest@example.org>'s booking:", admin_mail)
         self.assertIn("Message: course canceled", admin_mail)
 
     def test_cancels_waitlisted_registration(self):
@@ -147,17 +154,23 @@ class CancelRegistrationTest(unittest.TestCase):
         to_addrs = [t for t, _, _ in self.sent_emails]
         self.assertIn("guest@example.org", to_addrs)
 
-    def test_cancel_email_includes_a_working_reinstate_link(self):
+    def test_cancel_email_includes_a_working_host_reinstate_link(self):
         # 2026-07-10: `my-bt cancel` mints a fresh reinstate token the same
-        # way every web cancel path does, so its own cancellation email
-        # gets a working /reinstate/<token> link too -- not just the web
-        # admin's /admin/cancel.
+        # way every web cancel path does, and the ADMIN copy's
+        # /host-reinstate/<registration_id> link (unconditional regardless
+        # of who canceled) actually undoes it. 2026-07-09, the operator (c): the
+        # PARTICIPANT copy gets no reinstate link at all for a host-
+        # initiated cancel like this one -- see the test right above.
         user, reg = self._book("guest@example.org", "Guest")
         cancel_registration(self.store, self.settings, reg.registration_id)
-        participant_mail = next(b for t, s, b in self.sent_emails if t == "guest@example.org")
-        self.assertIn("If this was a mistake, you can reinstate it here: https://", participant_mail)
-        token = participant_mail.split("/reinstate/")[1].split("\n")[0].strip()
-        self.assertIsNotNone(self.store.find_canceled_by_guest_token_hash(hash_token(token)))
+        admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org")
+        self.assertIn(f"Reinstate this booking: https://example.org/host-reinstate/{reg.registration_id}", admin_mail)
+        # The reinstate_token itself is still minted/stored (harmless, just
+        # unused by any email now) -- confirm it's still a real, working
+        # token rather than silently dropped.
+        stored = self.store.find_by_id(reg.registration_id)
+        self.assertTrue(stored.guest_cancel_token_hash)
+        self.assertIsNotNone(self.store.find_canceled_by_guest_token_hash(stored.guest_cancel_token_hash))
 
     def test_without_message_omits_message_line_and_reports_empty(self):
         user, reg = self._book("guest@example.org", "Guest")

@@ -100,10 +100,16 @@ def cancel_registration(
     user = store.find_user_by_id(reg.user_id)
     course = settings.course(reg.course_shortname)
 
-    # Freshly minted (2026-07-10) so the participant's cancellation email
-    # gets a working /reinstate/<token> link too -- see
-    # Store.cancel()'s own `reinstate_token_hash` docstring for why the
-    # ORIGINAL cancel token can't be reused for this.
+    # Freshly minted (2026-07-10) -- see Store.cancel()'s own
+    # `reinstate_token_hash` docstring for why the ORIGINAL cancel token
+    # can't be reused for this. Still minted/stored even though this is a
+    # host-initiated cancel (canceled_by="host" below) and
+    # send_cancellation_emails no longer puts a participant-facing
+    # /reinstate/<token> link in a host-initiated cancel's email
+    # (2026-07-09, the operator: "In host cancelations there should NOT be a
+    # Reinstate link") -- the operator's own unconditional
+    # /host-reinstate/<registration_id> link (registration_id, not this
+    # token) is what actually gets used to undo a `my-bt cancel`.
     reinstate_token = new_token()
     changed = store.cancel(
         registration_id, canceled_by="host", host_message=message,
