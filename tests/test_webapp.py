@@ -814,13 +814,21 @@ class SessionBannerTest(unittest.TestCase):
         rule = rule[: rule.index("}")]
         self.assertIn("font-style:normal", rule)
 
-    # -- 2026-07-09: booking-page name/email prefilled+locked when logged in --
+    # -- 2026-07-09: booking-page name/email hidden (not just locked) when logged in --
 
-    def test_book_page_prefills_and_locks_name_email_when_logged_in(self):
+    def test_book_page_hides_name_email_fields_when_logged_in(self):
+        # 2026-07-09, the operator, on the earlier prefilled+readonly version:
+        # "This is confusing: If you are logged in ad you book, please
+        # hide Your name + Your email fields (instead of showing them
+        # prefilled)." -- the session banner already says who they're
+        # booking as, so no visible "Your name"/"Your email" label+field
+        # at all now, just hidden inputs carrying the same values.
         environ = self._login_environ("regular@example.org")
         _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
-        self.assertIn('name="name" value="Regular" readonly required', body)
-        self.assertIn('name="email" type="email" value="regular@example.org" readonly required', body)
+        self.assertIn('<input type="hidden" name="name" value="Regular">', body)
+        self.assertIn('<input type="hidden" name="email" value="regular@example.org">', body)
+        self.assertNotIn("Your name", body)
+        self.assertNotIn("Your email", body)
         # Irrelevant once already logged in with a password.
         self.assertNotIn("First time booking with this email?", body)
 
@@ -828,6 +836,8 @@ class SessionBannerTest(unittest.TestCase):
         _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
         self.assertIn('<input class="big-input id-input" name="name" required>', body)
         self.assertIn('<input class="big-input id-input" name="email" type="email" required>', body)
+        self.assertIn("Your name", body)
+        self.assertIn("Your email", body)
         # Only the CSS selector "input[readonly]" (always present in the
         # <style> block) should mention "readonly" here -- no actual input
         # tag should have the attribute for an anonymous visitor.
@@ -835,17 +845,17 @@ class SessionBannerTest(unittest.TestCase):
         self.assertNotIn('name="email" type="email" value=', body)
         self.assertIn("First time booking with this email?", body)
 
-    def test_book_page_error_retry_keeps_fields_locked_when_logged_in(self):
-        # the operator's fields must stay prefilled+readonly even on a re-render
-        # after a validation error -- not just the fresh GET.
+    def test_book_page_error_retry_keeps_fields_hidden_when_logged_in(self):
+        # the operator's fields must stay hidden (not reappear editable) even on
+        # a re-render after a validation error -- not just the fresh GET.
         environ = self._login_environ("regular@example.org")
         form = {"occurrence_date": self._occ_date(), "name": "Regular", "email": "regular@example.org"}  # no agree
         body_bytes = urlencode(form).encode()
         post_environ = dict(environ, CONTENT_LENGTH=str(len(body_bytes)), **{"wsgi.input": io.BytesIO(body_bytes)})
         _status, _headers, body = self.app.book("POST", "yoga-class-1", post_environ)
         self.assertIn("acknowledge the participation terms", body)
-        self.assertIn('name="name" value="Regular" readonly required', body)
-        self.assertIn('name="email" type="email" value="regular@example.org" readonly required', body)
+        self.assertIn('<input type="hidden" name="name" value="Regular">', body)
+        self.assertIn('<input type="hidden" name="email" value="regular@example.org">', body)
 
     def test_logged_in_booking_ignores_submitted_email_and_uses_session_identity(self):
         # readonly is client-side only -- the server must not trust a

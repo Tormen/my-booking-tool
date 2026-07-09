@@ -1732,17 +1732,31 @@ class App:
             # on why the server ALSO enforces this (readonly is client-side
             # only, not a security boundary).
             if logged_in_user is not None:
-                name_field = (
-                    f'<input class="big-input id-input" name="name" value="{esc(logged_in_user.name)}" readonly required>'
-                )
-                email_field = (
-                    f'<input class="big-input id-input" name="email" type="email" '
-                    f'value="{esc(logged_in_user.email)}" readonly required>'
+                # 2026-07-09, the operator, on the earlier prefilled+readonly
+                # fields: "This is confusing: If you are logged in ad you
+                # book, please hide Your name + Your email fields (instead
+                # of showing them prefilled)." -- the session banner right
+                # above ("Logged in as ...") already tells them who they're
+                # booking as, so showing greyed-out name/email fields too
+                # was redundant AND read as "why can't I edit this?"
+                # confusion. Still submitted via hidden inputs (never
+                # `disabled` -- see the comment this replaces, same reason:
+                # a disabled input's value is never POSTed at all), and the
+                # server ALSO enforces this identity server-side (see
+                # book()'s own comment) -- hiding the fields client-side is
+                # a UX choice only, never the actual security boundary.
+                identity_fields_html = (
+                    f'<input type="hidden" name="name" value="{esc(logged_in_user.name)}">'
+                    f'<input type="hidden" name="email" value="{esc(logged_in_user.email)}">'
                 )
                 first_time_hint = ""
             else:
-                name_field = '<input class="big-input id-input" name="name" required>'
-                email_field = '<input class="big-input id-input" name="email" type="email" required>'
+                identity_fields_html = (
+                    '<label>Your name <span class="req">(required)</span>'
+                    '<input class="big-input id-input" name="name" required></label>'
+                    '<label>Your email <span class="req">(required)</span>'
+                    '<input class="big-input id-input" name="email" type="email" required></label>'
+                )
                 first_time_hint = (
                     "<p class=\"hint\">First time booking with this email? We'll send a link to confirm your\n"
                     "                account and set a password.</p>"
@@ -1758,10 +1772,7 @@ class App:
                 <div class="dates" role="radiogroup" aria-label="Dates available">{date_buttons}</div>
               </label>
               <div class="selected-box">Selected date: <strong id="selected-date-text">{esc(occurrences[0].date.isoformat())}</strong></div>
-              <label>Your name <span class="req">(required)</span>
-                {name_field}</label>
-              <label>Your email <span class="req">(required)</span>
-                {email_field}</label>
+              {identity_fields_html}
               {first_time_hint}
               <div class="guests-section">
                 <div id="guest-rows"></div>
