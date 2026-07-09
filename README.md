@@ -485,8 +485,8 @@ my-bt cancel --date 2026-08-01 --course example-monday-class  # --course only ne
 my-bt status                            # live server summary: up/running, maintenance mode, logged-in users
 
 my-bt admin hash-password                # prompts (hidden input), prints the admin_password_hash value
-my-bt admin gdpr erase --email guest@example.com          # asks for confirmation
-my-bt admin gdpr erase --email guest@example.com --yes    # scripted/non-interactive
+my-bt admin gdpr erase guest@example.com          # asks for confirmation (--email guest@example.com also works)
+my-bt admin gdpr erase guest@example.com --yes    # scripted/non-interactive
 my-bt admin gdpr                         # overview: retention window(s) + counts past due (bookings+accounts)
 my-bt admin gdpr bookings                # list every registration + the date it would be purged
 my-bt admin gdpr bookings --purge        # actually delete rows past their retention window
@@ -504,7 +504,7 @@ my-bt admin setup                        # guided post-install steps -- see belo
 my-bt admin setup --interactive          # ...or -i: be walked through them
 my-bt admin health                       # full install-health diagnostic -- see below
 
-my-bt -D admin gdpr erase --email guest@example.com   # -D/--debug: full traceback on
+my-bt -D admin gdpr erase guest@example.com   # -D/--debug: full traceback on
                                             # error instead of one clean line
                                             # (same as MY_BOOKING_DEBUG=1,
                                             # just for this one command)
@@ -1189,7 +1189,9 @@ dealbreaker. Weigh this against the safety net the snapshot itself
 provides before deciding either way.
 
 **Right to erasure** (Art. 17): an attendee can delete their own account from
-`/my`, or you can run `my-bt admin gdpr erase --email ...` on their behalf. Either way:
+`/my`, or you can run `my-bt admin gdpr erase <email>` (or `--email <email>`,
+2026-07-16: both forms work -- the operator: "--email should be optional here simply,
+my-bt admin erase operator@example.org should work as well") on their behalf. Either way:
 any future confirmed/waitlisted booking is canceled first (freeing the spot
 for the waitlist), then the user row and all their registration rows move
 from the live CSVs into `data/archived/{users,registrations}.csv` with the

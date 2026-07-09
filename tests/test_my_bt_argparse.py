@@ -106,7 +106,20 @@ class BareCommandHelpParserTest(unittest.TestCase):
         args = parser.parse_args(["admin", "gdpr", "erase", "--email", "guest@example.com", "--yes"])
         self.assertTrue(hasattr(args, "func"))
         self.assertEqual(args.func, my_bt_mod.cmd_erase)
-        self.assertEqual(args.email, "guest@example.com")
+        self.assertEqual(args.email_flag, "guest@example.com")
+        self.assertIsNone(args.email_pos)
+        self.assertTrue(args.yes)
+
+    def test_admin_gdpr_erase_accepts_a_positional_email_too(self):
+        # 2026-07-16, the operator: "--email should be optional here simply, my-bt
+        # admin erase operator@example.org should work as well" -- the email can
+        # now be given as a plain positional argument instead of always
+        # needing --email spelled out.
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "gdpr", "erase", "guest@example.com", "--yes"])
+        self.assertEqual(args.func, my_bt_mod.cmd_erase)
+        self.assertEqual(args.email_pos, "guest@example.com")
+        self.assertIsNone(args.email_flag)
         self.assertTrue(args.yes)
 
 
@@ -245,9 +258,15 @@ class BareCommandMainBehaviorTest(unittest.TestCase):
         self.assertNotIn("error:", output)
 
     def test_genuine_error_still_exits_nonzero_with_error_text(self):
-        # A real usage error (missing required --email) must still behave
-        # as an error -- this fix only covers the "no sub-command given
-        # at all" case, not every argparse failure.
+        # A real usage error (missing email, positional or --email) must
+        # still behave as an error -- this fix only covers the "no
+        # sub-command given at all" case, not every argparse/runtime
+        # failure. 2026-07-16: since --email is no longer `required=True`
+        # at the argparse level (a plain positional EMAIL is now accepted
+        # too, see cmd_erase()'s own docstring), a missing email is caught
+        # by cmd_erase() itself at runtime (exit 1) rather than by
+        # argparse during parsing (exit 2) -- still a clean, non-zero,
+        # "error:"-prefixed failure either way, just a different code.
         old_argv = sys.argv
         sys.argv = ["my-bt", "admin", "gdpr", "erase"]
         err = io.StringIO()
@@ -257,7 +276,7 @@ class BareCommandMainBehaviorTest(unittest.TestCase):
                     my_bt_mod.main()
         finally:
             sys.argv = old_argv
-        self.assertEqual(ctx.exception.code, 2)
+        self.assertEqual(ctx.exception.code, 1)
         self.assertIn("error:", err.getvalue())
 
 

@@ -559,26 +559,45 @@ def cmd_hash_password(args) -> None:
 
 
 def cmd_erase(args) -> None:
-    """`my-bt erase --email ...` -- manual right-to-erasure (Art. 17).
-    Cancels any future confirmed/waitlisted bookings for this email and
-    moves their user + registration rows into data/archived/*.csv with the
-    email irreversibly hashed. Also promotes the next waitlisted person (if
-    a cancellation here freed a confirmed spot) and re-syncs the calendar
-    for every affected occurrence, via app.cancel_flow.cancel_and_promote --
-    the SAME shared logic every other cancellation path uses (2026-07-06:
-    this used to skip calendar sync entirely; that gap is closed now, same
-    as `my-bt cancel`). This means this command has a real network/CalDAV
-    dependency and can fail/take longer if the CalDAV server is
-    unreachable."""
+    """`my-bt admin gdpr erase EMAIL` (or `--email EMAIL`) -- manual
+    right-to-erasure (Art. 17). Cancels any future confirmed/waitlisted
+    bookings for this email and moves their user + registration rows into
+    data/archived/*.csv with the email irreversibly hashed. Also promotes
+    the next waitlisted person (if a cancellation here freed a confirmed
+    spot) and re-syncs the calendar for every affected occurrence, via
+    app.cancel_flow.cancel_and_promote -- the SAME shared logic every
+    other cancellation path uses (2026-07-06: this used to skip calendar
+    sync entirely; that gap is closed now, same as `my-bt cancel`). This
+    means this command has a real network/CalDAV dependency and can
+    fail/take longer if the CalDAV server is unreachable.
+
+    2026-07-16, the operator: "--email should be optional here simply, my-bt
+    admin erase operator@example.org should work as well" -- the email can now
+    be given as a plain positional argument (`email_pos`) instead of
+    always needing `--email` spelled out; both are accepted (an
+    explicit --email still works, e.g. for a script that already used
+    it), and giving BOTH with conflicting values is rejected rather than
+    silently picking one."""
+    email = args.email_pos or args.email_flag
+    if args.email_pos and args.email_flag and args.email_pos != args.email_flag:
+        print(
+            f"error: got two different emails -- {args.email_pos!r} (positional) vs "
+            f"{args.email_flag!r} (--email) -- pass just one",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if not email:
+        print("error: an email is required -- `my-bt admin gdpr erase EMAIL` or `--email EMAIL`", file=sys.stderr)
+        sys.exit(1)
     if not args.yes:
-        confirm = input(f"Erase all data for {args.email}? Type 'yes' to confirm: ")
+        confirm = input(f"Erase all data for {email}? Type 'yes' to confirm: ")
         if confirm.strip().lower() != "yes":
             print("aborted")
             return
     settings = app_config.load_settings(args.settings)
     store = _store(args)
     caldav = app_cancel_flow.build_caldav_client(settings)
-    ok = app_erasure.erase_user_by_email(store, settings, args.email, today=date.today(), caldav=caldav)
+    ok = app_erasure.erase_user_by_email(store, settings, email, today=date.today(), caldav=caldav)
     print("erased" if ok else "no such user (nothing to erase)")
 
 
@@ -2090,9 +2109,16 @@ def build_parser() -> argparse.ArgumentParser:
     ge = _add_subcommand(
         gdpr_sub, "erase", "manually erase an attendee's data (GDPR Art. 17).",
         "Same effect as an attendee self-erasing via /my, just host-initiated. "
-        "2026-07-14: moved here from `admin erase` to sit alongside the rest of GDPR.",
+        "2026-07-14: moved here from `admin erase` to sit alongside the rest of GDPR. "
+        "2026-07-16: the email can be given as a plain positional argument now too, "
+        "not just --email (the operator: \"--email should be optional here simply, "
+        "my-bt admin erase operator@example.org should work as well\").",
     )
-    ge.add_argument("--email", required=True, help="the attendee's login email")
+    ge.add_argument(
+        "email_pos", nargs="?", metavar="EMAIL",
+        help="the attendee's login email (or use --email below)",
+    )
+    ge.add_argument("--email", dest="email_flag", help="the attendee's login email (same as the positional EMAIL)")
     ge.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     ge.set_defaults(func=cmd_erase)
     gb = _add_subcommand(
