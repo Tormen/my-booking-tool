@@ -23,6 +23,7 @@ def send_mail(
     settings: Settings, to_addr: str, subject: str, body: str,
     html_body: str | None = None,
     ics_attachment: tuple[str, str, str] | None = None,
+    bcc_addrs: tuple[str, ...] = (),
 ) -> None:
     """`html_body` (2026-07-09, the operator: "format description in email as on
     page ... box the description and put the background color (as on the
@@ -46,11 +47,29 @@ def send_mail(
     `add_attachment()` after `set_content()`/`add_alternative()` correctly
     promotes the message to multipart/mixed (text+html alternative, plus
     this attachment) -- standard `email.message.EmailMessage` behavior,
-    no manual MIME structuring needed."""
+    no manual MIME structuring needed.
+
+    `bcc_addrs` (2026-07-09, the operator: "add as BCC the given email address to
+    all mails that go out to the attendees ... so that for some time I can
+    watch this to ensure that all is OK") -- a plain tuple of zero or more
+    addresses, deliberately NOT read from `settings.bcc_attendee_emails`
+    HERE: this function has no notion of "this is an attendee-facing
+    email" (it's used for admin copies, password resets, the watchdog
+    alert, etc. too), so every ATTENDEE-facing call site passes
+    `settings.bcc_attendee_email_list` explicitly instead -- see that
+    property's own docstring. Set as a real "Bcc" header field on the
+    message object rather than a second `send_message(..., to_addrs=...)`
+    argument: `smtplib.send_message()` already reads every recipient
+    (To/Cc/Bcc) straight off the message's own headers by default, and
+    `EmailMessage` conventionally strips a live "Bcc" header back out of
+    what's actually transmitted -- so setting it here is both simpler and
+    correct, not a privacy leak to the other recipients."""
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
     msg["To"] = to_addr
+    if bcc_addrs:
+        msg["Bcc"] = ", ".join(bcc_addrs)
     msg.set_content(body)
     if html_body:
         msg.add_alternative(html_body, subtype="html")

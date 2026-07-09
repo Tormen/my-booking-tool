@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import json
 import re
@@ -992,7 +993,7 @@ class MySettingsTest(unittest.TestCase):
         self.app = App(self.settings, self.store)
         self.sent_emails = []
 
-        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None):
+        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
             self.sent_emails.append((to, subject, body))
 
         for target in ("app.webapp.send_mail",):
@@ -1617,6 +1618,13 @@ class BookingFlowTest(unittest.TestCase):
         self.app._sync = lambda *a, **kw: None  # calendar mechanics covered elsewhere
 
         self.sent_emails: list[tuple[str, str, str]] = []
+        # 2026-07-09, the operator: bcc_attendee_emails -- a separate, parallel
+        # list (keyed the same way as self.sent_emails, same order) rather
+        # than widening every tuple in self.sent_emails itself, since
+        # dozens of existing tests already unpack that one as a plain
+        # 3-tuple (to, subject, body); only tests that actually care about
+        # the bcc_addrs a given send_mail() call was given read this one.
+        self.sent_email_bcc: list[tuple[str, str, tuple]] = []
         occs = build_occurrences(
             course, self.settings, datetime.now(timezone.utc),
             lambda sn, d: 0, lambda start, end: False,
@@ -1624,7 +1632,10 @@ class BookingFlowTest(unittest.TestCase):
         self.occs = occs
         self.occ_date = occs[0].date.isoformat()
 
-        recorder = lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body))
+        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
+            self.sent_emails.append((to, subject, body))
+            self.sent_email_bcc.append((to, subject, bcc_addrs))
+
         # Cancellation emails are composed in app.cancellation (factored
         # out of App on 2026-07-06 so `my-bt cancel` can reuse them), and the
         # promotion emails in app.cancel_flow (factored out the same day so
@@ -1796,7 +1807,7 @@ class BookingFlowTest(unittest.TestCase):
         self.store.set_password(user.user_id, h, s)
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
             if subject.startswith("Booking confirmed:"):
                 captured["ics_attachment"] = ics_attachment
             self.sent_emails.append((to, subject, body))
@@ -1890,7 +1901,7 @@ class BookingFlowTest(unittest.TestCase):
             self.store.set_password(user.user_id, h, s)
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
             if subject.startswith("Waitlisted:"):
                 captured["ics_attachment"] = ics_attachment
             self.sent_emails.append((to, subject, body))
@@ -1945,7 +1956,7 @@ class BookingFlowTest(unittest.TestCase):
         reg0 = self.store.registrations_for_user(guest0.user_id)[0]
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
             if subject.startswith("You're in!"):
                 captured["ics_attachment"] = ics_attachment
             self.sent_emails.append((to, subject, body))
@@ -2635,6 +2646,69 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
         self.assertFalse(admin_mail.startswith("Dear"))
 
+    # -- 2026-07-09, the operator: bcc_attendee_emails -- "add as BCC the given
+    # email address to all mails that go out to the attendees ... so that
+    # for some time I can watch this to ensure that all is OK". Confirms
+    # attendee-facing emails carry the configured BCC and admin-facing
+    # copies of the same event never do. See app.config.Settings.
+    # bcc_attendee_email_list and app.emailer.send_mail's own `bcc_addrs`.
+
+    def test_no_bcc_configured_means_no_bcc_on_any_email(self):
+        # self.settings (BookingFlowTest's own default) has no
+        # bcc_attendee_emails set at all -- every send_mail() call in this
+        # class must keep sending with an empty bcc_addrs, same as before
+        # this feature existed.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        self.assertTrue(self.sent_email_bcc)
+        for _to, _subject, bcc_addrs in self.sent_email_bcc:
+            self.assertEqual(bcc_addrs, ())
+
+    def test_bcc_applies_to_the_booking_confirmation_email(self):
+        self.app.settings = dataclasses.replace(self.settings, bcc_attendee_emails="watcher@example.org")
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _to, _subject, bcc_addrs = next(
+            (t, s, b) for t, s, b in self.sent_email_bcc if t == "regular@example.org" and s.startswith("Booking confirmed:")
+        )
+        self.assertEqual(bcc_addrs, ("watcher@example.org",))
+
+    def test_bcc_does_not_apply_to_the_admin_new_booking_notification(self):
+        self.app.settings = dataclasses.replace(self.settings, bcc_attendee_emails="watcher@example.org")
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _to, _subject, bcc_addrs = next(
+            (t, s, b) for t, s, b in self.sent_email_bcc if t == "admin@example.org" and s.startswith("New booking:")
+        )
+        self.assertEqual(bcc_addrs, ())
+
+    def test_bcc_applies_to_the_cancellation_participant_copy_not_the_admin_copy(self):
+        self.app.settings = dataclasses.replace(self.settings, bcc_attendee_emails="watcher@example.org")
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.sent_email_bcc.clear()
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        _to, _subject, participant_bcc = next(
+            (t, s, b) for t, s, b in self.sent_email_bcc if t == "regular@example.org" and s.startswith("Canceled:")
+        )
+        self.assertEqual(participant_bcc, ("watcher@example.org",))
+        _to, _subject, admin_bcc = next(
+            (t, s, b) for t, s, b in self.sent_email_bcc if t == "admin@example.org" and s.startswith("Canceled:")
+        )
+        self.assertEqual(admin_bcc, ())
+
+    def test_multiple_bcc_addresses_all_apply(self):
+        self.app.settings = dataclasses.replace(
+            self.settings, bcc_attendee_emails="watcher1@example.org, watcher2@example.org",
+        )
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _to, _subject, bcc_addrs = next(
+            (t, s, b) for t, s, b in self.sent_email_bcc if t == "regular@example.org" and s.startswith("Booking confirmed:")
+        )
+        self.assertEqual(bcc_addrs, ("watcher1@example.org", "watcher2@example.org"))
+
     def test_my_cancel_email_offers_a_reinstate_link_to_the_participant(self):
         # 2026-07-10: originally a plain "book again" link ("With the
         # reschedule button the email could also contain it: If this was
@@ -2802,7 +2876,7 @@ class BookingFlowTest(unittest.TestCase):
         token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
             if subject.startswith("Canceled:") and to == "regular@example.org":
                 captured["html_body"] = html_body
                 captured["ics_attachment"] = ics_attachment

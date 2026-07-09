@@ -58,6 +58,15 @@ port          = 465
 username      = "calendar@example.org"
 password_file = "/etc/my-booking/secrets/smtp_password"
 from_address  = "admin@example.org"
+# Optional, comma-separated. 2026-07-09, the operator: "add as BCC the given email
+# address to all mails that go out to the attendees ... so that for some
+# time I can watch this to ensure that all is OK". Applied only to
+# attendee/guest-facing emails (booking confirmed/waitlisted, promoted,
+# canceled, reinstated, account confirm/reset/email-change) -- never to the
+# separate admin-facing copy of the same event (that already goes straight
+# to admin_email), and never to operator-only mail like the watchdog alert.
+# Leave unset (the default) to disable entirely.
+# bcc_attendee_emails = "you@example.org"
 
 [admin]
 password_hash_file = "/etc/my-booking/secrets/admin_password_hash"

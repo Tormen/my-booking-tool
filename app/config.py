@@ -163,6 +163,26 @@ class Settings:
     # without a [logging] section gets) means stdout/journal only.
     log_file: str | None = None
 
+    # Optional, comma-separated (2026-07-09, the operator: "add as BCC the given
+    # email address to all mails that go out to the attendees ... so that
+    # for some time I can watch this to ensure that all is OK"). Applied
+    # ONLY to attendee/guest-facing emails (booking confirmed/waitlisted,
+    # promoted-from-waitlist, canceled, reinstated, account-confirm/
+    # password-reset/email-change) -- never to the separate admin-facing
+    # copy of the same event (that one already goes straight to
+    # admin_email) or to operator-only mail like the watchdog alert.
+    # Empty string (the default -- key omitted in settings.toml) disables
+    # this entirely, same as today. See app/emailer.py::send_mail's own
+    # `bcc_addrs` param and app.config.Settings.bcc_attendee_email_list.
+    bcc_attendee_emails: str = ""
+
+    @property
+    def bcc_attendee_email_list(self) -> tuple[str, ...]:
+        """Parsed, whitespace-trimmed, blank-entries-dropped form of
+        `bcc_attendee_emails` -- every attendee-facing send_mail() call site
+        reads this instead of re-splitting the raw string itself."""
+        return tuple(a.strip() for a in self.bcc_attendee_emails.split(",") if a.strip())
+
     # Whether the booking page shows "N spot(s) left" / "FULL, join
     # waitlist" at all. True = current/original behaviour.
     show_spots_left: bool = True
@@ -394,6 +414,7 @@ def load_settings(toml_path: str | Path) -> Settings:
         smtp_username=smtp["username"],
         smtp_password=_read_secret(smtp["password_file"]),
         smtp_from=smtp["from_address"],
+        bcc_attendee_emails=smtp.get("bcc_attendee_emails", ""),
         admin_password_hash=_read_secret(admin["password_hash_file"]),
         show_next_slots=int(defaults.get("show_next_slots", 4)),
         show_next_days=int(defaults.get("show_next_days", 42)),

@@ -163,6 +163,21 @@ class MessageHtmlTest(unittest.TestCase):
         self.assertNotIn("<script>alert(1)</script>", rendered)
         self.assertIn("&lt;script&gt;", rendered)
 
+    def test_default_label_is_plain_message(self):
+        rendered = message_html("running late, sorry")
+        self.assertIn("<b>Message:</b>", rendered)
+
+    def test_custom_label_is_used_instead(self):
+        # 2026-07-09, the operator (b): send_cancellation_emails's participant copy
+        # passes a direction-aware label instead of the plain default.
+        rendered = message_html("running late, sorry", label="Message from the host:")
+        self.assertIn("<b>Message from the host:</b>", rendered)
+        self.assertNotIn("<b>Message:</b>", rendered)
+
+    def test_custom_label_is_escaped(self):
+        rendered = message_html("hi", label="<script>alert(1)</script>")
+        self.assertNotIn("<script>alert(1)</script>", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

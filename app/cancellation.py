@@ -373,6 +373,7 @@ def send_cancellation_emails(
                 + apology_line_html
             ),
             ics_attachment=ics_attachment,
+            bcc_addrs=settings.bcc_attendee_email_list,
         )
     # 2026-07-09 (a): host-initiated cancels now name the attendee here too
     # (unless there's no user to name at all), instead of the previous bare
@@ -455,6 +456,7 @@ def send_reinstatement_emails(
                 + f'<p>Manage your bookings: <a href="{my_url}">{my_url}</a></p>'
             ),
             ics_attachment=ics_attachment,
+            bcc_addrs=settings.bcc_attendee_email_list,
         )
     admin_who = "You" if reinstated_by == "host" else (f"{user.name} <{user.email}>" if user else "The attendee")
     admin_intro = f"{admin_who} reinstated this booking -- {status_phrase}:"

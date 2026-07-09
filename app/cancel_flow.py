@@ -199,6 +199,7 @@ def cancel_and_promote(
                     + f'<p>Manage or cancel this booking: <a href="{my_url}">{my_url}</a></p>'
                 ),
                 ics_attachment=(ics_filename, ics_text, "PUBLISH"),
+                bcc_addrs=settings.bcc_attendee_email_list,
             )
         if promoted_users:
             # One combined admin email for the whole promoted party (not one

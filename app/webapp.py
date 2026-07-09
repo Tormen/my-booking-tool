@@ -1281,6 +1281,7 @@ class App:
                     f'<p>Leave the waitlist directly: <a href="{cancel_url}">{cancel_url}</a></p>'
                     f"{account_line_html}"
                 ),
+                bcc_addrs=self.settings.bcc_attendee_email_list,
             )
         else:
             ics_filename, ics_text = calendar_sync.guest_invite_ics(self.settings, course, date.fromisoformat(occ_date))
@@ -1299,6 +1300,7 @@ class App:
                     f"{account_line_html}"
                 ),
                 ics_attachment=(ics_filename, ics_text, "PUBLISH"),
+                bcc_addrs=self.settings.bcc_attendee_email_list,
             )
 
     def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
@@ -1613,6 +1615,7 @@ class App:
             "no longer valid.\n\n"
             "If you didn't request this, you can safely ignore this email.\n\n"
             f"Thanks,\n{site}",
+            bcc_addrs=self.settings.bcc_attendee_email_list,
         )
 
     def _late_booking_rejection(self, occ, now: datetime) -> str | None:
@@ -3038,6 +3041,7 @@ class App:
             f"becomes your login email and {user.email} will no longer have access to this "
             "account.\n\nIf you're not expecting this, you can safely ignore this email -- "
             "nothing changes unless this link is clicked.",
+            bcc_addrs=self.settings.bcc_attendee_email_list,
         )
         send_mail(
             self.settings, user.email, f"Email change requested for your {site} account",
@@ -3046,6 +3050,7 @@ class App:
             f"-- once {new_email} confirms via its own emailed link, {user.email} will no longer "
             f"have access to the account.\n\nIf you're NOT OK with this, cancel it here (no login "
             f"needed): {cancel_url}",
+            bcc_addrs=self.settings.bcc_attendee_email_list,
         )
 
     def _send_email_change_confirmed_emails(self, old_email: str, new_email: str) -> None:
@@ -3059,11 +3064,13 @@ class App:
             self.settings, new_email, f"Your {site} login email is now confirmed",
             f"Your {site} booking account's login email is now {new_email}. Use this address to "
             "log in from now on.",
+            bcc_addrs=self.settings.bcc_attendee_email_list,
         )
         send_mail(
             self.settings, old_email, f"Your {site} login email has changed",
             f"Your {site} booking account's login email has changed from this address to "
             f"{new_email}. This address can no longer be used to log in.",
+            bcc_addrs=self.settings.bcc_attendee_email_list,
         )
 
     def _my_settings_page(

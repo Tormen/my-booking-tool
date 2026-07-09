@@ -196,6 +196,66 @@ class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
         self.assertEqual(settings.guest_calendar_reminder_minutes, (15, 60))
 
 
+class LoadSettingsBccAttendeeEmailsTest(unittest.TestCase):
+    """2026-07-09, the operator: "add as BCC the given email address to all mails
+    that go out to the attendees ... so that for some time I can watch
+    this to ensure that all is OK" -- optional, comma-separated [smtp]
+    key; settings.bcc_attendee_email_list is what every attendee-facing
+    send_mail() call site actually reads (see app/config.py's own
+    docstring on both)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.caldav_password_file = self.dir / "caldav_password"
+        self.smtp_password_file = self.dir / "smtp_password"
+        self.admin_password_hash_file = self.dir / "admin_password_hash"
+        self.erasure_pepper_file = self.dir / "erasure_pepper"
+        for p in (self.caldav_password_file, self.smtp_password_file, self.admin_password_hash_file):
+            p.write_text("secret")
+        self.erasure_pepper_file.write_text("00" * 32)
+
+    def _write(self, extra_smtp_line: str = "") -> Path:
+        toml_path = self.dir / "settings.toml"
+        header = MINIMAL_HEADER.format(
+            caldav_password_file=self.caldav_password_file,
+            smtp_password_file=self.smtp_password_file,
+            admin_password_hash_file=self.admin_password_hash_file,
+            erasure_pepper_file=self.erasure_pepper_file,
+        )
+        header = header.replace(
+            'from_address = "admin@example.org"',
+            'from_address = "admin@example.org"\n' + extra_smtp_line,
+        )
+        toml_path.write_text(header)
+        return toml_path
+
+    def test_defaults_to_empty_string_and_empty_list_when_omitted(self):
+        settings = load_settings(self._write())
+        self.assertEqual(settings.bcc_attendee_emails, "")
+        self.assertEqual(settings.bcc_attendee_email_list, ())
+
+    def test_single_address_is_parsed(self):
+        toml_path = self._write('bcc_attendee_emails = "watcher@example.org"\n')
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.bcc_attendee_email_list, ("watcher@example.org",))
+
+    def test_multiple_comma_separated_addresses_are_split_and_trimmed(self):
+        toml_path = self._write(
+            'bcc_attendee_emails = "watcher1@example.org, watcher2@example.org"\n'
+        )
+        settings = load_settings(toml_path)
+        self.assertEqual(
+            settings.bcc_attendee_email_list, ("watcher1@example.org", "watcher2@example.org"),
+        )
+
+    def test_blank_string_gives_empty_list_not_a_list_with_one_blank_entry(self):
+        toml_path = self._write('bcc_attendee_emails = ""\n')
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.bcc_attendee_email_list, ())
+
+
 class WeekdayTimeRangeLabelTest(unittest.TestCase):
     """Course.weekday_time_range_label() -- 2026-07-10, the operator: "add the
     weekday to the TIME column (e.g. SAT 10h45-12h45)" on /my's bookings

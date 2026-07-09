@@ -54,7 +54,7 @@ class GuestBookingTestBase(unittest.TestCase):
         )
         self.occ_date = occs[0].date.isoformat()
 
-        recorder = lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body))
+        recorder = lambda settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(): self.sent_emails.append((to, subject, body))
         for target in ("app.webapp.send_mail", "app.cancellation.send_mail", "app.cancel_flow.send_mail"):
             patcher = patch(target, side_effect=recorder)
             patcher.start()
@@ -103,7 +103,7 @@ class PartyAdmissionTest(GuestBookingTestBase):
         # so each should get their own ics_attachment too, not just the leader.
         captured = []
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
             if subject.startswith("Booking confirmed:"):
                 captured.append((to, ics_attachment))
             self.sent_emails.append((to, subject, body))

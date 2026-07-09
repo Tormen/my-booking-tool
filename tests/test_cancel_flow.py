@@ -37,7 +37,7 @@ class CancelAndPromoteCourseRemovedTest(unittest.TestCase):
         self.sent_emails: list[tuple[str, str, str]] = []
         patcher = patch(
             "app.cancel_flow.send_mail",
-            side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body)),
+            side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(): self.sent_emails.append((to, subject, body)),
         )
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -102,7 +102,7 @@ class CancelOccurrenceTest(unittest.TestCase):
         for target in ("app.cancellation.send_mail", "app.cancel_flow.send_mail"):
             patcher = patch(
                 target,
-                side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None: self.sent_emails.append((to, subject, body)),
+                side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(): self.sent_emails.append((to, subject, body)),
             )
             patcher.start()
             self.addCleanup(patcher.stop)

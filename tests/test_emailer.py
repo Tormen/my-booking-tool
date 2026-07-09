@@ -74,6 +74,46 @@ class SendMailTest(unittest.TestCase):
         sent_msg = smtp.send_message.call_args[0][0]
         self.assertFalse(any(p.get_content_type() == "text/calendar" for p in sent_msg.walk()))
 
+    def test_no_bcc_by_default(self):
+        with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
+            smtp = mock_smtp_ssl.return_value.__enter__.return_value
+            send_mail(self.settings, "guest@example.org", "Subject", "plain body")
+        sent_msg = smtp.send_message.call_args[0][0]
+        self.assertIsNone(sent_msg["Bcc"])
+
+    def test_bcc_addrs_sets_bcc_header(self):
+        # 2026-07-09, the operator: "add as BCC the given email address to all
+        # mails that go out to the attendees ... so that for some time I
+        # can watch this to ensure that all is OK" -- see
+        # app.config.Settings.bcc_attendee_email_list, which every
+        # attendee-facing call site reads to build this argument.
+        with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
+            smtp = mock_smtp_ssl.return_value.__enter__.return_value
+            send_mail(
+                self.settings, "guest@example.org", "Subject", "plain body",
+                bcc_addrs=("watcher@example.org",),
+            )
+        sent_msg = smtp.send_message.call_args[0][0]
+        self.assertEqual(sent_msg["Bcc"], "watcher@example.org")
+
+    def test_multiple_bcc_addrs_are_comma_joined(self):
+        with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
+            smtp = mock_smtp_ssl.return_value.__enter__.return_value
+            send_mail(
+                self.settings, "guest@example.org", "Subject", "plain body",
+                bcc_addrs=("watcher1@example.org", "watcher2@example.org"),
+            )
+        sent_msg = smtp.send_message.call_args[0][0]
+        self.assertEqual(sent_msg["Bcc"], "watcher1@example.org, watcher2@example.org")
+
+    # Not separately tested here: whether the "Bcc" header actually reaches
+    # the wire. `smtplib.SMTP.send_message()` (the stdlib call send_mail()
+    # hands the message to -- mocked out above, since these tests don't
+    # want a real SMTP connection) is documented to read recipients off
+    # To/Cc/Bcc but always strip Bcc from what it actually serializes/
+    # transmits -- verified directly against its source, not this app's
+    # own logic to (re-)test.
+
 
 if __name__ == "__main__":
     unittest.main()
