@@ -17,6 +17,7 @@ import contextlib
 import importlib.machinery
 import importlib.util
 import io
+import json
 import os
 import sys
 import unittest
@@ -107,6 +108,76 @@ class BareCommandHelpParserTest(unittest.TestCase):
         self.assertEqual(args.func, my_bt_mod.cmd_erase)
         self.assertEqual(args.email, "guest@example.com")
         self.assertTrue(args.yes)
+
+
+class UsersScopeArgsTest(unittest.TestCase):
+    """2026-07-14, the operator, changing `my-bt users`'s bare-default scope:
+    "actually no: by default my-bt users should show --live users that
+    logged in (that has a last_login date) Then you add --all to show
+    both --live and --archived" -- confirmed: "--live shows ALL live
+    users also the ones that have no login date / --archive shows only
+    the archived users / --all shows both / it all makes sense, no?"
+    --live/--archive keep their old meaning; --all now covers what the
+    bare default used to mean; the new bare default (scope=None) is
+    handled specially in cmd_users() itself (live + has-logged-in)."""
+
+    def test_bare_users_has_scope_none(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["users"])
+        self.assertIsNone(args.scope)
+
+    def test_live_flag_sets_scope_live(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["users", "--live"])
+        self.assertEqual(args.scope, "live")
+
+    def test_archive_flag_sets_scope_archived(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["users", "--archive"])
+        self.assertEqual(args.scope, "archived")
+
+    def test_all_flag_sets_scope_all(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["users", "--all"])
+        self.assertEqual(args.scope, "all")
+
+    def test_live_and_all_are_mutually_exclusive(self):
+        parser = my_bt_mod.build_parser()
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["users", "--live", "--all"])
+
+    def _run_users(self, store_dir, extra_argv):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["--data-dir", store_dir, "users", "--format", "json"] + extra_argv)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            my_bt_mod.cmd_users(args)
+        return json.loads(out.getvalue())
+
+    def test_bare_default_shows_only_live_users_that_have_logged_in(self):
+        import tempfile
+
+        from app.storage import Store
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = Store(tmp.name)
+        never_logged_in = store.upsert_user_for_booking("never@example.org", "Never")
+        logged_in = store.upsert_user_for_booking("logged@example.org", "Logged")
+        from app.storage import USER_FIELDS, _LockedCsv
+        with _LockedCsv(store.users_path, USER_FIELDS) as (rows, write):
+            for row in rows:
+                if row["user_id"] == logged_in.user_id:
+                    row["last_login_at"] = "2026-07-01T09:30:00+00:00"
+            write(rows, "test setup")
+
+        bare = self._run_users(tmp.name, [])
+        self.assertEqual([r["email"] for r in bare], ["logged@example.org"])
+
+        live_all = self._run_users(tmp.name, ["--live"])
+        self.assertEqual(
+            sorted(r["email"] for r in live_all), ["logged@example.org", "never@example.org"],
+        )
 
 
 class BareCommandMainBehaviorTest(unittest.TestCase):

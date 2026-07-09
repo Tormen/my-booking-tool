@@ -266,9 +266,27 @@ def cmd_users(args) -> None:
     as wide as needed!" (erased users' hashed email is now shown as
     "[erased]" instead of the raw ~70-char hash), and "please only use
     YYYY-MM-DD for the columns and only with -V show also the
-    timestamp" -- see -V/--verbose below."""
+    timestamp" -- see -V/--verbose below.
+
+    2026-07-14, the operator, changing the DEFAULT scope (bare `my-bt users`,
+    no flags): "actually no: by default my-bt users should show --live
+    users that logged in (that has a last_login date) Then you add --all
+    to show both --live and --archived" -- confirmed exact semantics
+    after a follow-up: "--live shows ALL live users also the ones that
+    have no login date / --archive shows only the archived users / --all
+    shows both / it all makes sense, no?" So: --live/--archive are
+    UNCHANGED from before (every live row, or every archived row, no
+    login filter either way); --all is the old bare-default behavior
+    (live+archived combined, still no login filter); and the new bare
+    default (args.scope is None here) is the one truly new view -- live
+    accounts that have actually logged in at least once, a narrower
+    subset of --live. See the `users` subparser's own --all/--live/
+    --archive registration below for the argparse side of this."""
     store = _store(args)
-    rows = store.read_users(scope=args.scope)
+    if args.scope is None:
+        rows = [r for r in store.read_users(scope="live") if r.get("last_login_at")]
+    else:
+        rows = store.read_users(scope=args.scope)
     if args.email:
         needle = args.email.strip().lower()
         rows = [r for r in rows if needle in r["email"].lower()]
@@ -1903,10 +1921,29 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_list)
 
     sp = _add_subcommand(
-        sub, "users", "list attendee accounts (live + archived by default).",
-        "Same -r/--raw and --format options as `my-bt list`.",
+        sub, "users",
+        "list attendee accounts (default: live accounts that have actually logged in).",
+        "--live: every live account, including ones that have never logged in. --archive: "
+        "only archived accounts (see `my-bt erase`). --all: live + archived combined, no "
+        "login-date filter (2026-07-14: this used to be the bare default; the bare default "
+        "is now the narrower logged-in-live view above, the operator: \"actually no: by default "
+        "my-bt users should show --live users that logged in\"). Same -r/--raw and --format "
+        "options as `my-bt list`.",
     )
-    scope_args(sp)
+    users_scope = sp.add_mutually_exclusive_group()
+    users_scope.add_argument(
+        "--live", dest="scope", action="store_const", const="live",
+        help="every live account, including ones that have never logged in (last_login_at blank)",
+    )
+    users_scope.add_argument(
+        "--archive", "--archived", dest="scope", action="store_const", const="archived",
+        help="only archived accounts (see `my-bt erase`), as-is",
+    )
+    users_scope.add_argument(
+        "--all", dest="scope", action="store_const", const="all",
+        help="live + archived combined, no login-date filter (the pre-2026-07-14 bare default)",
+    )
+    sp.set_defaults(scope=None)
     format_arg(sp)
     raw_arg(sp, "users")
     sp.add_argument(

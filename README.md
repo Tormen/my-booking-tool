@@ -354,7 +354,10 @@ my-bt list --format json   # or --format csv
 my-bt list --raw                        # every raw CSV column (ids/hashes) instead of the clean default view
 my-bt list --all --email guest@example.com   # an attendee's full history, live + pre-erasure combined
 
-my-bt users [--email ...] [--live|--archive]   # --live/--archive default to live+archived combined
+my-bt users [--email ...]                # default: live accounts that have actually logged in
+my-bt users --live                       # every live account, incl. ones that never logged in
+my-bt users --archive                    # only archived accounts
+my-bt users --all                        # live + archived combined, no login-date filter (the old default)
 my-bt show <anything>                    # auto-detects: registration id, course shortname, YYYY-MM-DD date,
                                           # or a name/email substring -- or force a type: --course/--user
 my-bt stats [--year 2026]
