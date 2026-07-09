@@ -855,6 +855,37 @@ flooding the journal on every routine request; turn it on ahead of the
 next `my-bt admin resync-calendar -D` (or set `MY_BOOKING_DEBUG=1` in
 the service's environment before a `setup -i`) if this recurs.
 
+**Root cause found and fixed (2026-07-16), from the very DEBUG output
+above.** the operator ran `-D` and sent back the actual production log. It
+showed this was never a race in the first place: the re-read ETag was
+IDENTICAL on every single retry (not different, as a real concurrent
+writer would produce), and the server -- mailbox.org's Open-Xchange --
+named the real reason in its own error body: `"Concurrent modification
+[id 1081, client sequence 0, actual sequence 1]"`. Every single UPDATE
+to an already-existing operator event failed with HTTP 412, every time,
+while the one occurrence with no prior event (a brand-new create)
+succeeded fine. `calendar_sync.sync_occurrence()` built its VEvent with
+the field default `sequence=0` (RFC 5545 SEQUENCE) and never
+incremented it -- so the FIRST PUT for an occurrence (server also at 0)
+succeeds, and every PUT after that keeps sending the same stale
+SEQUENCE forever while the server's own tracked value has moved past
+it. Open-Xchange enforces that as a genuine, and permanent, conflict --
+independent of the ETag/If-Match matching correctly -- so no amount of
+retrying (3 attempts or 300) could ever have fixed it; only a correct
+SEQUENCE could.
+
+Fixed in `app.ics.parse_sequence()` (new, mirrors `parse_uid()`) plus
+`sync_occurrence()`: the occurrence's CURRENT event is read (uid, etag,
+*and* sequence, off the same `query_events()` call already used for the
+ETag) before building the PUT body, and the new event is sent with
+`current_sequence + 1` (or plain `0` for a brand-new event -- nothing
+to increment past). Re-read on every retry attempt too, not just once
+up front, in case the server's own tracked sequence moved again in the
+meantime. This is what actually "makes the calendar sync work," as
+opposed to the reverted retry-harder attempt above -- the DEBUG
+diagnostics from that revert are exactly what pinpointed this, and stay
+in place for any future, genuinely different incident.
+
 The closing "Done." line (2026-07-08) re-checks everything fresh (so it
 reflects whatever the walkthrough just fixed, not the state at the start)
 and says so: `"Done -- all checks pass now..."` if clean, or

@@ -133,11 +133,35 @@ class VEvent:
 _UID_RE = re.compile(r"^UID:(.+)$", re.MULTILINE)
 _DTSTART_RE = re.compile(r"^DTSTART(?:;[^:]*)?:(.+)$", re.MULTILINE)
 _DTEND_RE = re.compile(r"^DTEND(?:;[^:]*)?:(.+)$", re.MULTILINE)
+_SEQUENCE_RE = re.compile(r"^SEQUENCE:(-?\d+)$", re.MULTILINE)
 
 
 def parse_uid(ics_text: str) -> str | None:
     m = _UID_RE.search(ics_text)
     return m.group(1).strip() if m else None
+
+
+def parse_sequence(ics_text: str) -> int:
+    """RFC 5545 SEQUENCE of the given VEVENT, or 0 if absent (the spec's
+    own default). 2026-07-16, the operator, root-causing a persistent-conflict
+    incident down to the actual DEBUG output he collected (not just more
+    retries): every single UPDATE to an already-existing operator
+    calendar event was failing with HTTP 412 -- not intermittently, EVERY
+    time -- while the one occurrence with no prior event (a brand-new
+    create) succeeded. The CalDAV server's (Open-Xchange) own error body
+    said why: "Concurrent modification [id 1081, client sequence 0,
+    actual sequence 1]" -- calendar_sync.sync_occurrence() always builds
+    its VEvent with the default sequence=0 (see VEvent's own docstring),
+    on every single PUT, forever, never incrementing it. The FIRST PUT
+    for a given occurrence (sequence 0, matches the server's own initial
+    state) succeeds; every PUT after that still sends sequence 0 while
+    the server's own tracked sequence has since advanced past it, and
+    Open-Xchange enforces that as a real (and, absent this fix,
+    PERMANENT -- no amount of retrying a wrong value ever becomes right)
+    conflict, independent of whether the ETag/If-Match itself matched.
+    See sync_occurrence()'s own use of this, right below."""
+    m = _SEQUENCE_RE.search(ics_text)
+    return int(m.group(1)) if m else 0
 
 
 def _parse_dt(value: str) -> datetime:

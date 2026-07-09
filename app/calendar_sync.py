@@ -22,7 +22,7 @@ from .atomic_io import atomic_write_text, fsync_dir
 from .caldav_client import CalDAVClient, CalDAVConflictError, CalDAVError
 from .cancellation import html_to_text
 from .config import Course, Settings
-from .ics import VEvent
+from .ics import VEvent, parse_sequence
 from .storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_WAITLISTED,
     Registration, Store, User, format_display_timestamp,
@@ -46,16 +46,18 @@ log = logging.getLogger("my_booking.calendar_sync")
 # the 2026-07-16 note just below on why that no longer gets a separate,
 # more-patient constant of its own).
 #
-# Diagnostic note for the next incident: sync_occurrence()'s conflict
+# Diagnostic note, resolved 2026-07-16: sync_occurrence()'s conflict
 # handling logs, at DEBUG level, whether the re-read ETag actually
-# CHANGED between attempts. If it's genuinely a concurrent writer
-# racing us, the ETag should be different (and often different again)
-# on each retry. If the SAME etag keeps getting reported as "current"
-# attempt after attempt, that's NOT what a race looks like -- it points
-# at something else being wrong (e.g. an etag-comparison/encoding bug
-# on our side, or the server naming this resource's href differently
-# than we assume -- see query_events()'s own href note below), which is
-# exactly the "another problem with the Calendar" the operator suspects.
+# CHANGED between attempts -- added when it was still an open question
+# whether this was a genuinely concurrent writer (ETag should differ,
+# often differently again, each retry) or "something else". the operator
+# collected exactly that DEBUG output from a real run and it WAS
+# something else: the ETag was identical on every retry, and the
+# server's own error named the real cause -- see parse_sequence()'s
+# docstring in app/ics.py and this function's own 2026-07-16 update
+# just below for the actual bug (a permanently-stale SEQUENCE, not a
+# race) and its fix. The diagnostics stay in place regardless, in case
+# a genuinely different incident turns up here in the future.
 _SYNC_CONFLICT_MAX_ATTEMPTS = 3
 
 # 2026-07-16, the operator ("Please make the calendar sync work :)"): a previous
@@ -226,10 +228,31 @@ def sync_occurrence(
     caller (live booking/cancellation AND the bulk resync) now uses the
     exact same 3-attempts/zero-delay behavior; see
     _SYNC_CONFLICT_MAX_ATTEMPTS's own docstring for why more patience
-    isn't the fix being reached for here. The conflict-handling loops
-    below now log much richer DEBUG-level diagnostics instead (etag
-    before/after re-read, full server response) -- see each `except
-    CalDAVConflictError` block.
+    isn't the fix being reached for here.
+
+    the operator was right: the DEBUG output he collected (real production log,
+    `MY_BOOKING_DEBUG=1`) found the actual bug. Every single UPDATE to an
+    already-existing operator event was failing with HTTP 412 -- not
+    intermittently, EVERY time, while a brand-new create succeeded fine
+    -- and the ETag reported as "current" after re-reading was IDENTICAL
+    to the one just rejected, every retry. Open-Xchange's own error body
+    said why: "Concurrent modification [id 1081, client sequence 0,
+    actual sequence 1]" -- this function always built its VEvent with
+    the default `sequence=0` (see VEvent's own docstring) and never
+    incremented it, so every PUT after the very first one for a given
+    occurrence sent a permanently-stale SEQUENCE that could never
+    satisfy the server, no matter how many times or how patiently it was
+    retried. Fixed: read the CURRENT event's own SEQUENCE (from the same
+    query_events() call already used for the ETag) and PUT with
+    current+1 -- re-read fresh on every retry attempt too, in case the
+    server's own tracked sequence moved again in between. See
+    app.ics.parse_sequence()'s own docstring for the full incident.
+
+    The conflict-handling loops below still log richer DEBUG-level
+    diagnostics on top of this fix (etag before/after re-read, full
+    server response) -- see each `except CalDAVConflictError` block --
+    since a real, if different, future incident could still turn up
+    there.
 
     The invite lists THREE groups: active (confirmed), waiting
     (waitlisted), and canceled (STATUS_CANCELED_BY_GUEST or
@@ -256,20 +279,26 @@ def sync_occurrence(
     canceled = [r for r in regs if r.status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST)]
     uid = event_uid(settings, course.shortname, occurrence_date)
 
-    def current_etag() -> str | None:
-        """(Re-)reads this occurrence's own event's CURRENT ETag, fresh --
-        called once up front, and again by the retry loop below each time
-        a 412 shows the etag we had was already stale."""
-        for u, _ics, etag in client.query_events(
+    def current_event_state() -> tuple[str | None, int]:
+        """(Re-)reads this occurrence's own event's CURRENT (etag,
+        sequence), fresh -- called once up front, and again by the retry
+        loops below each time a 412 shows what we had was already stale.
+        (None, 0) if the event doesn't exist yet -- a brand-new event
+        correctly starts at SEQUENCE 0, RFC 5545's own default; there's
+        nothing to increment past yet. See parse_sequence()'s own
+        docstring for why sequence is read here at all (2026-07-16
+        incident: a fixed sequence=0 forever meant every UPDATE PUT was
+        permanently rejected by the server, not a transient race)."""
+        for u, ics_text, etag in client.query_events(
             calendar_href,
             datetime.combine(occurrence_date, datetime.min.time(), tzinfo=tz),
             datetime.combine(occurrence_date + timedelta(days=1), datetime.min.time(), tzinfo=tz),
         ):
             if u == uid:
-                return etag
-        return None
+                return etag, parse_sequence(ics_text)
+        return None, 0
 
-    etag = current_etag()
+    etag, _sequence = current_event_state()
 
     if not active:
         # No confirmed registrants -- delete the event even if there's a
@@ -283,7 +312,7 @@ def sync_occurrence(
                     client.delete_event(calendar_href, uid, etag)
                     break
                 except CalDAVConflictError as exc:
-                    fresh_etag = current_etag()
+                    fresh_etag, _fresh_sequence = current_event_state()
                     log.debug(
                         "conflict deleting calendar event %s (attempt %d/%d): attempted "
                         "etag=%r, server's current etag now=%r%s -- %s",
@@ -379,6 +408,12 @@ def sync_occurrence(
         location=course.location,
         start=start,
         end=end,
+        # 2026-07-16: sequence=0 for a brand-new event (etag is None --
+        # matches VEvent's own default/RFC 5545's), otherwise the
+        # CURRENT server-side sequence + 1 -- see parse_sequence()'s own
+        # docstring for why this can't just stay the field default
+        # forever. Re-set on each retry attempt below too.
+        sequence=(_sequence + 1) if etag is not None else 0,
         alarms_minutes_before=settings.trainer_calendar_reminder_minutes,
         # 2026-07-14, the operator: host_calendar_entry_cc_list -- see
         # Course's own field docstring. organizer is only set when there's
@@ -394,12 +429,12 @@ def sync_occurrence(
             client.put_event(calendar_href, uid, event.to_ics(), etag=etag)
             return
         except CalDAVConflictError as exc:
-            fresh_etag = current_etag()
+            fresh_etag, fresh_sequence = current_event_state()
             log.debug(
                 "conflict updating calendar event %s (attempt %d/%d): attempted "
-                "etag=%r, server's current etag now=%r%s -- %s",
-                uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS, etag, fresh_etag,
-                " [UNCHANGED -- see _SYNC_CONFLICT_MAX_ATTEMPTS's docstring, this is "
+                "etag=%r sequence=%r, server's current etag now=%r sequence now=%r%s -- %s",
+                uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS, etag, event.sequence, fresh_etag, fresh_sequence,
+                " [ETAG UNCHANGED -- see _SYNC_CONFLICT_MAX_ATTEMPTS's docstring, this is "
                 "NOT what a concurrent write should look like]" if fresh_etag == etag else "",
                 exc,
             )
@@ -412,6 +447,11 @@ def sync_occurrence(
                 uid, attempt, _SYNC_CONFLICT_MAX_ATTEMPTS,
             )
             etag = fresh_etag
+            # 2026-07-16: re-derive sequence too, not just etag -- a
+            # retry that keeps resending the SAME (now stale) sequence
+            # is exactly the bug this fix exists to prevent (see
+            # parse_sequence()'s own docstring on the real incident).
+            event.sequence = (fresh_sequence + 1) if fresh_etag is not None else 0
 
 
 def resync_after_course_rename(

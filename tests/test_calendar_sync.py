@@ -2,6 +2,7 @@
 active/waiting/canceled participant tables (status, name, email,
 self/guest, timestamp), and the zero-active removal condition. See
 calendar_sync.py's own docstring for what's being tested here."""
+import re
 import tempfile
 import unittest
 from datetime import date
@@ -25,7 +26,13 @@ from .helpers import make_course, make_settings
 EMPTY_REPORT = """<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"></D:multistatus>"""
 
-def _report_with_event(uid: str, etag: str = '"e1"') -> str:
+def _report_with_event(uid: str, etag: str = '"e1"', sequence: int | None = None) -> str:
+    # `sequence`: added 2026-07-16 for the SEQUENCE-tracking incident (see
+    # calendar_sync.py's parse_sequence() note) -- None (the default)
+    # omits the SEQUENCE line entirely, same fixture shape as before this
+    # was added, so every EXISTING test using this helper is unaffected
+    # (parse_sequence() treats an absent line as 0, matching RFC 5545).
+    sequence_line = f"SEQUENCE:{sequence}\n" if sequence is not None else ""
     return f"""<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:response>
@@ -37,7 +44,7 @@ BEGIN:VEVENT
 UID:{uid}
 DTSTART:20260801T151500Z
 DTEND:20260801T165500Z
-SUMMARY:Test
+{sequence_line}SUMMARY:Test
 END:VEVENT
 END:VCALENDAR
 </C:calendar-data>
@@ -300,6 +307,132 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
                 )
         debug_messages = [call.args[0] % call.args[1:] for call in m_log.debug.call_args_list]
         self.assertTrue(any("UNCHANGED" in msg for msg in debug_messages))
+
+
+class SyncOccurrenceSequenceTest(unittest.TestCase):
+    """2026-07-16, the operator, root-caused via his own collected DEBUG output
+    (not by retrying harder): a real production incident where EVERY
+    single UPDATE to an already-existing operator calendar event failed
+    with a permanent (not intermittent) HTTP 412, while a brand-new
+    create succeeded fine. Open-Xchange's own error said why:
+    "Concurrent modification [id 1081, client sequence 0, actual
+    sequence 1]" -- sync_occurrence() always built its VEvent with the
+    default sequence=0 and never incremented it, so the ETag matched but
+    the server's own SEQUENCE check still rejected it, every time,
+    forever. These tests use a transport that mimics that real
+    Open-Xchange enforcement (reject unless the incoming SEQUENCE
+    strictly exceeds what the server has tracked) -- they would have
+    failed (raised CalDAVConflictError after exhausting all 3 attempts)
+    against the OLD, fixed-sequence=0 code, and pass against the fix."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.course = make_course(shortname="yoga-class-1", title="Yoga", capacity=2)
+        self.settings = make_settings(courses=(self.course,), booking_calendar="Bookings")
+        self.occ_date = date(2026, 8, 1)
+        self.store.upsert_user_for_booking("stays@example.org", "Stays")
+        self.store.add_registration(
+            "yoga-class-1", self.occ_date.isoformat(),
+            self.store.find_user_by_email("stays@example.org").user_id, "tok-hash", status=STATUS_CONFIRMED,
+        )
+        self.uid = event_uid(self.settings, "yoga-class-1", self.occ_date)
+
+    def _oxlike_transport(self, report_body_fn, put_bodies: list):
+        """report_body_fn() is called fresh on every REPORT (so a retry
+        can see a DIFFERENT server-tracked sequence than the first read,
+        same as the real server would show after any update -- ours or
+        anyone else's). PUT is accepted unconditionally if there's no
+        EXISTING event yet (a fresh create, If-None-Match -- nothing to
+        conflict with, same as production); otherwise only if the
+        incoming SEQUENCE strictly exceeds whatever SEQUENCE the CURRENT
+        report_body_fn() reports -- i.e. the exact Open-Xchange behavior
+        from the incident, not just a canned pass/fail sequence."""
+        def transport(method, url, body="", extra_headers=None):
+            if method == "REPORT":
+                return Response(207, {}, report_body_fn())
+            if method == "PUT":
+                put_bodies.append(body)
+                current_report = report_body_fn()
+                if f"UID:{self.uid}" in current_report:
+                    sent = parse_sequence_for_test(body)
+                    current = parse_sequence_for_test(current_report)
+                    if sent <= current:
+                        return Response(412, {}, '<D:error xmlns:D="DAV:"/>')
+                return Response(204, {}, "")
+            raise AssertionError(f"unexpected {method} {url}")
+        return transport
+
+    def test_put_sends_current_sequence_plus_one_not_a_fixed_zero(self):
+        report_body = _report_with_event(self.uid, sequence=1)
+        put_bodies: list = []
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=self._oxlike_transport(lambda: report_body, put_bodies),
+        )
+        sync_occurrence(client, "/caldav/Bookings/", self.store, self.settings, self.course, self.occ_date)
+        # Succeeds on the FIRST attempt now -- the old fixed-sequence=0
+        # code would have needed (and never gotten) 3 failed attempts.
+        self.assertEqual(len(put_bodies), 1)
+        self.assertIn("SEQUENCE:2", put_bodies[0])
+
+    def test_a_brand_new_event_still_starts_at_sequence_zero(self):
+        # No existing event at all (empty REPORT) -- must NOT try to
+        # increment past a sequence that doesn't exist yet.
+        put_bodies: list = []
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=self._oxlike_transport(lambda: EMPTY_REPORT, put_bodies),
+        )
+        sync_occurrence(client, "/caldav/Bookings/", self.store, self.settings, self.course, self.occ_date)
+        self.assertEqual(len(put_bodies), 1)
+        self.assertIn("SEQUENCE:0", put_bodies[0])
+
+    def test_retry_re_reads_sequence_if_the_server_advanced_again_meanwhile(self):
+        # Simulates the server's own tracked sequence moving AGAIN between
+        # our first read and our first PUT attempt (e.g. a real, separate
+        # update landed in between) -- our first attempt (computed from
+        # the stale read) is correctly rejected, but the RETRY must
+        # re-read and use the NEW current value, not just repeat the same
+        # already-rejected one forever (that repetition is exactly the
+        # 2026-07-16 bug).
+        state = {"sequence": 1}
+
+        def current_report():
+            return _report_with_event(self.uid, sequence=state["sequence"])
+
+        put_bodies: list = []
+        real_transport = self._oxlike_transport(current_report, put_bodies)
+
+        def flaky_transport(method, url, body="", extra_headers=None):
+            resp = real_transport(method, url, body=body, extra_headers=extra_headers)
+            # The FIRST PUT attempt targets sequence 1+1=2, but by the
+            # time it arrives the server has already moved to 2 (as if
+            # someone/something else updated it in between) -- so it's
+            # rejected even though our math was right against the STALE
+            # read; only the retry (which re-reads first) can succeed.
+            if method == "PUT" and len(put_bodies) == 1:
+                state["sequence"] = 2
+                return Response(412, {}, '<D:error xmlns:D="DAV:"/>')
+            return resp
+
+        client = CalDAVClient(
+            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
+            transport=flaky_transport,
+        )
+        sync_occurrence(client, "/caldav/Bookings/", self.store, self.settings, self.course, self.occ_date)
+        self.assertEqual(len(put_bodies), 2)
+        self.assertIn("SEQUENCE:2", put_bodies[0])  # first attempt: stale read (1) + 1
+        self.assertIn("SEQUENCE:3", put_bodies[1])  # retry: fresh read (2) + 1, succeeds
+
+
+def parse_sequence_for_test(ics_or_report_text: str) -> int:
+    """Independent of app.ics.parse_sequence (the code under test) so
+    SyncOccurrenceSequenceTest's fake Open-Xchange-like transport isn't
+    just testing itself against its own parsing logic."""
+    m = re.search(r"SEQUENCE:(-?\d+)", ics_or_report_text)
+    return int(m.group(1)) if m else 0
 
 
 class ResyncAfterCourseRenameTest(unittest.TestCase):
