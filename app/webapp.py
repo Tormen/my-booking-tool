@@ -1608,6 +1608,15 @@ class App:
         as the logged-in banner does, so an anonymous visitor gets that
         one-click way back too.
 
+        2026-07-16, the operator, screenshot of this exact banner: "Not logged in
+        is not necessary if you have the Login on the top right..." -- the
+        "Not logged in" label text was dropped, but the first `<span>`
+        itself stays (now empty) rather than being removed outright:
+        `.session-banner` is `justify-content:space-between`, which (per
+        the flex spec) collapses to flex-start with only a single child --
+        i.e. without a first span to space against, Login would jump to
+        the LEFT instead of staying "on the top right" as the operator put it.
+
         `next_path` (2026-07-11, the operator: "Login link returns to originating
         page"), when given, is appended as `?next=<path>` on the Login
         link -- my()'s login form/POST carries it through (see
@@ -1621,7 +1630,7 @@ class App:
         next_qs = f"?next={esc(next_path)}" if next_path else ""
         return (
             '<div class="session-banner">'
-            "<span>Not logged in</span>"
+            "<span></span>"
             f'<span><a href="/my{next_qs}">Login</a> &middot; '
             f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
             "</div>"

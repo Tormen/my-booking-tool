@@ -722,7 +722,6 @@ class SessionBannerTest(unittest.TestCase):
         # "Login" link in the same box instead of nothing.
         _status, _headers, body = self.app.courses("GET", {})
         self.assertIn('class="session-banner"', body)
-        self.assertIn("Not logged in", body)
         # 2026-07-11, the operator: "Login link returns to originating page" --
         # the link now carries ?next= back to this same page.
         self.assertIn('<a href="/my?next=/courses">Login</a>', body)
@@ -736,7 +735,6 @@ class SessionBannerTest(unittest.TestCase):
     def test_book_form_shows_login_banner_when_anonymous(self):
         _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
         self.assertIn('class="session-banner"', body)
-        self.assertIn("Not logged in", body)
         # 2026-07-11, the operator: "Login link returns to originating page" --
         # the link now carries ?next= back to this same course's page.
         self.assertIn('<a href="/my?next=/book/yoga-class-1">Login</a>', body)
@@ -749,7 +747,7 @@ class SessionBannerTest(unittest.TestCase):
         environ = {"HTTP_COOKIE": f"session={sid}"}
         _status, _headers, body = self.app.courses("GET", environ)
         self.assertIn('class="session-banner"', body)
-        self.assertIn("Not logged in", body)
+        self.assertIn('<a href="/my?next=/courses">Login</a>', body)
 
     def test_my_page_anonymous_view_has_no_redundant_login_banner(self):
         # Deliberately NOT given the full anonymous "Not logged in /
@@ -1010,7 +1008,7 @@ class AlwaysVisibleBannerRolloutTest(unittest.TestCase):
     def test_guest_cancel_bogus_token_shows_banner(self):
         _status, _headers, body = self.app.guest_cancel("GET", "bogus-token", {})
         self.assertIn('class="session-banner"', body)
-        self.assertIn("Not logged in", body)
+        self.assertIn('<a href="/my">Login</a>', body)
 
     def test_guest_reinstate_bogus_token_shows_banner(self):
         _status, _headers, body = self.app.guest_reinstate("GET", "bogus-token", {})
@@ -1031,7 +1029,7 @@ class AlwaysVisibleBannerRolloutTest(unittest.TestCase):
     def test_my_reset_form_shows_banner(self):
         _status, _headers, body = self.app.my_reset("GET", {})
         self.assertIn('class="session-banner"', body)
-        self.assertIn("Not logged in", body)
+        self.assertIn('<a href="/my">Login</a>', body)
 
     def test_my_confirm_invalid_token_shows_banner(self):
         _status, _headers, body = self.app.my_confirm("GET", "bogus-token", {})
@@ -1047,11 +1045,11 @@ class AlwaysVisibleBannerRolloutTest(unittest.TestCase):
 
     def test_admin_login_page_shows_boxed_homepage_link_only(self):
         # This page IS the admin login form -- same reasoning as /my's own
-        # login page: no redundant "Not logged in" text, just the box +
-        # homepage link (see _homepage_only_banner_html()'s docstring).
+        # login page: no redundant Login link, just the box + homepage
+        # link (see _homepage_only_banner_html()'s docstring).
         _status, _headers, body = self.app.admin_login("GET", {})
         self.assertIn('class="session-banner"', body)
-        self.assertNotIn("Not logged in", body)
+        self.assertNotIn(">Login<", body)
         self.assertIn(f'<a href="{self.settings.base_url}">', body)
 
     def test_admin_overview_shows_admin_banner_when_logged_in(self):
