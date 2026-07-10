@@ -1,3 +1,5 @@
+import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -28,6 +30,17 @@ class ReadStateTest(unittest.TestCase):
         self.assertTrue(state.enabled)
         self.assertEqual(state.message, "back Monday")
         self.assertTrue(state.set_at)  # non-empty ISO timestamp
+
+    def test_enable_secures_the_flag_file(self):
+        # 2026-07-10: secure=True -- this flag lives in the same shared
+        # data_dir as users.csv, and `my-bt maintenance on/off` runs as
+        # root same as every other my-bt invocation; group-readable
+        # (0640), not owner-only (0600), confirms it's actually wired up
+        # (see app.atomic_io.secure_data_path's docstring for why this
+        # matters: a root-owned, owner-only flag would make read_state()
+        # silently fail open to "off" for the live service).
+        maintenance.enable(self.data_dir, message="back Monday")
+        self.assertEqual(stat.S_IMODE(os.stat(maintenance.flag_path(self.data_dir)).st_mode), 0o640)
 
     def test_enable_creates_data_dir_if_missing(self):
         nested = self.data_dir / "not" / "yet" / "created"

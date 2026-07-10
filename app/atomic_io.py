@@ -14,40 +14,130 @@ used for CSVs, extracted here so it isn't duplicated per module):
 write the new content to a temp file in the SAME directory as the target
 (so the final rename is on the same filesystem -- required for
 os.replace() to be atomic at all), fsync() that temp file (new content
-durable on disk), os.replace() it over the real path (atomic rename --
-a reader, or a crash, only ever sees the complete old file or the
-complete new one, never a torn one), then fsync() the containing
-directory too (see fsync_dir's own docstring for why the rename itself
-needs this).
+durable on disk), optionally secure it (see secure_data_path below),
+os.replace() it over the real path (atomic rename -- a reader, or a
+crash, only ever sees the complete old file or the complete new one,
+never a torn one), then fsync() the containing directory too (see
+fsync_dir's own docstring for why the rename itself needs this).
 
-Deliberately does NOT do CSV-specific things (row sanitization, csv.
-DictWriter, chmod/chgrp via app.storage._secure_data_path) -- callers
-that need those still go through storage.py's own _LockedCsv. This is
-just the shared temp-file+fsync+rename+dir-fsync mechanics underneath
-both.
+2026-07-10, the operator, second real production incident: `secure_data_path`
+(chmod/chgrp/root-only-chown) used to live in app/storage.py, CSV-only --
+see its own docstring for the two incidents ("the operator's own VPS ...
+PermissionError") that shaped it. Any OTHER file under the same shared
+data directory (calendar_sync.py's resync markers, maintenance.py's
+maintenance-flag) is written through THIS module's atomic_write_text
+instead of _LockedCsv, and is exposed to the exact same root-run-my-bt-
+breaks-the-live-service's-own-access problem -- there's nothing
+CSV-specific about that failure mode. Moved here, and exposed via
+atomic_write_text's own `secure=`/`mode=` params, so both write paths
+share one securing implementation instead of two copies of the same
+root-vs-non-root chown/chgrp logic drifting apart. app/storage.py now
+imports this rather than defining its own copy.
 """
 from __future__ import annotations
 
+import grp
 import logging
 import os
+import pwd
 import tempfile
 from pathlib import Path
 
 log = logging.getLogger("my_booking.atomic_io")
 
+# Every my-booking systemd unit (my-booking.service, -watchdog, -retention,
+# -git-snapshot) runs as this same dedicated user/group -- see systemd/*.service.
+SERVICE_GROUP = "my-booking"
+SERVICE_USER = "my-booking"
 
-def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> None:
+
+def secure_data_path(path, mode: int = 0o640) -> None:
+    """Best-effort: chmod (default 0640 -- owner rw, GROUP read -- not
+    owner-only 0600), chgrp to SERVICE_GROUP, and (root only -- see below)
+    chown to SERVICE_USER. Applied to every shared data file/directory on
+    every write/creation, so permissions self-heal on the next write
+    regardless of who performed a previous one.
+
+    Deliberately never raises. Failure modes are logged at two different
+    levels, on purpose:
+      - SERVICE_GROUP/SERVICE_USER simply don't exist on this machine
+        (KeyError from getgrnam/getpwnam) -- entirely normal for a dev
+        checkout or this repo's own test suite, not something an operator
+        needs to see on every single write, so this logs at DEBUG only.
+      - chmod/chown/chgrp fails outright for any OTHER reason (e.g. a real
+        deployment where the group exists but the calling process isn't a
+        member of it and isn't root) -- an actually actionable problem
+        worth surfacing, so this logs at WARNING.
+    Either way, the write this is securing must never fail just because
+    the permissions touch-up couldn't fully complete.
+
+    2026-07-09, real production incident #1 (the operator ran `my-bt cancel`
+    directly as root, leaving registrations.csv root:root mode 0600 --
+    unreadable by my-booking-watchdog.service, a READ-only consumer):
+    chmod-to-0640 + chgrp-to-SERVICE_GROUP fixed that one.
+
+    2026-07-10, real production incident #2: chgrp alone was NOT enough
+    for a read-WRITE consumer. `my-bt admin gdpr erase` (root, same as
+    every my-bt invocation on this box) writes through this exact
+    function -- os.replace() into place makes the NEW file's OWNER
+    whoever performed that write, root in this case, regardless of the
+    chgrp below. At mode 0640 (owner rw, GROUP READ-ONLY), that leaves
+    my-booking.service -- a group MEMBER, never the owner once root has
+    written -- able to read but never write its own users.csv again:
+    "PermissionError: [Errno 13] ... users.csv" the next time the service
+    tried to set a confirm/reset token.
+
+    Fix: a non-root process still only ever chgrp's (POSIX lets an owner
+    chgrp to any group they're a member of without root; forcing
+    ownership itself would need root universally and isn't necessary
+    there). But when the CURRENT process IS root -- the one case that can
+    reliably fix this, and also the one case that causes it -- also chown
+    the OWNER back to SERVICE_USER, restoring exactly the access the
+    service had before that root-run write touched the file."""
+    try:
+        os.chmod(path, mode)
+    except OSError as exc:
+        log.warning("could not chmod %s to %o (%s)", path, mode, exc)
+    if os.geteuid() == 0:
+        try:
+            uid = pwd.getpwnam(SERVICE_USER).pw_uid
+        except KeyError:
+            log.debug("service user %r does not exist on this machine -- skipping chown of %s", SERVICE_USER, path)
+        else:
+            try:
+                os.chown(path, uid, -1)
+            except OSError as exc:
+                log.warning("could not chown %s to %r (%s)", path, SERVICE_USER, exc)
+    try:
+        gid = grp.getgrnam(SERVICE_GROUP).gr_gid
+    except KeyError:
+        log.debug("service group %r does not exist on this machine -- skipping chgrp of %s", SERVICE_GROUP, path)
+        return
+    try:
+        os.chown(path, -1, gid)
+    except OSError as exc:
+        log.warning("could not chgrp %s to %r (%s)", path, SERVICE_GROUP, exc)
+
+
+def atomic_write_text(
+    path: str | Path, text: str, encoding: str = "utf-8", *, secure: bool = False, mode: int = 0o640,
+) -> None:
     """Crash-safe replacement for `Path(path).write_text(text)`: on a
     crash mid-write, the target either still has its old, complete
     content or its new, complete content -- never a truncated/partial
     write. Creates the parent directory if it doesn't exist yet (matches
     every call site this replaces, which all did this themselves before).
 
-    Callers that need to chmod/chown the result (e.g. a secret file)
-    should still do that on `path` AFTER this returns -- os.replace()
-    takes the temp file's own permissions (mkstemp's default: 0600,
-    owner-only), so an existing file's more permissive mode is not
-    preserved across a rewrite."""
+    `secure=True` applies secure_data_path(mode=mode) to the temp file
+    BEFORE the rename (same order _LockedCsv._atomic_write always used --
+    the permissions/ownership need to be right at the instant the new
+    file becomes visible at `path`, not as a separate step after). Pass
+    this for anything living in the shared data directory alongside the
+    CSVs (see secure_data_path's own docstring for why); leave it False
+    (the default) for anything else -- e.g. secrets, or files nginx/other
+    services own -- where this app's my-booking group model doesn't
+    apply. Callers that need some OTHER chmod/chown scheme entirely
+    should still do that on `path` themselves AFTER this returns."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
@@ -56,6 +146,8 @@ def atomic_write_text(path: str | Path, text: str, encoding: str = "utf-8") -> N
             tmp.write(text)
             tmp.flush()
             os.fsync(tmp.fileno())
+        if secure:
+            secure_data_path(tmp_path, mode=mode)
         os.replace(tmp_path, path)
         fsync_dir(path.parent)
     except BaseException:

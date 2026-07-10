@@ -153,7 +153,9 @@ def record_resync_skips(data_dir: str | Path, result: ResyncResult) -> None:
     either should update this record."""
     marker_path = Path(data_dir) / CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME
     if result.skipped:
-        atomic_write_text(marker_path, "\n".join(result.skipped) + "\n")
+        # secure=True: same shared data_dir, same root-run-my-bt exposure
+        # as the format-version marker above -- see its own comment.
+        atomic_write_text(marker_path, "\n".join(result.skipped) + "\n", secure=True, mode=0o640)
     elif marker_path.exists():
         marker_path.unlink()
         fsync_dir(marker_path.parent)
@@ -716,7 +718,12 @@ def resync_if_format_changed(
     # Written even when we only ran because of pending skips (format_is_
     # stale False) -- harmless (same value it already had) and keeps
     # this the one place that owns writing it.
-    atomic_write_text(marker_path, f"{format_version}\n")
+    # 2026-07-10: secure=True -- this marker lives in the same shared
+    # data_dir as users.csv/registrations.csv, written by the exact same
+    # root-run `my-bt admin resync-calendar`/`setup -i` that broke those
+    # (see app.atomic_io.secure_data_path's own docstring); nothing about
+    # that failure mode is CSV-specific, so this gets the same treatment.
+    atomic_write_text(marker_path, f"{format_version}\n", secure=True, mode=0o640)
     record_resync_skips(data_dir, result)
     return result
 

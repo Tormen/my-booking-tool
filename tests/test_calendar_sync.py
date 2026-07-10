@@ -2,7 +2,9 @@
 active/waiting/canceled participant tables (status, name, email,
 self/guest, timestamp), and the zero-active removal condition. See
 calendar_sync.py's own docstring for what's being tested here."""
+import os
 import re
+import stat
 import tempfile
 import unittest
 from datetime import date
@@ -802,6 +804,12 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
         # above -- are expected and not what this is checking).
         leftover_tmps = [p.name for p in Path(self.data_dir).iterdir() if p.name.endswith(".tmp")]
         self.assertEqual(leftover_tmps, [])
+        # 2026-07-10: secure=True -- this marker lives in the same shared
+        # data_dir as users.csv/registrations.csv and is exposed to the
+        # exact same root-run-my-bt ownership problem (see
+        # app.atomic_io.secure_data_path's docstring); group-readable
+        # (0640), not owner-only (0600), confirms it's actually wired up.
+        self.assertEqual(stat.S_IMODE(os.stat(marker).st_mode), 0o640)
 
     def test_matching_marker_is_a_no_op(self):
         marker = Path(self.data_dir) / ".calendar_invite_format_version"
@@ -955,6 +963,10 @@ class RecordResyncSkipsTest(unittest.TestCase):
         result = ResyncResult(fixed=2, skipped=["yoga-class-1 on 2026-07-10: boom"])
         record_resync_skips(self.data_dir, result)
         self.assertEqual(self.marker_path.read_text(encoding="utf-8").strip(), "yoga-class-1 on 2026-07-10: boom")
+        # 2026-07-10: secure=True -- same shared data_dir, same root-run-
+        # my-bt exposure as users.csv/registrations.csv (see
+        # app.atomic_io.secure_data_path's docstring).
+        self.assertEqual(stat.S_IMODE(os.stat(self.marker_path).st_mode), 0o640)
 
     def test_multiple_skips_are_one_per_line(self):
         result = ResyncResult(fixed=0, skipped=["a: boom", "b: bang"])

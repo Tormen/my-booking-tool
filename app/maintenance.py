@@ -125,8 +125,17 @@ def enable(data_dir: str | Path, message: str = "") -> MaintenanceState:
     # open to "off" on unreadable/corrupt JSON), but there's no reason
     # for this one to be the odd one out once every other write in the
     # project uses the crash-safe pattern. See app/atomic_io.py.
+    # 2026-07-10: secure=True too -- this flag lives in the same shared
+    # data_dir as users.csv, and `my-bt maintenance on/off` runs as root
+    # same as every other my-bt invocation. Without this, a root-run
+    # toggle would leave the flag root-owned and my-booking.service would
+    # silently fail to even READ it (read_state() fails open to "off" on
+    # any OSError) -- not a crash, but "maintenance on" quietly not taking
+    # effect for real visitors is exactly the kind of silent breakage
+    # secure_data_path exists to prevent. See app.atomic_io.secure_data_path.
     atomic_write_text(
         p, json.dumps({"enabled": True, "message": state.message, "set_at": state.set_at}),
+        secure=True, mode=0o640,
     )
     return state
 
