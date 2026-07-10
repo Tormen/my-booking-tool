@@ -494,6 +494,8 @@ my-bt users [--email ...]                # default: live accounts that have actu
 my-bt users --live                       # every live account, incl. ones that never logged in
 my-bt users --archive                    # only archived accounts
 my-bt users --all                        # live + archived combined, no login-date filter (the old default)
+my-bt users logout guest@example.com     # same as `my-bt admin logout` -- reachable from here too
+my-bt users logout --all                 # same as `my-bt admin logout --all`
 my-bt show <anything>                    # auto-detects: registration id, course shortname, YYYY-MM-DD date,
                                           # or a name/email substring -- or force a type: --course/--user
 my-bt stats [--year 2026]

@@ -329,16 +329,18 @@ def build_clean_registration_view(
 
 def build_clean_user_view(
     rows: list[dict], last_course_by_user: dict[str, str] | None = None, verbose: bool = False,
+    active_sessions: set[str] | None = None,
 ) -> list[dict]:
     """Builds the compact, human-readable rows `my-bt users` shows by
     default (2026-07-13, same "clean by default, -r/--raw for the full
     table" request as `my-bt list` above) -- name, when they joined, when
-    they last logged in, their last confirmed course, and email (in that
-    order), with no user_id or any of the token/hash columns
-    (password_hash/salt, confirm_token_hash, pending_email_*, ... -- see
-    User's own dataclass in app/storage.py for the full raw list).
-    pin_hash/pin_salt were already stripped upstream by cmd_users before
-    this ever runs, same as -r/--raw still does.
+    they last logged in, whether they have a live session right now,
+    their last confirmed course, and email (in that order), with no
+    user_id or any of the token/hash columns (password_hash/salt,
+    confirm_token_hash, pending_email_*, ... -- see User's own dataclass
+    in app/storage.py for the full raw list). pin_hash/pin_salt were
+    already stripped upstream by cmd_users before this ever runs, same as
+    -r/--raw still does.
 
     2026-07-08, the operator, re-ordering + two more changes in the same
     message:
@@ -361,18 +363,36 @@ def build_clean_user_view(
       cmd_users wires this to a new -V/--verbose flag, same "more detail
       on top of the summary" axis as `list -V`/the old `gdpr-retention -V`), in
       which case the full format_display_timestamp() rendering (date, or
-      date_HHMM.SS when there's a real time-of-day) is used instead."""
+      date_HHMM.SS when there's a real time-of-day) is used instead.
+
+    2026-07-10, the operator: "already shows last_login! so lets add a column:
+    session still active?" -- `active_sessions` is the set of lowercased
+    emails scripts/my-bt's cmd_users resolved as currently logged in (via
+    /internal/status, the same source `my-bt status`'s own "logged-in
+    users" table reads -- see _query_internal_status). Three possible
+    cell values, not two: "active" (email is in the set), "(offline)"
+    (queried fine, just not in the set), or "(unknown)" -- shown when
+    `active_sessions` itself is None, meaning the live process couldn't
+    be reached at all. That third case matters: silently rendering
+    "(offline)" whenever the query fails would be actively misleading
+    (claiming nobody's logged in when the truth is "couldn't check"),
+    not just imprecise."""
     last_course_by_user = last_course_by_user or {}
     fmt = format_display_timestamp if verbose else _format_display_date
     out = []
     for r in rows:
         email = r.get("email", "")
+        if active_sessions is None:
+            session = "(unknown)"
+        else:
+            session = "active" if email.lower() in active_sessions else "(offline)"
         if is_erased_email(email):
             email = "[erased]"
         out.append({
             "name": r.get("name", ""),
             "joined": fmt(r.get("created_at", "")),
             "last_login": fmt(r.get("last_login_at", "")) or "(never)",
+            "session": session,
             "last_course": last_course_by_user.get(r.get("user_id", ""), ""),
             "email": email,
         })

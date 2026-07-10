@@ -259,11 +259,15 @@ class BuildCleanUserViewTest(unittest.TestCase):
         self.assertEqual(result[0]["joined"], "2026-01-01")
         self.assertEqual(result[0]["last_login"], "2026-07-01")
 
-    def test_column_order_is_name_joined_last_login_last_course_email(self):
+    def test_column_order_is_name_joined_last_login_session_last_course_email(self):
         # 2026-07-08, the operator: "please have name joined last_login
-        # last_course email".
+        # last_course email". 2026-07-10: "session" (active/offline/
+        # unknown) inserted right after last_login -- see the
+        # ActiveSessionsColumnTest class below.
         result = build_clean_user_view([self.row])
-        self.assertEqual(list(result[0].keys()), ["name", "joined", "last_login", "last_course", "email"])
+        self.assertEqual(
+            list(result[0].keys()), ["name", "joined", "last_login", "session", "last_course", "email"],
+        )
 
     def test_dates_are_date_only_by_default_even_with_a_real_time_of_day(self):
         # 2026-07-08, the operator: "please only use YYYY-MM-DD for the columns
@@ -307,6 +311,46 @@ class BuildCleanUserViewTest(unittest.TestCase):
     def test_ordinary_email_unaffected(self):
         result = build_clean_user_view([self.row])
         self.assertEqual(result[0]["email"], "ada@example.com")
+
+
+class ActiveSessionsColumnTest(unittest.TestCase):
+    """2026-07-10, the operator: "already shows last_login! so lets add a
+    column: session still active?" -- active_sessions is the lowercased
+    email set scripts/my-bt's cmd_users resolves via /internal/status
+    (see _query_internal_status); None specifically means "couldn't
+    ask", not "nobody's logged in"."""
+
+    def setUp(self):
+        self.row = {
+            "user_id": "u1", "name": "Ada", "email": "Ada@Example.com",
+            "created_at": "2026-01-01T00:00:00", "last_login_at": "2026-07-01T09:30:00",
+        }
+
+    def test_email_in_active_set_shows_active(self):
+        result = build_clean_user_view([self.row], active_sessions={"ada@example.com"})
+        self.assertEqual(result[0]["session"], "active")
+
+    def test_matching_is_case_insensitive(self):
+        result = build_clean_user_view([self.row], active_sessions={"ADA@EXAMPLE.COM".lower()})
+        self.assertEqual(result[0]["session"], "active")
+
+    def test_email_not_in_active_set_shows_offline(self):
+        result = build_clean_user_view([self.row], active_sessions={"someone-else@example.com"})
+        self.assertEqual(result[0]["session"], "(offline)")
+
+    def test_empty_active_set_shows_offline_not_unknown(self):
+        # An empty set is a real, known answer ("queried fine, nobody's
+        # logged in right now") -- must not be confused with None.
+        result = build_clean_user_view([self.row], active_sessions=set())
+        self.assertEqual(result[0]["session"], "(offline)")
+
+    def test_none_active_sessions_shows_unknown(self):
+        result = build_clean_user_view([self.row], active_sessions=None)
+        self.assertEqual(result[0]["session"], "(unknown)")
+
+    def test_default_is_none_shows_unknown(self):
+        result = build_clean_user_view([self.row])
+        self.assertEqual(result[0]["session"], "(unknown)")
 
 
 class ComputeLastConfirmedCourseTest(unittest.TestCase):

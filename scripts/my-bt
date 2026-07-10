@@ -282,7 +282,21 @@ def cmd_users(args) -> None:
     default (args.scope is None here) is the one truly new view -- live
     accounts that have actually logged in at least once, a narrower
     subset of --live. See the `users` subparser's own --all/--live/
-    --archive registration below for the argparse side of this."""
+    --archive registration below for the argparse side of this.
+
+    2026-07-10, the operator: "already shows last_login! so lets add a column:
+    session still active?" -- only meaningful for the clean (non-raw)
+    view, so the live /internal/status query (same one `my-bt status`
+    itself makes, see _query_internal_status) only happens when we're
+    actually about to build that view; a plain -r/--raw dump stays a
+    pure CSV read with no network dependency, same as before. See
+    app.cli_list.build_clean_user_view's own docstring for what a query
+    failure renders as ("(unknown)", not a false "(offline)").
+
+    Also see `my-bt users logout` below (same message: "lets add 'logout
+    <EMAIL>' and 'logout --all' as possibilities to my-bt users") --
+    the actual command stays `my-bt admin logout` (the operator, on where it
+    should live: "we have BOTH"), this is just also reachable from here."""
     store = _store(args)
     if args.scope is None:
         rows = [r for r in store.read_users(scope="live") if r.get("last_login_at")]
@@ -296,7 +310,14 @@ def cmd_users(args) -> None:
         last_course = app_cli_list.compute_last_confirmed_course(
             store.read_registrations(scope="all"), date.today(),
         )
-        rows = app_cli_list.build_clean_user_view(rows, last_course_by_user=last_course, verbose=args.verbose)
+        payload, _error = _query_internal_status(args.internal_url)
+        active_sessions = (
+            {s["who"].lower() for s in payload.get("sessions", []) if s.get("kind") == "guest"}
+            if payload else None
+        )
+        rows = app_cli_list.build_clean_user_view(
+            rows, last_course_by_user=last_course, verbose=args.verbose, active_sessions=active_sessions,
+        )
     _print_rows(rows, args.format)
 
 
@@ -2047,7 +2068,7 @@ def build_parser() -> argparse.ArgumentParser:
         "login-date filter (2026-07-14: this used to be the bare default; the bare default "
         "is now the narrower logged-in-live view above, the operator: \"actually no: by default "
         "my-bt users should show --live users that logged in\"). Same -r/--raw and --format "
-        "options as `my-bt list`.",
+        "options as `my-bt list`. See also `my-bt users logout` below.",
     )
     users_scope = sp.add_mutually_exclusive_group()
     users_scope.add_argument(
@@ -2070,7 +2091,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="show full joined/last_login timestamps (date_HHMM.SS) instead of just YYYY-MM-DD",
     )
     sp.add_argument("--email", help="filter by (partial, case-insensitive) email")
+    sp.add_argument(
+        "--internal-url", default=DEFAULT_INTERNAL_URL,
+        help="base URL of the running app's own loopback listener, queried (clean view only, "
+             "not -r/--raw) for the new 'session' column (default: %(default)s, "
+             "or $MY_BOOKING_INTERNAL_URL)",
+    )
     sp.set_defaults(func=cmd_users)
+    users_sub = sp.add_subparsers(dest="users_command")
+    lo = _add_subcommand(
+        users_sub, "logout",
+        "force-log-out an attendee (or --all for everyone) -- same command as `my-bt admin logout`.",
+        "2026-07-10, the operator: \"lets add 'logout <EMAIL>' and 'logout --all' as possibilities to "
+        "my-bt users\" -- discoverable from here too since you're probably already looking at "
+        "`my-bt users`'s new 'session' column when you reach for this, but the actual command "
+        "stays `my-bt admin logout` (the operator, on where it should live: \"we have BOTH\") -- this "
+        "is the exact same cmd_admin_logout, just reachable from a second spot.",
+    )
+    lo.add_argument("email_pos", nargs="?", metavar="EMAIL", help="attendee's login email (or use --all below)")
+    lo.add_argument("--all", action="store_true", help="log out EVERY active session, guest and admin alike")
+    lo.add_argument(
+        "--internal-url", default=DEFAULT_INTERNAL_URL,
+        help="base URL of the running app's own loopback listener (default: %(default)s, "
+             "or $MY_BOOKING_INTERNAL_URL)",
+    )
+    lo.set_defaults(func=cmd_admin_logout)
 
     sp = _add_subcommand(
         sub, "show", "show any entity: a registration/booking, a course, a course-occurrence, or a user.",
