@@ -2719,12 +2719,16 @@ class App:
             )
         reset_label = "Send me a link"
         err_html = '<p class="err">Too many attempts -- try again later.</p>' if lockout_seconds else ""
+        # 2026-07-10, the operator (screenshot of this page): "here we are missing
+        # a back button" -- the POST-success response already had "Back to
+        # login" (see above), but this initial GET form never did, leaving
+        # no way back to /my short of the browser's own Back button.
         body = f"""{err_html}<form method="post" class="card" id="reset-form">
           <label>Email <input class="big-input id-input" name="email" type="email" required></label>
           <div class="submit-row"><button type="submit" id="reset-btn" data-resend-cooldown-btn{
               f' data-lockout-btn data-lockout-seconds="{int(lockout_seconds)}"' if lockout_seconds else ""
             }>{esc(reset_label)}</button></div>
-        </form>""" + _RESEND_COOLDOWN_SCRIPT
+        </form><p><a href="/my">Back to login</a></p>""" + _RESEND_COOLDOWN_SCRIPT
         if lockout_seconds:
             body += _LOCKOUT_COUNTDOWN_SCRIPT
         return "200 OK", [("Content-Type", "text/html")], page("Forgot your password?", body, banner=banner)

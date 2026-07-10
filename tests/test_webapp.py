@@ -2225,6 +2225,13 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self._post(self.app.my_reset, (), {"email": "newguest@example.org"})
         self.assertIn('<a href="/my">Back to login</a>', body)
 
+    def test_my_reset_form_itself_also_links_back_to_login(self):
+        # 2026-07-10, the operator (screenshot of this page): "here we are missing
+        # a back button" -- the confirmation page above already had this
+        # link; the initial GET form didn't.
+        _status, _headers, body = self.app.my_reset("GET", {})
+        self.assertIn('<a href="/my">Back to login</a>', body)
+
     def test_my_reset_emails_unconfirmed_account_a_confirm_link(self):
         self._book("newguest@example.org")
         self.sent_emails.clear()
