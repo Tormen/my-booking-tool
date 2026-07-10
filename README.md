@@ -329,6 +329,19 @@ dnf always sees a newer package and upgrades in place rather than saying
 install) `%post` also runs `systemctl try-restart my-booking.service` for
 you, so the new code is actually running afterwards, not just unpacked.
 
+**Refuses to upgrade while someone's logged in (2026-07-10):** `%pre`
+queries the currently-running service's own live session list (`my-bt
+status`'s "active sessions" line -- see "The `my-bt` CLI" below) and
+aborts the whole `dnf`/`rpm` transaction if it's non-zero, rather than
+silently restarting the service (and clearing every session) out from
+under someone. Nothing is lost either way -- sessions are in-memory only,
+so a restart just logs people out, it doesn't touch booking data -- this
+purely avoids the surprise. Only checked on an actual upgrade (a first
+install has no running service yet); if the service isn't running, or
+you're upgrading from a build old enough to predate this check, it fails
+open rather than blocking. Wait for the session(s) to log out/expire, or
+re-run the same install command once `my-bt status` shows none.
+
 `%post` itself only prints a short pointer to `my-bt admin setup` (see "The
 `my-bt` CLI" below) -- that command generates the full list dynamically,
 checking what's already done instead of always repeating a static wall of

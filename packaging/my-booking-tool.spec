@@ -217,6 +217,29 @@ install -m 644 site/index.html site/privacy.html site/terms.html site/impressum.
 getent group my-booking >/dev/null || groupadd -r my-booking
 getent passwd my-booking >/dev/null || \
   useradd -r -g my-booking -d %{_sharedstatedir}/my-booking -s /sbin/nologin my-booking
+
+# 2026-07-10, the operator: "can the rpm package check that no one is logged in
+# currently before proceeding, and fail if there is an open session
+# reported by my-bt" -- only matters on an UPGRADE ($1 -ge 2, same test
+# %post already uses below): a first install has no running service yet
+# to protect. Shells out to the OLD my-bt (still fully intact at %pre
+# time -- rpm hasn't touched any files yet on an upgrade), which queries
+# the live process's own in-memory session list directly over its
+# loopback listener (see app/webapp.py::internal_status and scripts/
+# my-bt::_print_live_status's "active sessions" line). If the service
+# isn't running at all, or the OLD my-bt predates that line's exact
+# wording (nothing to grep -> $sessions empty), this fails OPEN -- only
+# an actual reported count > 0 blocks the transaction.
+if [ "$1" -ge 2 ] 2>/dev/null && [ -x /usr/local/bin/my-bt ]; then
+  sessions=$(/usr/local/bin/my-bt status 2>/dev/null \
+    | sed -n 's/^active sessions[[:space:]]*: *\([0-9][0-9]*\).*/\1/p')
+  if [ -n "$sessions" ] && [ "$sessions" -gt 0 ] 2>/dev/null; then
+    echo "my-booking-tool: refusing to upgrade -- $sessions active" >&2
+    echo "session(s) right now. Wait for them to log out/expire" >&2
+    echo "(see \`my-bt status\`), or re-run once nobody's logged in." >&2
+    exit 1
+  fi
+fi
 exit 0
 
 %post
