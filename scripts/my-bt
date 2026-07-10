@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict
 from datetime import date, datetime, timezone
@@ -1017,6 +1018,35 @@ def cmd_admin_gdpr_accounts(args) -> None:
     _print_rows(rows, args.format)
 
 
+def cmd_admin_logout(args) -> None:
+    """`my-bt admin logout EMAIL` / `my-bt admin logout --all` -- force-
+    clears active session(s) on the LIVE running process (see
+    app/webapp.py::internal_logout), the same in-memory SESSIONS dict
+    `my-bt status`'s "active sessions" line already reads. 2026-07-10,
+    the operator: added specifically so `setup -i`'s "Restart my-booking.service
+    now?" step (and the RPM's own %pre gate before an upgrade) have
+    something concrete to point at instead of just refusing and leaving
+    you stuck -- clear sessions on purpose here, then retry."""
+    if args.all and args.email_pos:
+        print("error: pass either an email or --all, not both", file=sys.stderr)
+        sys.exit(1)
+    if not args.all and not args.email_pos:
+        print("error: `my-bt admin logout EMAIL` or `my-bt admin logout --all`", file=sys.stderr)
+        sys.exit(1)
+    params = {"all": "1"} if args.all else {"email": args.email_pos}
+    payload, error = _post_internal_logout(args.internal_url, **params)
+    if error:
+        print(f"logout failed: {error}", file=sys.stderr)
+        sys.exit(1)
+    n = payload.get("logged_out", 0)
+    if args.all:
+        print(f"logged out {n} active session(s) (everyone).")
+    elif n:
+        print(f"logged out {n} active session(s) for {args.email_pos}.")
+    else:
+        print(f"no active session for {args.email_pos}.")
+
+
 def cmd_git_snapshot(args) -> None:
     """`my-bt git-snapshot` -- manually run the same hourly auto-commit
     the systemd timer runs (see systemd/my-booking-git-snapshot.timer):
@@ -1134,6 +1164,22 @@ def _query_internal_status(base_url: str, timeout: float = 3.0) -> tuple[dict | 
     url = base_url.rstrip("/") + "/internal/status"
     try:
         with urllib.request.urlopen(url, timeout=timeout) as resp:  # noqa: S310 - fixed http://127.0.0.1 URL
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTP {exc.code} from {url}"
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, f"{exc} -- is the my-booking service running (`systemctl status my-booking`)?"
+
+
+def _post_internal_logout(base_url: str, timeout: float = 5.0, **params: str) -> tuple[dict | None, str | None]:
+    """POSTs {base_url}/internal/logout (see app/webapp.py::internal_logout)
+    -- `my-bt admin logout`'s actual mechanism. Same (payload, error)
+    contract and same direct-loopback-bypassing-nginx reasoning as
+    _query_internal_status above."""
+    url = base_url.rstrip("/") + "/internal/logout"
+    data = urllib.parse.urlencode(params).encode("utf-8")
+    try:
+        with urllib.request.urlopen(url, data=data, timeout=timeout) as resp:  # noqa: S310 - fixed http://127.0.0.1 URL
             return json.loads(resp.read().decode("utf-8")), None
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code} from {url}"
@@ -2152,6 +2198,25 @@ def build_parser() -> argparse.ArgumentParser:
     ga.add_argument("--purge", action="store_true", help="actually send due warnings and erase overdue accounts, instead of just listing them")
     format_arg(ga)
     ga.set_defaults(func=cmd_admin_gdpr_accounts)
+
+    sp = _add_subcommand(
+        admin_sub, "logout",
+        "force-log-out an attendee (or --all for everyone) from the LIVE running service.",
+        "2026-07-10, the operator: prompted by `setup -i`'s \"Restart my-booking.service now?\" "
+        "step refusing to proceed while sessions are active (SESSIONS is in-memory -- a "
+        "restart silently drops every one) -- this is the one-line fix it now points you "
+        "at: clear them on purpose, then retry. Same effect as the RPM's own %pre gate "
+        "before an upgrade. EMAIL logs out just that one attendee (every device); --all "
+        "also clears any admin session.",
+    )
+    sp.add_argument("email_pos", nargs="?", metavar="EMAIL", help="attendee's login email (or use --all below)")
+    sp.add_argument("--all", action="store_true", help="log out EVERY active session, guest and admin alike")
+    sp.add_argument(
+        "--internal-url", default=DEFAULT_INTERNAL_URL,
+        help="base URL of the running app's own loopback listener (default: %(default)s, "
+             "or $MY_BOOKING_INTERNAL_URL)",
+    )
+    sp.set_defaults(func=cmd_admin_logout)
 
     sp = _add_subcommand(
         admin_sub, "rename-course",

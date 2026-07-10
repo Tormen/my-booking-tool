@@ -1557,6 +1557,82 @@ class InternalStatusEndpointTest(unittest.TestCase):
         # (the expiry) -- comfortably within a few seconds either way.
         self.assertAlmostEqual(connected_since, before, delta=5)
 
+
+class InternalLogoutEndpointTest(unittest.TestCase):
+    """POST /internal/logout (2026-07-10) -- `my-bt admin logout`'s actual
+    mechanism, and what interactive_setup's restart guard points you at.
+    Same loopback-only trust model as /internal/status -- see
+    internal_logout()'s own docstring."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings()
+        self.app = App(self.settings, self.store)
+
+    def _new_tracked_session(self, data):
+        sid = webapp._new_session(data)
+        self.addCleanup(webapp.SESSIONS.pop, sid, None)
+        return sid
+
+    def _post(self, form: dict):
+        body = urlencode(form).encode()
+        environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+        return self.app.internal_logout("POST", environ)
+
+    def test_post_only(self):
+        status, _headers, _body = self.app.internal_logout("GET", {})
+        self.assertEqual(status, "405 Method Not Allowed")
+
+    def test_rejects_requests_that_arrived_via_nginx(self):
+        status, _headers, _body = self.app.internal_logout(
+            "POST", {"HTTP_X_FORWARDED_FOR": "1.2.3.4", "CONTENT_LENGTH": "0", "wsgi.input": io.BytesIO(b"")}
+        )
+        self.assertEqual(status, "403 Forbidden")
+
+    def test_neither_email_nor_all_is_a_bad_request(self):
+        status, _headers, _body = self._post({})
+        self.assertEqual(status, "400 Bad Request")
+
+    def test_all_clears_every_session_guest_and_admin_alike(self):
+        user = self.store.upsert_user_for_booking("logout-all@example.org", "LogoutAll")
+        self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        self._new_tracked_session({"kind": "admin"})
+        status, _headers, body = self._post({"all": "1"})
+        self.assertEqual(status, "200 OK")
+        payload = json.loads(body)
+        self.assertGreaterEqual(payload["logged_out"], 2)
+        self.assertEqual(webapp.SESSIONS, {})
+
+    def test_email_logs_out_only_that_user_not_others(self):
+        target = self.store.upsert_user_for_booking("logout-target@example.org", "Target")
+        other = self.store.upsert_user_for_booking("logout-other@example.org", "Other")
+        sid_target = self._new_tracked_session({"kind": "guest", "user_id": target.user_id})
+        sid_other = self._new_tracked_session({"kind": "guest", "user_id": other.user_id})
+        status, _headers, body = self._post({"email": "logout-target@example.org"})
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(json.loads(body)["logged_out"], 1)
+        self.assertNotIn(sid_target, webapp.SESSIONS)
+        self.assertIn(sid_other, webapp.SESSIONS)
+
+    def test_email_with_multiple_sessions_logs_out_all_of_them(self):
+        # Every device/browser, not just one -- same guarantee
+        # _invalidate_all_sessions_for_user already gives an email change.
+        user = self.store.upsert_user_for_booking("multi-device@example.org", "MultiDevice")
+        sid1 = self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        sid2 = self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        status, _headers, body = self._post({"email": "multi-device@example.org"})
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(json.loads(body)["logged_out"], 2)
+        self.assertNotIn(sid1, webapp.SESSIONS)
+        self.assertNotIn(sid2, webapp.SESSIONS)
+
+    def test_unknown_email_is_a_no_op_not_an_error(self):
+        status, _headers, body = self._post({"email": "nobody-logged-in@example.org"})
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(json.loads(body)["logged_out"], 0)
+
     def test_guest_with_unresolvable_user_id_shows_placeholder_not_a_crash(self):
         self._new_tracked_session({"kind": "guest", "user_id": "totally-unresolvable-user-id"})
         _status, _headers, body = self.app.internal_status("GET", {})

@@ -123,6 +123,33 @@ class BareCommandHelpParserTest(unittest.TestCase):
         self.assertTrue(args.yes)
 
 
+class AdminLogoutArgsTest(unittest.TestCase):
+    """2026-07-10, the operator: `my-bt admin logout EMAIL` / `--all` -- the
+    force-logout command interactive_setup's restart guard (and the RPM's
+    own %pre gate) point you at."""
+
+    def test_email_positional_sets_func_and_email(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "logout", "guest@example.com"])
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_logout)
+        self.assertEqual(args.email_pos, "guest@example.com")
+        self.assertFalse(args.all)
+
+    def test_all_flag_sets_all_true_with_no_email(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "logout", "--all"])
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_logout)
+        self.assertTrue(args.all)
+        self.assertIsNone(args.email_pos)
+
+    def test_bare_logout_has_neither(self):
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "logout"])
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_logout)
+        self.assertFalse(args.all)
+        self.assertIsNone(args.email_pos)
+
+
 class GitSnapshotMessageArgTest(unittest.TestCase):
     """2026-07-14, the operator, pasting `my-bt admin git-snapshot -h` output:
     "add optional message parameter" -- -m/--message lets a manual snapshot

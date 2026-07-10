@@ -10,16 +10,49 @@ needing an actual tty/root/systemd/rpm on the machine running the suite.
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import re
 import secrets as _secrets
 import shutil
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Callable
 
 from . import cli_checks, security as app_security, site_render
 from .atomic_io import atomic_write_text
+
+# Same env-var-with-localhost-default convention as scripts/my-bt's own
+# DEFAULT_INTERNAL_URL -- this is an internal, always-loopback listener,
+# not something deployments realistically reconfigure per-command.
+_DEFAULT_INTERNAL_URL = os.environ.get("MY_BOOKING_INTERNAL_URL", "http://127.0.0.1:8811")
+
+
+def _default_check_active_sessions(internal_url: str = _DEFAULT_INTERNAL_URL) -> tuple[int | None, str | None]:
+    """GETs {internal_url}/internal/status (see app/webapp.py::
+    internal_status) and returns (session_count, error) -- exactly one
+    set, mirroring scripts/my-bt's own _query_internal_status (kept
+    separate rather than imported: that one lives in the non-.py CLI
+    script and isn't importable from here -- see that module's own
+    comment on why check/report logic belongs in this package instead).
+
+    2026-07-10, the operator: prompted by realizing interactive_setup's own
+    "Restart my-booking.service now?" step (below) had no session-
+    awareness at all, unlike the RPM's own %pre gate before an upgrade --
+    a restart here silently drops every session (SESSIONS is in-memory,
+    see app/webapp.py's module docstring). A connection failure (service
+    not running/reachable) returns (None, error) -- the call site treats
+    that as "nothing running, nothing to protect", not a reason to
+    refuse, same as the RPM gate's own fail-open behavior."""
+    url = internal_url.rstrip("/") + "/internal/status"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:  # noqa: S310 - fixed http://127.0.0.1 URL
+            payload = json.loads(resp.read().decode("utf-8"))
+            return len(payload.get("sessions", [])), None
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, str(exc)
 
 
 def _default_prompt(message: str) -> bool:
@@ -313,6 +346,7 @@ def interactive_setup(
     is_root: Callable[[], bool] = _default_is_root,
     print_fn: Callable[[str], None] = print,
     data_dir: str = "/var/lib/my-booking",
+    check_active_sessions: Callable[[], tuple[int | None, str | None]] = _default_check_active_sessions,
 ) -> tuple[int, int]:
     """Runs the interactive walkthrough and returns (fails, warns) -- the
     same CURRENT-state counts (after whatever this walkthrough just fixed)
@@ -576,7 +610,23 @@ def interactive_setup(
         else:
             print_fn(f"{label}: {detail}")
             if "aren't live yet" in detail:
-                if is_root() and prompt("Restart my-booking.service now?"):
+                # 2026-07-10, the operator: unlike the RPM's own %pre gate before
+                # an upgrade, this restart used to have NO session-
+                # awareness at all -- SESSIONS is in-memory (see
+                # app/webapp.py's module docstring), so restarting here
+                # silently logs out anyone currently logged in. Refuse the
+                # same way %pre does, but tell you exactly how to proceed:
+                # `my-bt admin logout` clears sessions on purpose, then a
+                # re-run of `setup -i` picks this restart back up.
+                sessions, _err = check_active_sessions()
+                if sessions:
+                    print_fn(
+                        f"[blocked] {sessions} active session(s) right now -- restarting "
+                        "would log them all out. Run `my-bt admin logout EMAIL` (one "
+                        "attendee) or `my-bt admin logout --all` (everyone), then "
+                        "re-run `my-bt setup -i` to actually apply this restart."
+                    )
+                elif is_root() and prompt("Restart my-booking.service now?"):
                     run(["systemctl", "restart", "my-booking.service"])
                 elif not is_root():
                     print_fn("(needs root -- re-run `sudo my-bt setup -i`)")

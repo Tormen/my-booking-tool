@@ -52,6 +52,30 @@ class FakePrompts:
         return [m for m in self.asked if substr in m]
 
 
+class DefaultCheckActiveSessionsTest(unittest.TestCase):
+    """cli_setup._default_check_active_sessions -- the real GET-/internal/
+    status-and-count-sessions implementation interactive_setup's restart
+    guard defaults to. Mocks urllib directly (no real HTTP call) rather
+    than spinning up a live server for this small a check."""
+
+    def test_returns_the_session_count_from_the_payload(self):
+        import io
+        import json as _json
+
+        fake_resp = io.BytesIO(_json.dumps({"sessions": [{}, {}]}).encode("utf-8"))
+        with patch("app.cli_setup.urllib.request.urlopen") as m_urlopen:
+            m_urlopen.return_value.__enter__.return_value = fake_resp
+            count, error = cli_setup._default_check_active_sessions("http://127.0.0.1:8811")
+        self.assertEqual(count, 2)
+        self.assertIsNone(error)
+
+    def test_connection_failure_returns_error_not_a_raise(self):
+        with patch("app.cli_setup.urllib.request.urlopen", side_effect=OSError("Connection refused")):
+            count, error = cli_setup._default_check_active_sessions("http://127.0.0.1:8811")
+        self.assertIsNone(count)
+        self.assertIn("Connection refused", error)
+
+
 class PrintReportTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -458,6 +482,80 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
             print_fn=lambda *_: None,
         )
         self.assertEqual(calls, [])
+
+
+class InteractiveSetupRestartSessionGuardTest(unittest.TestCase):
+    """2026-07-10, the operator: the "Restart my-booking.service now?" prompt
+    (fired by check_settings_fresh's "aren't live yet" warning) used to
+    have no session-awareness at all, unlike the RPM's own %pre gate
+    before an upgrade -- SESSIONS is in-memory (app/webapp.py's module
+    docstring), so this restart silently drops every session. the operator chose
+    a hard refuse (not just a warning), with the fix pointed at directly:
+    `my-bt admin logout`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+
+        self._patches = [
+            patch("app.cli_checks.check_group_membership", return_value=[("my-booking group membership (operator)", "ok", "")]),
+            patch("app.cli_checks.check_systemd", return_value=[("my-booking.service", "ok", "enabled, active")]),
+            patch("app.cli_checks.check_selinux", return_value=[("SELinux httpd_can_network_connect", "ok", "on")]),
+            patch("app.cli_checks.check_settings_fresh",
+                  return_value=[("my-booking.service freshness", "warn",
+                                  "settings.toml was edited after my-booking.service last (re)started -- "
+                                  "those edits aren't live yet: sudo systemctl restart my-booking.service")]),
+        ]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_active_sessions_refuses_the_restart_and_never_prompts(self):
+        prompt = FakePrompts({"Restart my-booking.service": True})
+        calls: list[list[str]] = []
+        printed: list[str] = []
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: True,
+            print_fn=printed.append,
+            check_active_sessions=lambda: (2, None),
+        )
+        self.assertEqual(prompt.asked_matching("Restart my-booking.service"), [])
+        self.assertFalse(any(c == ["systemctl", "restart", "my-booking.service"] for c in calls))
+        self.assertTrue(any("2 active session(s)" in line for line in printed))
+        self.assertTrue(any("my-bt admin logout" in line for line in printed))
+
+    def test_zero_sessions_proceeds_exactly_as_before(self):
+        prompt = FakePrompts({"Restart my-booking.service": True})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: True,
+            print_fn=lambda *_: None,
+            check_active_sessions=lambda: (0, None),
+        )
+        self.assertEqual(len(prompt.asked_matching("Restart my-booking.service")), 1)
+        self.assertTrue(any(c == ["systemctl", "restart", "my-booking.service"] for c in calls))
+
+    def test_session_check_error_fails_open_same_as_service_not_running(self):
+        # The service being unreachable is treated as "nothing running,
+        # nothing to protect" -- same fail-open reasoning as the RPM's own
+        # %pre gate -- not a reason to refuse.
+        prompt = FakePrompts({"Restart my-booking.service": True})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: True,
+            print_fn=lambda *_: None,
+            check_active_sessions=lambda: (None, "Connection refused"),
+        )
+        self.assertEqual(len(prompt.asked_matching("Restart my-booking.service")), 1)
+        self.assertTrue(any(c == ["systemctl", "restart", "my-booking.service"] for c in calls))
 
 
 class InteractiveSetupStaticSiteTest(unittest.TestCase):

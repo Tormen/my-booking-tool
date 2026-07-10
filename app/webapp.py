@@ -83,6 +83,11 @@ GET /internal/status         same-process JSON dump of SESSIONS (who's
                               `my-bt status` to query directly over HTTP on
                               127.0.0.1 -- see internal_status() below for
                               why this doesn't need its own auth system.
+POST /internal/logout        force-clears SESSIONS -- all=1 for everyone,
+                              or email=<address> for one account -- for
+                              `my-bt admin logout`/`--all` (2026-07-10, see
+                              internal_logout() below). Same loopback-only
+                              trust model as /internal/status above.
 2026-07-13, the operator: "I would prefer a web endpoint that queries on
 localhost the running server" over persisting session state to disk --
 this app already only ever listens on 127.0.0.1 (see app/serve.py), so
@@ -872,6 +877,8 @@ class App:
             return self.host_cancel_occurrence(method, m.group(1), m.group(2), environ)
         if path == "/internal/status":
             return self.internal_status(method, environ)
+        if path == "/internal/logout":
+            return self.internal_logout(method, environ)
         return "404 Not Found", [("Content-Type", "text/plain")], "not found"
 
     @staticmethod
@@ -3124,6 +3131,54 @@ class App:
             "sessions": sessions_out,
         }
         return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
+
+    # -- /internal/logout ---------------------------------------------------------
+
+    def internal_logout(self, method: str, environ):
+        """POST-only counterpart to /internal/status -- `my-bt admin logout`'s
+        actual mechanism (2026-07-10, the operator: "add an admin command to log
+        user out. with a --all parameter", prompted by realizing `setup
+        -i`'s "Restart my-booking.service now?" step -- unlike the RPM's
+        own %pre gate -- had no session-awareness at all before this: a
+        restart silently drops every session, so the fix there is to
+        refuse and point here instead of proceeding blindly. See
+        cli_setup.py's check_settings_fresh handling and
+        packaging/my-booking-tool.spec's %pre for the two OTHER places a
+        service restart can happen).
+
+        Same trust model as internal_status (loopback-only, rejects
+        anything carrying X-Forwarded-For -- see that method's own
+        docstring): `my-bt` is always run on this same host and connects
+        directly to 127.0.0.1, never through nginx.
+
+        Body (form-encoded, same as every other POST here): `all=1` clears
+        EVERY session (guest and admin alike) via a plain SESSIONS.clear()
+        -- the whole point of --all is "make it safe to restart right
+        now", so an admin session mid-restart-prompt is not spared either.
+        Otherwise `email=<address>` resolves to a user_id via self.store
+        and reuses _invalidate_all_sessions_for_user (the exact same
+        every-device logout an email change already triggers) -- an
+        unknown email is a no-op returning logged_out: 0, not an error,
+        since "nobody was logged in as that address anyway" isn't a
+        failure."""
+        if method != "POST":
+            return "405 Method Not Allowed", [("Content-Type", "text/plain")], "POST only"
+        if environ.get("HTTP_X_FORWARDED_FOR"):
+            return "403 Forbidden", [("Content-Type", "text/plain")], "internal endpoint -- direct localhost access only"
+        form = self._read_form(environ)
+        if form.get("all"):
+            logged_out = len(SESSIONS)
+            SESSIONS.clear()
+            return "200 OK", [("Content-Type", "application/json")], json.dumps({"logged_out": logged_out})
+        email = form.get("email", "").strip()
+        if not email:
+            return "400 Bad Request", [("Content-Type", "text/plain")], "need email=<address> or all=1"
+        user = self.store.find_user_by_email(email)
+        if not user:
+            return "200 OK", [("Content-Type", "application/json")], json.dumps({"logged_out": 0})
+        before = len(SESSIONS)
+        _invalidate_all_sessions_for_user(user.user_id)
+        return "200 OK", [("Content-Type", "application/json")], json.dumps({"logged_out": before - len(SESSIONS)})
 
     # -- /my/settings -----------------------------------------------------------
     #
