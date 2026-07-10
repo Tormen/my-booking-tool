@@ -340,7 +340,16 @@ purely avoids the surprise. Only checked on an actual upgrade (a first
 install has no running service yet); if the service isn't running, or
 you're upgrading from a build old enough to predate this check, it fails
 open rather than blocking. Wait for the session(s) to log out/expire, or
-re-run the same install command once `my-bt status` shows none.
+force them out with `my-bt admin logout <email>` / `--all` (see "The
+`my-bt` CLI" below), then re-run the same install command once `my-bt
+status` shows none.
+
+`my-bt admin setup --interactive`'s own "restart my-booking.service now?"
+prompt (separate from the RPM's `%pre` gate above -- this one fires any
+time settings.toml has changed, not just on a package upgrade) runs the
+same check: if sessions are active it refuses and prints the exact
+`my-bt admin logout` command to run first, instead of silently
+restarting and logging everyone out.
 
 `%post` itself only prints a short pointer to `my-bt admin setup` (see "The
 `my-bt` CLI" below) -- that command generates the full list dynamically,
@@ -516,6 +525,8 @@ my-bt admin watchdog-check               # run the "strange usage patterns" swee
 my-bt admin setup                        # guided post-install steps -- see below
 my-bt admin setup --interactive          # ...or -i: be walked through them
 my-bt admin health                       # full install-health diagnostic -- see below
+my-bt admin logout guest@example.com     # force-log-out one attendee (every device)
+my-bt admin logout --all                 # force-log-out EVERYONE, guest and admin alike
 
 my-bt -D admin gdpr erase guest@example.com   # -D/--debug: full traceback on
                                             # error instead of one clean line
