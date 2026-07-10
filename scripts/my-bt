@@ -1155,11 +1155,30 @@ def _print_live_status(payload: dict) -> None:
     (2026-07-13): server-up summary, maintenance mode (highlighted if
     ON), and the live logged-in-user list -- everything the full
     per-check report (-V/--verbose, see cmd_status) would otherwise bury
-    a long scroll below."""
-    print(f"my-booking-tool {payload.get('version', '?')} -- responding, server time "
-          f"{_fmt_ts(payload.get('server_time'))}")
+    a long scroll below.
 
+    2026-07-10, the operator: "redesign the output ... to follow the pattern:
+    field   value and align the values" plus "add the # of active
+    sessions" -- prompted by asking whether an RPM upgrade could refuse
+    to proceed while someone's logged in. Turned out unnecessary for
+    that (SESSIONS is in-memory -- ANY service restart already clears it,
+    RPM upgrade or not, and nothing is lost besides having to log back
+    in), but the visibility itself is still worth having at a glance.
+    Reuses _print_single_row_kv -- the same aligned "key : value" layout
+    `my-bt show`'s single-entity views already use -- rather than a
+    second, separately-drifting implementation of the same idea."""
     mnt = payload.get("maintenance", {})
+    sessions = payload.get("sessions", [])
+    _print_single_row_kv(
+        {
+            "version": payload.get("version", "?"),
+            "server time": _fmt_ts(payload.get("server_time")),
+            "maintenance mode": "ON" if mnt.get("enabled") else "off",
+            "active sessions": len(sessions),
+        },
+        "table",
+    )
+
     if mnt.get("enabled"):
         banner = "!!  MAINTENANCE MODE IS ON -- attendees are seeing a maintenance page  !!"
         print()
@@ -1169,15 +1188,11 @@ def _print_live_status(payload: dict) -> None:
         since = _fmt_ts(mnt.get("set_at")) if mnt.get("set_at") else "(unknown time)"
         print(f"since {since}" + (f': "{mnt["message"]}"' if mnt.get("message") else ""))
         print("Run `my-bt admin site-maintenance off` to reopen the site.")
-    else:
-        print("maintenance mode: off")
 
-    sessions = payload.get("sessions", [])
-    print()
     if not sessions:
-        print("logged-in users: none (no unexpired sessions)")
         return
-    print(f"logged-in users ({len(sessions)}):")
+    print()
+    print("logged-in users:")
     rows = [
         {
             "who": s["who"] + (" [admin]" if s["kind"] == "admin" else ""),
