@@ -379,9 +379,23 @@ class _LockedCsv:
 
     def __enter__(self):
         if self.readonly:
-            if not self.path.exists():
+            # 2026-07-10, the operator, real incident: a non-privileged user ("me",
+            # not in the my-booking group) ran `my-bt users` and silently
+            # got "(no matching rows)" instead of an error. The OLD guard
+            # here was `if not self.path.exists(): return [], ...` --
+            # pathlib's Path.exists() swallows ANY OSError, including
+            # PermissionError on the file or a parent directory, and just
+            # returns False, making "can't read this" indistinguishable
+            # from "genuinely doesn't exist yet". Fixed the same way as
+            # _read_csv_plain below: open directly, and only treat
+            # FileNotFoundError as the legitimate "doesn't exist" case --
+            # any OTHER OSError (PermissionError first and foremost) now
+            # propagates instead of being silently swallowed into an
+            # empty, misleadingly-innocent-looking result.
+            try:
+                self._fh = open(self.path, "r", newline="", encoding="utf-8")
+            except FileNotFoundError:
                 return [], self._set_rows_to_write
-            self._fh = open(self.path, "r", newline="", encoding="utf-8")
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_SH)
             reader = csv.DictReader(self._fh)
             rows = list(reader)
@@ -453,11 +467,25 @@ class _LockedCsv:
 
 def _read_csv_plain(path: Path, fieldnames: list[str]) -> list[dict]:
     """Read-only, unlocked (reporting/CLI use) -- creates nothing, returns []
-    if the file doesn't exist yet."""
-    if not path.exists():
+    if the file doesn't exist yet.
+
+    2026-07-10, the operator, real incident: `my-bt users`, run by a non-
+    privileged user not in the my-booking group, silently printed "(no
+    matching rows)" instead of an error. The old `if not path.exists():
+    return []` guard is the reason -- pathlib's Path.exists() swallows
+    ANY OSError (a PermissionError on this file OR an unreadable parent
+    directory included) and just returns False, so "can't read this" and
+    "genuinely doesn't exist yet" were indistinguishable. Fixed by opening
+    directly and treating ONLY FileNotFoundError as "doesn't exist" --
+    every other OSError (PermissionError first and foremost) now
+    propagates to the caller (scripts/my-bt's own top-level handler turns
+    that into a clear `error: [Errno 13] Permission denied: ...` and a
+    non-zero exit, instead of a falsely-empty result)."""
+    try:
+        with open(path, "r", newline="", encoding="utf-8") as fh:
+            return list(csv.DictReader(fh))
+    except FileNotFoundError:
         return []
-    with open(path, "r", newline="", encoding="utf-8") as fh:
-        return list(csv.DictReader(fh))
 
 
 class Store:

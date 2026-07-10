@@ -17,6 +17,7 @@ from app.storage import (
     Store,
     _LockedCsv,
     _fsync_dir,
+    _read_csv_plain,
     format_display_timestamp,
     status_label,
 )
@@ -1004,6 +1005,36 @@ class StatusLabelTest(unittest.TestCase):
         self.assertEqual(status_label("some_new_status"), "Some new status")
 
 
+class ReadCsvPlainTest(unittest.TestCase):
+    """_read_csv_plain -- the read-only, unlocked path `my-bt users`/`my-bt
+    list` etc. actually use (Store.read_users/read_registrations), as
+    opposed to _LockedCsv itself (see LockedCsvReadonlyModeTest below for
+    the sibling fix there). Same 2026-07-10 incident and same fix."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "users.csv"
+
+    def test_missing_file_returns_empty_not_an_error(self):
+        self.assertEqual(_read_csv_plain(self.path, ["a", "b"]), [])
+
+    def test_existing_file_is_read_normally(self):
+        self.path.write_text("a,b\n1,2\n", encoding="utf-8")
+        self.assertEqual(_read_csv_plain(self.path, ["a", "b"]), [{"a": "1", "b": "2"}])
+
+    def test_permission_error_propagates_not_swallowed(self):
+        # 2026-07-10, the operator, real incident: `my-bt users`, run as a
+        # non-privileged user, silently printed "(no matching rows)"
+        # instead of an error -- the OLD `if not path.exists(): return
+        # []` guard swallowed the PermissionError (pathlib's Path.exists()
+        # treats ANY OSError as "doesn't exist"). Must now propagate.
+        self.path.write_text("a,b\n1,2\n", encoding="utf-8")
+        with mock.patch("builtins.open", side_effect=PermissionError("Permission denied")):
+            with self.assertRaises(PermissionError):
+                _read_csv_plain(self.path, ["a", "b"])
+
+
 class LockedCsvReadonlyModeTest(unittest.TestCase):
     """_LockedCsv(readonly=True) must open "r", never "r+" -- "r+" fails
     outright on a genuinely read-only file/mount (e.g. systemd's
@@ -1066,6 +1097,26 @@ class LockedCsvReadonlyModeTest(unittest.TestCase):
         with _LockedCsv(self.path, REG_FIELDS, readonly=True) as (rows, write):
             with self.assertRaises(RuntimeError):
                 write(rows)
+
+    def test_readonly_mode_missing_file_returns_empty_not_an_error(self):
+        # The genuinely-missing case must still be silent/empty -- only a
+        # real permission problem (below) should surface as an error.
+        missing = Path(self._tmp.name) / "does-not-exist.csv"
+        with _LockedCsv(missing, REG_FIELDS, readonly=True) as (rows, _write):
+            self.assertEqual(rows, [])
+
+    def test_readonly_mode_permission_error_propagates_not_swallowed(self):
+        # 2026-07-10, the operator, real incident: `my-bt users`, run by a
+        # non-privileged user, silently printed "(no matching rows)"
+        # instead of an error -- the OLD `if not path.exists(): return
+        # [], ...` guard swallowed the PermissionError entirely (pathlib's
+        # Path.exists() treats ANY OSError as "doesn't exist"). A real
+        # permission problem must now propagate instead of looking exactly
+        # like an empty, perfectly healthy result.
+        with mock.patch("builtins.open", side_effect=PermissionError("Permission denied")):
+            with self.assertRaises(PermissionError):
+                with _LockedCsv(self.path, REG_FIELDS, readonly=True) as (rows, _write):
+                    pass
 
 
 class StoreReadOnlyMethodsUnderReadOnlyMountTest(StoreTestBase):
