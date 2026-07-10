@@ -122,20 +122,6 @@ server {
         limit_conn perip 20;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
-    # 2026-07-10, the operator: browser console showed a 404 for /favicon.ico on
-    # every page. Every modern browser also requests this exact root path
-    # directly, regardless of the <link rel="icon"> tags declared in <head>
-    # (see app/templates.py/site/index.html's own favicon links, which all
-    # point at /favicon/* instead) -- so root/index alone was never enough.
-    # NOT a location block here -- global/restrictions.conf (included
-    # above, outside this repo) already has its own `location =
-    # /favicon.ico { log_not_found off; access_log off; }` for the exact
-    # same path; nginx rejects two exact-match locations for one path
-    # regardless of which included file they come from ("duplicate
-    # location", a hard [emerg] on `nginx -t`/`nginx -T` -- real incident,
-    # 2026-07-10). Fix lives THERE instead: add
-    # `try_files /favicon/favicon.ico =404;` to that existing block.
-
     ############################################################
     # Proxied booking app (Python, listening on 127.0.0.1:8811)
     ############################################################
