@@ -24,6 +24,7 @@ def send_mail(
     html_body: str | None = None,
     ics_attachment: tuple[str, str, str] | None = None,
     bcc_addrs: tuple[str, ...] = (),
+    reply_to: str | None = None,
 ) -> None:
     """`html_body` (2026-07-09, the operator: "format description in email as on
     page ... box the description and put the background color (as on the
@@ -49,6 +50,18 @@ def send_mail(
     this attachment) -- standard `email.message.EmailMessage` behavior,
     no manual MIME structuring needed.
 
+    `reply_to` (2026-07-16, the operator: "add a reply-to header so that if I as
+    host reply to a registration of a participant mail, the reply will
+    go to the address of the participant") -- every ADMIN-facing
+    notification about one specific participant (new booking, waitlist
+    promotion, cancel, rebook) passes that participant's own email here,
+    so hitting "Reply" in the host's inbox goes straight to them instead
+    of back to `smtp_from`/`admin_email` itself (mail clients honor
+    Reply-To over From for this). None (the default, and every
+    non-participant email: password reset, watchdog alerts, the
+    directory-fsync startup check, ...) omits the header entirely --
+    unchanged behavior, reply goes to From as normal.
+
     `bcc_addrs` (2026-07-09, the operator: "add as BCC the given email address to
     all mails that go out to the attendees ... so that for some time I can
     watch this to ensure that all is OK") -- a plain tuple of zero or more
@@ -68,6 +81,8 @@ def send_mail(
     msg["Subject"] = subject
     msg["From"] = settings.smtp_from
     msg["To"] = to_addr
+    if reply_to:
+        msg["Reply-To"] = reply_to
     if bcc_addrs:
         msg["Bcc"] = ", ".join(bcc_addrs)
     msg.set_content(body)

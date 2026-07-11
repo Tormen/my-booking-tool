@@ -151,7 +151,7 @@ class SendAccountDeletionWarningsTest(unittest.TestCase):
         self.sent_emails = []
         patcher = patch(
             "app.retention.send_mail",
-            side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(): (
+            side_effect=lambda settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None: (
                 self.sent_emails.append((to, subject, body, bcc_addrs))
             ),
         )

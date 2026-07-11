@@ -228,6 +228,10 @@ def cancel_and_promote(
                     load_email_template(settings, "promoted_admin_email.html"),
                     intro=intro_html(admin_intro), recap=admin_recap_html,
                 )),
+                # 2026-07-16: reply-to the first (leader) promoted user --
+                # same "who does 'reply' go to for a party" call as
+                # webapp.py's own _send_party_admin_email (new bookings).
+                reply_to=promoted_users[0].email,
             )
     if sync_fn is not None:
         sync_fn(course_shortname, occurrence_date_str)

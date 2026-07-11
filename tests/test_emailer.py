@@ -106,6 +106,29 @@ class SendMailTest(unittest.TestCase):
         sent_msg = smtp.send_message.call_args[0][0]
         self.assertEqual(sent_msg["Bcc"], "watcher1@example.org, watcher2@example.org")
 
+    def test_no_reply_to_by_default(self):
+        with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
+            smtp = mock_smtp_ssl.return_value.__enter__.return_value
+            send_mail(self.settings, "guest@example.org", "Subject", "plain body")
+        sent_msg = smtp.send_message.call_args[0][0]
+        self.assertIsNone(sent_msg["Reply-To"])
+
+    def test_reply_to_sets_header(self):
+        # 2026-07-16, the operator: "add a reply-to header so that if I as host
+        # reply to a registration of a participant mail, the reply will
+        # go to the address of the participant" -- every admin-facing
+        # notification about one specific participant now passes their
+        # email here (see app.webapp/app.cancellation/app.cancel_flow's
+        # own call sites).
+        with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
+            smtp = mock_smtp_ssl.return_value.__enter__.return_value
+            send_mail(
+                self.settings, "admin@example.org", "Subject", "plain body",
+                reply_to="participant@example.org",
+            )
+        sent_msg = smtp.send_message.call_args[0][0]
+        self.assertEqual(sent_msg["Reply-To"], "participant@example.org")
+
     # Not separately tested here: whether the "Bcc" header actually reaches
     # the wire. `smtplib.SMTP.send_message()` (the stdlib call send_mail()
     # hands the message to -- mocked out above, since these tests don't

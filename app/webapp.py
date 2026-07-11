@@ -1371,6 +1371,7 @@ class App:
                 load_email_template(self.settings, "new_booking_admin_email.txt"),
                 who=who, verb=verb, course_title=course.title, occ_date=occ_date,
             ),
+            reply_to=user.email,
         )
 
     def _already_booked_guests_note(self, already_booked: list[str]) -> str:
@@ -1438,6 +1439,7 @@ class App:
                 who=who, verb=verb, course_title=course.title, occ_date=occ_date,
                 party_size=str(len(users)), status_word=status_word,
             ),
+            reply_to=leader.email,
         )
 
     def _book_with_guests(

@@ -1075,7 +1075,7 @@ class MySettingsTest(unittest.TestCase):
         self.app = App(self.settings, self.store)
         self.sent_emails = []
 
-        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
+        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None):
             self.sent_emails.append((to, subject, body))
 
         for target in ("app.webapp.send_mail",):
@@ -1794,6 +1794,12 @@ class BookingFlowTest(unittest.TestCase):
         # 3-tuple (to, subject, body); only tests that actually care about
         # the bcc_addrs a given send_mail() call was given read this one.
         self.sent_email_bcc: list[tuple[str, str, tuple]] = []
+        # 2026-07-16, the operator: "add a reply-to header so that if I as host
+        # reply to a registration of a participant mail, the reply will
+        # go to the address of the participant" -- same parallel-list
+        # convention as sent_email_bcc just above, for the same reason
+        # (only tests that actually care read this one).
+        self.sent_email_reply_to: list[tuple[str, str, str | None]] = []
         occs = build_occurrences(
             course, self.settings, datetime.now(timezone.utc),
             lambda sn, d: 0, lambda start, end: False,
@@ -1801,9 +1807,10 @@ class BookingFlowTest(unittest.TestCase):
         self.occs = occs
         self.occ_date = occs[0].date.isoformat()
 
-        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
+        def recorder(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None):
             self.sent_emails.append((to, subject, body))
             self.sent_email_bcc.append((to, subject, bcc_addrs))
+            self.sent_email_reply_to.append((to, subject, reply_to))
 
         # Cancellation emails are composed in app.cancellation (factored
         # out of App on 2026-07-06 so `my-bt cancel` can reuse them), and the
@@ -1976,7 +1983,7 @@ class BookingFlowTest(unittest.TestCase):
         self.store.set_password(user.user_id, h, s)
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None):
             if subject.startswith("Booking confirmed:"):
                 captured["ics_attachment"] = ics_attachment
             self.sent_emails.append((to, subject, body))
@@ -2070,7 +2077,7 @@ class BookingFlowTest(unittest.TestCase):
             self.store.set_password(user.user_id, h, s)
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None):
             if subject.startswith("Waitlisted:"):
                 captured["ics_attachment"] = ics_attachment
             self.sent_emails.append((to, subject, body))
@@ -2125,7 +2132,7 @@ class BookingFlowTest(unittest.TestCase):
         reg0 = self.store.registrations_for_user(guest0.user_id)[0]
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None):
             if subject.startswith("You're in!"):
                 captured["ics_attachment"] = ics_attachment
             self.sent_emails.append((to, subject, body))
@@ -2890,6 +2897,41 @@ class BookingFlowTest(unittest.TestCase):
         )
         self.assertEqual(bcc_addrs, ("watcher1@example.org", "watcher2@example.org"))
 
+    # -- 2026-07-16, the operator: "add a reply-to header so that if I as host
+    # reply to a registration of a participant mail, the reply will go to
+    # the address of the participant" -- confirms the admin-facing copy
+    # of every registration-status email carries Reply-To: <participant>,
+    # while the participant's OWN copy (and any non-participant email)
+    # never does.
+
+    def test_new_booking_admin_notification_has_reply_to_the_participant(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _to, _subject, reply_to = next(
+            (t, s, r) for t, s, r in self.sent_email_reply_to if t == "admin@example.org" and s.startswith("New booking:")
+        )
+        self.assertEqual(reply_to, "regular@example.org")
+
+    def test_participants_own_booking_confirmation_has_no_reply_to(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _to, _subject, reply_to = next(
+            (t, s, r) for t, s, r in self.sent_email_reply_to
+            if t == "regular@example.org" and s.startswith("Booking confirmed:")
+        )
+        self.assertIsNone(reply_to)
+
+    def test_cancellation_admin_notification_has_reply_to_the_participant(self):
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self.sent_email_reply_to.clear()
+        self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
+        _to, _subject, reply_to = next(
+            (t, s, r) for t, s, r in self.sent_email_reply_to if t == "admin@example.org" and s.startswith("Canceled:")
+        )
+        self.assertEqual(reply_to, "regular@example.org")
+
     def test_custom_email_templates_folder_overrides_the_cancel_email_wording(self):
         # 2026-07-09, the operator: "place all email templates into settings.toml
         # [directory] to easily change something there if needed" --
@@ -3076,7 +3118,7 @@ class BookingFlowTest(unittest.TestCase):
         token = confirmed_body.split("/cancel/")[1].split("\n")[0].strip()
         captured = {}
 
-        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=()):
+        def spy(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None):
             if subject.startswith("Canceled:") and to == "regular@example.org":
                 captured["html_body"] = html_body
                 captured["ics_attachment"] = ics_attachment

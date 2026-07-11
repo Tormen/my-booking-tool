@@ -419,6 +419,7 @@ def send_cancellation_emails(
             intro=intro_html(admin_intro), message_line=admin_message_line_html,
             recap=recap_html, reinstate_link=admin_reinstate_link_html,
         )),
+        reply_to=user.email if user else None,
     )
 
 
@@ -490,4 +491,5 @@ def send_reinstatement_emails(
             load_email_template(settings, "reinstate_email_admin.html"),
             intro=intro_html(admin_intro), recap=recap_html,
         )),
+        reply_to=user.email if user else None,
     )
