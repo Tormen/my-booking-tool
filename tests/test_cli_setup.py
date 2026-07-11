@@ -13,6 +13,50 @@ from unittest.mock import patch
 
 from app import cli_setup, maintenance, site_render
 
+# 2026-07-16, real failure on the RPM build host (vps-b59d01b3's own
+# %check, i.e. the actual production machine): interactive_setup()'s
+# check_active_sessions defaults to a REAL HTTP GET against
+# http://127.0.0.1:8811/internal/status (see _default_check_active_
+# sessions) -- fine in a throwaway CI sandbox where nothing's listening
+# on that port, but on THIS host the real my-booking.service IS actually
+# up, so the ~50 tests below that call interactive_setup() without
+# mocking check_settings_fresh were unknowingly hitting the real,
+# running production service on every single run (confirmed via
+# journalctl: a burst of real "GET /internal/status" hits exactly when
+# `rpmbuild %check` ran). Only one test's assertion happened to be
+# sensitive enough to actually fail from this (it requires zero active
+# sessions to see the restart prompt fire) -- but ANY test here was one
+# `sudo my-bt admin logout` away from silently changing behavior based on
+# real, live production session state, which is a much bigger problem
+# than the one visible failure. check_active_sessions() is only ever
+# reached when check_settings_fresh() reports "aren't live yet" (see
+# interactive_setup's own settings-freshness step), so patching THAT one
+# function to always report "ok" by default -- for the whole module --
+# is enough to make every test hermetic without touching each of the ~50
+# individual call sites. The few tests that deliberately want the "aren't
+# live yet" scenario (InteractiveSetupRestartSessionGuardTest) already
+# apply their OWN nested patch of check_settings_fresh in their own
+# setUp(), which correctly overrides this module-level default for the
+# duration of those tests (mock.patch stacks: an inner patch's stop()
+# restores whatever was active before it started, i.e. this default) and
+# reverts back to it afterward.
+_module_patches: list = []
+
+
+def setUpModule():
+    p = patch(
+        "app.cli_checks.check_settings_fresh",
+        return_value=[("my-booking.service freshness", "ok", "settings.toml unchanged since last (re)start")],
+    )
+    p.start()
+    _module_patches.append(p)
+
+
+def tearDownModule():
+    for p in _module_patches:
+        p.stop()
+    _module_patches.clear()
+
 
 def _raw(**overrides) -> dict:
     base = {
