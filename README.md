@@ -708,6 +708,20 @@ something seems off, or after any install/reinstall (this is what plain
 - Whether the data directory actually supports directory fsync (see
   "Data durability" above) -- a marker-file/local-fd probe, no network
   call, same reasoning as the calendar-invite-format check below.
+- Group ownership + SELinux file context for `data_dir` itself,
+  `[logging].log_file`, and `[site].static_site_dir` (2026-07-16) -- one
+  shared check (real `os.stat()`, never `os.access()`, for the same
+  root-masking reason as the CSV-ownership check above) applied to every
+  data path the service reads or writes, not just `*.csv` uid. Flags a
+  path whose group isn't `my-booking` (how a DIFFERENT process, e.g.
+  nginx reading `static_site_dir`, is meant to reach it without running
+  as the `my-booking` user itself), and -- only when SELinux is
+  Enforcing -- a file context that doesn't match what `matchpathcon`
+  says policy expects (needs `policycoreutils-python-utils`, same
+  package `setsebool` already comes from). `admin setup -i` offers
+  `chgrp -R`/`restorecon -Rv` to fix either, root-gated same as the CSV
+  chown step. Any FUTURE settings.toml-configurable directory goes
+  through this exact same check.
 - Whether any occurrence failed to resync on the last calendar-invite
   resync attempt (persistent CalDAV conflict) -- a marker-file check, no
   network call, see "Per-occurrence resync failures" below.

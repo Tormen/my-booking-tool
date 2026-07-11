@@ -237,6 +237,109 @@ def check_data_dir_ownership(data_dir: str | Path) -> list[Check]:
     return [("data dir file ownership", "ok", f"all {len(csv_files)} CSV file(s) owned by my-booking")]
 
 
+def check_path_group_and_selinux(label: str, path: str | Path, expected_group: str = "my-booking") -> list[Check]:
+    """Generic, reusable group-ownership + SELinux-file-context audit for
+    ANY single data path (file or directory) my-booking reads or writes.
+
+    2026-07-16, the operator: "audit group+permissions+SELinux ... for ALL data
+    paths, INCLUDING any user-configurable ones [in settings.toml] --
+    e.g. an email-templates directory." Before this, every path grew its
+    own bespoke, slightly different check: check_data_dir_ownership
+    above only ever checks `*.csv` OWNER uid (never group, never
+    SELinux), and (until this change) `data_dir`/`log_file`/
+    `static_site_dir` in scripts/my-bt's cmd_admin_health only ever used
+    os.access() -- which silently reports "ok" when run as root
+    regardless of the real ownership/permissions underneath (same root-
+    masking failure mode check_data_dir_ownership's own docstring
+    already explains for the 2026-07-08 incident). This is now the ONE
+    function every data path -- `data_dir` itself, `[logging].log_file`,
+    `[site].static_site_dir`, and any future settings.toml-configurable
+    directory -- goes through, so adding one later is a single extra
+    call here instead of new bespoke chgrp/restorecon code.
+
+    Real os.stat()-based checks throughout, never os.access(), for the
+    same reason.
+
+    Checks, in order:
+    - existence (warn, not fail -- several of these paths are created
+      lazily on first real use, e.g. data_dir/log_file before the
+      service has ever started)
+    - GROUP ownership (warn if not `expected_group`'s own gid -- this is
+      how a DIFFERENT process, e.g. nginx reading static_site_dir, is
+      meant to reach a my-booking-owned path via group-read permission
+      without needing to run as the my-booking user itself; "warn", not
+      "fail", since a path with a different group can still work fine if
+      it's otherwise world-readable -- this flags the common case, not
+      every theoretically-working permission combination)
+    - SELinux file context, ONLY when `getenforce` reports Enforcing
+      (same "not present/not enforcing -> nothing to check" fallback as
+      check_selinux() above) -- `matchpathcon` (policycoreutils, same
+      package `getsebool`/`setsebool` already come from) says what
+      SELinux's OWN policy expects for this exact path; `stat -c %C`
+      says what it actually IS right now. A mismatch here is exactly the
+      kind of thing that silently 403s/500s the very first time a
+      service touches a path that was created or moved outside the
+      normal package-install flow (rsync'd in, created by a script run
+      from an unexpected working directory, ...) -- `restorecon -Rv
+      <path>` is the fix, offered by `setup -i`."""
+    import grp
+
+    path = Path(path)
+    if not path.exists():
+        return [(f"{label} group/SELinux", "warn", f"{path} does not exist yet -- not checked")]
+
+    checks: list[Check] = []
+    try:
+        expected_gid = grp.getgrnam(expected_group).gr_gid
+    except KeyError:
+        return [(f"{label} group", "warn",
+                  f"'{expected_group}' system group doesn't exist yet -- install the package first")]
+    actual_gid = path.stat().st_gid
+    if actual_gid == expected_gid:
+        checks.append((f"{label} group", "ok", f"group is '{expected_group}'"))
+    else:
+        try:
+            actual_group = grp.getgrgid(actual_gid).gr_name
+        except KeyError:
+            actual_group = f"gid {actual_gid}"
+        checks.append((f"{label} group", "warn",
+            f"{path} is group '{actual_group}', expected '{expected_group}' -- "
+            f"sudo chgrp -R {expected_group} {path}"))
+
+    checks.extend(_check_selinux_context(label, path))
+    return checks
+
+
+def _check_selinux_context(label: str, path: Path) -> list[Check]:
+    """The SELinux half of check_path_group_and_selinux, split out so it
+    can be unit-tested (mocked subprocess calls) independently of the
+    group-ownership half above. Same "not present/not enforcing -> ok,
+    nothing to check" fallback as check_selinux()'s own httpd boolean
+    check -- SELinux simply isn't relevant on a non-enforcing box."""
+    if not shutil.which("getenforce"):
+        return []
+    mode = subprocess.run(["getenforce"], capture_output=True, text=True).stdout.strip()
+    if mode != "Enforcing":
+        return []
+    if not shutil.which("matchpathcon"):
+        return [(f"{label} SELinux context", "warn",
+                  "enforcing, but matchpathcon isn't available to check "
+                  "(install policycoreutils-python-utils) -- skipping")]
+    expected = subprocess.run(
+        ["matchpathcon", "-n", str(path)], capture_output=True, text=True,
+    ).stdout.strip()
+    actual = subprocess.run(
+        ["stat", "-c", "%C", str(path)], capture_output=True, text=True,
+    ).stdout.strip()
+    if not expected or not actual:
+        return [(f"{label} SELinux context", "warn",
+                  "couldn't determine the expected/actual context -- skipping")]
+    if expected == actual:
+        return [(f"{label} SELinux context", "ok", f"matches policy ({actual})")]
+    return [(f"{label} SELinux context", "warn",
+              f"is '{actual}', policy expects '{expected}' -- sudo restorecon -Rv {path}")]
+
+
 def check_caldav_calendars(raw: dict) -> list[Check]:
     """Live PROPFIND against the configured CalDAV server, verifying
     `[calendar].booking_calendar` and every `[calendar].conflict_calendars`

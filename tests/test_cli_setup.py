@@ -134,6 +134,33 @@ class PrintReportTest(unittest.TestCase):
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         self.assertTrue(any("SKIP" in ln and "static_site_dir" in ln for ln in lines))
 
+    def test_log_file_not_configured_shows_skip(self):
+        # 2026-07-16: [logging].log_file's group/SELinux check (new)
+        # -- unlike the other data paths, print_report had no section
+        # for log_file at all before this; must degrade to a plain SKIP
+        # line, not silently vanish, when it isn't configured.
+        lines: list[str] = []
+        cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("SKIP" in ln and "log_file" in ln for ln in lines))
+
+    def test_static_site_dir_group_selinux_findings_are_shown(self):
+        with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
+            ("static_site_dir group", "warn", "wrong group -- sudo chgrp -R my-booking X"),
+        ]):
+            lines: list[str] = []
+            raw = _raw(site={"static_site_dir": str(self.home / "public_html")})
+            cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("WARN" in ln and "static_site_dir group" in ln for ln in lines))
+
+    def test_data_dir_group_selinux_findings_are_shown_and_counted(self):
+        with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
+            ("data dir SELinux context", "warn", "mismatch -- sudo restorecon -Rv X"),
+        ]):
+            lines: list[str] = []
+            fails, warns = cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("WARN" in ln and "data dir SELinux context" in ln for ln in lines))
+        self.assertGreaterEqual(warns, 1)
+
     def test_returned_counts_match_the_printed_report(self):
         # 2026-07-10, the operator: wants plain `my-bt setup` scriptable the same
         # way `status` already is -- print_report() now returns (fails,
@@ -481,6 +508,86 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
             prompt=prompt, run=calls.append, is_root=lambda: True,
             print_fn=lambda *_: None,
         )
+        self.assertEqual(calls, [])
+
+
+class InteractiveSetupPathGroupSelinuxTest(unittest.TestCase):
+    """Step 11d -- cli_checks.check_path_group_and_selinux's group/
+    SELinux findings for data_dir (always audited) and
+    [logging].log_file / [site].static_site_dir (only when configured --
+    the base `_raw()` fixture has neither, so only the data_dir call
+    fires in these tests). Mocked here, not real grp/subprocess calls,
+    same determinism reasoning as InteractiveSetupPrivilegedStepsTest
+    above. 2026-07-16, the operator: "audit group+permissions+SELinux ... for
+    ALL data paths" -- this is the auto-heal half (chgrp/restorecon),
+    gated on is_root() the same way the pre-existing data-dir-ownership
+    chown step is."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+        self.data_dir = Path(self._tmp.name) / "data"
+        self.data_dir.mkdir()
+
+    def _run(self, prompt, calls, is_root):
+        cli_setup.interactive_setup(
+            _raw(), self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=is_root,
+            print_fn=lambda *_: None, data_dir=str(self.data_dir),
+        )
+
+    def test_group_mismatch_offers_chgrp_when_root(self):
+        with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
+            ("data dir group", "warn", "wrong group -- sudo chgrp -R my-booking X"),
+        ]):
+            prompt = FakePrompts({"chgrp": True})
+            calls: list[list[str]] = []
+            self._run(prompt, calls, is_root=lambda: True)
+        self.assertEqual(len(prompt.asked_matching("chgrp")), 1)
+        self.assertTrue(any(c[0] == "chgrp" for c in calls))
+
+    def test_group_mismatch_as_non_root_is_not_prompted_or_run(self):
+        with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
+            ("data dir group", "warn", "wrong group -- sudo chgrp -R my-booking X"),
+        ]):
+            prompt = FakePrompts({})
+            calls: list[list[str]] = []
+            self._run(prompt, calls, is_root=lambda: False)
+        self.assertEqual(prompt.asked_matching("chgrp"), [])
+        self.assertEqual(calls, [])
+
+    def test_selinux_mismatch_offers_restorecon_when_root(self):
+        with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
+            ("data dir SELinux context", "warn", "mismatch -- sudo restorecon -Rv X"),
+        ]):
+            prompt = FakePrompts({"restorecon": True})
+            calls: list[list[str]] = []
+            self._run(prompt, calls, is_root=lambda: True)
+        self.assertEqual(len(prompt.asked_matching("restorecon")), 1)
+        self.assertTrue(any(c[0] == "restorecon" for c in calls))
+
+    def test_declining_the_prompt_runs_nothing(self):
+        with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
+            ("data dir group", "warn", "wrong group -- sudo chgrp -R my-booking X"),
+        ]):
+            prompt = FakePrompts({"chgrp": False})
+            calls: list[list[str]] = []
+            self._run(prompt, calls, is_root=lambda: True)
+        self.assertEqual(calls, [])
+
+    def test_ok_result_is_never_prompted(self):
+        with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
+            ("data dir group", "ok", "group is 'my-booking'"),
+        ]):
+            prompt = FakePrompts({})
+            calls: list[list[str]] = []
+            self._run(prompt, calls, is_root=lambda: True)
+        self.assertEqual(prompt.asked_matching("chgrp"), [])
         self.assertEqual(calls, [])
 
 

@@ -188,6 +188,22 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "data_dir_git": cli_checks.check_data_dir_git(data_dir),
         "data_dir_ownership": cli_checks.check_data_dir_ownership(data_dir),
         "directory_fsync_support": cli_checks.check_directory_fsync_support(data_dir),
+        "data_dir_group_selinux": cli_checks.check_path_group_and_selinux("data dir", data_dir),
+        "log_file_group_selinux": (
+            cli_checks.check_path_group_and_selinux("log file", log_file_path)
+            # 2026-07-16: read straight out of the already-parsed `raw`
+            # dict, NOT config.peek_log_file(settings_path) -- that
+            # re-reads settings_path off disk, which several tests here
+            # point at a fake/incomplete path since build_report never
+            # used to touch settings.toml itself beyond the `raw` it was
+            # handed. Same value peek_log_file would return either way
+            # (raw["logging"]["log_file"]).
+            if (log_file_path := raw.get("logging", {}).get("log_file")) else []
+        ),
+        "static_site_dir_group_selinux": (
+            cli_checks.check_path_group_and_selinux("static_site_dir", static_site_dir)
+            if (static_site_dir := raw.get("site", {}).get("static_site_dir")) else []
+        ),
         "maintenance": cli_checks.check_maintenance_mode(data_dir),
         "calendar_invite_format": cli_checks.check_calendar_invite_format(raw, data_dir),
         "calendar_invite_resync_skips": cli_checks.check_calendar_invite_resync_skips(data_dir),
@@ -278,6 +294,7 @@ def print_report(
     static_site_checks = (
         report["static_site"] + report["static_site_compliance"]
         + report["static_pages_deployed"] + report["static_pages_reachable"]
+        + report["static_site_dir_group_selinux"]
     )
     if static_site_checks:
         show(static_site_checks)
@@ -303,6 +320,13 @@ def print_report(
     show(report["data_dir_git"])
     show(report["data_dir_ownership"])
     show(report["directory_fsync_support"])
+    show(report["data_dir_group_selinux"])
+
+    print_fn("\n11d. Configured log file group/SELinux ([logging].log_file, if set):")
+    if report["log_file_group_selinux"]:
+        show(report["log_file_group_selinux"])
+    else:
+        print_fn("   [SKIP] [logging].log_file not configured, or doesn't exist yet -- not checked")
 
     print_fn("\n12. Maintenance mode (`my-bt admin site-maintenance on/off/status`):")
     show(report["maintenance"])
@@ -909,6 +933,44 @@ def interactive_setup(
     print_fn("\n-- 11c. Directory fsync support --")
     for label, level, detail in cli_checks.check_directory_fsync_support(data_dir):
         print_fn(f"[{level}] {label}: {detail}")
+
+    # 11d. Data path group/SELinux audit -- data_dir itself,
+    # [logging].log_file, and [site].static_site_dir all go through the
+    # SAME cli_checks.check_path_group_and_selinux() (see its own
+    # docstring: this is deliberately the ONE place any FUTURE
+    # settings.toml-configurable directory -- the operator's own example: an
+    # email-templates dir -- gets wired in too, one line here plus one
+    # in build_report() above, instead of new bespoke chgrp/restorecon
+    # code each time). Auto-fix gated on is_root(), same reasoning as the
+    # data-dir-ownership chown step above -- chgrp/restorecon are both
+    # genuinely privileged operations, no point prompting for something
+    # that would just fail as a non-root my-booking-group member.
+    print_fn("\n-- 11d. Data path group/SELinux audit --")
+    audit_paths = [("data dir", Path(data_dir))]
+    log_file_configured = raw.get("logging", {}).get("log_file")
+    if log_file_configured and Path(log_file_configured).exists():
+        audit_paths.append(("log file", Path(log_file_configured)))
+    static_site_dir = raw.get("site", {}).get("static_site_dir")
+    if static_site_dir:
+        audit_paths.append(("static_site_dir", Path(static_site_dir)))
+    for path_label, path in audit_paths:
+        for label, level, detail in cli_checks.check_path_group_and_selinux(path_label, path):
+            if level == "ok":
+                print_fn(f"[ok] {label}: {detail}")
+                continue
+            print_fn(f"{label}: {detail}")
+            if label.endswith(" group"):
+                if not is_root():
+                    print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+                elif prompt(f"Run chgrp -R my-booking {path} now?"):
+                    run(["chgrp", "-R", "my-booking", str(path)])
+                    print_fn("[ok] group fixed")
+            elif label.endswith(" SELinux context"):
+                if not is_root():
+                    print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+                elif prompt(f"Run restorecon -Rv {path} now?"):
+                    run(["restorecon", "-Rv", str(path)])
+                    print_fn("[ok] SELinux context restored")
 
     # 12. Maintenance mode -- informational only, same reasoning as CalDAV
     # above: there's no safe "fix" to offer here (it's a deliberate toggle,

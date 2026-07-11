@@ -1401,6 +1401,11 @@ def cmd_admin_health(args) -> None:
     checks.extend(cli_checks.check_data_dir_git(data_dir))
     checks.extend(cli_checks.check_data_dir_ownership(data_dir))
     checks.extend(cli_checks.check_directory_fsync_support(data_dir))
+    # 2026-07-16: group + SELinux context audit for the data dir ITSELF
+    # (check_data_dir_ownership above only ever looks at *.csv OWNER uid,
+    # never the directory's own group or SELinux context) -- see
+    # cli_checks.check_path_group_and_selinux's own docstring.
+    checks.extend(cli_checks.check_path_group_and_selinux("data dir", data_dir))
 
     # -- configured log file, if any ---------------------------------------------
     log_file = app_config.peek_log_file(args.settings) if raw else None
@@ -1414,6 +1419,16 @@ def cmd_admin_health(args) -> None:
                 "start the service once (it creates it), or create it yourself"))
         else:
             checks.append((f"log file ({log_file})", "ok", "configured and writable"))
+        if lp.exists():
+            checks.extend(cli_checks.check_path_group_and_selinux("log file", lp))
+
+    # -- [site].static_site_dir, if configured: group + SELinux context ----------
+    # (this directory is READ by nginx, a different unix user, not just
+    # written by my-booking -- a group/SELinux-context problem here is a
+    # real live-serving gap the existing content-drift checks don't catch.)
+    static_site_dir = raw.get("site", {}).get("static_site_dir") if raw else None
+    if static_site_dir:
+        checks.extend(cli_checks.check_path_group_and_selinux("static_site_dir", static_site_dir))
 
     # -- my-booking group membership, systemd, SELinux, package integrity -------
     checks.extend(cli_checks.check_group_membership())

@@ -13,6 +13,10 @@ def _levels(checks):
     return {label: level for label, level, _ in checks}
 
 
+def _both(checks):
+    return {label: (label, level, detail) for label, level, detail in checks}
+
+
 class CheckSecretsTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1492,6 +1496,148 @@ class CheckDataDirOwnershipTest(unittest.TestCase):
         label, level, detail = checks[0]
         self.assertEqual(level, "fail")
         self.assertIn(f"owned by uid {real_uid}", detail)
+
+
+class CheckPathGroupAndSelinuxTest(unittest.TestCase):
+    """2026-07-16, the operator: "audit group+permissions+SELinux ... for ALL
+    data paths, INCLUDING any user-configurable ones [e.g.] an
+    email-templates directory" -- the ONE shared function every data
+    path (data_dir itself, [logging].log_file, [site].static_site_dir,
+    and any future configurable directory) goes through instead of
+    growing its own bespoke ownership check the way check_data_dir_
+    ownership above (uid-only, *.csv-only) and scripts/my-bt's old
+    os.access()-based data_dir/log_file checks did."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "somedir"
+        self.path.mkdir()
+
+    def _no_selinux(self):
+        return patch("app.cli_checks.shutil.which", return_value=None)
+
+    def test_missing_path_warns_and_skips_everything_else(self):
+        checks = cli_checks.check_path_group_and_selinux("data dir", self.path / "nope")
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn("does not exist yet", detail)
+
+    def test_expected_group_missing_warns(self):
+        with patch("grp.getgrnam", side_effect=KeyError("no such group")):
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(label, "data dir group")
+        self.assertEqual(level, "warn")
+        self.assertIn("doesn't exist yet", detail)
+
+    def test_matching_group_is_ok(self):
+        my_gid = os.stat(self.path).st_gid  # test process's own gid as a stand-in
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": my_gid})()), self._no_selinux():
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        group_check = _levels(checks)["data dir group"]
+        self.assertEqual(group_check, "ok")
+
+    def test_mismatched_group_warns_with_chgrp_command(self):
+        real_gid = os.stat(self.path).st_gid
+        wrong_gid = real_gid + 1
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": wrong_gid})()), \
+             patch("grp.getgrgid", return_value=type("G", (), {"gr_name": "wheel"})()), self._no_selinux():
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        label, level, detail = _both(checks)["data dir group"]
+        self.assertEqual(level, "warn")
+        self.assertIn("group 'wheel'", detail)
+        self.assertIn(f"sudo chgrp -R my-booking {self.path}", detail)
+
+    def test_mismatched_group_with_no_grp_entry_shown_as_gid(self):
+        # The path's own ACTUAL gid (real_gid) is what has no /etc/group
+        # entry here -- the mismatch is against `expected_group`
+        # ("my-booking", mocked to a different gid), not the other way
+        # around, so the rendered "gid N" must be the real, current gid.
+        real_gid = os.stat(self.path).st_gid
+        wrong_gid = real_gid + 1
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": wrong_gid})()), \
+             patch("grp.getgrgid", side_effect=KeyError("no such gid")), self._no_selinux():
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        _, level, detail = _both(checks)["data dir group"]
+        self.assertEqual(level, "warn")
+        self.assertIn(f"gid {real_gid}", detail)
+
+    def test_selinux_not_present_skips_selinux_check_entirely(self):
+        my_gid = os.stat(self.path).st_gid
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": my_gid})()), self._no_selinux():
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        self.assertNotIn("data dir SELinux context", _levels(checks))
+
+    def test_selinux_permissive_skips_selinux_check(self):
+        my_gid = os.stat(self.path).st_gid
+
+        def which(name):
+            return "/usr/sbin/getenforce" if name == "getenforce" else None
+
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": my_gid})()), \
+             patch("app.cli_checks.shutil.which", side_effect=which), \
+             patch("app.cli_checks.subprocess.run", return_value=type("R", (), {"stdout": "Permissive"})()):
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        self.assertNotIn("data dir SELinux context", _levels(checks))
+
+    def test_selinux_enforcing_matchpathcon_missing_warns(self):
+        my_gid = os.stat(self.path).st_gid
+
+        def which(name):
+            return "/usr/sbin/getenforce" if name == "getenforce" else None
+
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": my_gid})()), \
+             patch("app.cli_checks.shutil.which", side_effect=which), \
+             patch("app.cli_checks.subprocess.run", return_value=type("R", (), {"stdout": "Enforcing"})()):
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        label, level, detail = _both(checks)["data dir SELinux context"]
+        self.assertEqual(level, "warn")
+        self.assertIn("matchpathcon isn't available", detail)
+
+    def test_selinux_enforcing_matching_context_is_ok(self):
+        my_gid = os.stat(self.path).st_gid
+
+        def which(name):
+            return f"/usr/sbin/{name}"
+
+        def run(cmd, capture_output, text):
+            if cmd[0] == "getenforce":
+                return type("R", (), {"stdout": "Enforcing"})()
+            if cmd[0] == "matchpathcon":
+                return type("R", (), {"stdout": "system_u:object_r:var_lib_t:s0"})()
+            return type("R", (), {"stdout": "system_u:object_r:var_lib_t:s0"})()  # stat -c %C
+
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": my_gid})()), \
+             patch("app.cli_checks.shutil.which", side_effect=which), \
+             patch("app.cli_checks.subprocess.run", side_effect=run):
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        label, level, detail = _both(checks)["data dir SELinux context"]
+        self.assertEqual(level, "ok")
+
+    def test_selinux_enforcing_mismatched_context_warns_with_restorecon_command(self):
+        my_gid = os.stat(self.path).st_gid
+
+        def which(name):
+            return f"/usr/sbin/{name}"
+
+        def run(cmd, capture_output, text):
+            if cmd[0] == "getenforce":
+                return type("R", (), {"stdout": "Enforcing"})()
+            if cmd[0] == "matchpathcon":
+                return type("R", (), {"stdout": "system_u:object_r:var_lib_t:s0"})()
+            return type("R", (), {"stdout": "unconfined_u:object_r:user_home_t:s0"})()  # stat -c %C
+
+        with patch("grp.getgrnam", return_value=type("G", (), {"gr_gid": my_gid})()), \
+             patch("app.cli_checks.shutil.which", side_effect=which), \
+             patch("app.cli_checks.subprocess.run", side_effect=run):
+            checks = cli_checks.check_path_group_and_selinux("data dir", self.path)
+        label, level, detail = _both(checks)["data dir SELinux context"]
+        self.assertEqual(level, "warn")
+        self.assertIn("policy expects 'system_u:object_r:var_lib_t:s0'", detail)
+        self.assertIn(f"sudo restorecon -Rv {self.path}", detail)
 
 
 class CheckMaintenanceModeTest(unittest.TestCase):
