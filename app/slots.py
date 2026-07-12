@@ -99,12 +99,16 @@ def build_occurrences(
     else:
         now = now.replace(tzinfo=tz)
 
-    h, m = course.start_hm()
-
     out: list[Occurrence] = []
     for d in candidate_dates(course, now.date(), settings.show_next_days):
+        # 2026-07-16, the operator: per-date exceptional time changes -- see
+        # Course.date_overrides/start_hm_for/duration_minutes_for. A date
+        # with no override behaves exactly as before (its own start_hm()/
+        # duration_minutes).
+        occ_date_str = d.isoformat()
+        h, m = course.start_hm_for(occ_date_str)
         start = datetime(d.year, d.month, d.day, h, m, tzinfo=tz)
-        end = start + timedelta(minutes=course.duration_minutes)
+        end = start + timedelta(minutes=course.duration_minutes_for(occ_date_str))
         if start < now:
             continue
         if conflict_checker(start, end):

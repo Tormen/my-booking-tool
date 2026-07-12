@@ -1031,6 +1031,39 @@ class GuestInviteAndCancelIcsTest(unittest.TestCase):
         self.assertEqual(ics_text.count("BEGIN:VALARM"), 1)
         self.assertIn("TRIGGER:-PT60M", ics_text)
 
+    def test_date_override_shifts_dtstart_and_dtend(self):
+        # 2026-07-16, the operator's per-course date_overrides feature: the
+        # guest's own .ics attachment must reflect the exceptional
+        # shifted time too, same as the operator's synced calendar event
+        # (both go through the shared occurrence_start_end()).
+        from app.config import CourseDateOverride
+
+        course = make_course(
+            shortname="yoga-class-1", title="Yoga", location="Studio 1", description="",
+            weekday="sat", start_time="17:15", duration_minutes=100,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        settings = make_settings(courses=(course,), base_url="https://example.org")
+        _filename, ics_text = guest_invite_ics(settings, course, date(2026, 7, 18))
+        # Europe/Berlin is CEST (+2) in July -- 09:45 local -> 07:45 UTC,
+        # and the 100min duration is kept (unaffected, no override
+        # duration_minutes set) -> ends 11:25 local -> 09:25 UTC.
+        self.assertIn("DTSTART:20260718T074500Z", ics_text)
+        self.assertIn("DTEND:20260718T092500Z", ics_text)
+
+    def test_unrelated_date_is_unaffected_by_a_different_dates_override(self):
+        from app.config import CourseDateOverride
+
+        course = make_course(
+            shortname="yoga-class-1", title="Yoga", location="Studio 1", description="",
+            weekday="sat", start_time="17:15", duration_minutes=100,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        settings = make_settings(courses=(course,), base_url="https://example.org")
+        _filename, ics_text = guest_invite_ics(settings, course, date(2026, 7, 25))
+        # 17:15 local (normal, unaffected) -> 15:15 UTC.
+        self.assertIn("DTSTART:20260725T151500Z", ics_text)
+
     def test_invite_honors_a_configured_guest_reminder(self):
         settings = make_settings(
             courses=(self.course,), base_url="https://example.org",

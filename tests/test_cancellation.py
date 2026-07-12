@@ -11,8 +11,9 @@ bodies."""
 import unittest
 
 from app.cancellation import (
-    booking_details_text, course_recap_html, greeting_html, html_email_body, intro_html, message_html,
+    attention_html, booking_details_text, course_recap_html, greeting_html, html_email_body, intro_html, message_html,
 )
+from app.config import CourseDateOverride
 
 from .helpers import make_course
 
@@ -44,6 +45,51 @@ class BookingDetailsTextTest(unittest.TestCase):
         course = make_course(description="Bring your own mat.")
         details = booking_details_text(course, "2026-07-11")
         self.assertNotIn("Message:", details)
+
+    def test_date_override_adds_an_attention_line_above_the_description(self):
+        # 2026-07-16, the operator: "the emails concerning this slot with time
+        # exceptions should also contain the ATTENTION with optional msg
+        # block up in the email" -- looked up automatically from
+        # Course.date_overrides, no per-call-site plumbing needed.
+        course = make_course(
+            description="Bring your own mat.",
+            date_overrides=(CourseDateOverride(
+                date="2026-07-18", start_time="09:45",
+                message="I need to be in Kaiserslautern before 13h.",
+            ),),
+        )
+        details = booking_details_text(course, "2026-07-18")
+        self.assertIn("ATTENTION: I need to be in Kaiserslautern before 13h.", details)
+        self.assertLess(details.index("Where:"), details.index("ATTENTION:"))
+        self.assertLess(details.index("ATTENTION:"), details.index("Bring your own mat."))
+        # The When: line itself must reflect the shifted time too (default
+        # make_course duration is 100min, so 09:45 -> 11:25).
+        self.assertIn("9h45 - 11h25", details)
+
+    def test_date_override_with_no_message_omits_the_attention_line(self):
+        course = make_course(
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        details = booking_details_text(course, "2026-07-18")
+        self.assertNotIn("ATTENTION:", details)
+
+    def test_unrelated_date_gets_no_attention_line(self):
+        course = make_course(
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45", message="early"),),
+        )
+        details = booking_details_text(course, "2026-07-25")
+        self.assertNotIn("ATTENTION:", details)
+
+    def test_attention_and_human_message_can_coexist(self):
+        # ATTENTION (operator/settings.toml) and Message (guest/host typed,
+        # e.g. Reinstate's comment) are separate lines, both possible at once.
+        course = make_course(
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45", message="early"),),
+        )
+        details = booking_details_text(course, "2026-07-18", message="see you there")
+        self.assertIn("ATTENTION: early", details)
+        self.assertIn("Message: see you there", details)
+        self.assertLess(details.index("ATTENTION:"), details.index("Message:"))
 
 
 class CourseRecapHtmlTest(unittest.TestCase):
@@ -97,6 +143,50 @@ class CourseRecapHtmlTest(unittest.TestCase):
         html = course_recap_html(course, "2026-07-11")
         self.assertNotIn("Message:", html)
         self.assertNotIn("background:#f2f2f2", html)
+
+    def test_date_override_adds_a_red_attention_box_above_the_description(self):
+        course = make_course(
+            description="<p>Bring your own mat.</p>",
+            date_overrides=(CourseDateOverride(
+                date="2026-07-18", start_time="09:45",
+                message="I need to be in Kaiserslautern before 13h.",
+            ),),
+        )
+        html = course_recap_html(course, "2026-07-18")
+        self.assertIn("ATTENTION:", html)
+        self.assertIn("I need to be in Kaiserslautern before 13h.", html)
+        self.assertIn("background:#fdecea", html)  # attention_html()'s red box
+        self.assertLess(html.index("Where:"), html.index("ATTENTION:"))
+        self.assertLess(html.index("ATTENTION:"), html.index("Bring your own mat."))
+        self.assertIn("9h45 - 11h25", html)  # When: line reflects the shift too
+
+    def test_date_override_with_no_message_omits_the_attention_box(self):
+        course = make_course(
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        html = course_recap_html(course, "2026-07-18")
+        self.assertNotIn("ATTENTION:", html)
+        self.assertNotIn("background:#fdecea", html)
+
+
+class AttentionHtmlTest(unittest.TestCase):
+    """2026-07-16, the operator: "displayed as an 'ATTENTION'-message in red"."""
+
+    def test_has_a_red_box_and_the_attention_label(self):
+        rendered = attention_html("starts earlier")
+        self.assertIn("background:#fdecea", rendered)
+        self.assertIn("ATTENTION:", rendered)
+        self.assertIn("starts earlier", rendered)
+
+    def test_blank_input_renders_nothing(self):
+        self.assertEqual(attention_html(""), "")
+
+    def test_input_is_not_escaped_operator_authored_trust_boundary(self):
+        # UNLIKE message_html() (guest/host free text), attention_html()'s
+        # input comes from settings.toml -- same trust boundary as
+        # Course.description, rendered raw elsewhere in this app too.
+        rendered = attention_html("<b>bold</b> stays bold")
+        self.assertIn("<b>bold</b> stays bold", rendered)
 
 
 class HtmlEmailBodyTest(unittest.TestCase):

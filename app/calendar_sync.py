@@ -206,10 +206,19 @@ def occurrence_start_end(course: Course, occurrence_date: date, tz: ZoneInfo) ->
     out of sync_occurrence() (2026-07-09) so guest_invite_ics()/
     guest_cancel_ics() below build the EXACT same window the operator's own
     synced calendar event uses, rather than a second, easy-to-drift-apart
-    copy of this three-line calculation."""
-    h, m = course.start_hm()
+    copy of this three-line calculation.
+
+    2026-07-16: uses Course.start_hm_for()/duration_minutes_for()
+    (course.date_overrides-aware), not the plain start_hm()/
+    duration_minutes -- an exceptional date's actual CalDAV event (both
+    the operator's own synced entry and the guest's .ics attachment) must
+    reflect the REAL, shifted time, not the course's normal weekly one,
+    exactly like app/slots.py::build_occurrences already does for the
+    booking page itself."""
+    occ_date_str = occurrence_date.isoformat()
+    h, m = course.start_hm_for(occ_date_str)
     start = datetime(occurrence_date.year, occurrence_date.month, occurrence_date.day, h, m, tzinfo=tz)
-    return start, start + timedelta(minutes=course.duration_minutes)
+    return start, start + timedelta(minutes=course.duration_minutes_for(occ_date_str))
 
 
 def sync_occurrence(

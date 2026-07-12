@@ -78,5 +78,50 @@ class BuildOccurrencesTest(unittest.TestCase):
         self.assertEqual(occs[0].date.isoformat(), "2026-07-08")
 
 
+class BuildOccurrencesDateOverrideTest(unittest.TestCase):
+    """2026-07-16, the operator's per-course date_overrides feature -- occurrences
+    for an overridden date must use the shifted start/end (and duration,
+    when the override sets one), while every OTHER date on the same course
+    stays completely unaffected."""
+
+    def setUp(self):
+        from app.config import CourseDateOverride
+
+        self.settings = make_settings(show_next_slots=3, show_next_days=42, min_notice_hours=2)
+        self.course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120, capacity=10,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+
+    def test_overridden_date_gets_the_shifted_start_and_kept_duration(self):
+        tz = ZoneInfo(self.settings.timezone)
+        now = datetime(2026, 7, 12, 8, 0, tzinfo=tz)
+        occs = build_occurrences(self.course, self.settings, now, zero_capacity, no_conflict)
+        overridden = next(o for o in occs if o.date.isoformat() == "2026-07-18")
+        self.assertEqual(overridden.start.strftime("%H:%M"), "09:45")
+        self.assertEqual(overridden.end.strftime("%H:%M"), "11:45")  # 120min kept
+
+    def test_other_dates_on_the_same_course_are_unaffected(self):
+        tz = ZoneInfo(self.settings.timezone)
+        now = datetime(2026, 7, 12, 8, 0, tzinfo=tz)
+        occs = build_occurrences(self.course, self.settings, now, zero_capacity, no_conflict)
+        other = next(o for o in occs if o.date.isoformat() == "2026-07-25")
+        self.assertEqual(other.start.strftime("%H:%M"), "10:45")
+        self.assertEqual(other.end.strftime("%H:%M"), "12:45")
+
+    def test_override_with_explicit_duration_changes_the_end_too(self):
+        from app.config import CourseDateOverride
+
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120, capacity=10,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45", duration_minutes=60),),
+        )
+        tz = ZoneInfo(self.settings.timezone)
+        now = datetime(2026, 7, 12, 8, 0, tzinfo=tz)
+        occs = build_occurrences(course, self.settings, now, zero_capacity, no_conflict)
+        overridden = next(o for o in occs if o.date.isoformat() == "2026-07-18")
+        self.assertEqual(overridden.end.strftime("%H:%M"), "10:45")
+
+
 if __name__ == "__main__":
     unittest.main()

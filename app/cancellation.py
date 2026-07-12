@@ -84,12 +84,21 @@ def booking_details_text(course: Course, occ_date: str, message: str = "") -> st
     send_cancellation_emails()/send_reinstatement_emails()."""
     details = (
         f"{_WHAT_EMOJI} What: {course.title}\n"
-        f"{_WHEN_EMOJI} When: {occ_date} {course.time_range_label()}\n"
+        f"{_WHEN_EMOJI} When: {occ_date} {course.time_range_label_for(occ_date)}\n"
         f"{_WHERE_EMOJI} Where: {course.location}\n"
     )
+    # 2026-07-16, the operator: exceptional per-date time changes (Course.
+    # date_overrides) get an automatic ATTENTION line here -- looked up
+    # straight from `course`/`occ_date`, so EVERY caller of this function
+    # (booking confirmed/waitlisted, promoted-from-waitlist, cancel,
+    # reinstate) shows it for free, with no per-call-site plumbing.
+    # Deliberately a SEPARATE line from the `message` param above (a
+    # human-typed cancel/reinstate reason) -- the two can coexist.
+    attention = course.override_message_for(occ_date)
+    attention_block = f"\nATTENTION: {attention}\n" if attention else ""
     message_block = f"\nMessage: {message}\n" if message else ""
     description_text = html_to_text(course.description) if course.description else ""
-    return details + message_block + (f"\n{description_text}\n" if description_text else "")
+    return details + attention_block + message_block + (f"\n{description_text}\n" if description_text else "")
 
 
 def course_recap_html(course: Course, occ_date: str, message: str = "") -> str:
@@ -114,6 +123,13 @@ def course_recap_html(course: Course, occ_date: str, message: str = "") -> str:
     box, i.e. ABOVE the description, not after it like the old separate
     `reason_html` concatenation used to put it. Blank omits it entirely."""
     esc = lambda v: html.escape(str(v), quote=True)  # noqa: E731
+    # 2026-07-16: automatic red ATTENTION callout for an exceptional
+    # per-date time change -- see attention_html()/Course.
+    # override_message_for's own docstrings. Looked up straight from
+    # `course`/`occ_date`, so every caller of this function gets it for
+    # free, same reasoning as booking_details_text()'s plain-text twin
+    # above.
+    attention_block = attention_html(course.override_message_for(occ_date))
     message_block = message_html(message) if message else ""
     desc_html = (
         '<div style="background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;'
@@ -123,8 +139,9 @@ def course_recap_html(course: Course, occ_date: str, message: str = "") -> str:
         '<div style="background:#f4f7f4;border:1px solid #ddd;border-radius:8px;'
         'padding:1em 1.2em;margin:1em 0;font-family:sans-serif">'
         f'<p style="margin:.3em 0"><b>{_WHAT_EMOJI} What:</b> {esc(course.title)}</p>'
-        f'<p style="margin:.3em 0"><b>{_WHEN_EMOJI} When:</b> {esc(occ_date)} {esc(course.time_range_label())}</p>'
+        f'<p style="margin:.3em 0"><b>{_WHEN_EMOJI} When:</b> {esc(occ_date)} {esc(course.time_range_label_for(occ_date))}</p>'
         f'<p style="margin:.3em 0"><b>{_WHERE_EMOJI} Where:</b> {esc(course.location)}</p>'
+        f"{attention_block}"
         f"{message_block}"
         f"{desc_html}"
         "</div>"
@@ -194,6 +211,37 @@ def message_html(message: str, label: str = "Message:") -> str:
         '<div style="background:#f2f2f2;border:1px solid #ddd;border-radius:8px;'
         f'padding:.8em 1.2em;margin:.6em 0"><b>{html.escape(label, quote=True)}</b> '
         f'{html.escape(message, quote=True)}</div>'
+    )
+
+
+def attention_html(message_html_inner: str) -> str:
+    """Boxed, RED "ATTENTION" callout for an exceptional per-date time
+    change (Course.date_overrides, 2026-07-16) -- the operator: "automatically
+    ... displayed as an 'ATTENTION'-message in red". Same boxed shape as
+    message_html() above, but red rather than grey/cream, so a schedule
+    exception reads as visually distinct (and more urgent) than an
+    ordinary human-typed comment.
+
+    UNLIKE message_html() (guest/host-typed free text -- always esc()'d),
+    `message_html_inner` here is NOT escaped: a date-override's `message`
+    comes from settings.toml, the exact same operator-authored trust
+    boundary as Course.description (see course_recap_html's own
+    desc_html, rendered raw for the same reason) -- whoever can edit
+    settings.toml already has full control of the server, so this isn't
+    a new privilege boundary. This also lets app/webapp.py's own
+    _course_date_overrides_html build one combined banner (multiple
+    dates, its own `<b>`/`<br>` markup) through this same function
+    instead of a second copy of the box styling.
+
+    Blank input renders nothing -- every call site only has something to
+    show when Course.override_message_for()/date_overrides actually
+    found one for the date(s) in question."""
+    if not message_html_inner:
+        return ""
+    return (
+        '<div style="background:#fdecea;border:1px solid #f5c2c0;border-radius:8px;'
+        'padding:.8em 1.2em;margin:.6em 0;color:#a61b1b">'
+        f'<b>⚠ ATTENTION:</b> {message_html_inner}</div>'
     )
 
 

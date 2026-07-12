@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 from app import maintenance, webapp
 from app.caldav_client import CalDAVClient, Response
+from app.config import CourseDateOverride
 from app.erasure import erase_user_by_email
 from app.security import hash_admin_password, hash_secret, hash_token, new_token
 from app.slots import Occurrence, build_occurrences
@@ -276,6 +277,63 @@ class BookPageTest(unittest.TestCase):
         _, _, html = app._book_page(course, [self._occ(spots_taken=1, capacity=10)])
         self.assertIn('<span class="d-date">2026-07-11</span>', html)
         self.assertIn('<span class="d-spots">9 spots left</span>', html)
+
+
+class BookPageDateOverrideTest(unittest.TestCase):
+    """_book_page's red ATTENTION banner for Course.date_overrides
+    (2026-07-16) -- the operator: "automatically be displayed as an 'ATTENTION'-
+    message in red ... on the booking site for this course.\" One line per
+    overridden date actually present among the occurrences being shown."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.app = App(make_settings(), self.store)
+
+    def _occ(self, d) -> Occurrence:
+        start = datetime(d.year, d.month, d.day, 10, 0, tzinfo=timezone.utc)
+        end = datetime(d.year, d.month, d.day, 11, 15, tzinfo=timezone.utc)
+        return Occurrence("trier-sat-yoga", d, start, end, 1, 10)
+
+    def test_no_overrides_omits_the_banner_entirely(self):
+        course = make_course()
+        _, _, html = self.app._book_page(course, [self._occ(date(2026, 7, 18))])
+        self.assertNotIn("ATTENTION", html)
+
+    def test_overridden_occurrence_shows_attention_banner_with_message(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(
+                date="2026-07-18", start_time="09:45", message="I need to be in Kaiserslautern before 13h.",
+            ),),
+        )
+        _, _, html = self.app._book_page(course, [self._occ(date(2026, 7, 18))])
+        self.assertIn("ATTENTION", html)
+        self.assertIn("background:#fdecea", html)
+        self.assertIn("2026-07-18", html)
+        self.assertIn("9h45 - 11h45", html)
+        self.assertIn("I need to be in Kaiserslautern before 13h.", html)
+
+    def test_override_with_no_message_still_shows_banner_without_a_dash_suffix(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        _, _, html = self.app._book_page(course, [self._occ(date(2026, 7, 18))])
+        banner = html.split("ATTENTION")[1].split("</div>")[0]
+        self.assertNotIn(" -- ", banner)
+
+    def test_only_the_overridden_occurrence_among_several_is_mentioned(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45", message="early"),),
+        )
+        _, _, html = self.app._book_page(
+            course, [self._occ(date(2026, 7, 18)), self._occ(date(2026, 7, 25))],
+        )
+        self.assertIn("2026-07-18", html.split("ATTENTION")[1][:50])
+        self.assertEqual(html.count("ATTENTION"), 1)
 
 
 class CoursesPageTest(unittest.TestCase):
@@ -1402,6 +1460,84 @@ class MySessionStatusTest(unittest.TestCase):
 
     def test_content_type_is_json(self):
         _status, headers, _body = self.app.my_session_status("GET", {})
+        self.assertIn(("Content-Type", "application/json"), headers)
+
+
+class ScheduleExceptionsTest(unittest.TestCase):
+    """GET /schedule-exceptions (2026-07-16) -- public, read-only JSON list
+    of every course's upcoming Course.date_overrides entries, consumed by
+    site/index.html's own opportunistic <script> to render a red ATTENTION
+    banner. the operator: "automatically be displayed as an 'ATTENTION'-message in
+    red on index.html and on the booking site for this course.\""""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def _app(self, courses):
+        settings = make_settings(courses=courses)
+        return App(settings, self.store)
+
+    def test_no_overrides_anywhere_gives_an_empty_list(self):
+        course = make_course(shortname="plain")
+        app = self._app((course,))
+        _status, _headers, body = app.schedule_exceptions("GET", {})
+        self.assertEqual(json.loads(body), [])
+
+    def test_upcoming_override_is_included_with_expected_fields(self):
+        course = make_course(
+            shortname="trier", title="Trier Yoga",
+            date_overrides=(CourseDateOverride(
+                date="9999-12-31", start_time="09:45", message="I need to leave early.",
+            ),),
+        )
+        app = self._app((course,))
+        _status, _headers, body = app.schedule_exceptions("GET", {})
+        items = json.loads(body)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["course_shortname"], "trier")
+        self.assertEqual(items[0]["course_title"], "Trier Yoga")
+        self.assertEqual(items[0]["date"], "9999-12-31")
+        self.assertEqual(items[0]["message"], "I need to leave early.")
+        self.assertIn("9h45", items[0]["time_label"])
+
+    def test_past_override_date_is_excluded(self):
+        course = make_course(
+            shortname="past", date_overrides=(CourseDateOverride(date="2000-01-01", start_time="09:45"),),
+        )
+        app = self._app((course,))
+        _status, _headers, body = app.schedule_exceptions("GET", {})
+        self.assertEqual(json.loads(body), [])
+
+    def test_sorted_by_date_then_course_shortname(self):
+        course_a = make_course(
+            shortname="b-course", date_overrides=(CourseDateOverride(date="9999-06-01", start_time="09:00"),),
+        )
+        course_b = make_course(
+            shortname="a-course", date_overrides=(CourseDateOverride(date="9999-06-01", start_time="09:00"),),
+        )
+        course_c = make_course(
+            shortname="c-course", date_overrides=(CourseDateOverride(date="9999-01-01", start_time="09:00"),),
+        )
+        app = self._app((course_a, course_b, course_c))
+        _status, _headers, body = app.schedule_exceptions("GET", {})
+        items = json.loads(body)
+        self.assertEqual(
+            [(it["date"], it["course_shortname"]) for it in items],
+            [("9999-01-01", "c-course"), ("9999-06-01", "a-course"), ("9999-06-01", "b-course")],
+        )
+
+    def test_post_not_allowed(self):
+        course = make_course(shortname="plain")
+        app = self._app((course,))
+        status, _headers, _body = app.schedule_exceptions("POST", {})
+        self.assertEqual(status, "405 Method Not Allowed")
+
+    def test_content_type_is_json(self):
+        course = make_course(shortname="plain")
+        app = self._app((course,))
+        _status, headers, _body = app.schedule_exceptions("GET", {})
         self.assertIn(("Content-Type", "application/json"), headers)
 
 

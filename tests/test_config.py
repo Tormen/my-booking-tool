@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.config import load_settings
+from app.config import CourseDateOverride, load_settings
 
 from .helpers import make_course
 
@@ -350,6 +350,137 @@ class WeekdayTimeRangeLabelTest(unittest.TestCase):
     def test_minutes_always_zero_padded(self):
         course = make_course(weekday="fri", start_time="12:00", duration_minutes=60)
         self.assertEqual(course.weekday_time_range_label(), "FRI 12h00-13h00")
+
+
+class CourseDateOverrideTest(unittest.TestCase):
+    """Course.date_overrides + its *_for() lookup helpers -- 2026-07-16,
+    the operator: "add a new config option per course in settings.toml to
+    exceptionally change time for a course on a certain date. Optionally
+    a message ... It should be possible to set a LIST of dates with
+    different times." """
+
+    def test_no_overrides_at_all_is_unaffected(self):
+        course = make_course(weekday="sat", start_time="10:45", duration_minutes=120)
+        self.assertIsNone(course.override_for("2026-07-18"))
+        self.assertEqual(course.time_range_label_for("2026-07-18"), course.time_range_label())
+        self.assertEqual(course.override_message_for("2026-07-18"), "")
+
+    def test_matching_date_overrides_the_start_time_keeps_duration(self):
+        # duration_minutes omitted on the override -- normal 120min length
+        # is kept, only the start shifts (09:45 - 11:45, not 09:45 - 12:45).
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        self.assertEqual(course.time_range_label_for("2026-07-18"), "9h45 - 11h45")
+        self.assertEqual(course.start_hm_for("2026-07-18"), (9, 45))
+        self.assertEqual(course.end_hm_for("2026-07-18"), (11, 45))
+        self.assertEqual(course.duration_minutes_for("2026-07-18"), 120)
+
+    def test_override_can_also_change_duration(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45", duration_minutes=60),),
+        )
+        self.assertEqual(course.time_range_label_for("2026-07-18"), "9h45 - 10h45")
+        self.assertEqual(course.duration_minutes_for("2026-07-18"), 60)
+
+    def test_non_matching_date_is_unaffected(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        self.assertEqual(course.time_range_label_for("2026-07-25"), "10h45 - 12h45")
+        self.assertIsNone(course.override_for("2026-07-25"))
+
+    def test_message_is_optional_and_defaults_to_blank(self):
+        course = make_course(
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        self.assertEqual(course.override_message_for("2026-07-18"), "")
+
+    def test_message_is_returned_when_set(self):
+        course = make_course(
+            date_overrides=(
+                CourseDateOverride(date="2026-07-18", start_time="09:45", message="I need to leave early."),
+            ),
+        )
+        self.assertEqual(course.override_message_for("2026-07-18"), "I need to leave early.")
+
+    def test_multiple_dates_are_looked_up_independently(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(
+                CourseDateOverride(date="2026-07-18", start_time="09:45", message="early one week"),
+                CourseDateOverride(date="2026-08-01", start_time="14:00", message="late another week"),
+            ),
+        )
+        self.assertEqual(course.time_range_label_for("2026-07-18"), "9h45 - 11h45")
+        self.assertEqual(course.override_message_for("2026-07-18"), "early one week")
+        self.assertEqual(course.time_range_label_for("2026-08-01"), "14h00 - 16h00")
+        self.assertEqual(course.override_message_for("2026-08-01"), "late another week")
+        # A third, unrelated date sees neither.
+        self.assertEqual(course.time_range_label_for("2026-08-08"), "10h45 - 12h45")
+
+
+class LoadSettingsDateOverrideTest(LoadSettingsCourseOrderTest):
+    """Real end-to-end TOML parsing of `[[course.date_override]]` --
+    reuses LoadSettingsCourseOrderTest's own setUp/_write (secrets +
+    MINIMAL_HEADER) since date_override sub-tables need a real, fully
+    loadable settings.toml, not just a bare Course() construction."""
+
+    def _course_block_with_override(
+        self, shortname: str, date: str, start_time: str,
+        duration_minutes: int | None = None, message: str | None = None,
+    ) -> str:
+        override_lines = [
+            "[[course.date_override]]",
+            f'date = "{date}"',
+            f'start_time = "{start_time}"',
+        ]
+        if duration_minutes is not None:
+            override_lines.append(f"duration_minutes = {duration_minutes}")
+        if message is not None:
+            override_lines.append(f'message = "{message}"')
+        return self._course_block(shortname) + "\n".join(override_lines) + "\n"
+
+    def test_no_date_override_table_is_an_empty_tuple(self):
+        toml_path = self._write(self._course_block("plain"))
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.course("plain").date_overrides, ())
+
+    def test_date_override_with_message_parses(self):
+        toml_path = self._write(self._course_block_with_override(
+            "trier", date="2026-07-18", start_time="09:45", message="I need to be in Kaiserslautern before 13h.",
+        ))
+        settings = load_settings(toml_path)
+        overrides = settings.course("trier").date_overrides
+        self.assertEqual(len(overrides), 1)
+        self.assertEqual(overrides[0].date, "2026-07-18")
+        self.assertEqual(overrides[0].start_time, "09:45")
+        self.assertEqual(overrides[0].message, "I need to be in Kaiserslautern before 13h.")
+        self.assertIsNone(overrides[0].duration_minutes)
+
+    def test_date_override_message_is_optional(self):
+        toml_path = self._write(self._course_block_with_override("trier", date="2026-07-18", start_time="09:45"))
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.course("trier").date_overrides[0].message, "")
+
+    def test_date_override_duration_minutes_is_optional_and_parsed_when_present(self):
+        toml_path = self._write(self._course_block_with_override(
+            "trier", date="2026-07-18", start_time="09:45", duration_minutes=60,
+        ))
+        settings = load_settings(toml_path)
+        self.assertEqual(settings.course("trier").date_overrides[0].duration_minutes, 60)
+
+    def test_multiple_date_overrides_on_the_same_course(self):
+        block = self._course_block("trier")
+        block += '[[course.date_override]]\ndate = "2026-07-18"\nstart_time = "09:45"\n'
+        block += '[[course.date_override]]\ndate = "2026-08-01"\nstart_time = "14:00"\n'
+        toml_path = self._write(block)
+        settings = load_settings(toml_path)
+        overrides = settings.course("trier").date_overrides
+        self.assertEqual([o.date for o in overrides], ["2026-07-18", "2026-08-01"])
 
 
 if __name__ == "__main__":

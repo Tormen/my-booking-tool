@@ -255,6 +255,25 @@ language    = "en"
 description = "Example weekly class. Replace this with your own description."
 # subtitle  = "Mondays -- Example Community Center"
 order_in_all_courses = 10
+# [[course.date_override]] (2026-07-16, the operator: "add a new config option
+# per course in settings.toml to exceptionally change time for a course
+# on a certain date"): any number of these per course (must come directly
+# after that course's own fields, before the next [[course]] block, same
+# TOML nested-array-of-tables rule as everywhere else), each a one-off
+# exception to the normal weekly weekday/start_time/duration_minutes
+# above, for exactly ONE date. `duration_minutes` is optional -- omit it
+# to keep the course's normal duration and only shift the start time.
+# `message` is optional free-text shown alongside the changed time
+# everywhere it's displayed -- the booking page, index.html (via a small
+# JS snippet fetching /schedule-exceptions -- see site/index.html.example),
+# and every confirmation/cancellation email for that date -- all as a red
+# "ATTENTION" callout. Omit `message` for just the changed time with no
+# explanation. No [[course.date_override]] at all (the default) changes
+# nothing.
+# [[course.date_override]]
+# date = "2026-08-03"
+# start_time = "09:00"
+# message = "Exceptionally an hour earlier this week only."
 
 [[course]]
 shortname  = "example-thursday-class"

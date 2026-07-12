@@ -1771,6 +1771,44 @@ escaped, so bold/italic/underline, links, and bullet lists all work --
 safe because this is your own settings.toml content, not attendee input, the
 same trust boundary as the hand-authored `site/*.html` pages).
 
+### Exceptional date/time overrides (`[[course.date_override]]`) (2026-07-16)
+
+A course can list any number of exceptional dates where it starts at a
+different time (and, optionally, runs a different length) than its usual
+weekly slot -- e.g. a one-off earlier start because the instructor has to
+leave early that day. Add one `[[course.date_override]]` sub-table per
+exceptional date, right after the `[[course]]` block it belongs to:
+
+```toml
+[[course.date_override]]
+date = "2026-07-18"           # required, "YYYY-MM-DD"
+start_time = "09:45"          # required, "HH:MM"
+duration_minutes = 60         # optional -- omit to keep the course's own duration
+message = "I need to be in Kaiserslautern before 13h."  # optional
+```
+
+`date` must match one of the course's normal weekly occurrence dates --
+this shifts an existing session's time, it does not add an extra one.
+`duration_minutes` only needs to be set if the session's length itself
+changes too; omitted, the course's normal duration is kept (so the end
+time still shifts along with the new start time). `message` is optional,
+free-text, and rendered as raw HTML (same operator-authored trust
+boundary as `description` above).
+
+Any upcoming override is shown automatically, with no further
+configuration: as a red "ATTENTION" line on that course's `/book/<shortname>`
+page (right below the subtitle), in every booking-related email that
+mentions that date (booking confirmed/waitlisted, promoted-from-waitlist,
+cancellation, rebook), and on `site/index.html` itself via a small
+`fetch('/schedule-exceptions')` call in that page's own `<script>` (same
+opportunistic, same-origin-fetch pattern as its Login/Logout banner --
+see that file's own comments). `GET /schedule-exceptions` is a public,
+read-only JSON endpoint listing every course's upcoming overrides
+(`course_shortname`, `course_title`, `date`, `time_label`, `message`),
+sorted by date then course -- past dates are left out. The operator's
+own synced calendar event and the guest's `.ics` email attachment both
+reflect the shifted time too, not just the web page/email text.
+
 ## Account confirmation (`/my`, `/my/reset`, `/my/confirm/<token>`)
 
 The booking page only ever asks for name + email -- there is no

@@ -111,6 +111,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from http import cookies
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
 
 from . import calendar_sync
 from . import cli_list
@@ -120,8 +121,8 @@ from .cancel_flow import (
     CANCELABLE_STATUSES, cancel_and_promote, cancel_occurrence, find_cancelable_registrations_for_occurrence,
 )
 from .cancellation import (
-    booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text, intro_html,
-    send_cancellation_emails, send_reinstatement_emails,
+    attention_html, booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text,
+    intro_html, send_cancellation_emails, send_reinstatement_emails,
 )
 from .config import Settings
 from .email_templates import load_email_template, render_template
@@ -608,6 +609,34 @@ def _course_subtitle_html(course) -> str:
     return f'<p class="subtitle">{esc(text)}</p>' if text else ""
 
 
+def _course_date_overrides_html(course, occurrences) -> str:
+    """One red ATTENTION line per exceptional date-override (Course.
+    date_overrides, 2026-07-16) that's actually still a real, currently
+    shown occurrence on this booking page -- deliberately cross-checked
+    against `occurrences` (not just "every override on this course"), so
+    a stale override left in settings.toml for a date that's already
+    past, or that fell off the schedule for some other reason (a
+    calendar conflict, say), never shows a banner for a session nobody
+    can actually book. the operator: "automatically be displayed as an
+    'ATTENTION'-message in red ... on ... the booking site for this
+    course." Empty string (no banner at all) when none of the shown
+    occurrences have a date-override.
+
+    override.message is operator-authored (settings.toml) -- same trust
+    boundary as Course.description, deliberately NOT esc()'d here, see
+    attention_html()'s own docstring."""
+    occ_dates = sorted({o.date.isoformat() for o in occurrences})
+    lines = [
+        f"On {esc(d)}, this session starts at <b>{esc(course.time_range_label_for(d))}</b> instead"
+        + (f" -- {msg}" if (msg := course.override_message_for(d)) else "")
+        for d in occ_dates
+        if course.override_for(d) is not None
+    ]
+    if not lines:
+        return ""
+    return attention_html("<br>".join(lines))
+
+
 def _course_recap_html(course, occ_date: str) -> str:
     """Thin wrapper around app.cancellation.course_recap_html (2026-07-09) --
     the WHAT/WHEN/WHERE(+description) recap shown on the booking-confirmation
@@ -825,6 +854,8 @@ class App:
     def route(self, method: str, path: str, environ) -> tuple[str, list, str]:
         if path == "/courses":
             return self.courses(method, environ)
+        if path == "/schedule-exceptions":
+            return self.schedule_exceptions(method, environ)
         if m := re.fullmatch(r"/book/([a-z0-9-]+)", path):
             return self.book(method, m.group(1), environ)
         if m := re.fullmatch(r"/cancel/([A-Za-z0-9_-]+)", path):
@@ -994,6 +1025,51 @@ class App:
                 )
             body = "".join(cards)
         return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Courses", body, banner=banner)
+
+    # -- /schedule-exceptions ---------------------------------------------------
+
+    def schedule_exceptions(self, method: str, environ):
+        """GET-only, public, JSON: every upcoming Course.date_overrides
+        entry across every configured course (2026-07-16, the operator: an
+        exceptional per-date time change should "automatically be
+        displayed as an 'ATTENTION'-message in red on index.html"). This
+        is the live data source site/index.html.example's own small JS
+        snippet fetches (same "opportunistic same-origin fetch, degrade
+        silently on any failure" pattern already used there for the
+        Login/Logout banner, see that file's own top-of-file comment) --
+        site/index.html itself is real, hand-maintained content ("MANAGED
+        BY YOU, NOT my-bt"), not generated/templated by this app the way
+        privacy.html is, so a live fetch is the only way to keep it
+        "automatic" without the operator ever having to hand-edit that file
+        whenever an exception is added or removed from settings.toml.
+
+        No maintenance-mode guard, no session/auth -- same "informational,
+        read-only, nothing to protect" reasoning as /courses being public
+        regardless of `audience`. Deliberately NO CalDAV conflict-check
+        (same "no network dependency" reasoning as `my-bt admin gdpr
+        erase`/every other CLI-side check that doesn't need one) -- a date
+        that later turns out calendar-conflicted just means a slightly
+        stale banner for a session that no longer exists; remove the
+        override from settings.toml if that ever actually happens.
+        Past dates (before today, in settings.timezone) are filtered out
+        so this doesn't grow forever."""
+        if method != "GET":
+            return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
+        today = datetime.now(ZoneInfo(self.settings.timezone)).date().isoformat()
+        items = [
+            {
+                "course_shortname": course.shortname,
+                "course_title": course.title,
+                "date": override.date,
+                "time_label": course.time_range_label_for(override.date),
+                "message": override.message,
+            }
+            for course in self.settings.courses
+            for override in course.date_overrides
+            if override.date >= today
+        ]
+        items.sort(key=lambda it: (it["date"], it["course_shortname"]))
+        return "200 OK", [("Content-Type", "application/json")], json.dumps(items)
 
     # -- /book ---------------------------------------------------------------
 
@@ -1810,6 +1886,10 @@ class App:
         # has full control of the server, so this isn't a new privilege
         # boundary, just a place raw HTML is intentionally allowed through.
         desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
+        # 2026-07-16, the operator: exceptional per-date time changes (Course.
+        # date_overrides) get a red ATTENTION banner right here, above the
+        # date picker -- see _course_date_overrides_html's own docstring.
+        overrides_html = _course_date_overrides_html(course, occurrences)
         # 2026-07-09, the operator (screenshot of /my showing 2 future confirmed
         # bookings the date-picker above never mentioned): "It could be
         # nice here, to show the user that he/she already booked the
@@ -1836,7 +1916,7 @@ class App:
                 key=lambda r: r.occurrence_date,
             )
         if not occurrences and not already_booked:
-            body = subtitle + desc_html + "<p>No dates currently available, please check back next week.</p>"
+            body = subtitle + overrides_html + desc_html + "<p>No dates currently available, please check back next week.</p>"
         elif not occurrences:
             # Nothing left TO book, but the guest does have other future
             # bookings for this course -- show those (still useful
@@ -1850,7 +1930,7 @@ class App:
                 for r in already_booked
             )
             body = (
-                subtitle + desc_html
+                subtitle + overrides_html + desc_html
                 + f'<label>Dates available<div class="dates" role="radiogroup" '
                 f'aria-label="Dates available">{already_booked_html}</div></label>'
                 + "<p>No further dates currently available, please check back next week.</p>"
@@ -1941,6 +2021,7 @@ class App:
                 )
             body = f"""
             {subtitle}
+            {overrides_html}
             {desc_html}
             {note_html}
             {err_html}
@@ -2860,7 +2941,7 @@ class App:
                 # no need to repeat it on every line too.
                 status_suffix = "" if updated.status == STATUS_CONFIRMED else f" -- {updated.status}"
                 confirmed_lines.append(
-                    f"{course.title} on {reg.occurrence_date} at {course.time_range_label()} "
+                    f"{course.title} on {reg.occurrence_date} at {course.time_range_label_for(reg.occurrence_date)} "
                     f"({course.location}){status_suffix}"
                 )
 

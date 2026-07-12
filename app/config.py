@@ -16,6 +16,34 @@ from pathlib import Path
 
 
 @dataclass(frozen=True)
+class CourseDateOverride:
+    """One exceptional date for a course -- 2026-07-16, the operator: "add a new
+    config option per course in settings.toml to exceptionally change
+    time for a course on a certain date. Optionally a message as
+    explanation ... It should be possible to set a LIST of dates with
+    different times." Parsed from a `[[course.date_override]]` sub-table
+    nested under the relevant `[[course]]` entry (see
+    settings.toml.example) -- one course can have any number of these.
+
+    `start_time` follows the exact same "HH:MM" convention as
+    Course.start_time. `duration_minutes` is optional -- omit it (None,
+    the default) to keep the course's own normal duration and only shift
+    the START time; set it to actually run long/short that one day too.
+    `message` is optional free-text shown alongside the exceptional time
+    everywhere it's displayed (booking page, index.html, every
+    confirmation/cancellation email for that occurrence) -- blank omits
+    it, showing just the changed time with no explanation."""
+    date: str  # "YYYY-MM-DD"
+    start_time: str  # "HH:MM"
+    duration_minutes: int | None = None
+    message: str = ""
+
+    def start_hm(self) -> tuple[int, int]:
+        h, m = self.start_time.split(":")
+        return int(h), int(m)
+
+
+@dataclass(frozen=True)
 class Course:
     shortname: str
     title: str
@@ -74,6 +102,11 @@ class Course:
     # ORGANIZER/ATTENDEE properties at all, byte-identical to before this
     # existed.
     host_calendar_entry_cc_list: tuple[str, ...] = ()
+    # 2026-07-16, the operator: exceptional per-date time changes -- see
+    # CourseDateOverride's own docstring above. Empty tuple (the default
+    # -- no `[[course.date_override]]` sub-tables in settings.toml) means
+    # no exceptions at all, byte-identical to before this existed.
+    date_overrides: tuple[CourseDateOverride, ...] = ()
 
     WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
     WEEKDAY_LABELS = {
@@ -126,6 +159,46 @@ class Course:
         (2026-07-10, the operator: "add the weekday to the TIME column (e.g. SAT
         10h45-12h45)")."""
         return f"{self.weekday.upper()} {self._fmt_hm(*self.start_hm())}-{self._fmt_hm(*self.end_hm())}"
+
+    def override_for(self, occ_date: str) -> CourseDateOverride | None:
+        """The CourseDateOverride for this exact "YYYY-MM-DD", if any --
+        the single lookup every other *_for() helper below and
+        app/slots.py::build_occurrences share, so a date match is only
+        ever defined in one place."""
+        return next((o for o in self.date_overrides if o.date == occ_date), None)
+
+    def start_hm_for(self, occ_date: str) -> tuple[int, int]:
+        override = self.override_for(occ_date)
+        return override.start_hm() if override else self.start_hm()
+
+    def duration_minutes_for(self, occ_date: str) -> int:
+        override = self.override_for(occ_date)
+        if override and override.duration_minutes is not None:
+            return override.duration_minutes
+        return self.duration_minutes
+
+    def end_hm_for(self, occ_date: str) -> tuple[int, int]:
+        h, m = self.start_hm_for(occ_date)
+        total = h * 60 + m + self.duration_minutes_for(occ_date)
+        return (total // 60) % 24, total % 60
+
+    def time_range_label_for(self, occ_date: str) -> str:
+        """Same shape as time_range_label(), but reflecting an exceptional
+        date's own overridden start/end if `occ_date` ("YYYY-MM-DD") has
+        one -- what every guest-facing "When:" line (booking page,
+        confirmation/cancellation emails, index.html) should call instead
+        of the plain time_range_label() from now on, so a one-off
+        schedule change is never silently shown with the wrong time."""
+        if self.override_for(occ_date) is None:
+            return self.time_range_label()
+        return f"{self._fmt_hm(*self.start_hm_for(occ_date))} - {self._fmt_hm(*self.end_hm_for(occ_date))}"
+
+    def override_message_for(self, occ_date: str) -> str:
+        """The optional explanation attached to `occ_date`'s override, or
+        "" if there's no override for that date, or the override has no
+        message (message is itself optional, see CourseDateOverride)."""
+        override = self.override_for(occ_date)
+        return override.message if override else ""
 
 
 @dataclass(frozen=True)
@@ -421,6 +494,15 @@ def load_settings(toml_path: str | Path) -> Settings:
             subtitle=c.get("subtitle"),
             order_in_all_courses=int(c.get("order_in_all_courses", 0)),
             host_calendar_entry_cc_list=tuple(c.get("host_calendar_entry_cc_list", [])),
+            date_overrides=tuple(
+                CourseDateOverride(
+                    date=o["date"],
+                    start_time=o["start_time"],
+                    duration_minutes=int(o["duration_minutes"]) if o.get("duration_minutes") is not None else None,
+                    message=o.get("message", ""),
+                )
+                for o in c.get("date_override", [])
+            ),
         )
         for c in raw.get("course", [])
     ]

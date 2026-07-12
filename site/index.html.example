@@ -47,11 +47,22 @@
  .login-btn { font-size: 0.85em; padding: 0.3em 0.9em; border: 1px solid #ccc; border-radius: 4px;
               text-decoration: none; color: #222; }
  .login-btn:hover { background: #f4f7f4; }
+ .attention { background: #fdecea; border: 1px solid #f5c2c0; border-radius: 8px;
+              padding: 0.8em 1.2em; margin: 0.6em 0; color: #a61b1b; }
+ .attention a { color: #a61b1b; }
 </style>
 </head>
 <body>
 
 <div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+
+<!-- 2026-07-16: exceptional per-date schedule changes (settings.toml's
+     [[course.date_override]], see app/config.py::CourseDateOverride) --
+     filled in by the <script> at the bottom of <body>, same opportunistic
+     same-origin-fetch pattern as the Login/Logout swap above. Left empty
+     (no banner at all) whenever nothing's coming up. Keep this div -- move
+     it if you like, but don't remove the id. -->
+<div id="schedule-exceptions"></div>
 
 <h1>REPLACE-ME-YOUR-SITE-NAME</h1>
 
@@ -88,6 +99,33 @@
         '</form>';
     })
     .catch(function () { /* stay on the plain Login button */ });
+})();
+</script>
+
+<script>
+// Schedule exceptions (2026-07-16): fetches app/webapp.py::schedule_exceptions,
+// a public/read-only JSON list of upcoming [[course.date_override]] entries
+// across every course, and renders one red ATTENTION line per item. course_title/
+// message are operator-authored (settings.toml, same trust boundary as course
+// description elsewhere in this app) -- deliberately not escaped here, exactly
+// like that content isn't escaped server-side either. Opportunistic only: any
+// failure (network, JS disabled) just leaves the page with no banner at all,
+// same as before this existed.
+(function () {
+  fetch('/schedule-exceptions', { credentials: 'same-origin' })
+    .then(function (r) { return r.json(); })
+    .then(function (items) {
+      if (!items || !items.length) return;
+      var el = document.getElementById('schedule-exceptions');
+      if (!el) return;
+      el.innerHTML = items.map(function (it) {
+        var msg = it.message ? ' -- ' + it.message : '';
+        return '<div class="attention"><b>⚠ ATTENTION:</b> ' + it.course_title +
+          ' on ' + it.date + ' starts at ' + it.time_label + ' instead' + msg +
+          ' -- <a href="/book/' + it.course_shortname + '">details</a></div>';
+      }).join('');
+    })
+    .catch(function () { /* leave the page exactly as-is */ });
 })();
 </script>
 
