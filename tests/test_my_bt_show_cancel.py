@@ -235,9 +235,9 @@ class CancelSmartQueryTest(_MyBtCliTestBase):
 
 
 class CancelConfirmationPromptTest(_MyBtCliTestBase):
-    """2026-07-09, the operator: "Please present the booking in the form like show
-    (for the fields you line up here in 1 line). and then ask below that:
-    Cancel ? - Type 'yes' to confirm:" -- covers the actual interactive
+    """2026-07-09: the booking is presented in the form like show
+    (fields lined up in 1 line), then below that: Cancel ? - Type 'yes'
+    to confirm -- covers the actual interactive
     (no --yes) confirmation path, which CancelSmartQueryTest above never
     exercises (every one of its cases passes --yes, skipping this prompt
     entirely)."""

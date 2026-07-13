@@ -79,7 +79,7 @@ class BuildOccurrencesTest(unittest.TestCase):
 
 
 class BuildOccurrencesDateOverrideTest(unittest.TestCase):
-    """2026-07-16, the operator's per-course date_overrides feature -- occurrences
+    """2026-07-16: the per-course date_overrides feature -- occurrences
     for an overridden date must use the shifted start/end (and duration,
     when the override sets one), while every OTHER date on the same course
     stays completely unaffected."""

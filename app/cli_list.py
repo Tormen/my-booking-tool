@@ -18,10 +18,9 @@ from .storage import format_display_timestamp, status_label
 
 def _format_display_date(iso_str: str) -> str:
     """Date-only rendering of a now_iso()-produced (or any ISO-8601)
-    timestamp -- YYYY-MM-DD, no time-of-day, ever. 2026-07-08, the operator,
-    looking at `my-bt users`'s joined/last_login columns: "please only
-    use YYYY-MM-DD for the columns and only with -V show also the
-    timestamp" -- unlike format_display_timestamp() (which still shows
+    timestamp -- YYYY-MM-DD, no time-of-day, ever. 2026-07-08:
+    `my-bt users`'s joined/last_login columns should only show
+    YYYY-MM-DD, with the full timestamp only shown via -V -- unlike format_display_timestamp() (which still shows
     the time-of-day when it isn't exactly midnight), this ALWAYS drops
     it; the full timestamp is only ever shown when the caller explicitly
     asks for verbose output (see build_clean_user_view's own `verbose`
@@ -40,9 +39,8 @@ def compute_last_confirmed_course(rows: list[dict], today: date) -> dict[str, st
     CONFIRMED registration with occurrence_date today-or-earlier ("today
     counts as already happened", same convention as
     compute_times_booked_counts/app.cli_stats.compute_last_and_next_
-    slot). 2026-07-08, the operator: "please have name joined last_login
-    last_course email ... last_course = last confirmed course" -- a new
-    column on `my-bt users`'s clean view.
+    slot). 2026-07-08: added last_course (last confirmed course) as a new
+    column on `my-bt users`'s clean view, alongside name/joined/last_login/email.
 
     `rows` should be ALL registrations regardless of the users list's
     own --live/--archive/--all scope (e.g. Store.read_registrations(
@@ -66,15 +64,14 @@ def compute_last_confirmed_course(rows: list[dict], today: date) -> dict[str, st
             course_by_user[r["user_id"]] = r["course_shortname"]
     return course_by_user
 
-# 2026-07-13, the operator: "would it be possible that my-bt lists a short-id that
-# can also be used with my-bt cancel to cancel a booking? a bit like what
-# git does with its commit ids ... please add this shortened ID to my-bt
-# list (not to the web interface as there we have the cancel button)."
+# 2026-07-13: `my-bt list` gained a short-id, usable with `my-bt cancel`
+# to cancel a booking, similar to how git references commits by a short
+# abbreviated hash -- CLI-only, not added to the web interface, which
+# already has a cancel button.
 #
-# 2026-07-08, the operator, looking at a real `my-bt list` full of ~23-char
-# "short" ids: "is there no way to have a shorter 'shorter ID'? ... I
-# said like git and there they have 6 chars I believe to reference the
-# commit". Root cause of the 23 chars: a live-registration universe isn't
+# 2026-07-08: a real `my-bt list` full of ~23-char "short" ids showed
+# there wasn't actually a way to have a SHORTER "short id" (git manages
+# 6 chars for the same purpose). Root cause of the 23 chars: a live-registration universe isn't
 # ALWAYS fresh uuid4s -- migrated SimplyMeet.me registrations get a
 # deterministic registration_id, "simplymeet-<numeric id>" (see
 # app/migrate_simplymeet.py's REGISTRATION_ID_PREFIX), so hundreds of
@@ -179,7 +176,7 @@ def annotate_admin_party_label(rows: list[dict], users_by_id: dict[str, dict]) -
     """Adds a "party_label" column matching app/webapp.py's admin_overview()
     Guests column EXACTLY: "" for a solo booking, "Guest of <name>" (falling
     back to the leader's email if their name is the "Guest" placeholder --
-    2026-07-08, the operator: "Is guest of Guest correct??" -- technically yes, but
+    2026-07-08: "Guest of Guest" is technically correct but
     unreadable, see admin_overview()'s own comment on this) on a guest's own
     row, "Host (+N guest(s))" on the leader's row.
 
@@ -188,8 +185,8 @@ def annotate_admin_party_label(rows: list[dict], users_by_id: dict[str, dict]) -
     used by `my-bt show`/`history`'s existing output, kept as-is so those
     don't change shape. This one exists specifically so `my-bt list`'s
     2026-07-13 clean default view can show the IDENTICAL column /admin's
-    own web table shows (2026-07-13, the operator: "for my-bt list: can you
-    mimick the view of the web-interface?") -- extracted from
+    own web table shows (2026-07-13: `my-bt list` should mimic the
+    web-interface's own view) -- extracted from
     admin_overview()'s own inline version of this same logic so the two
     can never drift apart; admin_overview() now calls this too instead of
     keeping a second copy.
@@ -233,8 +230,8 @@ def compute_times_booked_counts(rows: list[dict], today: date) -> tuple[Counter,
     status, any date); upto_now_by_user restricts to occurrence_date <=
     today. Same computation, same "N/total" up-to-now-over-total framing,
     app/webapp.py's admin_overview() uses for its own Times booked column
-    (2026-07-08, the operator: "actually even better: make it 2/9 ... so that I
-    see the total and also see the current time they joined") -- `rows`
+    (2026-07-08: shows both the up-to-now count and the total, e.g.
+    "2/9") -- `rows`
     should be ALL registrations (live + archived, e.g.
     Store.read_registrations(scope="all")), same as admin_overview()'s own
     `all_regs`, so an erased-but-never-rebooked attendee's true historical
@@ -251,17 +248,16 @@ def build_clean_registration_view(
     short_ids_by_reg_id: dict[str, str] | None = None, verbose: bool = False,
 ) -> list[dict]:
     """Builds the compact, human-readable rows `my-bt list` shows by
-    default (2026-07-13, the operator: "the default command shows it cleaned up
-    without technical ids... can you mimick the view of the
-    web-interface?") -- Date, Id, Status, Course, Name, Email, Times
+    default (2026-07-13: the default command shows a cleaned-up view
+    with no technical ids, mimicking the web interface's own view) --
+    Date, Id, Status, Course, Name, Email, Times
     booked, plus Registered/Guests when `verbose` (see below). No
     registration_id/user_id/party_id/invited_by_user_id/token hashes --
     pass -r/--raw for the full raw CSV-column view instead (see
     scripts/my-bt's cmd_list).
 
-    2026-07-08, the operator: "put [date] as first column" -- "date" leads every
-    row (it was 4th, after id/status/course); "Please don't show when
-    they registered by default but only with my-bt list -V" -- the
+    2026-07-08: "date" now leads every
+    row (it was 4th, after id/status/course); the
     "registered" column (registration timestamp) is now OMITTED unless
     `verbose=True` (scripts/my-bt's cmd_list wires this to -V/--verbose,
     the same "adds more detail on top of the summary" axis already used
@@ -273,22 +269,21 @@ def build_clean_registration_view(
     added "date first" column reads top-to-bottom in the order it's
     sorted by.
 
-    2026-07-08, same day, the operator looking at a fresh `list` output: "the
-    'guests' here is additional fluff as any guest will have their own
-    line here, correct? if yes, then please also only show with -V" --
-    correct: every party member (leader AND each guest they bring) is
+    2026-07-08, same day: the "guests" column was additional fluff,
+    since any guest already has their own line here -- every party
+    member (leader AND each guest they bring) is
     already its own row in `rows` (one registration = one row), so the
     "guests"/party_label column is a convenience summary of something
     that's already fully visible across the other rows, same spirit as
     "registered". Now gated behind the SAME `verbose` flag as
     "registered", not a separate one.
 
-    ONE exception to "no ids" (2026-07-13, same day, the operator's very next
-    message): a leading -- well, now second -- "id" column with a short,
+    ONE exception to "no ids" (2026-07-13, same day): a leading -- well,
+    now second -- "id" column with a short,
     git-style abbreviated registration_id (see assign_short_ids), usable
-    with `my-bt cancel` -- "a bit like what git does with its commit
-    ids". Deliberately CLI-only, never shown on the web (the operator: "not to
-    the web interface as there we have the cancel button") -- pass
+    with `my-bt cancel`, similar to how git references commits by a
+    short hash. Deliberately CLI-only, never shown on the web (the web
+    interface already has a cancel button) -- pass
     `short_ids_by_reg_id` (see scripts/my-bt's cmd_list for how it's
     built, from the LIVE registration_id universe only) to populate it;
     omit/None leaves every row's "id" blank (e.g. an archived row, which
@@ -342,14 +337,15 @@ def build_clean_user_view(
     already stripped upstream by cmd_users before this ever runs, same as
     -r/--raw still does.
 
-    2026-07-08, the operator, re-ordering + two more changes in the same
-    message:
-    - "please have name joined last_login last_course email" -- email
+    2026-07-08, re-ordering + two more changes in the same
+    change:
+    - column order became name/joined/last_login/last_course/email --
+      email
       moves from 2nd to LAST; new "last_course" column added (see
       compute_last_confirmed_course -- pass its result as
       `last_course_by_user`; a user_id absent from that dict, e.g. no
       confirmed history yet, gets a blank cell).
-    - "please only make email as wide as needed!" -- root cause of the
+    - email column made only as wide as needed -- root cause of the
       column being far wider than any real email: an ERASED (archived)
       user's "email" field is a long keyed HMAC hash (see
       app/security.py's hash_email_for_erasure, "erased:<64 hex chars>"),
@@ -357,16 +353,16 @@ def build_clean_user_view(
       "[erased]" instead -- matching "name"'s own existing "[erased]"
       placeholder for the same rows -- so the column is only ever as wide
       as a real display value needs.
-    - "please only use YYYY-MM-DD for the columns and only with -V show
-      also the timestamp" -- joined/last_login are date-only
+    - joined/last_login now show only YYYY-MM-DD, with the full
+      timestamp shown only via -V -- joined/last_login are date-only
       (_format_display_date) unless `verbose=True` (scripts/my-bt's
       cmd_users wires this to a new -V/--verbose flag, same "more detail
       on top of the summary" axis as `list -V`/the old `gdpr-retention -V`), in
       which case the full format_display_timestamp() rendering (date, or
       date_HHMM.SS when there's a real time-of-day) is used instead.
 
-    2026-07-10, the operator: "already shows last_login! so lets add a column:
-    session still active?" -- `active_sessions` is the set of lowercased
+    2026-07-10: since this view already shows last_login, a "session
+    still active?" column was added too -- `active_sessions` is the set of lowercased
     emails scripts/my-bt's cmd_users resolved as currently logged in (via
     /internal/status, the same source `my-bt status`'s own "logged-in
     users" table reads -- see _query_internal_status). Three possible
@@ -474,23 +470,22 @@ def merge_archived_for_display(store, settings, live_users: list[dict], archived
     those archived rows with the LIVE user_id -- WITHOUT writing anything
     to disk.
 
-    2026-07-13, the operator: "/admin should [be] non-mutating" -- both `my-bt
+    2026-07-13: /admin should be non-mutating -- both `my-bt
     list --all`/`--past` and app/webapp.py's admin_overview() call this
     instead of the previous behavior (silently rewriting the CSVs on
     every page/command load).
 
-    2026-07-14, the operator: the former `my-bt admin dearchive` command (and
+    2026-07-14: the former `my-bt admin dearchive` command (and
     Store.merge_archived_registrations, the mutating method backing it)
-    were removed entirely -- "a clear GDPR violation": permanently
+    were removed entirely -- a clear GDPR violation, since permanently
     re-attaching pre-erasure history onto a live, identifiable account
     undoes the point of an Art. 17 erasure. This function is unaffected
     and stays exactly as-is: it's read-only, nothing is ever persisted,
-    and the operator explicitly confirmed this on removing dearchive: "the
-    implicit functionality of this baked into /admin and my-bt list
-    should stay."
+    and the implicit functionality of this baked into /admin and
+    my-bt list is meant to stay.
 
     Same duplicate-avoidance rule the removed mutating method used to
-    have (2026-07-10, the operator's own bug report): an archived row is DROPPED
+    have (2026-07-10, from a real bug report): an archived row is DROPPED
     entirely -- not relabeled, not shown at all -- if the live account it
     would relabel onto already has its own live row for that exact
     (course_shortname, occurrence_date). Showing both would look like two

@@ -59,8 +59,8 @@ class FakeTransport:
     def __init__(self, report_body: str = EMPTY_REPORT, conflicts_before_success: int = 0):
         self.calls = []
         self.report_body = report_body
-        # 2026-07-07, the operator (a real production 500 on /my/confirm,
-        # root-caused to a stale-ETag CalDAV 412): simulates that race --
+        # 2026-07-07: a real production 500 on /my/confirm was
+        # root-caused to a stale-ETag CalDAV 412; simulates that race --
         # the first `conflicts_before_success` PUT/DELETE calls return 412
         # Precondition Failed (a stale If-Match), then every one after
         # that succeeds normally, same shape as the real incident (a
@@ -141,8 +141,8 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         )
 
     def test_includes_cancel_entire_session_link_alongside_per_participant_links(self):
-        # 2026-07-13, the operator: "the CALDAV invite needs BOTH: cancel link per
-        # participant AND the course cancel link for ALL of them" -- a
+        # 2026-07-13: the CALDAV invite needs BOTH a cancel link per
+        # participant AND the course cancel link for ALL of them -- a
         # second, always-present link for canceling the whole occurrence at
         # once (app.cancel_flow.cancel_occurrence via
         # app/webapp.py::host_cancel_occurrence), alongside each
@@ -222,7 +222,7 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
     def test_zero_active_deletes_event_even_with_canceled_and_waitlisted_present(self):
         # The one confirmed registrant cancels -- zero active remain. Even
         # though a waitlisted and a canceled row still exist for this
-        # occurrence, the event must still be deleted (the operator's spec: only
+        # occurrence, the event must still be deleted (by spec: only
         # ALL participants canceling -- i.e. zero ACTIVE -- removes the
         # invite; canceled/waitlisted counts never factor in).
         self._add("waiter@example.org", STATUS_WAITLISTED)
@@ -244,8 +244,8 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         self.assertIn("PUT", methods)
         self.assertNotIn("DELETE", methods)
 
-    # -- reminders (2026-07-07, the operator: "make the reminders (list) a setting.
-    # But default to NO reminders" for the trainer's own event) ------------
+    # -- reminders (2026-07-07: the reminders (list) became a setting,
+    # defaulting to NO reminders, for the trainer's own event) ------------
 
     def test_operator_event_has_no_alarms_by_default(self):
         self._add("stays@example.org", STATUS_CONFIRMED)
@@ -264,7 +264,7 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         self.assertIn("BEGIN:VALARM", put_body)
         self.assertIn("TRIGGER:-PT30M", put_body)
 
-    # -- stale-ETag conflict retry (2026-07-07, the operator: a real production
+    # -- stale-ETag conflict retry (2026-07-07: a real production
     # 500 on /my/confirm, root-caused via journalctl to "PUT ... -> HTTP
     # 412 ... a newer version of the appointment already exists" -- a
     # same-second retry worked on its own, i.e. genuinely transient) ------
@@ -291,9 +291,9 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
         self.assertEqual(methods.count("DELETE"), 2)
 
     def test_persistent_conflict_logs_a_debug_hint_when_the_etag_never_actually_changes(self):
-        # 2026-07-16, the operator: "But there must be another problem with the
-        # Calendar. Please do NOT retry more often!!! But rather collect
-        # DEBUG OUTPUT please!!!" -- if the etag we re-read after a 412
+        # 2026-07-16: retrying more often wasn't fixing the underlying
+        # calendar problem, so debug output is collected instead -- if the
+        # etag we re-read after a 412
         # is the exact SAME one every time (as simulated here via
         # _report_with_event's fixed etag), that's specifically NOT what
         # a genuinely concurrent writer racing us should look like (that
@@ -312,8 +312,8 @@ class SyncOccurrenceInviteBodyTest(unittest.TestCase):
 
 
 class SyncOccurrenceSequenceTest(unittest.TestCase):
-    """2026-07-16, the operator, root-caused via his own collected DEBUG output
-    (not by retrying harder): a real production incident where EVERY
+    """2026-07-16: root-caused via collected DEBUG output
+    (not by retrying harder) -- a real production incident where EVERY
     single UPDATE to an already-existing operator calendar event failed
     with a permanent (not intermittent) HTTP 412, while a brand-new
     create succeeded fine. Open-Xchange's own error said why:
@@ -438,8 +438,8 @@ def parse_sequence_for_test(ics_or_report_text: str) -> int:
 
 
 class ResyncAfterCourseRenameTest(unittest.TestCase):
-    """2026-07-08, the operator: "rename lux-wed-mindfulness to lux-wed-mind ...
-    provide a command to migrate the existing data" -- event_uid() bakes
+    """2026-07-08: renaming lux-wed-mindfulness to lux-wed-mind required
+    a command to migrate the existing data -- event_uid() bakes
     the course_shortname directly into the calendar event's UID, so a
     renamed course's already-synced future occurrences would otherwise be
     orphaned under their OLD uid forever, with a fresh duplicate created
@@ -561,10 +561,10 @@ class ResyncAfterCourseRenameTest(unittest.TestCase):
 
 
 class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
-    """2026-07-09, the operator, on noticing a real occurrence's calendar invite was
-    still missing the "cancel entire session" line added days earlier:
-    "please ensure that the existing (future) calendar invites are updated
-    as well" -- then narrowed to HOST-side events only, since an
+    """2026-07-09: a real occurrence's calendar invite was found to be
+    still missing the "cancel entire session" line added days earlier, so
+    existing (future) calendar invites now get updated as well -- then
+    narrowed to HOST-side events only, since an
     already-emailed guest .ics can't be retroactively edited. See
     resync_all_future_calendar_events's own docstring. Same discovery logic
     as ResyncAfterCourseRenameTest above, just across every configured
@@ -709,14 +709,13 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
         self.assertIn("2026-07-10", result.skipped[0])
 
     def test_persistent_conflict_gets_the_same_attempt_count_as_a_live_request(self):
-        # 2026-07-16, the operator ("Please make the calendar sync work :)"),
-        # after a real bulk resync hit persistent conflicts on 3
-        # occurrences: a prior version of this gave the bulk resync path
+        # 2026-07-16: after a real bulk resync hit persistent conflicts on
+        # 3 occurrences, a prior version of this gave the bulk resync path
         # MORE attempts with real backoff than a live request gets,
         # reasoning it was probably just an active concurrent writer.
-        # the operator's follow-up reverted that: "But there must be another
-        # problem with the Calendar. Please do NOT retry more often!!!
-        # But rather collect DEBUG OUTPUT please!!!" So the bulk resync
+        # A follow-up report showed retrying more often wasn't fixing the
+        # underlying calendar problem, and debug output was needed
+        # instead. So the bulk resync
         # now gets the EXACT same _SYNC_CONFLICT_MAX_ATTEMPTS (3,
         # zero-delay) as a live booking/cancellation request -- no
         # special case, no sleeping. This test locks that in.
@@ -748,16 +747,15 @@ class ResyncAllFutureCalendarEventsTest(unittest.TestCase):
 
 
 class ResyncIfFormatChangedTest(unittest.TestCase):
-    """2026-07-14: the "on install" half of the operator's own standing request
-    (2026-07-09: "maybe either on install or on the next moment you touch
-    this calendar invite again ?") -- resync_if_format_changed() only
+    """2026-07-14: the "on install" half of a standing request
+    (2026-07-09: resync either on install or on the next moment this
+    calendar invite is touched again) -- resync_if_format_changed() only
     actually resyncs when CALENDAR_INVITE_FORMAT_VERSION doesn't match a
     marker file recorded under the data dir, so `my-bt setup -i` can call
     this unconditionally on every run without re-syncing every single
-    time it's invoked. 2026-07-16, the operator, after being told a previous
-    incident's fix wouldn't take effect until he separately ran `my-bt
-    admin resync-calendar` by hand: "but WHY can't my-bt setup then NOT
-    to THIS???" -- fair complaint, so this ALSO now resyncs whenever a
+    time it's invoked. 2026-07-16: after a previous incident's fix didn't
+    take effect until `my-bt admin resync-calendar` was separately run by
+    hand, this ALSO now resyncs whenever a
     previous attempt left pending skips recorded, independent of the
     format-version marker; see test_pending_skips_trigger_a_resync_even_
     when_the_format_marker_already_matches below."""
@@ -826,8 +824,8 @@ class ResyncIfFormatChangedTest(unittest.TestCase):
         self.assertEqual(transport.calls, [])
 
     def test_pending_skips_trigger_a_resync_even_when_the_format_marker_already_matches(self):
-        # 2026-07-16, the operator: "but WHY can't my-bt setup then NOT to
-        # THIS???" -- a stale skip marker left over from a PREVIOUS,
+        # 2026-07-16: `my-bt setup` needed to catch this too -- a stale
+        # skip marker left over from a PREVIOUS,
         # already-fixed-in-the-meantime incident used to just sit there
         # forever (repeated in every `admin health`/`admin setup` as a
         # WARN, exit 1) because the format-version marker already
@@ -984,8 +982,8 @@ class RecordResyncSkipsTest(unittest.TestCase):
 
 
 class GuestInviteAndCancelIcsTest(unittest.TestCase):
-    """2026-07-09, the operator: "Can you please attach a calendar invite also in
-    the email that is sent to the participant?" -- guest_invite_ics()
+    """2026-07-09: a calendar invite is also attached to
+    the email that is sent to the participant -- guest_invite_ics()
     (confirmed booking, METHOD:PUBLISH) and guest_cancel_ics() (later
     cancellation, METHOD:CANCEL, "Let's be nice :)"). Both are personal,
     single-guest .ics builders meant as EMAIL ATTACHMENTS, distinct from
@@ -1025,14 +1023,14 @@ class GuestInviteAndCancelIcsTest(unittest.TestCase):
         self.assertNotIn("BEGIN:VALARM", ics_text)
 
     def test_invite_defaults_to_exactly_one_reminder_1h_before(self):
-        # 2026-07-07, the operator: "The invites to the course participants should
-        # have reminder 1h before the meeting."
+        # 2026-07-07: the invites to the course participants should
+        # have a reminder 1h before the meeting.
         _filename, ics_text = guest_invite_ics(self.settings, self.course, date(2026, 8, 1))
         self.assertEqual(ics_text.count("BEGIN:VALARM"), 1)
         self.assertIn("TRIGGER:-PT60M", ics_text)
 
     def test_date_override_shifts_dtstart_and_dtend(self):
-        # 2026-07-16, the operator's per-course date_overrides feature: the
+        # 2026-07-16: the per-course date_overrides feature means the
         # guest's own .ics attachment must reflect the exceptional
         # shifted time too, same as the operator's synced calendar event
         # (both go through the shared occurrence_start_end()).
@@ -1076,9 +1074,9 @@ class GuestInviteAndCancelIcsTest(unittest.TestCase):
 
 
 class SyncOccurrenceHostCalendarEntryCcListTest(unittest.TestCase):
-    """2026-07-14, the operator: "list of email addresses that if set on a course
+    """2026-07-14: a list of email addresses that if set on a course
     in settings.toml will also be invited as optional (cc) so that they
-    receive the same invite as well." -- sync_occurrence()'s own HOST
+    receive the same invite as well -- sync_occurrence()'s own HOST
     event, not the guest .ics (guest_invite_ics is untouched by this)."""
 
     def setUp(self):

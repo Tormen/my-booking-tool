@@ -1,10 +1,10 @@
 """Direct unit coverage for app/cancellation.py's shared booking-detail
 generators -- previously only exercised indirectly through the full email
 flows in test_webapp.py/test_book_guests.py/test_cli_cancel.py. Added
-2026-07-09 alongside course_recap_html()/html_email_body() (the operator: "Please
-use yoga emoji for the What" / "format description in email as on page ...
-box the description and put the background color (as on the page)" /
-"Can be always the same code that generates this for the page or email"),
+2026-07-09 alongside course_recap_html()/html_email_body() (a yoga emoji
+was requested for the What line; the description formatting was requested
+to match the page, including the boxed background color; and the same code
+should generate this for both the page and email),
 since those are new, easy-to-drift-apart pieces worth pinning down on
 their own rather than only ever asserting on giant end-to-end email
 bodies."""
@@ -32,10 +32,10 @@ class BookingDetailsTextTest(unittest.TestCase):
         self.assertLess(details.index("When:"), details.index("Where:"))
 
     def test_message_sits_above_the_description_not_after_it(self):
-        # 2026-07-11, the operator (screenshot of a Reinstated email with "Message:
-        # you are on again" printed AFTER the whole course description):
-        # "please place the msg block ABOVE the description and if there is
-        # no message, leave it out."
+        # 2026-07-11: a Reinstated email was found with "Message:
+        # you are on again" printed AFTER the whole course description --
+        # the msg block now goes ABOVE the description, and is left out
+        # entirely if there is no message.
         course = make_course(description="Bring your own mat.")
         details = booking_details_text(course, "2026-07-11", message="you are on again")
         self.assertLess(details.index("Where:"), details.index("Message:"))
@@ -47,9 +47,9 @@ class BookingDetailsTextTest(unittest.TestCase):
         self.assertNotIn("Message:", details)
 
     def test_date_override_adds_an_attention_line_above_the_description(self):
-        # 2026-07-16, the operator: "the emails concerning this slot with time
+        # 2026-07-16: emails concerning this slot with time
         # exceptions should also contain the ATTENTION with optional msg
-        # block up in the email" -- looked up automatically from
+        # block up in the email -- looked up automatically from
         # Course.date_overrides, no per-call-site plumbing needed.
         course = make_course(
             description="Bring your own mat.",
@@ -108,8 +108,8 @@ class CourseRecapHtmlTest(unittest.TestCase):
         self.assertIn("<b>\U0001F4CD Where:</b>", html)
 
     def test_description_is_boxed_with_a_background_color(self):
-        # the operator: "box the description and put the background color (as on
-        # the page)" -- inline-styled (not class-based) so this exact
+        # The description is boxed with the background color (as on
+        # the page) -- inline-styled (not class-based) so this exact
         # markup also renders correctly embedded in an HTML email, where
         # a <style> block/class isn't reliable across mail clients.
         course = make_course(description="<p>Bring your own mat.</p>")
@@ -130,8 +130,8 @@ class CourseRecapHtmlTest(unittest.TestCase):
         self.assertNotIn("<Studio>", html)
 
     def test_message_sits_above_the_description_not_after_it(self):
-        # See BookingDetailsTextTest's twin test above for the full the operator
-        # quote -- same fix, HTML side.
+        # See BookingDetailsTextTest's twin test above for the full
+        # rationale -- same fix, HTML side.
         course = make_course(description="<p>Bring your own mat.</p>")
         html = course_recap_html(course, "2026-07-11", message="you are on again")
         self.assertLess(html.index("Where:"), html.index("Message:"))
@@ -170,7 +170,7 @@ class CourseRecapHtmlTest(unittest.TestCase):
 
 
 class AttentionHtmlTest(unittest.TestCase):
-    """2026-07-16, the operator: "displayed as an 'ATTENTION'-message in red"."""
+    """2026-07-16: displayed as an 'ATTENTION'-message in red."""
 
     def test_has_a_red_box_and_the_attention_label(self):
         rendered = attention_html("starts earlier")
@@ -197,9 +197,9 @@ class HtmlEmailBodyTest(unittest.TestCase):
 
 
 class IntroHtmlTest(unittest.TestCase):
-    """2026-07-10, the operator: "please make the first sentance in email a bit
-    more visible (bold mayb and for sure larger font size...) ... same of
-    course for ALL emails" -- shared by every html_body-carrying email
+    """2026-07-10: the first sentence in an email is made more
+    visible (bold and a larger font size), consistently across ALL
+    emails -- shared by every html_body-carrying email
     (booking confirmed/waitlisted, cancellation participant+admin,
     promoted-from-waitlist guest+admin)."""
 
@@ -219,8 +219,8 @@ class IntroHtmlTest(unittest.TestCase):
 
 
 class GreetingHtmlTest(unittest.TestCase):
-    """2026-07-08, the operator: "they should now all start with 'Dear <NAME>',
-    correct?" -- closes the gap between _send_confirm_email() (already had
+    """2026-07-08: emails should all start with 'Dear <NAME>' --
+    closes the gap between _send_confirm_email() (already had
     this) and the guest-facing booking-result/cancellation/reinstatement
     emails (didn't). Deliberately plain/non-bold, unlike intro_html()'s
     bold status sentence right after it -- a greeting isn't the "most
@@ -238,9 +238,9 @@ class GreetingHtmlTest(unittest.TestCase):
 
 
 class MessageHtmlTest(unittest.TestCase):
-    """2026-07-10, the operator: "the message from the comment field should
+    """2026-07-10: the message from the comment field should
     always be displayed like this: light grey background with the
-    message" -- shared by both send_cancellation_emails() and
+    message -- shared by both send_cancellation_emails() and
     send_reinstatement_emails()'s optional comment/reason."""
 
     def test_has_a_light_grey_background_box(self):
@@ -258,7 +258,7 @@ class MessageHtmlTest(unittest.TestCase):
         self.assertIn("<b>Message:</b>", rendered)
 
     def test_custom_label_is_used_instead(self):
-        # 2026-07-09, the operator (b): send_cancellation_emails's participant copy
+        # 2026-07-09: send_cancellation_emails's participant copy
         # passes a direction-aware label instead of the plain default.
         rendered = message_html("running late, sorry", label="Message from the host:")
         self.assertIn("<b>Message from the host:</b>", rendered)

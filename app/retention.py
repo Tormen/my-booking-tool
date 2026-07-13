@@ -21,15 +21,16 @@ are needed to recognize returning guests -- an unconfirmed user row left
 behind by an expired pending registration is just an inert, password-less
 row, same as any other).
 
-2026-07-09, the operator: send_account_deletion_warnings() below (run from the same
+2026-07-09: send_account_deletion_warnings() below (run from the same
 nightly timer, right after run_purge() in main()) emails a dormant account
 ONE warning as it approaches `retention_months` of inactivity (User.
 last_login_at, falling back to created_at) -- see that function's own
 docstring for the full story.
 
-2026-07-14, the operator, closing the gap flagged above: "yes regardless" (of
-whether the warning email is even enabled) and "this must be tied to the
-retention_months exactly (this is the GDPR law)" -- purge_dormant_accounts()
+2026-07-14, closing the gap flagged above: this must apply regardless of
+whether the warning email is even enabled, and must be tied to
+retention_months exactly, since that's the actual GDPR-mandated window --
+purge_dormant_accounts()
 below now actually ERASES (archives with a hashed email, same as any other
 erasure -- see app.erasure.erase_user_by_email) every account past that
 same retention_months deadline, unconditionally: it does not care whether
@@ -169,28 +170,28 @@ def run_purge(
 def send_account_deletion_warnings(
     store: Store, settings: Settings, today: date | None = None, now: datetime | None = None,
 ) -> int:
-    """2026-07-09, the operator: "Our scheduler that then deletes accounts should
-    detect imminent accounts that would need to be deleted and then send
-    out such an email" (a dormant-account warning email, prompted by a
-    Notion account-cleanup notice he forwarded as an example: "your
-    account will be deleted in 90 days unless you log in"). Runs from the
+    """2026-07-09: the scheduler that deletes accounts should also detect
+    imminent accounts that would need to be deleted and send a warning
+    email first (a dormant-account warning email, the same idea as a
+    typical "your account will be deleted in 90 days unless you log in"
+    notice). Runs from the
     SAME nightly systemd timer as run_purge() above (see main() below) --
-    the operator's own mental model is "the scheduler that deletes accounts",
-    and this file is already that scheduler.
+    this file is already "the scheduler that deletes accounts", so the
+    warning belongs alongside it.
 
     A no-op entirely (returns 0, touches nothing) when
     settings.account_deletion_warning_days <= 0 -- see that field's own
     docstring in app/config.py for the three equivalent ways to disable
     it (0, blank, or the key simply omitted from settings.toml).
 
-    Deliberately reuses `retention_months` (the operator: "there is already a
-    variable that defines the duration, I believe currently 2 years")
-    as the actual dormancy threshold, rather than adding a second
+    Deliberately reuses `retention_months` (the existing setting that
+    already defines the retention duration) as the actual dormancy
+    threshold, rather than adding a second
     duration setting -- account_deletion_warning_days only controls HOW
     LONG BEFORE that threshold the one warning email goes out.
 
-    "Inactive" (the operator: "Last login should count") is User.last_login_at;
-    an account that has never logged back in since its initial booking
+    "Inactive" is User.last_login_at (last login is what counts, not
+    just account age); an account that has never logged back in since its initial booking
     (last_login_at is blank until Store.touch_login() is ever called)
     falls back to created_at instead -- there's no other activity signal
     to use for it.
@@ -202,7 +203,7 @@ def send_account_deletion_warnings(
     `account_deletion_warning_days` of its computed deletion date and
     hasn't already passed it. Purely a courtesy notice -- see
     purge_dormant_accounts() below for the actual enforcement, which runs
-    independently of this (2026-07-14, the operator: "yes regardless" of whether
+    independently of this (2026-07-14: regardless of whether
     this warning is even enabled).
 
     Returns how many warning emails were actually sent.
@@ -246,8 +247,8 @@ def purge_dormant_accounts(
     store: Store, settings: Settings, today: date | None = None, caldav: CalDAVClient | None = None,
 ) -> int:
     """`my-bt admin gdpr accounts --purge` -- the actual account-erasure
-    enforcement (2026-07-14, the operator: "now we also need the account purge
-    after the same duration"). Erases (archives with a hashed email, via
+    enforcement (2026-07-14: added the account purge after the same
+    duration as the warning above). Erases (archives with a hashed email, via
     app.erasure.erase_user_by_email -- same mechanism as the guest's own
     `/my` self-erasure and `my-bt erase`) every LIVE account whose
     account_deletion_date() has already passed.
@@ -255,9 +256,9 @@ def purge_dormant_accounts(
     Unconditional -- runs regardless of whether
     settings.account_deletion_warning_days is configured/enabled, and
     regardless of whether this particular account was ever actually
-    warned (the operator: "yes regardless"). There is no separate on/off switch
-    for this: it is tied exactly to `retention_months` (the operator: "this is
-    the GDPR law"), the same setting send_account_deletion_warnings()
+    warned. There is no separate on/off switch
+    for this: it is tied exactly to `retention_months` (the actual
+    GDPR-mandated window), the same setting send_account_deletion_warnings()
     above already projects from.
 
     `caldav`, if given, is passed straight through to
@@ -289,9 +290,8 @@ def registration_purge_counts_by_month(store: Store, settings: Settings) -> dict
     past) exactly as `admin gdpr bookings`'s own listing does -- this is
     a forward-*and*-backward-looking projection of when each row
     reaches/reached its retention window, not just a count of what's
-    still upcoming. 2026-07-14, the operator: "please also provide a table
-    with the currently expected purge counts per month for accounts and
-    for bookings"."""
+    still upcoming. 2026-07-14: added to also show the currently
+    expected purge counts per month for accounts and for bookings."""
     counts: dict[str, int] = {}
     for reg in store.all_registrations():
         month = registration_purge_date(reg, settings).strftime("%Y-%m")

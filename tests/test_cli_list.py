@@ -132,7 +132,7 @@ class AnnotateAdminPartyLabelTest(unittest.TestCase):
         self.assertEqual(guest_row["party_label"], "Guest of Leo Leader")
 
     def test_guest_of_placeholder_name_falls_back_to_email(self):
-        # 2026-07-08, the operator: "Is guest of Guest correct??" -- must read
+        # 2026-07-08: "Guest of Guest" was flagged as confusing -- must read
         # "Guest of placeholder@example.com", never "Guest of Guest".
         rows = [{"registration_id": "r1", "user_id": "guest-1", "party_id": "", "invited_by_user_id": "placeholder-1"}]
         result = annotate_admin_party_label(rows, self.users)
@@ -182,13 +182,13 @@ class BuildCleanRegistrationViewTest(unittest.TestCase):
         self.assertEqual(result[0]["times_booked"], "0/1")
 
     def test_date_is_the_first_column(self):
-        # 2026-07-08, the operator: "put this as first column" (the date column).
+        # 2026-07-08: the date column was moved to be the first column.
         result = build_clean_registration_view([self.row], self.users, [self.row], today=date(2026, 7, 5))
         self.assertEqual(next(iter(result[0])), "date")
 
     def test_registered_column_hidden_by_default(self):
-        # 2026-07-08, the operator: "don't show when they registered by default
-        # but only with my-bt list -V".
+        # 2026-07-08: when they registered is not shown by default,
+        # only with my-bt list -V.
         result = build_clean_registration_view([self.row], self.users, [self.row], today=date(2026, 7, 5))
         self.assertNotIn("registered", result[0])
 
@@ -199,9 +199,9 @@ class BuildCleanRegistrationViewTest(unittest.TestCase):
         self.assertEqual(result[0]["registered"], "2026-07-01")
 
     def test_guests_column_hidden_by_default(self):
-        # 2026-07-08, same day, the operator: "the 'guests' here is additional
-        # fluff as any guest will have their own line here, correct? if
-        # yes, then please also only show with -V".
+        # 2026-07-08, same day: the 'guests' column here is additional
+        # fluff since any guest will have their own line here, so it's
+        # also only shown with -V.
         result = build_clean_registration_view([self.row], self.users, [self.row], today=date(2026, 7, 5))
         self.assertNotIn("guests", result[0])
 
@@ -260,8 +260,8 @@ class BuildCleanUserViewTest(unittest.TestCase):
         self.assertEqual(result[0]["last_login"], "2026-07-01")
 
     def test_column_order_is_name_joined_last_login_session_last_course_email(self):
-        # 2026-07-08, the operator: "please have name joined last_login
-        # last_course email". 2026-07-10: "session" (active/offline/
+        # 2026-07-08: column order set to name joined last_login
+        # last_course email. 2026-07-10: "session" (active/offline/
         # unknown) inserted right after last_login -- see the
         # ActiveSessionsColumnTest class below.
         result = build_clean_user_view([self.row])
@@ -270,8 +270,8 @@ class BuildCleanUserViewTest(unittest.TestCase):
         )
 
     def test_dates_are_date_only_by_default_even_with_a_real_time_of_day(self):
-        # 2026-07-08, the operator: "please only use YYYY-MM-DD for the columns
-        # and only with -V show also the timestamp" -- unlike the
+        # 2026-07-08: only YYYY-MM-DD is shown for the columns,
+        # and only with -V is the timestamp also shown -- unlike the
         # shared format_display_timestamp(), no time-of-day leaks through
         # here even when last_login_at isn't exactly midnight.
         result = build_clean_user_view([self.row])
@@ -301,7 +301,7 @@ class BuildCleanUserViewTest(unittest.TestCase):
         self.assertEqual(result[0]["last_course"], "")
 
     def test_erased_email_hash_shown_as_placeholder(self):
-        # 2026-07-08, the operator: "please only make email as wide as needed!"
+        # 2026-07-08: email should only be as wide as needed
         # -- root cause was an erased user's ~70-char hashed email
         # (app.security.hash_email_for_erasure) being shown in full.
         row = {**self.row, "email": hash_email_for_erasure("ada@example.com", b"pepper"), "name": "[erased]"}
@@ -314,8 +314,8 @@ class BuildCleanUserViewTest(unittest.TestCase):
 
 
 class ActiveSessionsColumnTest(unittest.TestCase):
-    """2026-07-10, the operator: "already shows last_login! so lets add a
-    column: session still active?" -- active_sessions is the lowercased
+    """2026-07-10: since last_login was already shown, a
+    column for "session still active?" was added -- active_sessions is the lowercased
     email set scripts/my-bt's cmd_users resolves via /internal/status
     (see _query_internal_status); None specifically means "couldn't
     ask", not "nobody's logged in"."""
@@ -393,11 +393,11 @@ class ComputeLastConfirmedCourseTest(unittest.TestCase):
 
 
 class AssignShortIdsTest(unittest.TestCase):
-    """2026-07-08, the operator, looking at real ~23-char "short" ids on migrated
+    """2026-07-08: looking at real ~23-char "short" ids on migrated
     SimplyMeet.me registrations (registration_id "simplymeet-<n>" --
-    deterministic, sharing a long literal prefix, NOT a uuid4): "is there
-    no way to have a shorter 'shorter ID'? ... I said like git and there
-    they have 6 chars". Root cause + fix: see SHORT_ID_LENGTH/
+    deterministic, sharing a long literal prefix, NOT a uuid4), a shorter
+    "short ID" was requested, more like git's 6-char short hashes.
+    Root cause + fix: see SHORT_ID_LENGTH/
     _short_id_digest's own comments in app/cli_list.py -- short ids are
     now a prefix of a HASH of the full id, not a literal prefix of the id
     itself, so shared literal prefixes in the source id can't inflate the
@@ -506,8 +506,8 @@ class ResolveShortIdTest(unittest.TestCase):
 
 class MergeArchivedForDisplayTest(unittest.TestCase):
     """Read-only equivalent of `my-bt admin dearchive` -- see
-    merge_archived_for_display's own docstring. 2026-07-13, the operator: "/admin
-    should [be] non-mutating" -- this is what both `my-bt list --all`/
+    merge_archived_for_display's own docstring. 2026-07-13: /admin
+    was made non-mutating -- this is what both `my-bt list --all`/
     `--past` and admin_overview() now call instead of actually rewriting
     the CSVs on every load."""
 

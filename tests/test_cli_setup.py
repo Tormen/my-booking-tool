@@ -143,7 +143,7 @@ class PrintReportTest(unittest.TestCase):
         self.assertTrue(any("SKIP" in ln and "caldav_url" in ln for ln in lines))
 
     def test_stale_calendar_invite_format_marker_is_a_warn_that_fails_the_report(self):
-        # 2026-07-15, the operator, from a real `setup -i` run: a stale marker was
+        # 2026-07-15: from a real `setup -i` run, a stale marker was
         # printed as a raw "[warn] ..." line that never became a structured
         # Check, so it didn't count towards fails/warns and didn't stop the
         # closing line from claiming "all checks pass now" -- see
@@ -206,7 +206,7 @@ class PrintReportTest(unittest.TestCase):
         self.assertGreaterEqual(warns, 1)
 
     def test_returned_counts_match_the_printed_report(self):
-        # 2026-07-10, the operator: wants plain `my-bt setup` scriptable the same
+        # 2026-07-10: plain `my-bt setup` should be scriptable the same
         # way `status` already is -- print_report() now returns (fails,
         # warns) so scripts/my-bt's cmd_setup can decide the exit code.
         # Regardless of what this sandboxed test host's own systemd/
@@ -234,8 +234,8 @@ class PrintReportTest(unittest.TestCase):
         self.assertTrue(any(f"{fails} problem(s)" in ln for ln in lines))
 
     def test_repeats_every_warning_and_failure_at_the_end(self):
-        # 2026-07-08, the operator: "please repeat all warnings at the end of
-        # setup and status explicitly" -- a real FAIL (missing secret)
+        # 2026-07-08: all warnings are repeated at the end of
+        # setup and status explicitly -- a real FAIL (missing secret)
         # must reappear, verbatim, in a repeated block after all twelve
         # numbered steps, not just once wherever it first printed.
         raw = _raw(calendar={"caldav_password_file": str(self.home / "nope")})
@@ -279,10 +279,10 @@ class NginxLocationsHintTest(unittest.TestCase):
     """When `nginx -T` is missing a required location block, the hint
     for where to copy it from should point at THIS checkout's own real,
     already-complete site/nginx-locations.conf when one exists, instead
-    of the bare generic packaged example -- 2026-07-10, the operator, after
-    seeing the generic hint fire while his own complete file sat unused
-    in site/: "But YOU can prepare here the correct nginx-locations.conf
-    to be complete already, or?" Both print_report() and
+    of the bare generic packaged example -- 2026-07-10, after
+    the generic hint was seen firing while a complete file sat unused
+    in site/, print_report() was updated to prepare the correct
+    nginx-locations.conf directly instead. Both print_report() and
     interactive_setup() share this logic, so both are covered here."""
 
     def setUp(self):
@@ -481,7 +481,7 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
 
         self._patches = [
             patch("app.cli_checks.check_group_membership",
-                  return_value=[("my-booking group membership (operator)", "warn", "not a member")]),
+                  return_value=[("my-booking group membership (alice)", "warn", "not a member")]),
             patch("app.cli_checks.check_systemd",
                   return_value=[("my-booking.service", "warn", "not enabled"),
                                 ("my-booking-retention.timer", "ok", "enabled, active")]),
@@ -562,8 +562,8 @@ class InteractiveSetupPathGroupSelinuxTest(unittest.TestCase):
     the base `_raw()` fixture has neither, so only the data_dir call
     fires in these tests). Mocked here, not real grp/subprocess calls,
     same determinism reasoning as InteractiveSetupPrivilegedStepsTest
-    above. 2026-07-16, the operator: "audit group+permissions+SELinux ... for
-    ALL data paths" -- this is the auto-heal half (chgrp/restorecon),
+    above. 2026-07-16: group+permissions+SELinux are audited for
+    ALL data paths -- this is the auto-heal half (chgrp/restorecon),
     gated on is_root() the same way the pre-existing data-dir-ownership
     chown step is."""
 
@@ -636,13 +636,13 @@ class InteractiveSetupPathGroupSelinuxTest(unittest.TestCase):
 
 
 class InteractiveSetupRestartSessionGuardTest(unittest.TestCase):
-    """2026-07-10, the operator: the "Restart my-booking.service now?" prompt
+    """2026-07-10: the "Restart my-booking.service now?" prompt
     (fired by check_settings_fresh's "aren't live yet" warning) used to
     have no session-awareness at all, unlike the RPM's own %pre gate
     before an upgrade -- SESSIONS is in-memory (app/webapp.py's module
-    docstring), so this restart silently drops every session. the operator chose
-    a hard refuse (not just a warning), with the fix pointed at directly:
-    `my-bt admin logout`."""
+    docstring), so this restart silently drops every session. A hard
+    refuse (not just a warning) was chosen, with the fix pointed at
+    directly: `my-bt admin logout`."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -654,7 +654,7 @@ class InteractiveSetupRestartSessionGuardTest(unittest.TestCase):
         Path(self.settings_path).write_text("x")
 
         self._patches = [
-            patch("app.cli_checks.check_group_membership", return_value=[("my-booking group membership (operator)", "ok", "")]),
+            patch("app.cli_checks.check_group_membership", return_value=[("my-booking group membership (alice)", "ok", "")]),
             patch("app.cli_checks.check_systemd", return_value=[("my-booking.service", "ok", "enabled, active")]),
             patch("app.cli_checks.check_selinux", return_value=[("SELinux httpd_can_network_connect", "ok", "on")]),
             patch("app.cli_checks.check_settings_fresh",
@@ -829,12 +829,12 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         self.assertEqual((self.static_dir / "index.html").read_text(), "old content")
 
     def test_maintenance_banner_alone_does_not_trigger_a_vimdiff_offer(self):
-        # 2026-07-10, the operator, looking at a vimdiff setup -i offered him where
+        # 2026-07-10: a vimdiff offered by setup -i where
         # the ONLY difference was the maintenance banner `my-bt admin site-maintenance
-        # on` had inserted into the live index.html: "my-bt setup -i should
-        # know about the maintenance mode and ignore any change linked to
-        # this, and should not propose this vimdiff if this is the only
-        # difference."
+        # on` had inserted into the live index.html led to `my-bt setup -i`
+        # learning about maintenance mode and ignoring any change linked to
+        # this, so it no longer proposes a vimdiff when this is the only
+        # difference.
         content = "<html><body>hello world</body></html>"
         (self.home / "site" / "index.html").write_text(content)
         banner = maintenance.banner_html("admin@example.org", "back soon")
@@ -1013,10 +1013,10 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
 
     def test_not_deployed_but_live_under_old_name_offers_vimdiff_then_rename(self):
         """2026-07-10: after the booking.example.org.conf -> nginx-locations.conf
-        rename, the operator's real server still had the file under the OLD name --
+        rename, a real server still had the file under the OLD name --
         nothing was at nginx_conf_path yet, but nginx -T said the vhost was
-        still live from elsewhere. "the package installer can fix this (or
-        my-bt setup -i can) ... please" -- vimdiff to reconcile content
+        still live from elsewhere. The package installer (or
+        my-bt setup -i) needed to fix this -- vimdiff to reconcile content
         first, then a root-gated rename into place, then offer to reload."""
         old = self.home / "old-etc" / "booking.example.org.conf"
         old.parent.mkdir()
@@ -1080,10 +1080,10 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_offers_to_point_nginx_conf_path_at_the_live_file_instead(self):
-        """2026-07-10, the operator, pushing back on an earlier version of this
-        step that only ever offered to rename the live file: "settings.toml
-        should tell you that I AM using booking.example.org.conf and hence my-bt
-        should respect this." This is the low-risk alternative: just fix
+        """2026-07-10: an earlier version of this step only ever offered
+        to rename the live file, but settings.toml should instead be able
+        to say booking.example.org.conf is what's actually in use and have my-bt
+        respect that. This is the low-risk alternative: just fix
         the setting, never touch the actual nginx file. Doesn't need root
         (writing settings.toml isn't a privileged operation)."""
         old = self.home / "old-etc" / "booking.example.org.conf"
@@ -1188,9 +1188,9 @@ class InteractiveSetupCaldavTest(unittest.TestCase):
 
 
 class InteractiveSetupCalendarInviteFormatTest(unittest.TestCase):
-    """Step 13, 2026-07-14 -- the "on install" half of the operator's own standing
-    request (2026-07-09: "maybe either on install or on the next moment
-    you touch this calendar invite again ?"). Never prompts (see the step's
+    """Step 13, 2026-07-14 -- the "on install" half of a standing
+    request (2026-07-09: resync either on install or on the next moment
+    this calendar invite is touched again). Never prompts (see the step's
     own comment in app/cli_setup.py for why) -- just calls
     app.calendar_sync.resync_if_format_changed() and reports what it did.
     A REAL, valid settings.toml is needed here (unlike most other tests in
@@ -1286,11 +1286,11 @@ erasure_pepper_file = "{secrets / 'erasure_pepper'}"
         self.assertIn("resynced 3 upcoming occurrence(s)", text)
 
     def test_format_changed_with_skips_warns_and_names_them(self):
-        # 2026-07-15/16, the operator, from a real production run: 3 occurrences
+        # 2026-07-15/16: from a real production run, 3 occurrences
         # hit persistent CalDAV conflicts and got skipped, yet this step
         # printed "[ok] ... resynced 6 upcoming occurrence(s)" with no
-        # hint anything had failed. "-- 13. Calendar invite format --
-        # says 'OK' but if you look at the output... I am NOT so sure!"
+        # hint anything had failed. The "OK" summary line didn't match
+        # what the detailed output actually showed.
         from app.calendar_sync import ResyncResult
 
         lines, _prompt, _mock = self._run(
@@ -1569,8 +1569,8 @@ class InteractiveSetupDataDirGitTest(unittest.TestCase):
 
 
 class InteractiveSetupFinalSummaryTest(unittest.TestCase):
-    """The closing "Done." line (2026-07-08, the operator: "would be better if
-    'Done' would reflect if there were any problems.") -- previously a flat
+    """The closing "Done." line (2026-07-08: it should reflect whether
+    there were any problems) -- previously a flat
     string printed unconditionally, identical whether the walkthrough above
     just fixed everything or three warnings are still sitting there.
     build_report() is patched directly here rather than relying on this
@@ -1619,8 +1619,8 @@ class InteractiveSetupFinalSummaryTest(unittest.TestCase):
         self.assertIn("Done -- 0 problem(s), 1 warning(s) still need attention", text)
 
     def test_repeats_every_warning_and_failure_before_the_done_line(self):
-        # 2026-07-08, the operator: "please repeat all warnings at the end of
-        # setup and status explicitly" -- same treatment as plain
+        # 2026-07-08: all warnings are repeated at the end of
+        # setup and status explicitly -- same treatment as plain
         # print_report() above, for the interactive walkthrough's own
         # closing summary.
         text = self._run({

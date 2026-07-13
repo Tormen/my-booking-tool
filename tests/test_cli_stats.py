@@ -69,7 +69,7 @@ class ComputeLastAndNextSlotTest(unittest.TestCase):
         self.assertIsNone(result[("yoga", "confirmed")]["next_slot"])
 
     def test_separate_status_gets_its_own_slots(self):
-        # 2026-07-08, the operator: "you will have this info per status listed" --
+        # 2026-07-08: this info is broken out per status listed --
         # a canceled row on one date must not bleed into confirmed's own
         # last/next slot for the same course.
         rows = [

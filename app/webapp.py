@@ -88,8 +88,8 @@ POST /internal/logout        force-clears SESSIONS -- all=1 for everyone,
                               `my-bt admin logout`/`--all` (2026-07-10, see
                               internal_logout() below). Same loopback-only
                               trust model as /internal/status above.
-2026-07-13, the operator: "I would prefer a web endpoint that queries on
-localhost the running server" over persisting session state to disk --
+2026-07-13: a web endpoint querying the running server directly on
+localhost was preferred over persisting session state to disk --
 this app already only ever listens on 127.0.0.1 (see app/serve.py), so
 `my-bt` (always run on the same host) can hit that same loopback port
 directly, no new persistence layer needed. The endpoint rejects any
@@ -181,8 +181,8 @@ email_change_limiter = RateLimiter(max_attempts=5, window_seconds=3600)
 # the guest on the set-password form.
 MIN_PASSWORD_LENGTH = 8
 
-# 2026-07-07, the operator: "when will the confirmation links be invalid?" -- until
-# this, they never expired at all (confirm_token_created_at was stored but
+# 2026-07-07: confirmation links previously never expired at all
+# (confirm_token_created_at was stored but
 # nothing ever checked it). A leaked/forwarded/very-old link would work
 # forever. 24h matches typical "reset password" link conventions -- see
 # my_confirm()'s expiry check and _send_confirm_email()'s email text.
@@ -194,8 +194,8 @@ CONFIRM_TOKEN_TTL_HOURS = 24
 # so a hand-crafted POST can't make it scan an unbounded number of form
 # fields. The form's own JS also stops offering "+ Add participant" once
 # this many rows exist -- see _book_page()'s guest-rows script. Now a
-# configurable Settings.max_guests (2026-07-09, the operator: "add a setting for
-# the max number of guests ... default to 3" -- see settings.toml
+# configurable Settings.max_guests (2026-07-09: made configurable,
+# defaulting to 3 -- see settings.toml
 # [defaults].max_guests); this was a fixed constant of 9 before.
 
 # 2026-07-06: "/my should always show the past 3 courses they scheduled."
@@ -228,8 +228,8 @@ _SAFE_NEXT_PATH_RE = re.compile(r"^/(courses|book/[A-Za-z0-9_-]+)$")
 
 def _safe_next_path(raw: str) -> str:
     """Validates a `?next=` value before it's ever used in a redirect or
-    echoed into a hidden form field (2026-07-11, the operator: "Login link returns
-    to originating page" -- clicking the plain "Login" link shown on
+    echoed into a hidden form field (2026-07-11: the Login link should
+    return to the originating page -- clicking the plain "Login" link shown on
     /courses or /book/<shortname> for an anonymous visitor, see
     _anonymous_banner_html(), should land back on that SAME page after a
     successful login instead of always on /my's bookings list).
@@ -265,8 +265,8 @@ def _admin_overview_redirect_location(form: dict) -> str:
 
 
 def _latest_logged_ip(path: str | None) -> str | None:
-    """Last non-empty line of an IP-tracking log file (e.g. the operator's own
-    /home/me/my-ip.log, kept fresh by infrastructure outside this app) --
+    """Last non-empty line of an IP-tracking log file (e.g. the
+    operator's own /home/me/my-ip.log, kept fresh by infrastructure outside this app) --
     a second source of "what's my current IP" alongside DNS, for exactly
     the same reason nginx's own sync-dynamic-ip-acls.sh already checks
     both when rebuilding /admin's IP allowlist: DNS can lag an actual IP
@@ -289,7 +289,7 @@ def _maintenance_bypass_allowed(client_ip: str, hostname: str | None, ip_log_pat
     """True if `client_ip` matches EITHER `hostname`'s current resolved
     address(es) OR the last logged IP in `ip_log_path` -- lets
     [site].maintenance_bypass_hostname/maintenance_bypass_ip_log (e.g.
-    the operator's own dynamic-DNS name "ssh.example.net" and his
+    a dynamic-DNS name like "ssh.example.net" and a matching
     /home/me/my-ip.log -- the exact same two sources nginx's own
     sync-dynamic-ip-acls.sh already checks to keep /admin's IP allowlist
     current) still reach /courses and /book/<shortname> normally while
@@ -350,8 +350,8 @@ def _login_required_redirect() -> tuple[str, list, str]:
     """302 to /my (the login page) for a guest-only endpoint hit with no
     valid session -- most commonly because the session simply timed out
     while the guest still had the tab open and then clicked something.
-    2026-07-14, the operator: "Can the page please redirect to login when the
-    session times out?" Replaces the old bare "403 Forbidden"/"log in
+    2026-07-14: the page should redirect to login when the
+    session times out, replacing the old bare "403 Forbidden"/"log in
     first" plain-text response every my_*() guest-action handler used to
     return here, which left the guest stuck looking at unstyled error
     text with no way forward.
@@ -368,9 +368,9 @@ def _login_required_redirect() -> tuple[str, list, str]:
 
 
 def _record_page_view(environ, path: str) -> None:
-    """2026-07-13, the operator: "Can I see with my-bt who is currently logged
-    in please? (should be user, since when connected and their current /
-    last loaded page with timestamp)" -- called once per request from
+    """2026-07-13: `my-bt` should be able to show who is currently
+    logged in, including which user, since when connected, and their
+    current/last loaded page with timestamp -- called once per request from
     App.__call__, BEFORE routing, so it captures the path even if the
     route handler itself then 404s/errors. Only touches SESSIONS for a
     request that already carries a valid session cookie (i.e. someone
@@ -398,8 +398,8 @@ def _invalidate_all_sessions_for_user(user_id: str) -> None:
     """Logs a guest out of EVERY active session (any browser/device), not
     just the one making the current request -- used after a credential-
     like change where an already-open old session should stop working
-    (2026-07-11, the operator, re: email-change confirmation: "Logout user
-    before email is changed (so with its old email)"). Sessions are
+    (2026-07-11: email-change confirmation should log the user out under
+    their old email before the change completes). Sessions are
     keyed by session_id, not user_id, so this is a linear scan of the
     (small, in-memory -- see SESSIONS' own module comment) session store;
     fine at this app's scale, same tradeoff SESSIONS itself already
@@ -433,8 +433,8 @@ _RESEND_COOLDOWN_SECONDS = 60
 _RESEND_COOLDOWN_KEY = "mb_resend_until"
 
 
-# 2026-07-07, the operator (repeatable console CSP violation on /my's lockout
-# screen, "maybe related?"): these three scripts used to be built as
+# 2026-07-07, from a repeatable console CSP violation on /my's lockout
+# screen: these three scripts used to be built as
 # f-strings interpolating a button id/label/seconds straight into the
 # <script> text, per call site. Every render therefore produced different
 # bytes -> a different sha256 hash -> never matched the fixed CSP
@@ -559,10 +559,10 @@ _DIALOG_WIRING_SCRIPT = """<script>
 </script>"""
 
 
-# /admin overview's "cancel entire session" checkbox (2026-07-13, the operator:
-# "auto check ALL participants as well and GREY OUT and disable the cancel
-# button on any other line ... undone, when you uncheck ANY of them (this
-# then unchecks all)") -- see admin_overview()'s own row-rendering comment
+# /admin overview's "cancel entire session" checkbox (2026-07-13:
+# checking it auto-checks ALL participants for that occurrence and
+# greys out/disables the cancel button on every other line, undone when
+# any of them is unchecked) -- see admin_overview()'s own row-rendering comment
 # for the checkbox/button markup this wires up (`.cancel-entire-checkbox`/
 # `.cancel-btn`, both tagged with a shared `data-occurrence` key). Module-
 # level constant, not per-row-interpolated, for the same CSP script-src-hash
@@ -617,9 +617,9 @@ def _course_date_overrides_html(course, occurrences) -> str:
     a stale override left in settings.toml for a date that's already
     past, or that fell off the schedule for some other reason (a
     calendar conflict, say), never shows a banner for a session nobody
-    can actually book. the operator: "automatically be displayed as an
-    'ATTENTION'-message in red ... on ... the booking site for this
-    course." Empty string (no banner at all) when none of the shown
+    can actually book. Automatically displayed as an
+    "ATTENTION" message in red on the booking site for this
+    course. Empty string (no banner at all) when none of the shown
     occurrences have a date-override.
 
     override.message is operator-authored (settings.toml) -- same trust
@@ -641,9 +641,8 @@ def _course_recap_html(course, occ_date: str) -> str:
     """Thin wrapper around app.cancellation.course_recap_html (2026-07-09) --
     the WHAT/WHEN/WHERE(+description) recap shown on the booking-confirmation
     page and every cancel-confirmation page (guest_cancel/admin_cancel/
-    host_cancel), reusing the EXACT SAME generator the HTML emails use
-    (the operator: "Can be always the same code that generates this for the page
-    or email"), so page and email can never drift apart on layout, emoji,
+    host_cancel), reusing the EXACT SAME generator the HTML emails use,
+    so page and email can never drift apart on layout, emoji,
     or ordering. See that function's own docstring for the full rationale."""
     return course_recap_html(course, occ_date)
 
@@ -720,9 +719,8 @@ _SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
       });
     });
   }
-  // 2026-07-08, the operator (screenshot of /admin?past=1): "Please by default
-  // sort the view ... by Date ... Like this people see also the sort
-  // arrow and can understand that this page is sortable" -- every table
+  // 2026-07-08: /admin?past=1 should default-sort by Date, so people
+  // see the sort arrow and understand the page is sortable -- every table
   // using this script was already RENDERED in some sensible server-side
   // order (see admin_overview()/my()'s own sort calls), but the arrow
   // that shows WHICH column that is, and that clicking a header does
@@ -929,14 +927,14 @@ class App:
         `my-bt admin site-maintenance on` is active, without touching any other route's
         status code.
 
-        2026-07-10, the operator: "the maintenance page should have a back link or
-        button" -- now that this shows on every guest-facing route (see
+        2026-07-10: the maintenance page needed a back link or
+        button -- now that this shows on every guest-facing route (see
         _maintenance_guard), landing here for someone who followed an old
         bookmark/email link left them with nowhere to go but the browser's
         own Back button. Links to the marketing homepage (settings.base_url).
 
-        2026-07-14, the operator (expanding the always-visible-banner request to
-        "basically ALL pages except for the index.html!"): the plain "Back
+        2026-07-14, expanding the always-visible-banner request to
+        basically ALL pages except index.html: the plain "Back
         to {site}" text link is now the same boxed _session_banner_html()
         banner every other guest-facing page uses, instead of its own
         one-off wording."""
@@ -947,16 +945,18 @@ class App:
         return "503 Service Unavailable", [("Content-Type", "text/html; charset=utf-8")], page("Maintenance", body, banner=banner)
 
     def _maintenance_guard(self, environ) -> tuple[str, list, str] | None:
-        """2026-07-10, the operator: "The maintenance banner should be displayed on
-        all pages. EXCEPT if the local excluded IP is recognized... else
-        everything works normally from this IP. But I did a test and I was
-        able to click on login and see the normal login page from an
-        external IP in maintenance mode. This should not be!" -- courses()
+        """2026-07-10: the maintenance banner should be displayed on
+        all pages, except when the recognized bypass IP is in use, in
+        which case everything works normally from that IP. A real
+        external-IP test found a gap: /my's login page was still
+        reachable and usable from an external IP during maintenance --
+        courses()
         and book() originally had this check inlined, but ONLY those two
         (see app/maintenance.py's now-outdated docstring, written the same
-        day: "existing-booking management (/my, /admin, /cancel/,
-        /reinstate/, /host-cancel/, /host-reinstate/) is deliberately left
-        untouched"). That narrower scope is exactly the bug the operator caught
+        day, which described existing-booking management --
+        /my, /admin, /cancel/,
+        /reinstate/, /host-cancel/, /host-reinstate/ -- as deliberately left
+        untouched). That narrower scope is exactly the bug caught
         via a real external-IP test -- /my's login form worked completely
         normally for a non-bypass visitor.
 
@@ -1030,9 +1030,9 @@ class App:
 
     def schedule_exceptions(self, method: str, environ):
         """GET-only, public, JSON: every upcoming Course.date_overrides
-        entry across every configured course (2026-07-16, the operator: an
-        exceptional per-date time change should "automatically be
-        displayed as an 'ATTENTION'-message in red on index.html"). This
+        entry across every configured course (2026-07-16: an
+        exceptional per-date time change is automatically
+        displayed as an "ATTENTION" message in red on index.html). This
         is the live data source site/index.html.example's own small JS
         snippet fetches (same "opportunistic same-origin fetch, degrade
         silently on any failure" pattern already used there for the
@@ -1040,7 +1040,7 @@ class App:
         site/index.html itself is real, hand-maintained content ("MANAGED
         BY YOU, NOT my-bt"), not generated/templated by this app the way
         privacy.html is, so a live fetch is the only way to keep it
-        "automatic" without the operator ever having to hand-edit that file
+        automatic without ever having to hand-edit that file
         whenever an exception is added or removed from settings.toml.
 
         No maintenance-mode guard, no session/auth -- same "informational,
@@ -1086,9 +1086,9 @@ class App:
         # return -- see _session_banner_html's own docstring.
         banner = self._session_banner_html(environ, next_path=f"/book/{shortname}")
 
-        # 2026-07-09, the operator (screenshots of /book + /my): "when you are
-        # logged in Name + email on booking page should be filled and
-        # greyed out or hidden". `logged_in_user`, when set, is threaded
+        # 2026-07-09: when logged in, Name + email on the booking page
+        # should be prefilled and greyed out or hidden.
+        # `logged_in_user`, when set, is threaded
         # through every _book_page() render below so the name/email
         # fields are always prefilled+readonly for an active guest
         # session -- never re-blanked on an error-retry render either.
@@ -1106,11 +1106,10 @@ class App:
             course, self.settings, now, capacity_lookup, self._conflict_checker(exclude_own=True)
         )
 
-        # 2026-07-11, the operator (my-bt list showing he was already `confirmed`
-        # for 2026-07-11 while /book/trier-sat-yoga still offered that
-        # exact date as a pickable option): "If I am already booked +
-        # confirmed for a date this date should simply be hidden here for
-        # me" -- a logged-in guest who already holds an active (confirmed
+        # 2026-07-11: a real case showed a guest already `confirmed`
+        # for a date while /book/<shortname> still offered that
+        # exact date as a pickable option -- fixed so a date the guest is
+        # already booked+confirmed for is simply hidden here. A logged-in guest who already holds an active (confirmed
         # or waitlisted -- same definition Store.has_active_registration
         # already uses for the double-booking guard below/entry #85) spot
         # for a given occurrence never needs to see that date offered
@@ -1178,8 +1177,8 @@ class App:
             # email's credential anymore.
             user = self.store.upsert_user_for_booking(email, name)
 
-            # 2026-07-10, the operator (screenshot of /my): "double booking
-            # possible?" -- yes, neither add_registration_checking_capacity
+            # 2026-07-10: double booking was actually possible -- neither
+            # add_registration_checking_capacity
             # nor add_party_registrations_checking_capacity ever checked
             # whether the requesting user (or a guest being added) already
             # held an active spot for this exact course+date, only
@@ -1197,8 +1196,9 @@ class App:
                     banner=banner, logged_in_user=logged_in_user,
                 )
 
-            # 2026-07-10, the operator: "no we take their booking. if the main
-            # person already booked, then cannot book again." -- so unlike
+            # 2026-07-10: if the main
+            # person already booked, a guest already booked shouldn't be
+            # rejected either -- so unlike
             # the leader (rejected above), a guest who already holds an
             # active spot is NOT an error: their existing booking is simply
             # kept as-is (not duplicated), and they're dropped from this
@@ -1253,9 +1253,9 @@ class App:
             # storage.STATUS_PENDING_CONFIRMATION's docstring. Re-sending
             # the confirmation email on every such attempt is deliberate --
             # exactly what a "resend" should do -- but the pending ROW
-            # itself is now deduped per course+date+user (2026-07-11,
-            # the operator: "silent re-registration for unconfirmed accounts" --
-            # see Store.has_pending_registration's own docstring for the
+            # itself is now deduped per course+date+user (2026-07-11:
+            # closed a silent re-registration bug for unconfirmed
+            # accounts -- see Store.has_pending_registration's own docstring for the
             # multi-row-promoted-at-once bug this closes): only the FIRST
             # attempt for a given course+date inserts a row; every retry
             # just resends the same email against the row already there.
@@ -1265,12 +1265,12 @@ class App:
                 )
             self._send_confirm_email(user)
             resend_label = "Resend the confirmation email"
-            # 2026-07-07, the operator (comparing this page's plain-prose "Your spot
-            # for X on Y" line against the What/When/Where box shown on
+            # 2026-07-07: this page's plain-prose "Your spot
+            # for X on Y" line was inconsistent with the What/When/Where box shown on
             # every other page/email referring to one course instance --
-            # host-cancel, Booked!, cancel/reinstate confirmations): "The way
-            # you present 'one course instance' ... should be CONSISTENT
-            # EVERYWHERE" -- so this now reuses the exact same
+            # host-cancel, Booked!, cancel/reinstate confirmations. The
+            # presentation of "one course instance" should be CONSISTENT
+            # EVERYWHERE -- so this now reuses the exact same
             # _course_recap_html() block as those, instead of its own
             # one-off sentence.
             body = (
@@ -1378,8 +1378,8 @@ class App:
                 f'<p>Optional: set up a password to view/manage this from '
                 f'<a href="{my_url}">{my_url}</a>: <a href="{confirm_url}">{confirm_url}</a></p>'
             )
-        # 2026-07-08, the operator: "they should now all start with 'Dear <NAME>',
-        # correct?" -- they didn't (only _send_confirm_email() had this);
+        # 2026-07-08: guest-facing emails should all start with "Dear
+        # <NAME>," -- only _send_confirm_email() had this;
         # added here too, same terse-but-warm register. See
         # cancellation.greeting_html()'s own docstring for why it's a
         # plain, non-bold line ahead of intro_html()'s bold status
@@ -1451,7 +1451,7 @@ class App:
         )
 
     def _already_booked_guests_note(self, already_booked: list[str]) -> str:
-        """2026-07-10, the operator: "no we take their booking" -- a guest already
+        """2026-07-10: a guest already
         holding an active spot for this session gets dropped from the party
         rather than duplicated (see book()'s filtering just before it calls
         _book_with_guests). This renders the one-line addendum telling
@@ -1539,7 +1539,7 @@ class App:
         name given falls back to the placeholder "Guest" rather than an
         empty string (User.name has no blank default).
 
-        `already_booked` (2026-07-10, the operator: "no we take their booking")
+        `already_booked` (2026-07-10)
         lists any guest emails book() already filtered OUT of `guests`
         because they held an active registration for this course+date --
         purely informational, for the success message's addendum via
@@ -1601,22 +1601,21 @@ class App:
         ever logging in -- this is purely a courtesy cue plus a quick way
         back to /my or to log out, for someone who arrived here already
         logged in. Also links back to the marketing homepage
-        (settings.base_url, 2026-07-09, the operator: "allow in the banner to
-        also go back to https://booking.example.org") -- this banner now shows on
+        (settings.base_url, 2026-07-09: the banner should also link back
+        to the marketing homepage) -- this banner now shows on
         /my too (see my()), so without this, a guest on /my had no
         one-click way back to the homepage other than the separate
         target="_blank" link my() already has for that.
 
-        `on_my_page=True` (2026-07-09, the operator, screenshot of /my's own
-        banner: "My bookings link on the my bookings page (in top-bar) :(")
-        drops the "My bookings" link -- a link back to the exact page
+        `on_my_page=True` (2026-07-09: /my's own banner showed a
+        redundant "My bookings" link while already on the my-bookings
+        page) drops the "My bookings" link -- a link back to the exact page
         you're already looking at is dead weight, not a shortcut. Only
         my() passes this; /courses and /book (where "My bookings" is a
         genuine link elsewhere) leave it at the default.
 
-        2026-07-09, the operator (screenshots of /book + /my): "Make it so that
-        the top-bar is ALWAYS visible (except for index.html) either with
-        LOGIN or with the BAR." -- an anonymous visitor to /courses or
+        2026-07-09: the top-bar should be ALWAYS visible (except for
+        index.html), either with LOGIN or with the BAR -- an anonymous visitor to /courses or
         /book now gets a small "Login" banner instead of nothing at all,
         same box/position the logged-in banner uses, so the bar is never
         just... absent. /my's own anonymous view is deliberately NOT given
@@ -1642,9 +1641,9 @@ class App:
 
     def _admin_banner_html(self, environ) -> str:
         """The same boxed `.session-banner` style as _session_banner_html(),
-        for /admin's own pages (2026-07-14, the operator, expanding the always-
-        visible-banner request: "also /admin should get the same boxed
-        banner, basically ALL pages except for the index.html!").
+        for /admin's own pages (2026-07-14, expanding the always-
+        visible-banner request: /admin should get the same boxed
+        banner, on basically ALL pages except index.html).
 
         Admin sessions are a separate `kind` ("admin", a single shared
         password -- see admin_login()) from guest sessions, so
@@ -1674,9 +1673,9 @@ class App:
         own docstring) or otherwise has no session state of its own worth
         reporting.
 
-        2026-07-14, the operator (unhappy with the plain "Back to {site}" text
-        link at the bottom of /my's login page): "Reuse same boxed banner
-        is good" -- reuses the exact CSS box every other banner uses,
+        2026-07-14: the plain "Back to {site}" text
+        link at the bottom of /my's login page was replaced with the
+        same boxed banner -- reuses the exact CSS box every other banner uses,
         without the redundant "Not logged in / Login" text this
         particular page doesn't need. Also used by admin_login() for the
         same reason (that page IS the admin login form)."""
@@ -1693,17 +1692,17 @@ class App:
         as the logged-in banner does, so an anonymous visitor gets that
         one-click way back too.
 
-        2026-07-16, the operator, screenshot of this exact banner: "Not logged in
-        is not necessary if you have the Login on the top right..." -- the
+        2026-07-16: the "Not logged in" label wasn't necessary given
+        Login is already visible on the top right -- the
         "Not logged in" label text was dropped, but the first `<span>`
         itself stays (now empty) rather than being removed outright:
         `.session-banner` is `justify-content:space-between`, which (per
         the flex spec) collapses to flex-start with only a single child --
         i.e. without a first span to space against, Login would jump to
-        the LEFT instead of staying "on the top right" as the operator put it.
+        the LEFT instead of staying on the top right.
 
-        `next_path` (2026-07-11, the operator: "Login link returns to originating
-        page"), when given, is appended as `?next=<path>` on the Login
+        `next_path` (2026-07-11: the Login link should return to the
+        originating page), when given, is appended as `?next=<path>` on the Login
         link -- my()'s login form/POST carries it through (see
         _my_login_page()/App.my()) so a guest who clicks Login from
         /courses or /book/<shortname> lands back on that same page after
@@ -1724,9 +1723,9 @@ class App:
     def _check_confirmation_text(self, environ) -> str:
         """The "Check ... for confirmation and a link in case you need to
         cancel your booking" line on the single-booking confirmation page
-        (2026-07-09, the operator: "If they are logged in you should rather say:
-        Check My bookings (as link) and if they are NOT logged in keep
-        your current version about the email") -- someone already logged
+        (2026-07-09: someone logged in should see a "Check My bookings"
+        link instead, keeping the email-based wording only for someone
+        NOT logged in) -- someone already logged
         in can just go straight to /my instead of digging through email."""
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
@@ -1768,23 +1767,22 @@ class App:
         Names the site in the subject (see _site_label()) -- without it
         this email is just "Confirm your account" with no indication of
         what account, for what, or from whom, which is confusing on its
-        own out of context (caught in practice 2026-07-05: "explain in the
-        email an account for WHAT ?!"). The BODY text spells out the full
-        https://... base_url instead (2026-07-07, the operator: "please write
-        rather https://booking.example.org in the text") -- a subject line reads
+        own out of context (caught in practice 2026-07-05, when it wasn't
+        clear what the account was even for). The BODY text spells out the full
+        https://... base_url instead (2026-07-07: the full URL reads
+        better in the body than in a subject line) -- a subject line reads
         oddly with a URL scheme in it, but the body sentence doesn't.
         Phrased as "...booking account on {url}..." rather than "...your
-        {url} booking account..." (2026-07-08, the operator's own exact requested
-        wording) -- reads more naturally with a full URL sitting mid-sentence.
+        {url} booking account..." (2026-07-08)
+        -- reads more naturally with a full URL sitting mid-sentence.
 
         Also states the link's expiry (CONFIRM_TOKEN_TTL_HOURS -- see
         my_confirm()) and that any older link is now void: this call
         always supersedes whatever confirm/reset link was outstanding
         before it (see Store.set_confirm_token), so a guest who requested
         twice needs to know the first email's link won't work anymore and
-        why (2026-07-07, the operator: "a new email should invalidate the pending
-        link ... [and] inform the user that there should be a NEW link
-        coming to him")."""
+        why (2026-07-07: a new email should invalidate the pending
+        link, and inform the user that a NEW link is on its way)."""
         confirm_url = self._confirm_url(user)
         first_time = not user.password_hash
         site = self._site_label()
@@ -1792,8 +1790,7 @@ class App:
         subject = f"Confirm your {site} account" if first_time else f"Reset your {site} password"
         verb = (f"confirm your booking account on {site_url} and set a password"
                 if first_time else f"set a new password for your booking account on {site_url}")
-        # 2026-07-07, the operator (screenshot of this email): "please formulate the
-        # email a bit more nicer" -- added a "Dear <name>," greeting and a
+        # 2026-07-07: reworded this email to sound nicer -- added a "Dear <name>," greeting and a
         # brief sign-off, same terse-but-warm register as every other
         # guest-facing email, not a wall of bare instructions.
         send_mail(
@@ -1886,22 +1883,20 @@ class App:
         # has full control of the server, so this isn't a new privilege
         # boundary, just a place raw HTML is intentionally allowed through.
         desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
-        # 2026-07-16, the operator: exceptional per-date time changes (Course.
+        # 2026-07-16: exceptional per-date time changes (Course.
         # date_overrides) get a red ATTENTION banner right here, above the
         # date picker -- see _course_date_overrides_html's own docstring.
         overrides_html = _course_date_overrides_html(course, occurrences)
-        # 2026-07-09, the operator (screenshot of /my showing 2 future confirmed
-        # bookings the date-picker above never mentioned): "It could be
-        # nice here, to show the user that he/she already booked the
-        # classes ... Like here: I have 2 future bookings already booked,
-        # they should be listed." Follow-up answers, in order: (1) "Only
-        # FUTURE bookings!" -- no past history, so filtered to
-        # occurrence_date >= today; (2) "Ignore canceled and also show
-        # waitlisted but rather say: 'On waitinglist'"; (3) a diagonal
-        # ribbon across the date-box corner (his own suggestion, in place
-        # of a plain greyed-out box) "with contrasted fontcolor" -- see
-        # .date-badge/.ribbon in templates.py's <style> block; (4) "not
-        # clickable" -- a plain <span>, no <input>/<label> at all, unlike
+        # 2026-07-09: the date-picker above never mentioned bookings the
+        # guest already had for other dates, e.g. 2 future confirmed
+        # bookings -- now shown here too. Rules, in order: (1) only
+        # FUTURE bookings, no past history, so filtered to
+        # occurrence_date >= today; (2) canceled bookings are ignored,
+        # and waitlisted ones are shown as "On waitinglist"; (3) a diagonal
+        # ribbon across the date-box corner, in place
+        # of a plain greyed-out box, with contrasted font color -- see
+        # .date-badge/.ribbon in templates.py's <style> block; (4) not
+        # clickable -- a plain <span>, no <input>/<label> at all, unlike
         # the real bookable date-boxes below.
         already_booked = []
         if logged_in_user is not None:
@@ -1978,8 +1973,8 @@ class App:
             first_label = "Join waitlist" if occurrences[0].is_full else self.settings.book_button_label
             note_html = f'<p class="note">{esc(note)}</p>' if (note := self._policy_note()) else ""
             err_html = f'<p class="err">{esc(error)}</p>' if error else ""
-            # 2026-07-09, the operator: "when you are logged in Name + email on
-            # booking page should be filled and greyed out or hidden" --
+            # 2026-07-09: when logged in, Name + email on the
+            # booking page should be prefilled and greyed out or hidden --
             # prefilled+readonly (NOT disabled: a disabled input's value is
             # never submitted at all, which would break the POST; readonly
             # still submits it, just blocks editing) for an active guest
@@ -1990,10 +1985,9 @@ class App:
             # on why the server ALSO enforces this (readonly is client-side
             # only, not a security boundary).
             if logged_in_user is not None:
-                # 2026-07-09, the operator, on the earlier prefilled+readonly
-                # fields: "This is confusing: If you are logged in ad you
-                # book, please hide Your name + Your email fields (instead
-                # of showing them prefilled)." -- the session banner right
+                # 2026-07-09: the earlier prefilled+readonly
+                # fields were confusing when logged in and booking --
+                # hidden instead of shown prefilled. The session banner right
                 # above ("Logged in as ...") already tells them who they're
                 # booking as, so showing greyed-out name/email fields too
                 # was redundant AND read as "why can't I edit this?"
@@ -2126,10 +2120,10 @@ class App:
               }}
               var bookLabel = form.dataset.bookLabel || "Book";
               function guestRowsValid() {{
-                // the operator, 2026-07-09: "if a required field is empty the button
-                // should not be clickable. Here someone should either remove
+                // 2026-07-09: if a required field is empty, the button
+                // should not be clickable -- either remove
                 // the empty participant first or provide an email at
-                // least." -- every currently-present guest row's required
+                // least. Every currently-present guest row's required
                 // email must look valid, or the Book button stays disabled
                 // until it's filled in or the row is removed.
                 if (!guestRowsEl) return true;
@@ -2154,9 +2148,9 @@ class App:
                 el.addEventListener("change", refresh);
               }});
               refresh();
-              // 2026-07-11, the operator ("BUG: selected date!", screenshot showing
-              // the 2026-07-18 box highlighted/checked while "Selected
-              // date:" still read 2026-07-11): some browsers restore a
+              // 2026-07-11: a real bug showed
+              // one date box highlighted/checked while "Selected
+              // date:" still read a different, earlier date -- some browsers restore a
               // PREVIOUSLY-checked radio button on reload/back-forward
               // navigation on their own, independent of this script and
               // AFTER it already ran once -- silently, with no "change"
@@ -2180,9 +2174,9 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
-        # 2026-07-14, the operator, expanding the always-visible-banner request:
-        # "also /admin should get the same boxed banner, basically ALL
-        # pages except for the index.html!" -- every page below now gets
+        # 2026-07-14, expanding the always-visible-banner request:
+        # /admin should get the same boxed banner too, basically ALL
+        # pages except index.html -- every page below now gets
         # the same _session_banner_html() banner /courses and /book use.
         banner = self._session_banner_html(environ)
         reg = self.store.find_by_guest_token_hash(hash_token(token))
@@ -2230,15 +2224,15 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Canceled", "<p>Your booking has been canceled.</p>", banner=banner
             )
-        # 2026-07-09, the operator: "This page should look like as described for
-        # the admin and like the email ... WHAT WHEN WHERE with emojis and
-        # bold font for the keyword followed by the description ... And
-        # THEN a bit of space and the optional reason and the button as it
-        # is." Same _course_recap_html() every other cancel-confirmation
+        # 2026-07-09: this page should look like the admin's and the
+        # email's version -- WHAT WHEN WHERE with emojis and
+        # bold keywords followed by the description, then a bit of
+        # space and the optional reason and the button.
+        # Same _course_recap_html() every other cancel-confirmation
         # page (admin_cancel/host_cancel) and the booking-confirmation page
         # use -- see that function's own docstring on why it's shared.
-        # 2026-07-16, the operator, screenshot of host_cancel_occurrence: "please
-        # place the reason-box above the course info-box" -- supersedes
+        # 2026-07-16: the reason-box should sit above the course
+        # info-box -- supersedes
         # the recap-then-reason order above; applied consistently to every
         # page sharing this layout, not just the one screenshotted.
         body = (
@@ -2301,12 +2295,12 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Rebooked", "<p>Your booking has been rebooked.</p>", banner=banner
             )
-        # 2026-07-14, the operator: "Please try find a simpler more intuitive word
-        # than reinstate" -- "Rebook" picked; see cancellation.py's own
+        # 2026-07-14: looked for a simpler, more intuitive word than
+        # "reinstate" -- "Rebook" picked; see cancellation.py's own
         # note on this same rename for the full scoping (visible text
         # only, routes/functions/params unchanged).
-        # 2026-07-16, the operator: "please place the reason-box above the course
-        # info-box" -- same reorder as guest_cancel()/host_cancel() etc.,
+        # 2026-07-16: the reason-box should sit above the course
+        # info-box -- same reorder as guest_cancel()/host_cancel() etc.,
         # applied here too for the same layout consistency.
         body = (
             "<p>Rebook your booking?</p>"
@@ -2332,27 +2326,25 @@ class App:
         courses()) rather than back to any specific course, since this
         guest may want a course they haven't booked before.
 
-        (2026-07-09, the operator: "What about PAST meetings?", asked while
-        looking at an account with zero bookings of either kind) Past now
+        (2026-07-09: an account with zero bookings of either kind
+        prompted the question "what about PAST meetings?") Past now
         always shows its own "You have no past bookings." message when
         empty, exactly like Upcoming already did -- omitting the whole
         section when empty (the original behavior) looked indistinguishable
         from the section being missing/broken rather than genuinely empty.
 
         Also shows the same _session_banner_html() banner /courses and
-        /book already show (2026-07-09, the operator: "Rather use the BANNER as
-        here to be CONSISTENT!!") instead of a separate, redundant "Log
+        /book already show (2026-07-09: for consistency) instead of a separate, redundant "Log
         out" button in the bottom row -- the banner's own Logout covers
         that; only "Delete my account & data" (a distinct, destructive
         action) remains in that row on its own. The top row's own
         separate "Visit booking.example.org (opens in a new tab)" link is gone too
-        now (2026-07-09, the operator: "Now we can get rid of the ugly green
-        sentence behind New bookings as we have https://booking.example.org in the
-        top-bar") -- the banner's own homepage link (see
+        now (2026-07-09: made redundant by the homepage link already in the
+        top-bar) -- the banner's own homepage link (see
         _session_banner_html) covers it, in the same tab, alongside "My
         bookings" and "Log out".
 
-        2026-07-10, the operator: caught (via a real external-IP test) that this
+        2026-07-10: a real external-IP test caught that this
         page worked completely normally during maintenance mode -- see
         _maintenance_guard()'s own docstring for the fix; this is the guard
         that blocks it now, checked before even looking at the session, so
@@ -2386,15 +2378,15 @@ class App:
                 title = course.title if course else r.course_shortname
                 time_range = course.weekday_time_range_label() if course else ""
                 location = course.location if course else ""
-                # 2026-07-07, the operator: "Please make the 'Course' string a link
-                # to the course booking page." Only linkable if the course
+                # 2026-07-07: the 'Course' string is a link
+                # to the course booking page. Only linkable if the course
                 # still exists in settings.toml (course is None for an old
                 # booking whose course was since removed -- nothing to link
                 # to in that case, same fallback as title/time_range/location
                 # above).
                 course_cell = f'<a href="/book/{esc(r.course_shortname)}">{esc(title)}</a>' if course else esc(title)
-                # 2026-07-09, the operator: "add a location_url and then use it on
-                # /my in the column location to make those clickable" --
+                # 2026-07-09: a location_url makes /my's location column
+                # clickable when set --
                 # same "only if we actually have something to link to"
                 # fallback as course_cell above: no course.location_url set
                 # (the field's own default) or no course at all just falls
@@ -2412,14 +2404,13 @@ class App:
                 # emailed cancel link and /admin could always do both;
                 # caught 2026-07-05 while touching this code for the
                 # cancel-dialog/both-sides-notification consistency pass).
-                # 2026-07-08, the operator (screenshot of /admin?past=1 showing an
-                # enabled Cancel button on a 2025-10-18 row): "PAST bookings
-                # should NOT have a CANCEL button as well" -- a session that
+                # 2026-07-08: /admin?past=1 was showing an
+                # enabled Cancel button on past rows -- PAST bookings
+                # should NOT have a CANCEL button either, since a session that
                 # already happened can't be un-happened; also require
                 # occurrence_date >= today, same future-only gate Reinstate
                 # already uses just below. Applies here too, not just
-                # /admin ("what I tell you about /admin should of course
-                # also apply to /my").
+                # /admin -- the same rule applies consistently across both pages.
                 disabled = r.status not in (STATUS_CONFIRMED, STATUS_WAITLISTED) or (
                     date.fromisoformat(r.occurrence_date) < today
                 )
@@ -2444,20 +2435,20 @@ class App:
                     f'<button type="button" class="dialog-close-btn" data-dialog="{cancel_id}-dialog">Never mind</button>'
                     "</div></dialog>"
                 )
-                # Reinstate ("undo the cancel"): 2026-07-10, the operator: "there
-                # should be then a reschedule button for canceled meetings
-                # which time (WHEN) is in the future" -- offered here for
+                # Reinstate ("undo the cancel"): 2026-07-10: a reschedule
+                # button for canceled meetings whose time (WHEN) is still
+                # in the future -- offered here for
                 # any of the guest's OWN canceled rows whose occurrence
                 # hasn't happened yet (a past occurrence has nothing left
                 # to reinstate INTO). Same confirm-dialog-with-optional-
-                # message pattern as Cancel above (2026-07-10: "Reinstate
-                # should, LIKE CANCEL, also ask for a COMMENT to be sent
-                # with the email to the other") -- reuses the same
+                # message pattern as Cancel above (2026-07-10: Reinstate
+                # should, like Cancel, also ask for a COMMENT to be sent
+                # with the email to the other side) -- reuses the same
                 # _DIALOG_WIRING_SCRIPT already loaded on this page.
                 #
-                # 2026-07-14, the operator (screenshot of a "Canceled by host" row
-                # still showing this button): "a meeting that was canceled
-                # by HOST should NOT have a reinstate button." Only
+                # 2026-07-14: a "Canceled by host" row was
+                # still showing this button, but a meeting canceled
+                # by HOST should NOT have a reinstate button. Only
                 # STATUS_CANCELED_BY_GUEST now -- a HOST cancellation means
                 # the session itself isn't happening (illness, venue
                 # unavailable, ...), which a guest un-canceling themselves
@@ -2526,8 +2517,8 @@ class App:
             {upcoming_html}
             <h3>Past (most recent {MY_PAST_BOOKINGS_LIMIT})</h3>
             {past_html}""" + _DIALOG_WIRING_SCRIPT
-            # 2026-07-14, the operator: "please move the delete button under
-            # 'Account settings': and rename to 'DELETE this account'" --
+            # 2026-07-14: the delete button moved under
+            # 'Account settings' and was renamed to 'DELETE this account' --
             # the delete-account form/dialog used to live at the bottom of
             # THIS page; it's now rendered by _my_settings_page() instead
             # (see that method). _DIALOG_WIRING_SCRIPT stays appended here
@@ -2563,8 +2554,7 @@ class App:
                     lockout_seconds = login_limiter.retry_after(key, now=now)
                     log.warning("rate limit blocked: admin login from %s (via /my)", _client_ip(environ))
                 elif verify_admin_password(password, self.settings.admin_password_hash):
-                    # 2026-07-11, the operator ("Why do I get this error? I did
-                    # NOT several login attempts!"): a SUCCESSFUL login used
+                    # 2026-07-11: a SUCCESSFUL login used
                     # to still count against this same 5/hour budget (allow()
                     # is called unconditionally above, before the password
                     # is even checked) with nothing ever resetting it --
@@ -2600,8 +2590,8 @@ class App:
                         login_limiter.reset(key)
                         sid = _new_session({"kind": "guest", "user_id": user.user_id})
                         self.store.touch_login(user.user_id)
-                        # 2026-07-11, the operator: "Login link returns to
-                        # originating page" -- lands back on /courses or
+                        # 2026-07-11: login link returns to
+                        # originating page -- lands back on /courses or
                         # /book/<shortname> if that's where the guest
                         # clicked Login from, /my otherwise (unchanged
                         # default).
@@ -2616,8 +2606,8 @@ class App:
         return self._my_login_page(login_error=error, login_lockout_seconds=lockout_seconds, next_path=next_path)
 
     def my_signup(self, method: str, environ):
-        """POST target for /my's "Sign up" tab (2026-07-06, the operator: "let's
-        also have a 'Sign up' possibility"). Creates a brand-new account
+        """POST target for /my's "Sign up" tab (2026-07-06: added
+        the 'Sign up' possibility). Creates a brand-new account
         (with the given name) if this email doesn't have one yet, then
         ALWAYS sends a confirm-or-reset link and shows the exact same
         generic success message either way -- entering an email that
@@ -2682,23 +2672,22 @@ class App:
         failed submission re-opens on the SAME tab the guest was using
         (via active_tab) instead of silently flipping back to Login.
 
-        2026-07-10, the operator (screenshot of /my's anonymous login page): "we
-        miss a back to https://booking.example.org here" -- this page deliberately
+        2026-07-10: this page was missing a link back to
+        https://booking.example.org -- this page deliberately
         has no _session_banner_html() banner at all (see that method's own
         docstring: a "Login" banner sitting above a login FORM would be
         redundant), which meant it was the one page in the app with no way
         back to the marketing homepage short of editing the URL by hand.
 
-        2026-07-14, the operator (unhappy with that fix's plain-text-link look):
-        "Reuse same boxed banner is good" -- now the same boxed
+        2026-07-14: switched to the same boxed
         `.session-banner` style via _homepage_only_banner_html() (see that
-        method's own docstring), not a bare <p> link."""
+        method's own docstring), not a bare <p> link, for visual consistency."""
         login_checked = "checked" if active_tab == "login" else ""
         signup_checked = "checked" if active_tab == "signup" else ""
 
         login_err_html = f'<p class="err">{esc(login_error)}</p>' if login_error else ""
         login_label = "Login"
-        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # 2026-07-11: login link returns to originating page --
         # carried through as a hidden field so App.my()'s POST handler can
         # redirect back to it on success; see _safe_next_path()'s own
         # docstring for why this is re-validated server-side rather than
@@ -2719,7 +2708,7 @@ class App:
         if signup_success:
             # Boxed the same as the form it replaces (2026-07-06 fix: a
             # bare, unboxed <p> here looked like a stray sentence floating
-            # on an otherwise-empty page -- the operator: "This is a bit ugly").
+            # on an otherwise-empty page, which was a bit ugly).
             signup_body = f'<div class="card"><p>{esc(signup_success)}</p></div>'
         else:
             signup_err_html = f'<p class="err">{esc(signup_error)}</p>' if signup_error else ""
@@ -2765,7 +2754,7 @@ class App:
         which ones exist.
 
         A rate-limited response, on the other hand, is safe to show
-        distinctly (2026-07-05, prompted by the operator asking why not): both
+        distinctly (2026-07-05): both
         login_limiter (per email) and reset_ip_limiter (per client IP,
         see its own comment) are checked and incremented BEFORE
         find_user_by_email is ever consulted, so whether either one
@@ -2780,8 +2769,8 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
-        # 2026-07-14, the operator, expanding the always-visible-banner request to
-        # "basically ALL pages except for the index.html!" -- same boxed
+        # 2026-07-14, expanding the always-visible-banner request to
+        # basically ALL pages except index.html -- same boxed
         # banner every other guest-facing page uses.
         banner = self._session_banner_html(environ)
         lockout_seconds = 0.0
@@ -2809,8 +2798,8 @@ class App:
             )
         reset_label = "Send me a link"
         err_html = '<p class="err">Too many attempts -- try again later.</p>' if lockout_seconds else ""
-        # 2026-07-10, the operator (screenshot of this page): "here we are missing
-        # a back button" -- the POST-success response already had "Back to
+        # 2026-07-10: this page was missing
+        # a back button -- the POST-success response already had "Back to
         # login" (see above), but this initial GET form never did, leaving
         # no way back to /my short of the browser's own Back button.
         body = f"""{err_html}<form method="post" class="card" id="reset-form">
@@ -2853,10 +2842,9 @@ class App:
         moment (it may have filled up while the account sat unconfirmed) --
         see Store.confirm_pending_registration.
 
-        Three distinct "this won't work" outcomes (2026-07-07, the operator asked
-        "when will the confirmation links be invalid?" and "clicking the
-        invalidated link should inform the user that there should be a NEW
-        link coming to him"), checked in this order:
+        Three distinct "this won't work" outcomes (2026-07-07: clicking an
+        invalidated link should inform the user that a NEW
+        link is on its way), checked in this order:
           1. Found + past CONFIRM_TOKEN_TTL_HOURS -> "expired" message.
           2. Not found, but matches prev_confirm_token_hash -> "a newer
              link was already sent to you" message (this is the common
@@ -2867,8 +2855,8 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
-        # 2026-07-14, the operator, expanding the always-visible-banner request to
-        # "basically ALL pages except for the index.html!" -- same boxed
+        # 2026-07-14, expanding the always-visible-banner request to
+        # basically ALL pages except index.html -- same boxed
         # banner every other guest-facing page uses.
         banner = self._session_banner_html(environ)
         token_hash = hash_token(token)
@@ -3018,15 +3006,15 @@ class App:
         is re-done here, not just trusted from the page: my()'s button is
         already hidden for a past occurrence, but a crafted/replayed POST
         could still hit this route directly. Same reasoning for the
-        guest-canceled-only check below (2026-07-14, the operator: "a meeting
-        that was canceled by HOST should NOT have a reinstate button") --
+        guest-canceled-only check below (2026-07-14: a meeting
+        that was canceled by HOST should NOT have a reinstate button) --
         my()'s button is already hidden for a host-canceled row too, but
         this re-checks it server-side for the same crafted/replayed-POST
         reason.
 
-        Optional `message` (2026-07-10, the operator: "Reinstate should, LIKE
-        CANCEL, also ask for a COMMENT to be sent with the email to the
-        other") is collected by the same dialog+textarea pattern Cancel
+        Optional `message` (2026-07-10: Reinstate should, LIKE
+        CANCEL, also ask for a comment to be sent with the email to the
+        other side) is collected by the same dialog+textarea pattern Cancel
         uses, and passed straight through to
         _send_reinstatement_emails() -- see that function's docstring."""
         guard = self._maintenance_guard(environ)
@@ -3062,8 +3050,8 @@ class App:
         # their wishes for no real benefit.
         #
         # Redirects to the homepage (settings.base_url), not "/my"
-        # (2026-07-11, the operator: "pressing logout should bring you back to
-        # https://booking.example.org"). This is the ONE logout form
+        # (2026-07-11: pressing logout should bring you back to
+        # https://booking.example.org). This is the ONE logout form
         # (_session_banner_html()'s own, action="/my/logout") shared by
         # every page that shows it -- the static homepage's own JS-rendered
         # copy (site/index.html), /courses, /book/<shortname>, and /my
@@ -3111,8 +3099,8 @@ class App:
         browser already logged in as a guest?", via a same-origin fetch()
         and swap its plain Login button for the same My-bookings/Log-out
         affordance the dynamic pages (/courses, /book, /my) already show
-        (2026-07-09, the operator: "if you are logged in, https://booking.example.org
-        should show the same banner and not 'Login' button").
+        (2026-07-09: a logged-in visitor at https://booking.example.org
+        should see the same banner, not a 'Login' button).
 
         A same-origin browser request already carries the HttpOnly session
         cookie automatically even though the static page's own JS can
@@ -3157,8 +3145,8 @@ class App:
         anything that arrived via nginx rather than a direct localhost
         connection).
 
-        "Currently logged in" (2026-07-13, the operator: "logged in means:
-        unexpired sessions") is exactly SESSIONS filtered to
+        "Currently logged in" (2026-07-13: logged in means
+        unexpired sessions) is exactly SESSIONS filtered to
         expires > now -- no extra recency window. Each entry's
         "connected_since" is expires - SESSION_TTL_SECONDS (see
         _record_page_view's docstring for why that's exact, not
@@ -3219,8 +3207,8 @@ class App:
 
     def internal_logout(self, method: str, environ):
         """POST-only counterpart to /internal/status -- `my-bt admin logout`'s
-        actual mechanism (2026-07-10, the operator: "add an admin command to log
-        user out. with a --all parameter", prompted by realizing `setup
+        actual mechanism (2026-07-10: added an admin command to log a
+        user out, with a --all parameter, after realizing `setup
         -i`'s "Restart my-booking.service now?" step -- unlike the RPM's
         own %pre gate -- had no session-awareness at all before this: a
         restart silently drops every session, so the fix there is to
@@ -3297,26 +3285,22 @@ class App:
         confirmation pair, sent once the link below is actually clicked
         (in my_confirm_email).
 
-        2026-07-11, the operator (screenshot of the current-address copy): "This
-        sentance is not nice to read. Yes the change was done from this
-        email... but the important info here is that the login should
-        change from test *TO* fred." -- the old wording ("from this
-        address to fred@example.org") made the reader work out that "this
+        2026-07-11: the current-address copy used to read awkwardly ("from
+        this address to fred@example.org"), making the reader work out that "this
         address" meant their own inbox; both emails below now spell out
         the FROM and TO addresses explicitly instead of leaning on a
         self-reference, for the same reason on both copies.
 
-        Also (same round): "it is not relevant if the person did the
-        change... he/she could have asked someone... important is if they
-        are OK with this!" -- both emails used to ask "did YOU request
-        this" (implying only the account owner's own click counts), which
-        doesn't hold up if someone else made the change on their behalf,
-        with their knowledge, at their own ask. Reworded to ask whether the
-        change itself is welcome/expected, not who physically clicked
-        anything.
+        Also (same round): it isn't relevant whether the account owner
+        personally clicked the change -- someone else could have made it on
+        their behalf, with their knowledge, at their own request. What
+        matters is whether they're OK with the change. Both emails used to
+        ask "did YOU request this" (implying only the account owner's own
+        click counts); reworded to ask whether the change itself is
+        welcome/expected, not who physically clicked anything.
 
-        `cancel_token` (2026-07-11, same round: "Please provide a link
-        without login") is the plaintext of a token FRESHLY MINTED by the
+        `cancel_token` (2026-07-11, same round: a no-login cancel link was
+        needed) is the plaintext of a token FRESHLY MINTED by the
         caller (my_settings_email), separate from `token` above -- see
         User.pending_email_cancel_token_hash's own docstring for why the
         confirm token can't double as this one. Builds the current
@@ -3386,8 +3370,8 @@ class App:
         # pending-change branch, which has no error slot of its own.
         email_err_html = f'<p class="err">{esc(email_error)}</p>' if email_error else ""
         if user.pending_email:
-            # 2026-07-11, the operator (screenshot of this exact card): "Please use
-            # same font-size for both text lines above the button" -- the
+            # 2026-07-11: both text lines above the button now use the
+            # same font size -- the
             # second line used to be class="hint" (smaller, grey -- see
             # templates.py's .hint rule), which read as visually secondary
             # to the first even though both are equally important status
@@ -3431,8 +3415,8 @@ class App:
             <button type="button" class="dialog-close-btn" data-dialog="delete-account-dialog">Never mind</button>
           </div>
         </dialog>""" + _DIALOG_WIRING_SCRIPT
-        # 2026-07-14, the operator: "please move the delete button under 'Account
-        # settings': and rename to 'DELETE this account'" -- moved here
+        # 2026-07-14: the delete button moved under 'Account
+        # settings' and was renamed to 'DELETE this account' -- moved here
         # from the bottom of /my (see my()'s own comment at the same
         # spot). Same form/dialog/confirm() markup as before, just
         # relocated + relabeled.
@@ -3549,9 +3533,9 @@ class App:
         one that requested it (e.g. opening the new inbox on a different
         device).
 
-        2026-07-07, the operator: "Logout user before email is changed (so with
-        its old email). Then redirect the user back to login page /my
-        with the link please." -- every session for this account (on
+        2026-07-07: logout the user before the email is changed (so with
+        its old email), then redirect the user back to the login page /my
+        with the link -- every session for this account (on
         every device/browser, including whichever one is reading this
         very "Email confirmed" page) is invalidated on a successful POST,
         so the next thing anyone does with this account is log in fresh
@@ -3560,8 +3544,8 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
-        # 2026-07-14, the operator, expanding the always-visible-banner request to
-        # "basically ALL pages except for the index.html!" -- same boxed
+        # 2026-07-14, expanding the always-visible-banner request to
+        # basically ALL pages except index.html -- same boxed
         # banner every other guest-facing page uses.
         banner = self._session_banner_html(environ)
         token_hash = hash_token(token)
@@ -3587,8 +3571,8 @@ class App:
             if updated is None:
                 body = '<p>This link is invalid or has already been used.</p>'
                 return "200 OK", [("Content-Type", "text/html")], page("Link invalid", body, banner=banner)
-            # the operator: "Logout user before email is changed ... redirect the
-            # user back to login page /my" -- kills every session for this
+            # Logout the user before email is changed, redirect the
+            # user back to login page /my -- kills every session for this
             # account (this browser included), so the link below has to be
             # a fresh login, not a still-logged-in settings page.
             _invalidate_all_sessions_for_user(user.user_id)
@@ -3597,11 +3581,11 @@ class App:
                     '<p>Please <a href="/my">log in</a> again with your new email.</p>')
             return "200 OK", [("Content-Type", "text/html")], page("Email confirmed", body, banner=banner)
 
-        # 2026-07-11, the operator (screenshot of this exact page): "3x Confirm is
-        # 1x too much. Please place the sentance within the box that
-        # surrounds the 'Confirm change' button and use the same font
-        # size as in the button. When you do, please remove the Confirm
-        # and simply ask: 'Change ... ?' instead" -- the page title
+        # 2026-07-11: this page used to say "Confirm" three times, one too
+        # many, so the sentence was moved inside the box that
+        # surrounds the 'Confirm change' button, at the same font
+        # size as the button, and reworded to plainly ask "Change ... ?"
+        # instead of also confirming -- the page title
         # ("Confirm email change") and the button ("Confirm change") each
         # already say it once; the sentence no longer needs to say it a
         # third time. Moved inside the same <form class="card"> the button
@@ -3619,8 +3603,8 @@ class App:
     def my_cancel_email_change(self, method: str, token: str, environ):
         """No-login "cancel this pending email change" landing page,
         linked from the CURRENT address's own notification email (see
-        _send_email_change_emails -- 2026-07-11, the operator: "Please provide a
-        link without login" -- that email's cancel action used to point
+        _send_email_change_emails -- 2026-07-11: a no-login cancel
+        link was needed -- that email's cancel action used to point
         at /my/settings, which needs a session).
 
         Gated by pending_email_cancel_token_hash, a token completely
@@ -3639,8 +3623,8 @@ class App:
         guard = self._maintenance_guard(environ)
         if guard:
             return guard
-        # 2026-07-14, the operator, expanding the always-visible-banner request to
-        # "basically ALL pages except for the index.html!" -- same boxed
+        # 2026-07-14, expanding the always-visible-banner request to
+        # basically ALL pages except index.html -- same boxed
         # banner every other guest-facing page uses.
         banner = self._session_banner_html(environ)
         user = self.store.find_user_by_pending_email_cancel_token_hash(hash_token(token))
@@ -3719,14 +3703,12 @@ class App:
         session = _get_session(environ)
         if not session or session.get("kind") != "admin":
             return "302 Found", [("Location", "/admin/login")], ""
-        # 2026-07-14, the operator, screenshot of the old binary "include past"
-        # text-link toggle: "please improve by providing selectors like
-        # for my-bt list: (so NOT a drop down list, but directly
-        # accessible 1-click possibilities to change): All, Only Past,
-        # Only Future and make it so only one of the selectors can be
-        # active at one time. And the active one should be visibly
-        # marked! So by default 'Only Future' should be active and
-        # marked." -- same 3-way mutually-exclusive shape `my-bt list`'s
+        # 2026-07-14: replaced the old binary "include past"
+        # text-link toggle with 1-click selectors, like
+        # `my-bt list`'s own -- All, Only Past, Only Future -- with
+        # only one active at a time, and the active one visibly
+        # marked. By default 'Only Future' is active and
+        # marked. Same 3-way mutually-exclusive shape `my-bt list`'s
         # own --live/--past/--all flags already use (see scripts/my-bt's
         # scope_args()), just as ?scope=... query-string links instead of
         # CLI flags. "future" (today-or-later, live rows only) is the
@@ -3748,13 +3730,13 @@ class App:
         # was already force-canceled by Store.erase_user before archiving,
         # so it's never something the "today + future only" view needs to
         # surface; it should only appear once "include past" is toggled.
-        # 2026-07-10, the operator: "the merge should be automatically done if you
-        # also display the history in the /admin page" -- any LIVE guest
+        # 2026-07-10: the merge is done automatically when
+        # the history is displayed in the /admin page -- any LIVE guest
         # whose current email hashes to an already-archived (erased)
         # identity shows that pre-erasure registration history alongside
         # their live rows here.
         #
-        # 2026-07-13, the operator: "/admin should [be] non-mutating" -- this
+        # 2026-07-13: /admin should be non-mutating -- this
         # used to actually rewrite the CSVs on every page load (moving the
         # archived rows for real, same as `my-bt admin dearchive`); now
         # it's a pure display-time merge instead, via the SAME shared
@@ -3782,12 +3764,9 @@ class App:
         # below -- a canceled booking still counts as a real time they were
         # once booked in.
         #
-        # 2026-07-08, the operator (screenshot of a guest already showing "9" with
-        # sessions still weeks out): "please have the times booked UP TO
-        # THIS MOMENT / date (always including of course the current
-        # course)", then "actually even better: make it 2/9 ... so that I
-        # see the total and also see the current time they joined" -- shows
-        # BOTH counts as "up-to-now/total" (e.g. "2/9": 2 sessions actually
+        # 2026-07-08: times booked now counts UP TO
+        # THIS MOMENT / date (always including the current
+        # course), shown as "up-to-now/total" (e.g. "2/9": 2 sessions actually
         # happened so far, 9 ever booked including future ones). occurrence_
         # date <= today (today's own session counts, not just strictly-past
         # ones) is the same "past" cutoff used everywhere else in this
@@ -3820,8 +3799,8 @@ class App:
             regs = [r for r in live_regs if date.fromisoformat(r.occurrence_date) < today] + archived_regs
         else:
             regs = [r for r in live_regs if date.fromisoformat(r.occurrence_date) >= today]
-        # 2026-07-08, the operator: "include past should by default show the
-        # newest first" -- the future-only view stays ascending (soonest
+        # 2026-07-08: include-past view shows the
+        # newest first -- the future-only view stays ascending (soonest
         # upcoming session first, unchanged); both past-containing views
         # (past/all) sort descending (most recent booking first) instead,
         # same asc-for-upcoming/desc-for-past split as /my's own
@@ -3846,7 +3825,7 @@ class App:
             row["registration_id"]: row["party_label"]
             for row in cli_list.annotate_admin_party_label(raw_all_regs, raw_users_by_id)
         }
-        # "Cancel entire session" (2026-07-13, the operator): every LIVE row that
+        # "Cancel entire session" (2026-07-13): every LIVE row that
         # cancel_flow.cancel_occurrence() would act on, grouped by
         # (course_shortname, occurrence_date) -- used below to (a) show,
         # right in each row's own cancel dialog, exactly who'd be notified
@@ -3903,12 +3882,12 @@ class App:
             times_cell = f"{times_upto_now_by_user.get(r.user_id, 0)}/{times_total_by_user.get(r.user_id, 0)}"
             if user and not erased:
                 cancel_id = f"admin-cancel-{esc(r.registration_id)}"
-                # 2026-07-08, the operator (screenshot of /admin?past=1): "PAST
-                # bookings should NOT have a CANCEL button as well :D" --
+                # 2026-07-08: PAST
+                # bookings should NOT have a CANCEL button either --
                 # same fix, same reasoning, as my()'s own Cancel button
                 # just below.
                 #
-                # 2026-07-13, the operator: a guest who hasn't yet clicked their
+                # 2026-07-13: a guest who hasn't yet clicked their
                 # account-confirmation email (STATUS_PENDING_CONFIRMATION)
                 # needs to be cancelable from here too -- previously they
                 # had NO way to be canceled at all, host or guest (see
@@ -3922,9 +3901,9 @@ class App:
                     date.fromisoformat(r.occurrence_date) < today
                 )
                 scope_field = f'<input type="hidden" name="scope" value="{scope}">' if scope != "future" else ""
-                # "Cancel entire session" (2026-07-13, the operator: "the checkbox
-                # ... Cancel ALL reservations for this date ... SHOW who
-                # would all then receive this cancel email") -- an
+                # "Cancel entire session" (2026-07-13: the checkbox
+                # cancels ALL reservations for this date and SHOWs who
+                # would all then receive this cancel email) -- an
                 # occurrence-key-tagged checkbox INSIDE this row's own
                 # dialog (same `form="{cancel_id}-form"` trick the message
                 # textarea below already uses to submit alongside a form it
@@ -4014,8 +3993,8 @@ class App:
             rows.append(
                 f"<tr><td>{esc(status_label(r.status))}</td><td>{esc(r.course_shortname)}</td>"
                 f'<td class="nowrap">{esc(r.occurrence_date)}</td>{name_cell}{email_cell}'
-                # 2026-07-14, the operator: "both date and time should be
-                # non-linebreakable" -- format_display_timestamp() now
+                # 2026-07-14: both date and time should be
+                # non-linebreakable -- format_display_timestamp() now
                 # returns a real space between date/time ("2026-07-08
                 # 11h49.54"), which is a line-break opportunity in an
                 # HTML table cell; nowrap keeps it on one line, same class
@@ -4024,11 +4003,11 @@ class App:
                 f"<td>{esc(party_cell)}</td>"
                 f"<td>{actions}</td></tr>"
             )
-        # One-click, mutually-exclusive selectors (2026-07-14, the operator: "so
-        # NOT a drop down list, but directly accessible 1-click
-        # possibilities to change") -- the active one is a plain,
-        # non-clickable <span class="scope-active"> (visibly marked, per
-        # the operator's own requirement, and there's no point linking to the
+        # One-click, mutually-exclusive selectors (2026-07-14: not a
+        # drop-down list, but directly accessible 1-click
+        # possibilities to change) -- the active one is a plain,
+        # non-clickable <span class="scope-active"> (visibly marked, and
+        # there's no point linking to the
         # view you're already on); the other two are plain links to the
         # same page with a different ?scope=.
         def _scope_selector(value: str, label: str) -> str:
@@ -4061,8 +4040,8 @@ class App:
         <tbody>{''.join(rows)}</tbody></table>""" + (
             _SORTABLE_FILTERABLE_TABLE_SCRIPT + _DIALOG_WIRING_SCRIPT + _CANCEL_ENTIRE_SESSION_SCRIPT
         )
-        # 2026-07-14, the operator: "also /admin should get the same boxed
-        # banner, basically ALL pages except for the index.html!"
+        # 2026-07-14: /admin also gets the same boxed
+        # banner, basically all pages except for index.html.
         return "200 OK", [("Content-Type", "text/html")], page(
             "Admin overview", body, banner=self._admin_banner_html(environ)
         )
@@ -4092,7 +4071,7 @@ class App:
             # the duplicate side effects; the redirect below (instead of
             # rendering "Canceled" on this same POST URL) additionally
             # closes the back-button-resubmit path itself at the source.
-            # "Cancel entire session" (2026-07-13, the operator: the /admin
+            # "Cancel entire session" (2026-07-13: the /admin
             # checkbox on each row -- see admin_overview()'s own row-
             # rendering comment) -- the checkbox submits alongside THIS
             # row's own form (via its `form="{cancel_id}-form"` attribute),
@@ -4126,8 +4105,8 @@ class App:
         # Same "reason, then recap, then button" layout as guest_cancel()/
         # host_cancel() -- see host_cancel()'s docstring for the full "Can
         # be always the same code" rationale, and for why the reason box
-        # comes BEFORE the recap (2026-07-16, the operator, screenshot: "please
-        # place the reason-box above the course info-box").
+        # comes BEFORE the recap (2026-07-16: the reason-box was moved
+        # above the course info-box).
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (
             f"<p>About to cancel <b>{esc(user.name if user else '(erased)')}</b> "
@@ -4147,11 +4126,11 @@ class App:
         """Host-side twin of my_reinstate() -- undoes a cancellation on ANY
         guest's booking, for the same "guest called/emailed after canceling
         by mistake" use case my_reinstate() covers for the guest's own
-        self-service view (2026-07-10: "ah yes true! (accidental error for
-        the admin could be use case!)"). Same confirm-dialog-with-optional-
-        message pattern as admin_cancel() (2026-07-10: "Reinstate should,
-        LIKE CANCEL, also ask for a COMMENT to be sent with the email to
-        the other") -- see admin_overview()'s row rendering for the
+        self-service view (2026-07-10: the same accidental-cancellation
+        case can happen from the admin side too). Same confirm-dialog-with-optional-
+        message pattern as admin_cancel() (2026-07-10: Reinstate should,
+        LIKE CANCEL, also ask for a comment to be sent with the email to
+        the other side) -- see admin_overview()'s row rendering for the
         dialog itself. Preserves `past` the same way admin_cancel() does,
         so reinstating from the "past" view's table doesn't bounce back to
         the default upcoming-only view."""
@@ -4180,12 +4159,12 @@ class App:
         """A no-login "magic link" twin of admin_cancel() above, same
         cancellation logic (canceled_by="host", both sides notified via
         _send_cancellation_emails) but reachable without an admin session
-        (2026-07-09, the operator, screenshot of being bounced to /admin/login:
-        "instead it should be a magic link that does not need a password,
-        but directly shows the page where it tells you: Cancel Booking /
-        WHAT / WHERE / WHEN / Reason: <optional> / CONFIRM button"). This is
+        (2026-07-09: being bounced to /admin/login before canceling was
+        unwanted -- instead it's a magic link that does not need a password,
+        and directly shows a page with Cancel Booking / WHAT / WHERE / WHEN
+        / Reason: <optional> / CONFIRM button). This is
         what app/calendar_sync.py's per-participant "cancel:" line in the
-        calendar EVENT DESCRIPTION now links to -- so from his own phone's
+        calendar EVENT DESCRIPTION now links to -- so from the host's own phone's
         calendar app, tapping that link goes straight to a confirm page
         instead of an admin login wall first.
 
@@ -4194,14 +4173,14 @@ class App:
         being an unguessable uuid4 (see storage.py's add_registration_*
         methods) -- there's no separate secret. That's an intentional,
         narrower trust boundary than the guest-facing link: this ID only
-        ever appears somewhere already inside the operator's own trust boundary
-        (his own CalDAV calendar, the password-gated /admin overview, or a
+        ever appears somewhere already inside the host's own trust boundary
+        (their own CalDAV calendar, the password-gated /admin overview, or a
         guest's OWN /my page for their OWN booking) -- never broadcast the
         way a guest's emailed cancel link is. If that calendar is ever
         shared/exported somewhere less private, treat this the same as any
         other bearer link in it and reconsider."""
-        # 2026-07-14, the operator, expanding the always-visible-banner request to
-        # "basically ALL pages except for the index.html!" -- there's no
+        # 2026-07-14, expanding the always-visible-banner request to
+        # basically ALL pages except index.html -- there's no
         # "host" session kind (this is a bearer-link, not a login), so this
         # is _session_banner_html()'s ordinary guest-or-anonymous banner,
         # same as any other no-login guest-facing page.
@@ -4243,10 +4222,10 @@ class App:
                 "Canceled", "<p>Registration canceled and attendee notified.</p>", banner=banner
             )
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
-        # 2026-07-11, the operator (screenshot of this exact page): "please add a
-        # 'Never mind' button also here that brings you back to the
-        # homepage! Check all other pages that you can reach with a direct
-        # link to have not just one submit button as well!" -- this is a
+        # 2026-07-11: added a
+        # 'Never mind' button here too, back to the
+        # homepage -- every other page reachable via a direct
+        # link gets one as well, not just a single submit button. This is a
         # standalone, no-login page (unlike the /my and /admin popup
         # dialogs, which already have their own JS "Never mind" close
         # button), so its escape hatch is a plain link back to "/" rather
@@ -4254,10 +4233,9 @@ class App:
         # guest_reinstate(), host_reinstate(), my_confirm_email(), and
         # my_cancel_email_change() -- every other single-submit-button
         # direct-link page in the app.
-        # 2026-07-16, the operator, screenshot of host_cancel_occurrence: "please
-        # place the reason-box above the course info-box ... also for
-        # single cancel (if applicable)" -- this IS that single-cancel
-        # page, same reorder applied.
+        # 2026-07-16: the reason-box moved above the course info-box on
+        # host_cancel_occurrence, and the same reorder applies here for
+        # single cancel too.
         body = (
             f"<p>Cancel <b>{esc(user.name if user else '(erased)')}</b> "
             f"({esc(user.email if user else '(erased)')})'s booking?</p>"
@@ -4274,10 +4252,10 @@ class App:
     def host_reinstate(self, method: str, registration_id: str, environ):
         """No-login "magic link" twin of admin_reinstate(), reachable
         straight from the ADMIN's copy of the cancellation email
-        (2026-07-10: "Both" [participant and admin copies get a reinstate
-        link] / "for /my and /admin ... POPUP ... Only from the email
-        there will be a single page ... WHAT WHEN WHERE like in the
-        confirmation email"). Same security model as host_cancel() above:
+        (2026-07-10: both participant and admin copies get a reinstate
+        link; /my and /admin use a popup, while the email link
+        goes to a single page showing what/when/where, like the
+        confirmation email). Same security model as host_cancel() above:
         gated purely by `registration_id` being an unguessable uuid4 (see
         that method's own docstring on why that's an adequate boundary
         here) -- no separate token needed, unlike guest_reinstate()'s
@@ -4313,8 +4291,8 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Rebooked", "<p>Registration rebooked and attendee notified.</p>", banner=banner
             )
-        # 2026-07-16, the operator: "please place the reason-box above the course
-        # info-box" -- same reorder as the other cancel/rebook pages.
+        # 2026-07-16: the reason-box moved above the course
+        # info-box -- same reorder as the other cancel/rebook pages.
         recap = _course_recap_html(course, reg.occurrence_date) if course else ""
         body = (
             f"<p>Rebook <b>{esc(user.name if user else '(erased)')}</b> "
@@ -4332,8 +4310,8 @@ class App:
     def host_cancel_occurrence(self, method: str, course_shortname: str, occurrence_date_str: str, environ):
         """"Cancel the entire session" -- no-login "magic link" twin of
         host_cancel() above, but for EVERY registration on one occurrence
-        at once rather than a single guest's booking (2026-07-13, the operator:
-        "cancel the entire course link ... only for the HOST / admin").
+        at once rather than a single guest's booking (2026-07-13: the
+        cancel-the-entire-course link is only for the HOST / admin).
         Reachable from the operator's OWN CalDAV event (see
         calendar_sync.sync_occurrence's own "cancel entire session" line) --
         NEVER from a guest-facing email or .ics attachment; a guest's own
@@ -4345,7 +4323,7 @@ class App:
         (course_shortname, occurrence_date) both being unremarkable, already
         -public-inside-the-app values (a course shortname and a date aren't
         secrets the way a token is) -- this link only ever appears inside
-        the operator's own trust boundary (his own calendar), same narrower
+        the host's own trust boundary (their own calendar), same narrower
         boundary host_cancel()'s own docstring explains for a single
         registration's magic link.
 
@@ -4392,8 +4370,8 @@ class App:
             u = users_by_id.get(r.user_id)
             who = f"{esc(u.name)} ({esc(u.email)})" if u else "(unknown)"
             rows.append(f"<li>{who} -- {esc(status_label(r.status))}</li>")
-        # 2026-07-16, the operator, screenshot of this exact page: "please place
-        # the reason-box above the course info-box" -- reason label +
+        # 2026-07-16: the reason-box moved above the course info-box on
+        # this page too -- reason label +
         # textarea now come first, recap box second, same reorder applied
         # across every cancel/rebook confirmation page sharing this
         # layout (guest_cancel, guest_reinstate, admin_cancel, host_cancel,

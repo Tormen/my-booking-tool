@@ -91,8 +91,8 @@ class CheckSecretsTest(unittest.TestCase):
 
 
 class SummarizeProblemsTest(unittest.TestCase):
-    """2026-07-08, the operator: 'please repeat all warnings at the end of setup
-    and status explicitly.' summarize_problems() is the shared formatter
+    """2026-07-08: all warnings are repeated at the end of setup
+    and status explicitly. summarize_problems() is the shared formatter
     `my-bt admin health`/plain `my-bt admin setup`/`my-bt admin setup -i`
     all use to repeat every non-ok check right before their own final
     pass/fail summary line."""
@@ -158,20 +158,20 @@ class CheckGroupMembershipTest(unittest.TestCase):
         self.assertEqual(checks[0][1], "ok")
 
     def test_member_is_ok(self):
-        with patch.dict("os.environ", {"SUDO_USER": "operator"}, clear=False), \
+        with patch.dict("os.environ", {"SUDO_USER": "alice"}, clear=False), \
              patch("grp.getgrnam") as getgrnam:
-            getgrnam.return_value = type("G", (), {"gr_mem": ["operator"]})()
+            getgrnam.return_value = type("G", (), {"gr_mem": ["alice"]})()
             checks = cli_checks.check_group_membership()
         self.assertEqual(checks[0][1], "ok")
 
     def test_non_member_warns_with_usermod_command(self):
-        with patch.dict("os.environ", {"SUDO_USER": "operator"}, clear=False), \
+        with patch.dict("os.environ", {"SUDO_USER": "alice"}, clear=False), \
              patch("grp.getgrnam") as getgrnam:
             getgrnam.return_value = type("G", (), {"gr_mem": ["someoneelse"]})()
             checks = cli_checks.check_group_membership()
         label, level, detail = checks[0]
         self.assertEqual(level, "warn")
-        self.assertIn("usermod -aG my-booking operator", detail)
+        self.assertIn("usermod -aG my-booking alice", detail)
 
     def test_group_missing_entirely_warns(self):
         import grp as real_grp
@@ -291,8 +291,8 @@ class CheckWatchdogNginxAccessTest(unittest.TestCase):
     inspecting st_mode bits -- a real incident (2026-07-05) with the old
     stat-based version: setfacl grants access via a POSIX ACL entry, which
     never shows up in st_mode at all, so the old check kept reporting
-    "can't read" even right after the operator ran the exact setfacl command it
-    printed. These tests mock `_my_booking_can_read` directly (its own
+    "can't read" even right after the exact setfacl command it
+    printed was run. These tests mock `_my_booking_can_read` directly (its own
     subprocess-vs-root branching is exercised separately below) so this
     class stays focused on check_watchdog_nginx_access's own branching."""
 
@@ -586,9 +586,9 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
     """Real regression, 2026-07-08: /host-cancel-occurrence/ was added to
     _REQUIRED_NGINX_LOCATIONS and to the tracked site/nginx-locations.conf
     .example, but the operator's own real, gitignored site/nginx-locations.conf
-    (what his OWN VPS actually installs from -- see
+    (what the operator's OWN VPS actually installs from -- see
     scripts/build-rpm.sh/packaging/my-booking-tool.spec) never got the
-    matching edit, and nothing caught it until he noticed a stale file on
+    matching edit, and nothing caught it until a stale file was noticed on
     the VPS after a rebuild. check_nginx_conf_repo_file() (tested above)
     already guards the real file at `my-bt admin health` time, but that can
     only ever run somewhere the real file actually exists -- it never runs
@@ -633,8 +633,8 @@ class CheckNginxConfDeployedTest(unittest.TestCase):
     disk (not `nginx -T`, not a checkout glob) -- and unlike every other
     optional settings.toml-path check, reports "fail" (not "warn") for any
     problem, since configuring this path at all is a deliberate statement
-    that this exact file is real and matters (2026-07-10, the operator: "truly
-    ERROR out in case there is a problem")."""
+    that this exact file is real and matters (2026-07-10: it should truly
+    ERROR out in case there is a problem)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -714,8 +714,8 @@ class ResolveNginxConfCheckoutSourceTest(unittest.TestCase):
     """2026-07-10: this no longer takes a nginx_conf_path argument at all --
     the checkout side always uses the fixed site/nginx-locations.conf(.example)
     name, completely independent of whatever the live deployed file is
-    called on the actual server (the operator's rename request: "all content in
-    site/ works the same")."""
+    called on the actual server (renamed so all content in
+    site/ works the same)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1123,11 +1123,12 @@ class CheckStaticPagesDeployedTest(unittest.TestCase):
         self.assertEqual(level, "ok")
 
     def test_maintenance_banner_alone_does_not_count_as_a_difference(self):
-        # 2026-07-10, the operator, looking at a vimdiff setup -i offered him where
-        # the ONLY difference was the maintenance banner: "my-bt setup -i
-        # should know about the maintenance mode and ignore any change
-        # linked to this, and should not propose this vimdiff if this is
-        # the only difference." -- `my-bt admin site-maintenance on` inserts the
+        # 2026-07-10: a vimdiff offered by setup -i where
+        # the ONLY difference was the maintenance banner led to `my-bt
+        # setup -i` learning about maintenance mode and ignoring any
+        # change linked to it, so it no longer proposes a vimdiff when
+        # this is the only difference -- `my-bt admin site-maintenance on`
+        # inserts the
         # banner directly into the LIVE deployed index.html (by design, so
         # it shows up immediately), so the deployed copy legitimately
         # differs from the checkout for as long as maintenance stays on.
@@ -1381,13 +1382,13 @@ class CheckDataDirGitTest(unittest.TestCase):
 
 
 class CheckDirectoryFsyncSupportTest(unittest.TestCase):
-    """2026-07-15, the operator, on fsync_dir()'s best-effort/never-raises
-    design: "worth a one-time capability probe ... rather than relying
-    on someone noticing a warning line in a log nobody tails." This is
+    """2026-07-15: fsync_dir()'s best-effort/never-raises
+    design is worth a one-time capability probe, rather than relying
+    on someone noticing a warning line in a log nobody tails. This is
     the re-checkable-any-time half of that (see app.serve's startup
     check for the other half) -- surfaced through `my-bt admin setup`/
     `admin health` so a stale/unsupported mount keeps showing up, with
-    the operator's own standing "any warning -> exit 1" policy applying to it
+    the standing "any warning -> exit 1" policy applying to it
     same as every other check here."""
 
     def setUp(self):
@@ -1499,9 +1500,9 @@ class CheckDataDirOwnershipTest(unittest.TestCase):
 
 
 class CheckPathGroupAndSelinuxTest(unittest.TestCase):
-    """2026-07-16, the operator: "audit group+permissions+SELinux ... for ALL
-    data paths, INCLUDING any user-configurable ones [e.g.] an
-    email-templates directory" -- the ONE shared function every data
+    """2026-07-16: group+permissions+SELinux are audited for ALL
+    data paths, INCLUDING any user-configurable ones (e.g. an
+    email-templates directory) -- the ONE shared function every data
     path (data_dir itself, [logging].log_file, [site].static_site_dir,
     and any future configurable directory) goes through instead of
     growing its own bespoke ownership check the way check_data_dir_
@@ -1811,14 +1812,14 @@ class CheckCalendarInviteFormatTest(unittest.TestCase):
 
 
 class CheckCalendarInviteResyncSkipsTest(unittest.TestCase):
-    """2026-07-15/16, the operator, from a real production run: 3 occurrences hit
+    """2026-07-15/16: from a real production run, 3 occurrences hit
     persistent CalDAV conflicts during a resync, got skipped, and the run
     still printed "[ok] ... resynced 6 upcoming occurrence(s)" then "Done
     -- all checks pass now" -- because check_calendar_invite_format()
     above only ever asks "did an attempt happen", never "did every
-    occurrence in that attempt actually succeed". "-- 13. Calendar
-    invite format -- says 'OK' but if you look at the output... I am NOT
-    so sure!" This is that second question, no network call, always safe
+    occurrence in that attempt actually succeed". The "OK" summary line
+    didn't match what the detailed output actually showed. This is that
+    second question, no network call, always safe
     to check -- no gating on CalDAV being configured at all, unlike
     check_calendar_invite_format above (the marker only ever exists after
     a real resync ran, so there's nothing to gate)."""

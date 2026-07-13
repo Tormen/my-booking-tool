@@ -38,7 +38,7 @@ def _default_check_active_sessions(internal_url: str = _DEFAULT_INTERNAL_URL) ->
     script and isn't importable from here -- see that module's own
     comment on why check/report logic belongs in this package instead).
 
-    2026-07-10, the operator: prompted by realizing interactive_setup's own
+    2026-07-10: added after realizing interactive_setup's own
     "Restart my-booking.service now?" step (below) had no session-
     awareness at all, unlike the RPM's own %pre gate before an upgrade --
     a restart here silently drops every session (SESSIONS is in-memory,
@@ -219,9 +219,9 @@ def print_report(
     two counts `cmd_status` in scripts/my-bt already computes from its own
     flat `checks` list -- so plain `my-bt setup` (no `-i`) can exit
     non-zero on either, exactly like `my-bt status` already does
-    (2026-07-10, the operator: "add that same summary-line + nonzero-exit
-    behavior to plain `my-bt setup`, for consistency with `status` and so
-    it's usable in a script/cron check too" -- "Yes please"). Before this,
+    (2026-07-10: the same summary-line + nonzero-exit behavior was added
+    to plain `my-bt setup`, for consistency with `status` and so it's
+    usable in a script/cron check too). Before this,
     plain `setup` always exited 0 and had no rollup line at all: every
     check was individually marked [OK]/[WARN]/[FAIL], so a human reading
     the whole report could tell, but there was nothing a script could
@@ -257,10 +257,9 @@ def print_report(
         # (site/nginx-locations.conf -- see check_nginx_conf_repo_file()
         # just below), point at THAT instead of the bare generic packaged
         # example: it's your own already-hardened file, not a from-scratch
-        # template to re-adapt (2026-07-10, the operator, after seeing exactly this
-        # hint fire while his own complete file sat unused in site/: "But
-        # YOU can prepare here the correct nginx-locations.conf to be
-        # complete already, or?").
+        # template to re-adapt (2026-07-10: this hint used to fire even
+        # when a complete file already sat unused in site/, which is
+        # confusing when it's already prepared and correct).
         if any(level == "ok" for _, level, _ in report["nginx_conf_repo_file"]):
             print_fn(f"   Add any missing block(s) from this checkout's own, already-complete")
             print_fn(f"   site/{cli_checks._NGINX_CONF_FILENAME} to your live vhost (not deployed")
@@ -472,10 +471,10 @@ def interactive_setup(
         # Point at this checkout's own real, already-complete vhost conf
         # (checked just below) instead of the bare generic packaged example
         # when one exists -- it's already hardened and has every block this
-        # app needs, not a from-scratch template to re-adapt (2026-07-10,
-        # the operator, seeing this hint fire while his own complete file sat
-        # unused in site/: "But YOU can prepare here the correct
-        # nginx-locations.conf to be complete already, or?").
+        # app needs, not a from-scratch template to re-adapt (2026-07-10:
+        # this hint used to fire even when a complete file already sat
+        # unused in site/, which is confusing when it's already prepared
+        # and correct).
         print_fn("Add the missing location block(s) above from")
         if repo_file_ok:
             print_fn(f"  this checkout's own site/{cli_checks._NGINX_CONF_FILENAME} (already complete)")
@@ -504,8 +503,9 @@ def interactive_setup(
     # so this reflects exactly what's on this box right now, and works
     # even before nginx is reloaded or if the nginx binary isn't
     # reachable at all. A configured-but-broken file here is a hard FAIL,
-    # not a warning (2026-07-10, the operator: "truly ERROR out in case there is
-    # a problem") -- unlike check_nginx_conf_repo_file() above, setting
+    # not a warning (2026-07-10: this path can actually be checked for
+    # correctness, so a real problem should truly ERROR out) -- unlike
+    # check_nginx_conf_repo_file() above, setting
     # this path is a deliberate statement that this exact file matters.
     # Still never auto-edited -- rewriting a hand-hardened vhost would be
     # worse than asking -- but if this checkout has its own copy (real or
@@ -514,8 +514,8 @@ def interactive_setup(
     # for .rpmnew merges and stale hand-authored static pages. The checkout
     # side is always the one fixed site/nginx-locations.conf(.example) --
     # unrelated to whatever nginx_conf_path itself is named on the live
-    # server (2026-07-10, the operator: rename convention so "all content in
-    # site/ works the same").
+    # server (2026-07-10: fixed filename convention so all content in
+    # site/ works the same way).
     nginx_conf_path = raw.get("site", {}).get("nginx_conf_path")
     if not nginx_conf_path:
         print_fn("[skip] [site].nginx_conf_path not configured -- not checked")
@@ -524,12 +524,11 @@ def interactive_setup(
         # Nothing at the configured path yet? `nginx -T`'s own
         # "# configuration file <path>:" markers can reveal this vhost is
         # actually still deployed under a DIFFERENT (e.g. pre-rename)
-        # filename -- exactly the gap hit right after the
-        # site/booking.example.org.conf -> site/nginx-locations.conf rename: the operator
-        # still needed to `sudo mv` the real file, and until now there was
-        # nothing for this tool to point at, let alone do for him
-        # (2026-07-10: "the package installer can fix this (or my-bt
-        # setup -i can) ... please").
+        # filename -- exactly the gap hit right after a real
+        # site/booking.example.org.conf -> site/nginx-locations.conf rename: the
+        # real file still needed a manual `sudo mv`, and until now there
+        # was nothing for this tool to point at, let alone fix
+        # (2026-07-10: added so `my-bt setup -i` can fix this directly).
         live_file = None
         if not deployed.exists():
             candidate = cli_checks._live_nginx_conf_file_for_host(raw)
@@ -545,10 +544,9 @@ def interactive_setup(
         # already says as much: the checkout side is deliberately
         # independent of this too). So the FIRST, lowest-risk offer here is
         # just correcting the SETTING to point at reality, not touching the
-        # live file at all (2026-07-10, the operator, pushing back on an earlier
-        # version of this step that only ever offered to rename the live
-        # file: "settings.toml should tell you that I AM using
-        # booking.example.org.conf and hence my-bt should respect this" -- renaming
+        # live file at all (2026-07-10: an earlier version of this step
+        # only ever offered to rename the live file, but settings.toml
+        # should instead be told which file is actually in use -- renaming
         # an already-working, hand-hardened vhost file is real risk for no
         # benefit if the setting can simply be corrected instead). Renaming
         # the file to match the setting is still offered further down, for
@@ -634,7 +632,7 @@ def interactive_setup(
         else:
             print_fn(f"{label}: {detail}")
             if "aren't live yet" in detail:
-                # 2026-07-10, the operator: unlike the RPM's own %pre gate before
+                # 2026-07-10: unlike the RPM's own %pre gate before
                 # an upgrade, this restart used to have NO session-
                 # awareness at all -- SESSIONS is in-memory (see
                 # app/webapp.py's module docstring), so restarting here
@@ -737,10 +735,9 @@ def interactive_setup(
                 continue
             # cli_checks._diffable_static_page_text() strips
             # `my-bt admin site-maintenance on`'s banner block before comparing
-            # (2026-07-10, the operator: "my-bt setup -i should know about the
-            # maintenance mode and ignore any change linked to this, and
-            # should not propose this vimdiff if this is the only
-            # difference") -- without it, index.html looks permanently
+            # (2026-07-10: `setup -i` should know about maintenance mode
+            # and ignore any change caused only by that banner, rather
+            # than proposing a vimdiff for it) -- without it, index.html looks permanently
             # "different" from the checkout for as long as maintenance mode
             # stays on, offering a pointless vimdiff every single run.
             same = cli_checks._diffable_static_page_text(deployed.read_text(encoding="utf-8", errors="replace")) == \
@@ -927,9 +924,9 @@ def interactive_setup(
     # here (an unsupported mount is an OS/infrastructure fact, not a
     # misconfiguration this tool caused or can chown/edit its way out
     # of), just surfacing it clearly instead of leaving it to a routine
-    # WARNING line in the app's own log that nobody tails (2026-07-15,
-    # the operator -- see cli_checks.check_directory_fsync_support's own
-    # docstring for the exact quote).
+    # WARNING line in the app's own log that nobody tails (2026-07-15 --
+    # see cli_checks.check_directory_fsync_support's own docstring for
+    # the full reasoning).
     print_fn("\n-- 11c. Directory fsync support --")
     for label, level, detail in cli_checks.check_directory_fsync_support(data_dir):
         print_fn(f"[{level}] {label}: {detail}")
@@ -938,8 +935,8 @@ def interactive_setup(
     # [logging].log_file, and [site].static_site_dir all go through the
     # SAME cli_checks.check_path_group_and_selinux() (see its own
     # docstring: this is deliberately the ONE place any FUTURE
-    # settings.toml-configurable directory -- the operator's own example: an
-    # email-templates dir -- gets wired in too, one line here plus one
+    # settings.toml-configurable directory (e.g. an
+    # email-templates dir) gets wired in too, one line here plus one
     # in build_report() above, instead of new bespoke chgrp/restorecon
     # code each time). Auto-fix gated on is_root(), same reasoning as the
     # data-dir-ownership chown step above -- chgrp/restorecon are both
@@ -982,11 +979,10 @@ def interactive_setup(
     for label, level, detail in cli_checks.check_maintenance_mode(data_dir):
         print_fn(f"[{level}] {label}: {detail}")
 
-    # 13. Calendar invite format -- the "on install" half of the operator's own
-    # standing request (2026-07-09: "If we change anything with the
-    # CALENDAR INVITE(s) ... Please ensure that the existing (future)
-    # calendar invites are updated as well (maybe either on install or on
-    # the next moment you touch this calendar invite again ?)"). Unlike
+    # 13. Calendar invite format -- the "on install" half of the
+    # standing requirement (2026-07-09) that any change to the CALENDAR
+    # INVITE(s) also updates existing (future) calendar invites, either
+    # on install or the next time this calendar invite is touched. Unlike
     # every other step above, this one never prompts -- it's idempotent
     # (a no-op once the marker matches CALENDAR_INVITE_FORMAT_VERSION, see
     # that constant's own docstring in app/calendar_sync.py) and touches
@@ -1016,9 +1012,9 @@ def interactive_setup(
             if result is None:
                 print_fn("[ok] calendar invite format unchanged since the last resync -- nothing to do")
             elif result.skipped:
-                # 2026-07-15/16, the operator, from a real run that hit exactly
-                # this: "-- 13. Calendar invite format -- says 'OK' but
-                # if you look at the output... I am NOT so sure!" --
+                # 2026-07-15/16: a real run showed step 13 printing an
+                # "[ok]"-looking result even though not everything had
+                # actually succeeded --
                 # `fixed` alone (the old message here) hid the fact that
                 # some occurrences were SKIPPED after a persistent CalDAV
                 # conflict -- this must never print [ok] when that
@@ -1040,8 +1036,8 @@ def interactive_setup(
         except Exception as exc:  # noqa: BLE001 -- config/network/CalDAV failure, report don't crash
             print_fn(f"[warn] couldn't check/resync calendar invite format: {exc}")
 
-    # 2026-07-08, the operator: "would be better if 'Done' would reflect if there
-    # were any problems." -- previously this was a flat "Done." no matter
+    # 2026-07-08: "Done" now reflects whether there were any problems --
+    # previously this was a flat "Done." no matter
     # how many [warn]/[fail] lines had just scrolled by above, so a real
     # outstanding issue (e.g. step 10's stale nginx_access_log path) was
     # exactly as easy to miss as a totally clean run. Re-running

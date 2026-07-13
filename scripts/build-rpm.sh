@@ -27,7 +27,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # invoking user's home explicitly, once, up front.
 RPMBUILD_DIR="${HOME:?HOME is not set}/rpmbuild"
 
-# 2026-07-10, the operator: running this via `sudo -u me /bin/sh .../build-rpm.sh`
+# 2026-07-10: running this via `sudo -u me /bin/sh .../build-rpm.sh`
 # from a root shell whose OWN cwd was /root inherits that /root cwd here
 # too (`sudo -u` drops privileges but does NOT chdir anywhere on its own,
 # unless run with `-H`/`--chdir`) -- "me" can't stat/access /root (700,
@@ -63,7 +63,7 @@ rpmdev-setuptree >/dev/null 2>&1 || mkdir -p "$RPMBUILD_DIR"/{SOURCES,SPECS,RPMS
 # %install/%files, updated the same day) -- meaning `my-bt setup -i`
 # (default MY_BOOKING_HOME=/opt/my-booking) could never find a real one to
 # vimdiff against, no matter how complete this SOURCE checkout's own copy
-# was. the operator: "That's the whole point HAVING this file locally!!"
+# was -- the whole point of having this file locally.
 for real in settings.toml site/index.html site/impressum.html site/terms.html site/privacy.html.tmpl site/nginx-locations.conf; do
   if [ ! -f "$HERE/$real" ] && [ -f "$HERE/$real.example" ]; then
     cp "$HERE/$real.example" "$HERE/$real"

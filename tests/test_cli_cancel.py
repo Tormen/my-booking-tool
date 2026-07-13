@@ -116,16 +116,16 @@ class CancelRegistrationTest(unittest.TestCase):
 
         participant_mail = next(b for t, s, b in self.sent_emails if t == "guest@example.org")
         self.assertIn("The host canceled this booking:", participant_mail)
-        # 2026-07-09, the operator (b): host-initiated cancels label the message
+        # 2026-07-09: host-initiated cancels label the message
         # from the ATTENDEE's point of view -- it came from the host.
         self.assertIn("Message from the host: course canceled", participant_mail)
         self.assertIn("What: Yoga", participant_mail)
-        # 2026-07-09, the operator (c): no reinstate link for a host-initiated
+        # 2026-07-09: no reinstate link for a host-initiated
         # cancel's participant copy -- `my-bt cancel` is always host-side.
         self.assertNotIn("/reinstate/", participant_mail)
 
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org")
-        # 2026-07-09, the operator (a): the admin copy must name WHO was canceled,
+        # 2026-07-09: the admin copy must name WHO was canceled,
         # not just say "You".
         self.assertIn("You canceled Guest <guest@example.org>'s booking:", admin_mail)
         self.assertIn("Message: course canceled", admin_mail)
@@ -139,7 +139,7 @@ class CancelRegistrationTest(unittest.TestCase):
         self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
 
     def test_cancels_pending_confirmation_registration(self):
-        # 2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        # 2026-07-13: a guest who registered but hasn't yet clicked
         # their account-confirmation email link (STATUS_PENDING_CONFIRMATION)
         # previously couldn't be canceled by ANY path at all -- closing that
         # gap here (see Store.cancel()'s own docstring). This guest is still
@@ -158,7 +158,7 @@ class CancelRegistrationTest(unittest.TestCase):
         # 2026-07-10: `my-bt cancel` mints a fresh reinstate token the same
         # way every web cancel path does, and the ADMIN copy's
         # /host-reinstate/<registration_id> link (unconditional regardless
-        # of who canceled) actually undoes it. 2026-07-09, the operator (c): the
+        # of who canceled) actually undoes it. 2026-07-09: the
         # PARTICIPANT copy gets no reinstate link at all for a host-
         # initiated cancel like this one -- see the test right above.
         user, reg = self._book("guest@example.org", "Guest")
@@ -284,8 +284,8 @@ class CancelRegistrationTest(unittest.TestCase):
 
 class ResolveCourseShortnameForDateTest(unittest.TestCase):
     """app.cli_cancel.resolve_course_shortname_for_date -- `my-bt cancel
-    --date`'s course auto-detection (2026-07-13, the operator: "--course parameter
-    should be optional")."""
+    --date`'s course auto-detection (2026-07-13: the --course parameter
+    was made optional)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -347,9 +347,9 @@ class ResolveCourseShortnameForDateTest(unittest.TestCase):
 
 
 class ClassifyCancelQueryTest(unittest.TestCase):
-    """app.cli_cancel.classify_cancel_query -- 2026-07-09, the operator: "please
-    make cancel also SMART like show ... the ID short or long is unique to
-    recognize! a DATE as well a course name as well!" Reuses the exact same
+    """app.cli_cancel.classify_cancel_query -- 2026-07-09: cancel became
+    SMART like show, recognizing a unique short or long ID, a DATE, or a
+    course name. Reuses the exact same
     building blocks as app.cli_show.classify_show_query (see that module's
     own tests in test_cli_show.py for the low-level id/date-shape checks);
     these tests focus on classify_cancel_query's own narrower precedence

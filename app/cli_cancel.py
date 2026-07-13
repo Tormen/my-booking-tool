@@ -106,8 +106,8 @@ def cancel_registration(
     # host-initiated cancel (canceled_by="host" below) and
     # send_cancellation_emails no longer puts a participant-facing
     # /reinstate/<token> link in a host-initiated cancel's email
-    # (2026-07-09, the operator: "In host cancelations there should NOT be a
-    # Reinstate link") -- the operator's own unconditional
+    # (2026-07-09: host cancellations should NOT show a Reinstate link
+    # to the participant) -- the operator's own unconditional
     # /host-reinstate/<registration_id> link (registration_id, not this
     # token) is what actually gets used to undo a `my-bt cancel`.
     reinstate_token = new_token()
@@ -164,8 +164,8 @@ def resolve_course_shortname_for_date(
     store: Store, occurrence_date: str, course_shortname: str | None = None,
 ) -> tuple[str | None, list[str]]:
     """`my-bt cancel --date ... [--course ...]`'s own course auto-detection
-    (2026-07-13, the operator: "as usually a single date for me holds a single
-    course, yes --course parameter should be optional"). If
+    (2026-07-13: --course is optional since a single date usually only
+    holds a single course). If
     `course_shortname` is given, it's returned as-is (unvalidated -- the
     caller, cancel_flow.find_cancelable_registrations_for_occurrence, will
     simply find nothing to cancel if it's wrong, same as passing a bogus
@@ -200,9 +200,9 @@ def classify_cancel_query(
     query: str, live_full_reg_ids: list[str], courses, min_id_length: int, digest_fn=None,
 ) -> tuple[str, object]:
     """Classifies one free-form `my-bt cancel <query>` positional -- 2026-
-    07-09, the operator: "please make cancel also SMART like show ... the ID
-    short or long is unique to recognize! a DATE as well a course name as
-    well!" -- same id/date auto-detection app.cli_show.classify_show_query
+    07-09: `cancel` gained the same smart auto-detection `show` already
+    has (short or long ID, a date, or a course name) -- same id/date
+    auto-detection app.cli_show.classify_show_query
     gives `my-bt show`, reusing its exact same building blocks
     (looks_like_registration_id/looks_like_date/find_course_by_shortname,
     resolve_short_id), just narrowed to what `cancel` can actually ACT on:

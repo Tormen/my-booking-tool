@@ -33,10 +33,10 @@ class StoreTestBase(unittest.TestCase):
 
 
 class GitAutoCommitTest(StoreTestBase):
-    """2026-07-07, the operator: "after any change to any of the CSV files: CUD
-    ... please directly do a git commit ... Commit message should state
-    what changed without revealing personal data ... as a safety net in
-    case of ANY bugs." Every Store write goes through _LockedCsv, which is
+    """2026-07-07: after any change to any of the CSV files (CUD),
+    a git commit is made directly, with a commit message that states
+    what changed without revealing personal data, as a safety net in
+    case of ANY bugs. Every Store write goes through _LockedCsv, which is
     where this is wired in (storage.py::_git_commit_data_file) -- so any
     one mutating call is enough to exercise it.
 
@@ -237,7 +237,7 @@ class PendingEmailTest(StoreTestBase):
         self.assertIsNone(self.store.find_user_by_pending_email_token_hash(""))
 
     def test_cancel_token_is_separate_from_the_confirm_token(self):
-        # 2026-07-11, the operator: "Please provide a link without login" -- the
+        # 2026-07-11: a link without login was requested -- the
         # cancel token must be its OWN secret, not a reuse of the confirm
         # token, so possessing one can never be used to perform the other
         # action (confirm vs. abort).
@@ -305,7 +305,7 @@ class RegistrationTest(StoreTestBase):
         self.assertEqual(self.store.count_confirmed("yoga-class-1", "2026-07-08"), 0)
 
     def test_cancel_works_on_pending_confirmation_row(self):
-        # 2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        # 2026-07-13: a guest who registered but hasn't yet clicked
         # their account-confirmation email link (STATUS_PENDING_CONFIRMATION)
         # previously couldn't be canceled by ANY path -- Store.cancel() only
         # accepted confirmed/waitlisted. Now cancelable too, same as any
@@ -480,8 +480,8 @@ class AddRegistrationCheckingCapacityTest(StoreTestBase):
 
 
 class HasActiveRegistrationTest(StoreTestBase):
-    """2026-07-10, the operator (screenshot of /my): "double booking possible?" --
-    Store.has_active_registration() is the pre-check app.webapp.App.book()
+    """2026-07-10: a screenshot of /my raised whether double booking was
+    possible -- Store.has_active_registration() is the pre-check app.webapp.App.book()
     now runs before add_registration_checking_capacity/
     add_party_registrations_checking_capacity, closing the gap where
     neither of those ever checked whether the REQUESTING user already held
@@ -530,8 +530,8 @@ class HasActiveRegistrationTest(StoreTestBase):
 
 
 class HasPendingRegistrationTest(StoreTestBase):
-    """2026-07-11, the operator: "silent re-registration for unconfirmed accounts"
-    -- Store.has_pending_registration() is the STATUS_PENDING_CONFIRMATION
+    """2026-07-11: silent re-registration for unconfirmed accounts is
+    guarded against -- Store.has_pending_registration() is the STATUS_PENDING_CONFIRMATION
     twin of has_active_registration() above, used by app.webapp.App.book()
     to stop a retried booking attempt (before the guest ever clicks their
     confirm link) from inserting a second pending row for the exact same
@@ -776,8 +776,8 @@ class ErasureTest(StoreTestBase):
 
 # 2026-07-14: MergeArchivedRegistrationsTest (Store.merge_archived_registrations,
 # the mutating method behind the now-removed `my-bt admin dearchive`) was
-# removed here -- the operator: "lets remove this command from my-bt admin
-# please as this is a clear GDPR violation" (permanently re-attaching
+# removed here -- this command was removed from my-bt admin
+# as a clear GDPR violation (permanently re-attaching
 # pre-erasure history onto a live account undoes an Art. 17 erasure). The
 # READ-ONLY equivalent (app.cli_list.merge_archived_for_display, used by
 # /admin and `my-bt list --all`/`--past`) is untouched and still fully
@@ -786,8 +786,8 @@ class ErasureTest(StoreTestBase):
 
 class RenameCourseShortnameTest(StoreTestBase):
     """Store.rename_course_shortname -- the CSV-row side of `my-bt admin
-    rename-course` (2026-07-08, the operator: "rename lux-wed-mindfulness to
-    lux-wed-mind ... provide a command to migrate the existing data").
+    rename-course` (2026-07-08: renaming lux-wed-mindfulness to
+    lux-wed-mind required a command to migrate the existing data).
     Does NOT touch settings.toml or the calendar -- see
     app.calendar_sync.resync_after_course_rename for the calendar side."""
 
@@ -950,14 +950,14 @@ class CsvInjectionTest(StoreTestBase):
 
 
 class FormatDisplayTimestampTest(unittest.TestCase):
-    """2026-07-07, the operator (screenshot of the operator's CalDAV event showing
-    "registered 2026-07-07T00:47:57+00:00"): "please use for TIMESTAMPS
-    wherever you currently have this format ... YYYY-MM-DD_HHMM.SS"."""
+    """2026-07-07: a screenshot of the operator's CalDAV event showing
+    "registered 2026-07-07T00:47:57+00:00" prompted using the
+    YYYY-MM-DD_HHMM.SS format everywhere this timestamp appears."""
 
     def test_formats_a_now_iso_style_timestamp(self):
-        # 2026-07-14, the operator: "In the GUI please split the timestamp with a
-        # space between date and time" then "(and add a 'h' between HH
-        # and MM)" -- format changed from "2026-07-07_0047.57" to
+        # 2026-07-14: the GUI timestamp was split with a
+        # space between date and time, and a 'h' added between HH
+        # and MM -- format changed from "2026-07-07_0047.57" to
         # "2026-07-07 00h47.57".
         self.assertEqual(format_display_timestamp("2026-07-07T00:47:57+00:00"), "2026-07-07 00h47.57")
 
@@ -970,9 +970,9 @@ class FormatDisplayTimestampTest(unittest.TestCase):
         self.assertEqual(format_display_timestamp("not-a-timestamp"), "not-a-timestamp")
 
     def test_exact_midnight_renders_as_date_only(self):
-        # 2026-07-08, the operator (screenshot of /admin?past=1's Registered
+        # 2026-07-08: a screenshot of /admin?past=1's Registered
         # column showing "2025-10-18_0000.00" for SimplyMeet.me-imported
-        # rows): "if we have no time, then please display just the date"
+        # rows prompted showing just the date when there is no time
         # -- migrate_simplymeet.py stamps every imported row's
         # registered_at as "<occurrence_date>T00:00:00" (no real time-of-
         # day known), so exact midnight is treated as "no real time" and
@@ -989,8 +989,8 @@ class FormatDisplayTimestampTest(unittest.TestCase):
 
 
 class StatusLabelTest(unittest.TestCase):
-    """2026-07-08, the operator: "I prefer Host and Guest and then also
-    'Confirmed' for the status". Moved here 2026-07-13 from
+    """2026-07-08: labels set to Host and Guest and then also
+    'Confirmed' for the status. Moved here 2026-07-13 from
     app/webapp.py's _status_label so app/cli_list.py (and therefore
     `my-bt list`'s own clean default view) can show the identical label."""
 
@@ -1024,7 +1024,7 @@ class ReadCsvPlainTest(unittest.TestCase):
         self.assertEqual(_read_csv_plain(self.path, ["a", "b"]), [{"a": "1", "b": "2"}])
 
     def test_permission_error_propagates_not_swallowed(self):
-        # 2026-07-10, the operator, real incident: `my-bt users`, run as a
+        # 2026-07-10: real incident -- `my-bt users`, run as a
         # non-privileged user, silently printed "(no matching rows)"
         # instead of an error -- the OLD `if not path.exists(): return
         # []` guard swallowed the PermissionError (pathlib's Path.exists()
@@ -1106,7 +1106,7 @@ class LockedCsvReadonlyModeTest(unittest.TestCase):
             self.assertEqual(rows, [])
 
     def test_readonly_mode_permission_error_propagates_not_swallowed(self):
-        # 2026-07-10, the operator, real incident: `my-bt users`, run by a
+        # 2026-07-10: real incident -- `my-bt users`, run by a
         # non-privileged user, silently printed "(no matching rows)"
         # instead of an error -- the OLD `if not path.exists(): return
         # [], ...` guard swallowed the PermissionError entirely (pathlib's
@@ -1242,9 +1242,9 @@ class LockedCsvWritePermissionsTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(nested.parent).st_mode), 0o750)
 
     def test_pre_existing_directory_is_also_self_healed_on_every_write(self):
-        # 2026-07-09, the operator: "my-bt needs to ensure that touching the files
-        # if my-bt is ran as root do not change permission or ownership
-        # under /var/lib for instance" -- a directory that was ALREADY
+        # 2026-07-09: my-bt needs to ensure that touching the files,
+        # if my-bt is run as root, does not change permission or ownership
+        # under /var/lib for instance -- a directory that was ALREADY
         # there (e.g. created by an earlier root-run command, before this
         # fix existed) must still get repaired on the next write, not just
         # directories _LockedCsv happens to create fresh itself. Mode is
@@ -1257,7 +1257,7 @@ class LockedCsvWritePermissionsTest(unittest.TestCase):
 
 
 class TouchLoginClearsDeletionWarningTest(StoreTestBase):
-    """2026-07-09, the operator: account-deletion warning email (see
+    """2026-07-09: account-deletion warning email (see
     app.retention.send_account_deletion_warnings) -- a real login must
     reset the dormancy clock that warning is based on, so
     deletion_warning_sent_at is cleared here, not just last_login_at set."""

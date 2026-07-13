@@ -16,16 +16,15 @@ permanent `--import-from-simplymeet.me` flag isn't worth the added surface
 area for something run exactly once during the cutover.
 
 **Decisions baked into plan_import() below -- flagged here since none of
-them are things the SimplyMeet.me export can actually tell us, and the operator
-should sanity-check them against the dry-run report before passing
---commit:**
+them are things the SimplyMeet.me export can actually tell us, and the
+operator should sanity-check them against the dry-run report before
+passing --commit:**
 
   - "Past" means the exact same thing it means everywhere else in this
     codebase: occurrence_date < today (see app/cli_list.py::filter_by_date
     and app/webapp.py::admin_overview's own today-or-later default view).
-    An occurrence dated today or later is skipped as "future" -- the operator's
-    own words were "migrate the HISTORY of all bookings ... (all except
-    future bookings)".
+    An occurrence dated today or later is skipped as "future" -- only the
+    HISTORY of bookings is migrated, not future ones.
 
   - SimplyMeet.me's export records THAT a booking was canceled and WHEN,
     but never WHO canceled it (guest vs. host). Every canceled row is
@@ -110,12 +109,10 @@ def _match_course(meeting_type: str, courses: tuple[Course, ...]) -> tuple[Cours
     `[[course]]` titles, in three tiers -- returns (course, note); `note`
     is None for an exact match (nothing to flag), and a human-readable
     explanation whenever a looser tier was needed, so plan_import() can
-    surface it in the report for the operator to double-check before --commit
-    (see 2026-07-06: "Please allow to map the Mindfulness bookings as
-    well ... maybe the title is now slightly different, but still largely
-    the same" -- a course was renamed in settings.toml since the export
-    was taken, so a strict exact-match-only policy started silently
-    dropping real history):
+    surface it in the report for the operator to double-check before
+    --commit (2026-07-06: a course was renamed in settings.toml since
+    the export was taken, so a strict exact-match-only policy started
+    silently dropping real history):
 
     1. Exact string match -- the common, safe case; no note.
     2. Normalized match (case/whitespace differences only) -- a near-
@@ -190,8 +187,8 @@ class MigrationReport:
     # or DIDN'T because more than one course was equally plausible
     # (ambiguous_course_matches, folded into skipped_unmatched_course too).
     # Surfaced separately so the CLI report can call them out distinctly --
-    # the operator should read every line here before trusting --commit for those
-    # rows.
+    # the operator should read every line here before trusting --commit
+    # for those rows.
     fuzzy_matched_courses: list[str] = field(default_factory=list)
     ambiguous_course_matches: list[str] = field(default_factory=list)
     skipped_guest_duplicate: int = 0

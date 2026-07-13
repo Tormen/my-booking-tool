@@ -27,16 +27,16 @@ def check_directory_fsync_support_at_startup(
     startup and reacts LOUDLY to a False result, unlike `fsync_dir()`'s
     own routine per-write WARNING.
 
-    2026-07-15, the operator, on fsync_dir()'s best-effort/never-raises design:
-    "that's the correct call for availability ... but it's also the kind
-    of failure that's invisible until the one time it matters -- if the
-    actual production mount silently doesn't support directory fsync,
-    every write since deploy has been getting the weaker guarantee with
-    nobody the wiser. Worth a one-time capability probe at startup ...
-    log loudly, or surface via whatever you're already using for
-    fail2ban/rkhunter alerts ... rather than relying on someone noticing
-    a warning line in a log nobody tails." This project's own actual
-    admin-alert mechanism is app.watchdog's admin_email (fail2ban/
+    2026-07-15: fsync_dir()'s best-effort/never-raises design is correct
+    for availability, but it's also the kind of failure that's invisible
+    until the one time it matters -- if the actual production mount
+    silently doesn't support directory fsync, every write since deploy
+    has been getting the weaker guarantee with nobody the wiser. Worth a
+    one-time capability probe at startup that logs loudly, or surfaces
+    via whatever alerting is already in place, rather than relying on
+    someone noticing a warning line in a log nobody tails. This
+    project's own actual admin-alert mechanism is app.watchdog's
+    admin_email (fail2ban/
     rkhunter are separate host-level tools with no code-level
     integration here) -- reused here directly, best-effort, rather than
     bolted onto watchdog's own 15-minute timer, which would re-alert on

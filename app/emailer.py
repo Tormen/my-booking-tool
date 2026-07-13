@@ -26,9 +26,9 @@ def send_mail(
     bcc_addrs: tuple[str, ...] = (),
     reply_to: str | None = None,
 ) -> None:
-    """`html_body` (2026-07-09, the operator: "format description in email as on
-    page ... box the description and put the background color (as on the
-    page)") is optional -- omitting it (every pre-existing call site that
+    """`html_body` (2026-07-09: format the description in an email the
+    same as on the page -- box it, same background color) is optional --
+    omitting it (every pre-existing call site that
     hasn't been updated yet) sends the exact same plain-text-only email as
     before. When given, this becomes a standard multipart/alternative
     message: `body` stays the plain-text part (still shown by text-only
@@ -38,8 +38,8 @@ def send_mail(
     html_email_body() for the shared generator both the app's own pages
     and this HTML part are built from.
 
-    `ics_attachment` (2026-07-09, the operator: "attach a calendar invite also in
-    the email that is sent to the participant") is `(filename, ics_text,
+    `ics_attachment` (2026-07-09: also attach a calendar invite in the
+    email sent to the participant) is `(filename, ics_text,
     method)` -- `method` is "PUBLISH" or "CANCEL" (see
     app/calendar_sync.py's guest_invite_ics()/guest_cancel_ics(), the only
     two builders of this tuple), echoed into the attachment's own
@@ -50,9 +50,9 @@ def send_mail(
     this attachment) -- standard `email.message.EmailMessage` behavior,
     no manual MIME structuring needed.
 
-    `reply_to` (2026-07-16, the operator: "add a reply-to header so that if I as
-    host reply to a registration of a participant mail, the reply will
-    go to the address of the participant") -- every ADMIN-facing
+    `reply_to` (2026-07-16: so that a host reply to a registration email
+    goes to the participant's own address, not back to the operator's
+    own address) -- every ADMIN-facing
     notification about one specific participant (new booking, waitlist
     promotion, cancel, rebook) passes that participant's own email here,
     so hitting "Reply" in the host's inbox goes straight to them instead
@@ -62,9 +62,9 @@ def send_mail(
     directory-fsync startup check, ...) omits the header entirely --
     unchanged behavior, reply goes to From as normal.
 
-    `bcc_addrs` (2026-07-09, the operator: "add as BCC the given email address to
-    all mails that go out to the attendees ... so that for some time I can
-    watch this to ensure that all is OK") -- a plain tuple of zero or more
+    `bcc_addrs` (2026-07-09: BCC a given email address on all mail going
+    out to attendees, e.g. to monitor what guests actually receive) --
+    a plain tuple of zero or more
     addresses, deliberately NOT read from `settings.bcc_attendee_emails`
     HERE: this function has no notion of "this is an attendee-facing
     email" (it's used for admin copies, password resets, the watchdog

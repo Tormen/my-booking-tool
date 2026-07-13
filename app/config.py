@@ -17,11 +17,10 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class CourseDateOverride:
-    """One exceptional date for a course -- 2026-07-16, the operator: "add a new
-    config option per course in settings.toml to exceptionally change
-    time for a course on a certain date. Optionally a message as
-    explanation ... It should be possible to set a LIST of dates with
-    different times." Parsed from a `[[course.date_override]]` sub-table
+    """One exceptional date for a course (2026-07-16): a per-course
+    config option to exceptionally change the time for a course on a
+    certain date, with an optional explanatory message, and support for
+    a LIST of such dates with different times. Parsed from a `[[course.date_override]]` sub-table
     nested under the relevant `[[course]]` entry (see
     settings.toml.example) -- one course can have any number of these.
 
@@ -55,9 +54,8 @@ class Course:
     audience: str = "private"  # "private" | "public"
     language: str = "en"
     description: str = ""
-    # Optional map/directions link (2026-07-09, the operator: "add a location_url
-    # and then use it on /my in the column location to make those
-    # clickable"). "" (the default -- key omitted in settings.toml) means
+    # Optional map/directions link (2026-07-09): makes /my's Location
+    # column clickable for this course. "" (the default -- key omitted in settings.toml) means
     # no link at all: /my's Location column falls back to plain text, same
     # as it always has. Deliberately its own field rather than reusing
     # `location` as a combined "text (url)" string -- `location` stays
@@ -74,11 +72,10 @@ class Course:
     # -- see time_range_label(). Set to "" explicitly to show no subtitle
     # at all, or to any other string to override the auto-derived one.
     subtitle: str | None = None
-    # Determines this course's position on /courses (2026-07-09, the operator:
-    # "add a sorting key ... allowing me to determine the ORDER of the
-    # courses"; renamed from the original `order` same day, the operator: "please
-    # rename to something like order_in_all_courses to be self-explanatory
-    # how this 'order' is actually USED" -- the bare word "order" alone
+    # Determines this course's position on /courses (2026-07-09: a
+    # sorting key to control the ORDER of the courses; renamed from the
+    # original `order` the same day to be self-explanatory about what
+    # this "order" is actually used for -- the bare word "order" alone
     # didn't say order of WHAT): sorted ascending, lowest first. Defaults
     # to 0 for every course that doesn't set it, so an existing
     # settings.toml with no `order_in_all_courses` keys anywhere is
@@ -89,10 +86,9 @@ class Course:
     # deliberately loose convention that leaves room to slot a new course
     # in later without renumbering everything else.
     order_in_all_courses: int = 0
-    # Optional, per-course. 2026-07-14, the operator: "list of email addresses
-    # that if set on a course in settings.toml will also be invited as
-    # optional (cc) so that they receive the same invite as well ! This is
-    # super useful for my work yoga events." Passed straight through to
+    # Optional, per-course. 2026-07-14: a list of email addresses that,
+    # when set on a course in settings.toml, are also invited as
+    # optional (cc) so they receive the same invite as well. Passed straight through to
     # app.ics.VEvent's own organizer/attendees fields by
     # app.calendar_sync.sync_occurrence() -- see that call site and
     # VEvent's own docstring for the ROLE=OPT-PARTICIPANT/RSVP=FALSE
@@ -102,7 +98,7 @@ class Course:
     # ORGANIZER/ATTENDEE properties at all, byte-identical to before this
     # existed.
     host_calendar_entry_cc_list: tuple[str, ...] = ()
-    # 2026-07-16, the operator: exceptional per-date time changes -- see
+    # 2026-07-16: exceptional per-date time changes -- see
     # CourseDateOverride's own docstring above. Empty tuple (the default
     # -- no `[[course.date_override]]` sub-tables in settings.toml) means
     # no exceptions at all, byte-identical to before this existed.
@@ -156,8 +152,8 @@ class Course:
         TIGHTER time range than time_range_label() (no spaces around the
         dash) -- used by /my's bookings table Time column, where several
         rows of this need to fit in one narrow column at a glance
-        (2026-07-10, the operator: "add the weekday to the TIME column (e.g. SAT
-        10h45-12h45)")."""
+        (2026-07-10: added the weekday to the TIME column, e.g. "SAT
+        10h45-12h45")."""
         return f"{self.weekday.upper()} {self._fmt_hm(*self.start_hm())}-{self._fmt_hm(*self.end_hm())}"
 
     def override_for(self, occ_date: str) -> CourseDateOverride | None:
@@ -230,26 +226,22 @@ class Settings:
     retention_months: int
     canceled_retention_months: int
     erasure_pepper: bytes
-    # Optional (2026-07-09, the operator: "Our scheduler that then deletes accounts
-    # should detect imminent accounts that would need to be deleted and
-    # then send out such an email" -- a dormant-account warning, one email,
-    # before deletion, similar to a Notion account-cleanup notice he
-    # forwarded as an example). 0 (the default -- also what "" or a
+    # Optional (2026-07-09): the scheduler that deletes accounts also
+    # sends a dormant-account warning email once, before deletion. 0
+    # (the default -- also what "" or a
     # commented-out/omitted key parse to, see load_settings()) disables
     # this entirely: no warning is ever sent. When positive, it's how many
     # days BEFORE an account would reach `retention_months` of inactivity
     # (see app.retention.send_account_deletion_warnings) that the ONE
     # warning email goes out -- reusing retention_months as the actual
-    # dormancy threshold rather than adding a second duration setting,
-    # per the operator: "there is already a variable that defines the duration".
+    # dormancy threshold (it already defines the retention duration)
+    # rather than adding a second duration setting.
     # "Inactivity" is User.last_login_at, falling back to created_at for an
     # account that has never logged in again since booking.
     account_deletion_warning_days: int = 0
 
-    # Optional (2026-07-09, the operator: "Add a settings.toml variable:
-    # email_templates_folder = and place all email templates into the
-    # settings.toml [directory] to easily change something there if
-    # needed"). "" (the default -- key omitted) means every email uses
+    # Optional (2026-07-09): a directory of custom email templates,
+    # overriding this repo's own built-in ones. "" (the default -- key omitted) means every email uses
     # this repo's own built-in email_templates/ copy unconditionally; when
     # set, a matching file THERE takes priority over the built-in one, per
     # template file, so you only need to copy the specific templates you
@@ -260,8 +252,8 @@ class Settings:
     courses: tuple[Course, ...] = field(default_factory=tuple)
 
     # Calendar-invite VALARM reminders (minutes before start) -- see
-    # ics.py::VEvent.alarms_minutes_before. 2026-07-07, the operator: "make the
-    # reminders (list) a setting. But default to NO reminders" for the
+    # ics.py::VEvent.alarms_minutes_before. 2026-07-07: reminders became
+    # a configurable setting, defaulting to NO reminders, for the
     # TRAINER's own event (app/calendar_sync.py::sync_occurrence, the one
     # PUT to the operator's CalDAV calendar), while course PARTICIPANTS'
     # emailed invite (guest_invite_ics) should default to exactly one
@@ -275,9 +267,9 @@ class Settings:
     # without a [logging] section gets) means stdout/journal only.
     log_file: str | None = None
 
-    # Optional, comma-separated (2026-07-09, the operator: "add as BCC the given
-    # email address to all mails that go out to the attendees ... so that
-    # for some time I can watch this to ensure that all is OK"). Applied
+    # Optional, comma-separated (2026-07-09): BCC these addresses on
+    # every attendee-facing email, e.g. to monitor what guests actually
+    # receive. Applied
     # ONLY to attendee/guest-facing emails (booking confirmed/waitlisted,
     # promoted-from-waitlist, canceled, reinstated, account-confirm/
     # password-reset/email-change) -- never to the separate admin-facing
@@ -322,8 +314,8 @@ class Settings:
     # Hard ceiling on how many "+ Add participant" guest rows the booking
     # form offers, and how many guest_email_N/guest_name_N fields book()
     # will ever look for on a submitted form -- see app/webapp.py's
-    # MAX_GUESTS docstring. 2026-07-09, the operator: "add a setting for the max
-    # number of guests ... default to 3" (was a fixed constant of 9 before).
+    # MAX_GUESTS docstring. 2026-07-09: made configurable, defaulting to
+    # 3 (was a fixed constant of 9 before).
     max_guests: int = 3
 
     # A booking made under a not-yet-confirmed email (see
@@ -350,9 +342,9 @@ class Settings:
     # Optional: a hostname (typically your own dynamic-DNS name, e.g.
     # "ssh.example.net") whose CURRENT resolved IP is allowed to keep using
     # /courses and /book/<shortname> as normal even while maintenance mode
-    # (app/maintenance.py) is ON for everyone else (2026-07-10, the operator: "can
-    # the maintenance mode still let me access the site from
-    # ssh.example.net please?"). Resolved fresh on every request while
+    # (app/maintenance.py) is ON for everyone else (2026-07-10: so the
+    # operator can still access the site during their own maintenance
+    # window). Resolved fresh on every request while
     # maintenance is on (rare/short-lived by nature, so no caching), NOT
     # baked in once at startup -- your dynamic IP can change between when
     # you turn maintenance on and when you next check the site. None (the
@@ -363,9 +355,9 @@ class Settings:
     # Optional second source for the same bypass check, checked IN ADDITION
     # to (not instead of) maintenance_bypass_hostname above -- the path to a
     # plain text file whose LAST non-empty line is your current IP, kept
-    # fresh by infrastructure outside this app (2026-07-10, the operator: "if you
-    # need an IP this changes and the latest can be found in
-    # /home/me/my-ip.log, but else the DNS also auto-updates!"). Mirrors
+    # fresh by infrastructure outside this app (2026-07-10: for setups
+    # where a changing IP is tracked in a log file in addition to DNS).
+    # Mirrors
     # nginx's own sync-dynamic-ip-acls.sh, which already checks both the
     # same hostname AND this same log file when rebuilding /admin's IP
     # allowlist -- DNS can lag an actual IP change by however long the
@@ -551,7 +543,7 @@ def load_settings(toml_path: str | Path) -> Settings:
         retention_months=int(privacy.get("retention_months", 24)),
         canceled_retention_months=int(privacy.get("canceled_retention_months", 6)),
         erasure_pepper=bytes.fromhex(_read_secret(privacy["erasure_pepper_file"])),
-        # `or 0` collapses every "off" spelling the operator asked for (0, "", or
+        # `or 0` collapses every "off" spelling (0, "", or
         # the key omitted entirely -- privacy.get's own default) to the
         # same falsy value in one step: 0/""/None are all falsy in Python,
         # so only a genuinely truthy (non-zero, non-blank) value reaches

@@ -62,7 +62,7 @@ The split:
   runtime -- see "Installing" below.
 
 `site/nginx-locations.conf` is a real, hardened nginx vhost reference --
-a FIXED filename (2026-07-10: renamed from being named after the operator's own
+a FIXED filename (2026-07-10: renamed from being named after the host's own
 domain, specifically so every real-vs-`.example` pair in `site/` follows
 the exact same convention -- nginx itself doesn't care what the file on
 disk is called, only that it's included). Unlike the others, this one is
@@ -193,13 +193,13 @@ reading a secret, running a command, checking for root) for testing -- see
 
 ## Data durability (hard-reboot / crash safety)
 
-2026-07-15, the operator: the VPS this runs on can lose power/hard-reboot at any
+2026-07-15: the VPS this runs on can lose power/hard-reboot at any
 time, unpredictably. The relevant question isn't OS-level sync tuning
 (that only ever protects everything EXCEPT the one write that was
 mid-flight at the exact moment of a crash) -- it's whether every write
 this project makes to disk is safe against exactly that write being
-interrupted. Followed up with "yes please ALL writes linked to
-my-booking-tool, my-bt and the site" -- not just `storage.py`'s CSVs.
+interrupted. The scope was clarified to cover ALL writes linked to
+my-booking-tool, my-bt and the site -- not just `storage.py`'s CSVs.
 
 **`app/atomic_io.py`** is the one shared, crash-safe write primitive
 every module uses (`atomic_write_text()` + `fsync_dir()`): write the new
@@ -268,13 +268,13 @@ transactions:
 routine log line.** `fsync_dir()` is deliberately best-effort on every
 individual write -- an unsupported mount must never turn a successful
 write into a crash, so a failure there is only ever a quiet WARNING.
-2026-07-15, the operator, reviewing that: "that's the correct call for
-availability ... but it's also the kind of failure that's invisible
+2026-07-15: on review, a quiet WARNING was judged correct for
+availability, but also the kind of failure that's invisible
 until the one time it matters -- if the actual production mount
 silently doesn't support directory fsync, every write since deploy has
-been getting the weaker guarantee with nobody the wiser. Worth a
-one-time capability probe at startup ... log loudly ... rather than
-relying on someone noticing a warning line in a log nobody tails."
+been getting the weaker guarantee with nobody the wiser. That called for
+a one-time capability probe at startup that logs loudly, rather than
+relying on someone noticing a warning line in a log nobody tails.
 Two places react loudly to `app.atomic_io.probe_dir_fsync_support()`
 instead:
 
@@ -558,8 +558,8 @@ If an erased attendee later books again with the same email, they get a
 brand-new live account -- their old, erased identity is now just a hash.
 `/admin` and `my-bt list --all`/`--past` both show any pre-erasure
 registrations sharing that same real email merged onto the new live
-account automatically (the operator: "the merge should be automatically done if
-you also display the history in the /admin page") -- purely a display-time
+account automatically (the merge is automatic as long as the history is
+also displayed on the /admin page) -- purely a display-time
 merge, computed fresh on every page load/query, nothing written to disk
 (2026-07-13: this used to actually rewrite the CSVs on every `/admin` page
 load; it doesn't anymore -- see `app/cli_list.py::merge_archived_for_display`).
@@ -567,8 +567,8 @@ This is the only merge behavior that exists: `my-bt admin dearchive`
 (renamed from `my-bt merge`; `my-bt history` was dropped entirely earlier,
 folded into `list --all`/`--past`) used to be a command that actually
 PERSISTED a merge -- rewriting the archived registration rows onto the
-live user_id for real. Removed entirely 2026-07-14 (the operator: "a clear GDPR
-violation") -- permanently re-linking booking history to a live,
+live user_id for real. Removed entirely 2026-07-14 as a clear GDPR
+violation -- permanently re-linking booking history to a live,
 identifiable account undoes the point of the Art. 17 erasure that
 de-linked it in the first place. The display-time merge above was kept:
 it writes nothing, and never touches the archived user row either way
@@ -603,8 +603,8 @@ next occurrence, to keep them engaged despite the cancellation.
 
 **Undoing a cancellation:** both the attendee's own `/my` page and the web
 admin's `/admin` overview show a "Rebook" button (2026-07-10; relabeled
-from "Reinstate" 2026-07-14, the operator: "Please try find a simpler more
-intuitive word than reinstate" -- the underlying routes/functions below
+from "Reinstate" 2026-07-14, chosen as a simpler, more
+intuitive word than "reinstate" -- the underlying routes/functions below
 still say "reinstate", only the visible text changed) on any canceled
 booking whose occurrence is still in the future. It's an undo, not a
 reschedule to a different date -- it puts the SAME registration back to
@@ -812,21 +812,20 @@ perform what it safely can:
   step 13 of plain `admin setup`'s report and part of `admin health` --
   a stale marker counts towards fails/warns, gets repeated in the
   "Warnings/failures, repeated from above" summary, and causes exit 1
-  on either command, same as any other check here (2026-07-15, the operator,
-  after a `[warn]` here didn't stop `setup -i` from reporting "Done --
-  all checks pass now": "setup and health should BOTH (a) repeat any
-  warn or error at the end (b) ... exit 1 to FAIL on any warning or
-  error").
+  on either command, same as any other check here (2026-07-15: after a
+  `[warn]` here didn't stop `setup -i` from reporting "Done -- all checks
+  pass now", it was decided that setup and health should both (a) repeat
+  any warn or error at the end and (b) exit 1 to fail on any warning or
+  error).
 
 **Per-occurrence resync failures are now tracked and surfaced, not just
 counted (2026-07-16).** On a real production run, a bulk resync hit
 persistent CalDAV conflicts (HTTP 412, likely from concurrent live-guest
 traffic during the same upgrade) on 3 occurrences, logged only as a
 `WARNING` each -- yet `setup -i` still printed `[ok] calendar invite
-format changed -- resynced 6 upcoming occurrence(s)` and exited 0. the operator:
-*"-- 13. Calendar invite format -- says 'OK' but if you look at the
-output... I am NOT so sure!"* and *"!! this did not get noticed !!"*.
-Root cause: `resync_all_future_calendar_events()`/
+format changed -- resynced 6 upcoming occurrence(s)` and exited 0, even
+though step 13's output plainly showed partial failures that went
+unnoticed. Root cause: `resync_all_future_calendar_events()`/
 `resync_if_format_changed()` used to return a plain `int` (occurrences
 fixed), which structurally discarded which occurrences failed -- no
 caller could ever report a partial failure. Fixed two ways:
@@ -845,8 +844,8 @@ caller could ever report a partial failure. Fixed two ways:
   structured Check, `cli_checks.check_calendar_invite_resync_skips()` --
   step 13 of `admin health`/`admin setup` (no CalDAV round-trip, no
   gating on CalDAV being configured, since the marker only exists after a
-  real resync ran). This is what actually closes the gap the operator found: the
-  skip stays a `[warn]` -- counted, repeated in the summary, exit-1 --
+  real resync ran). This is what actually closes the gap identified above:
+  the skip stays a `[warn]` -- counted, repeated in the summary, exit-1 --
   in *every later* `admin health`/`admin setup` run, not just the one run
   that happened to discover it. A clean resync afterwards clears the
   marker automatically.
@@ -856,10 +855,10 @@ caller could ever report a partial failure. Fixed two ways:
   was stale, so a skip marker left over from an ALREADY-FIXED underlying
   problem (e.g. the SEQUENCE incident above) would just sit there
   forever as a `[warn]`/exit-1 -- nothing would ever re-attempt it,
-  since the format marker already matched. the operator: *"but WHY can't my-bt
-  setup then NOT to THIS???"* (i.e. why require a separate manual `admin
-  resync-calendar` run to find out a fix actually worked) -- fair
-  complaint. Now a non-empty skip marker is its own independent trigger,
+  since the format marker already matched. This raised the question of
+  why `my-bt setup` shouldn't just retry this itself, instead of requiring
+  a separate manual `admin resync-calendar` run to find out a fix
+  actually worked -- a fair point. Now a non-empty skip marker is its own independent trigger,
   same standing as a stale format-version marker: `setup -i` retries
   known failures itself instead of leaving a human to remember to.
 
@@ -868,9 +867,10 @@ earlier version of this gave the bulk resync path (used by both `-i` and
 `admin resync-calendar`) more attempts with increasing backoff than a
 live booking/cancel request gets, reasoning that 3 unrelated occurrences
 conflicting in the same run was probably just an active concurrent
-writer that hadn't finished yet. the operator pushed back: *"But there must be
-another problem with the Calendar. Please do NOT retry more often!!!
-But rather collect DEBUG OUTPUT please!!!"* -- rightly skeptical that
+writer that hadn't finished yet. Further review pushed back on that
+explanation, arguing there had to be another underlying problem with the
+calendar sync, and that the fix should be to collect DEBUG output rather
+than retry more aggressively -- rightly skeptical that
 more patience was the correct fix for something that hit 3 *different*
 occurrences at once, a pattern just as consistent with a real,
 structural bug as with a slow concurrent writer, and one that retrying
@@ -908,7 +908,7 @@ next `my-bt admin resync-calendar -D` (or set `MY_BOOKING_DEBUG=1` in
 the service's environment before a `setup -i`) if this recurs.
 
 **Root cause found and fixed (2026-07-16), from the very DEBUG output
-above.** the operator ran `-D` and sent back the actual production log. It
+above.** Running with `-D` against the actual production log
 showed this was never a race in the first place: the re-read ETag was
 IDENTICAL on every single retry (not different, as a real concurrent
 writer would produce), and the server -- mailbox.org's Open-Xchange --
@@ -1027,9 +1027,9 @@ for a one-off command than the env var name): without it, a failing
 command prints one clean line (`error: ...`); with it, the full Python
 traceback.
 
-2026-07-16, the operator, after a persistent CalDAV-conflict incident that
-retrying harder didn't actually explain ("collect DEBUG OUTPUT please!!!"
--- see "Calendar invite format" above): this mode now also logs, for
+2026-07-16: after a persistent CalDAV-conflict incident that
+retrying harder didn't actually explain (see "Calendar invite format"
+above, where richer DEBUG output was called for instead): this mode now also logs, for
 every CalDAV request that comes back an error status (a 412 conflict
 included), the full request headers (minus `Authorization`) and the
 full, untruncated response body/headers -- not just the 200-char-
@@ -1185,10 +1185,10 @@ or by deleting their own account sooner via `/my`.
 `/var/lib/my-booking/.git` -- entirely independent of this project's own
 git checkout -- with TWO layers committing to it:
 
-- **Per-write** (2026-07-07, the operator: "after any change to any of the CSV
-  files: CUD ... please directly do a git commit ... Commit message
-  should state what changed without revealing personal data ... as a
-  safety net in case of ANY bugs"): every single Store method that
+- **Per-write** (2026-07-07: the requirement is that after any change to
+  any of the CSV files -- create, update, or delete -- a git commit
+  happens directly, with a commit message stating what changed without
+  revealing personal data, as a safety net in case of any bugs): every single Store method that
   mutates users.csv/registrations.csv/an archived/*.csv commits that ONE
   file immediately after writing it (`app/storage.py::_git_commit_data_file`),
   with a short, specific, PII-free message (e.g. "cancel registration",
@@ -1230,8 +1230,9 @@ provides before deciding either way.
 
 **Right to erasure** (Art. 17): an attendee can delete their own account from
 `/my`, or you can run `my-bt admin gdpr erase <email>` (or `--email <email>`,
-2026-07-16: both forms work -- the operator: "--email should be optional here simply,
-my-bt admin erase operator@example.org should work as well") on their behalf. Either way:
+2026-07-16: both forms work -- the `--email` flag was made optional so a
+plain positional email address, e.g. `my-bt admin erase someone@example.com`,
+works too) on their behalf. Either way:
 any future confirmed/waitlisted booking is canceled first (freeing the spot
 for the waitlist), then the user row and all their registration rows move
 from the live CSVs into `data/archived/{users,registrations}.csv` with the
@@ -1316,8 +1317,9 @@ looking broken) to load the login page inside a small embedded iframe.
 Viewed standalone (not embedded), `target="_top"` behaves like a normal
 same-tab link -- no downside either way.
 
-**Session-aware upgrade (2026-07-09):** the operator: "if you are logged in,
-https://booking.example.org should show the same banner and not 'Login' button."
+**Session-aware upgrade (2026-07-09):** the requirement was that if you
+are already logged in, https://booking.example.org should show the same banner
+instead of a 'Login' button.
 `site/index.html.example` now has a small `<script>` at the bottom of
 `<body>` that calls `GET /my/session` (a same-origin `fetch()`, which
 carries the attendee's session cookie automatically even though this page's
@@ -1367,8 +1369,8 @@ dynamic, session-aware equivalent ("Logged in as x@example.org...") on
 those pages are server-rendered by this app itself, not fetched from
 across an iframe boundary -- see "Course overview page" above. Both
 banners now also link back to the homepage itself (`settings.base_url`),
-not just to `/my` -- the operator: "allow in the banner to also go back to
-https://booking.example.org".
+not just to `/my` -- the banner was extended to also link back to
+https://booking.example.org.
 
 **Variant: overlaying the button onto a boxed/backgrounded layout.** If
 your real homepage wraps its content in its own box (e.g. a fixed-width
@@ -1491,10 +1493,9 @@ request, no restart needed.
 settings, delete-account, ...) -- via one shared check,
 `app/webapp.py::App._maintenance_guard`, called first thing by each of
 those. Originally scoped narrowly to just `/courses`/`/book/<shortname>`,
-widened the same day after the operator caught, via a real external-IP test,
-that `/my`'s login page still worked completely normally during
-maintenance: "I was able to click on login and see the normal login page
-... This should not be!"
+widened the same day after a real external-IP test caught
+`/my`'s login page still working completely normally during
+maintenance, when it should have been blocked like everything else.
 
 `/admin/*`, `/host-cancel/<reg_id>`, `/host-reinstate/<reg_id>`, and
 `/host-cancel-occurrence/<course>/<date>` are the one deliberate
@@ -1509,8 +1510,8 @@ cause confusing side effects (an attendee stuck "logged in" against their
 wishes, or a broken JSON parse) for no real benefit.
 
 Each blocked request gets the same 503 maintenance page, which includes
-a way back to `{yourdomain}` (2026-07-10, the operator: "the maintenance page
-should have a back link or button") -- so clicking "Login" on the static
+a way back to `{yourdomain}` (2026-07-10: the maintenance page needed a
+back link or button) -- so clicking "Login" on the static
 homepage during maintenance either shows this page (with a way back) or,
 for the recognized bypass IP, works completely normally. 2026-07-14: this
 is now the same boxed banner every other guest-facing page uses, not a
@@ -1527,8 +1528,8 @@ this is a deliberate exception: an explicit, dedicated command whose
 entire purpose is to touch this exact file, not a background auto-sync.
 If `static_site_dir` isn't configured, `on`/`off` still flip the flag file
 (the app-side gating above still works) but print a note that no banner
-was written anywhere. (2026-07-10, the operator: "the my-bt should not modify
-the package installed TEMPLATE folder site" -- this used to ALSO patch
+was written anywhere. (2026-07-10: my-bt should not modify
+the package-installed TEMPLATE folder site -- this used to ALSO patch
 this checkout's own `HOME/site/index.html`, i.e. `/opt/my-booking/site/`
 on a stock install, but that copy is a template/reference only, never
 what nginx actually serves; `static_site_dir` is the one real, live
@@ -1548,8 +1549,9 @@ exits non-zero), specifically so it can't stay enabled for days after a
 real maintenance window ends without anyone
 noticing -- see `app/cli_checks.py::check_maintenance_mode`.
 
-**Bypassing it for yourself** (2026-07-10, the operator: "can the maintenance
-mode still let me access the site from ssh.example.net please?"): two
+**Bypassing it for yourself** (2026-07-10: the requirement was that
+maintenance mode still let the operator access the site from
+ssh.example.net): two
 optional, independent `[site]` settings let a matching request keep using
 every gated route above normally even while everyone else is blocked (the
 one unavoidable exception is the static `index.html` banner itself --
@@ -1628,15 +1630,15 @@ above their own heading when reached with an active `/my` attendee session --
 e.g. after clicking "New booking" from `/my`. It also carries through to
 the booking result page ("Booked!"/"Almost there"/waitlisted). An
 anonymous visitor to `/courses` or `/book/<shortname>` sees the same box
-with a plain "Login · booking.example.org" instead (2026-07-09, the operator: "Make it so
-that the top-bar is ALWAYS visible ... either with LOGIN or with the
-BAR" -- see `_anonymous_banner_html()`); these pages work perfectly well
+with a plain "Login · booking.example.org" instead (2026-07-09: the requirement
+was that the top-bar always be visible, either showing LOGIN or the full
+banner -- see `_anonymous_banner_html()`); these pages work perfectly well
 without ever logging in first, this is purely a courtesy cue plus a quick
 way back to `/my`, to the main site, or to log out for someone who arrived
 here already signed in.
 
-That "Login" link (2026-07-11, the operator: "Login link returns to originating
-page") carries a `?next=/courses` or `?next=/book/<shortname>` query
+That "Login" link (2026-07-11: made to return to the originating
+page) carries a `?next=/courses` or `?next=/book/<shortname>` query
 param, so a successful login lands back on the exact page the attendee
 clicked Login from instead of always on `/my`'s bookings list -- see
 `_safe_next_path()`'s own docstring for the allowlist this is validated
@@ -1645,8 +1647,8 @@ field) before it's ever used in a redirect.
 
 The "booking.example.org" link in the middle
 (`settings.base_url`, labeled with the same hostname `_site_label()` uses
-elsewhere) was added 2026-07-09 (the operator: "allow in the banner to also go
-back to https://booking.example.org") -- this is a normal same-tab link, distinct
+elsewhere) was added 2026-07-09 (the banner was extended to also go
+back to https://booking.example.org) -- this is a normal same-tab link, distinct
 from the STATIC homepage's own separate, session-aware corner widget (see
 "Login banner" further below), which is intentionally NOT this same big
 banner: the homepage never shows "Logged in as ...", only a compact
@@ -1654,9 +1656,9 @@ banner: the homepage never shows "Logged in as ...", only a compact
 much smaller/differently-styled corner widget by design.
 
 On `/my` itself the "My bookings" link is dropped from the banner
-(`_session_banner_html(..., on_my_page=True)`, 2026-07-09) -- the operator,
-looking at a screenshot of `/my`'s own banner: "My bookings link on the my
-bookings page (in top-bar) :(". A link back to the exact page you're
+(`_session_banner_html(..., on_my_page=True)`, 2026-07-09) -- flagged
+from a screenshot of `/my`'s own banner showing a redundant "My bookings"
+link on the my bookings page itself. A link back to the exact page you're
 already looking at isn't a shortcut, just clutter -- `/courses` and
 `/book` still show it since it's a genuine link elsewhere from there.
 
@@ -1666,13 +1668,13 @@ login form deliberately skip the "Not logged in / Login" text -- a
 still get the same boxed `.session-banner` style with just the homepage
 link (`_homepage_only_banner_html()`). That used to leave `/my`'s login
 page as the one page in the app with no way back to the marketing
-homepage short of editing the URL by hand (2026-07-10, the operator: "we miss a
-back to https://booking.example.org here"), first fixed with a plain "Back to
-`{yourdomain}`" text link, then (2026-07-14, the operator: "Reuse same boxed
-banner is good") upgraded to the same box.
+homepage short of editing the URL by hand (2026-07-10: a way back to
+https://booking.example.org was missing there), first fixed with a plain "Back to
+`{yourdomain}`" text link, then (2026-07-14: reusing the same boxed
+banner was judged better) upgraded to the same box.
 
-2026-07-14, the operator, expanding this further: "also /admin should get the
-same boxed banner, basically ALL pages except for the index.html!" --
+2026-07-14: this was expanded further so that /admin, and basically all
+pages except index.html, get the same boxed banner --
 every remaining page in the app (every guest/host magic link --
 `/cancel/<token>`, `/reinstate/<token>`, `/host-cancel/<id>`,
 `/host-reinstate/<id>`, `/host-cancel-occurrence/<shortname>/<date>` --
@@ -1689,8 +1691,8 @@ admin session just sits in memory until the process restarts or a fresh
 login overwrites it) -- just an "Admin" label and the homepage link.
 
 Logging out (`POST /my/logout`, the one form every banner above shares)
-redirects to the homepage (`settings.base_url`), not `/my` (2026-07-11,
-the operator: "pressing logout should bring you back to https://booking.example.org").
+redirects to the homepage (`settings.base_url`), not `/my` (2026-07-11:
+pressing logout was changed to bring you back to https://booking.example.org).
 Since the same banner/logout form is shared by the homepage's own
 JS-rendered copy, `/courses`, `/book/<shortname>`, and `/my` itself, the
 old `/my` target was most jarring from the homepage -- logging out there
@@ -1907,9 +1909,9 @@ any one course. `/my` also shows the same session banner `/courses` and
 `/book` do (see "Course overview page" above) instead of its own separate
 Logout button -- that banner's own link back to the main site
 (`settings.base_url`) replaced a dedicated "visit the homepage" link `/my`
-used to show on its own (2026-07-09, the operator: "Now we can get rid of the
-ugly green sentence behind New bookings as we have https://booking.example.org in
-the top-bar").
+used to show on its own (2026-07-09: the redundant sentence behind New
+bookings could be dropped now that https://booking.example.org already appears in
+the top-bar).
 
 Abandoned pending signups (a confirmation link never clicked) are purged
 by the nightly retention job after `pending_confirmation_hours` (default

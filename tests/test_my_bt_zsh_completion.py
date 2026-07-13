@@ -1,10 +1,8 @@
 """Tests for scripts/my-bt's zsh completion generator (generate_zsh_
-completion, --print-zsh-completion) -- 2026-07-08/09, the operator: "can you
-please built into the script a zsh compatible shell auto-complete", then,
-once reminded it was never actually built: "as we have the package you
-are right though that we can do this via the rpm!", then: "the autocomplete
-should work over all levels ... As much autocomplete as possible also if
-it recognises a course-name maybe if this is possible?"
+completion, --print-zsh-completion) -- 2026-07-08/09: a zsh compatible
+shell auto-complete was requested to be built into the script, shipped via
+the rpm package, and to work over all levels -- as much autocomplete as
+possible, including recognizing a course-name where possible.
 
 No real zsh is available in this environment to actually source/exercise
 the generated script, so these tests are structural: they check the
@@ -12,10 +10,11 @@ output is well-formed zsh _arguments/_describe syntax (balanced braces,
 every spec line in a multi-line _arguments call backslash-continued
 except the last, no unescaped colons in a positional's message field --
 see generate_zsh_completion's own docstring for why that specific rule
-matters) rather than actually running it. the operator's own rebuild/install
-cycle is what actually exercises this against a real zsh (see
-feedback_run_targeted_tests_during_dev -- full suite + real usage is his
-own job at install time, not this repo's job to re-verify here).
+matters) rather than actually running it. The operator's own
+rebuild/install cycle is what actually exercises this against a real zsh
+(see feedback_run_targeted_tests_during_dev -- full suite + real usage is
+the operator's own job at install time, not this repo's job to re-verify
+here).
 
 scripts/my-bt has no .py extension and lives outside app/, so it's loaded
 via importlib.machinery.SourceFileLoader, same as test_my_bt_argparse.py.

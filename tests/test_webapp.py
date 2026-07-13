@@ -281,8 +281,8 @@ class BookPageTest(unittest.TestCase):
 
 class BookPageDateOverrideTest(unittest.TestCase):
     """_book_page's red ATTENTION banner for Course.date_overrides
-    (2026-07-16) -- the operator: "automatically be displayed as an 'ATTENTION'-
-    message in red ... on the booking site for this course.\" One line per
+    (2026-07-16) -- automatically displayed as an 'ATTENTION'-
+    message in red on the booking site for this course. One line per
     overridden date actually present among the occurrences being shown."""
 
     def setUp(self):
@@ -383,10 +383,10 @@ class MaintenanceModeTest(unittest.TestCase):
     """`my-bt admin site-maintenance on` (see app/maintenance.py + scripts/my-bt) blocks
     every GUEST-facing route via a data-dir flag file checked fresh on
     every request (app.webapp.App._maintenance_guard). Originally scoped
-    to only /courses and /book/<shortname> (2026-07-10: the operator asked to gate
-    "any booking URL (like the links on index.html)"), widened the same
-    day after the operator caught, via a real external-IP test, that /my's login
-    page still worked completely normally: "This should not be!" -- see
+    to only /courses and /book/<shortname> (2026-07-10: widened to gate
+    any booking URL, like the links on index.html), widened the same
+    day after a real external-IP test caught that /my's login
+    page still worked completely normally, which it should not -- see
     MaintenanceScopeTest below for the full route-by-route coverage of the
     corrected scope."""
 
@@ -436,9 +436,9 @@ class MaintenanceModeTest(unittest.TestCase):
         self.assertEqual(status, "503 Service Unavailable")
 
     def test_my_page_is_blocked_by_maintenance_mode(self):
-        # 2026-07-10, the operator, after testing this himself from an external
-        # IP: "I was able to click on login and see the normal login page
-        # ... This should not be!" -- /my used to be deliberately exempt;
+        # 2026-07-10: testing from an external
+        # IP showed it was possible to click on login and see the normal
+        # login page, which should not be -- /my used to be deliberately exempt;
         # now it's gated exactly like /courses and /book (see
         # _maintenance_guard's docstring for the corrected scope).
         maintenance.enable(self.store.data_dir, message="down")
@@ -448,8 +448,8 @@ class MaintenanceModeTest(unittest.TestCase):
         self.assertIn("down for maintenance", body)
 
     def test_maintenance_response_links_back_to_the_homepage(self):
-        # 2026-07-10, the operator: "the maintenance page should have a back link
-        # or button." 2026-07-14: now the same boxed _session_banner_html()
+        # 2026-07-10: the maintenance page should have a back link
+        # or button. 2026-07-14: now the same boxed _session_banner_html()
         # banner every other guest-facing page uses, not a one-off "Back
         # to {site}" text link -- see _maintenance_response()'s docstring.
         maintenance.enable(self.store.data_dir, message="down")
@@ -612,9 +612,9 @@ class MaintenanceBypassTest(unittest.TestCase):
         self.assertEqual(status, "200 OK")
 
     def test_ip_log_alone_bypasses_even_with_dns_unresolvable(self):
-        # 2026-07-10, the operator: "if you need an IP this changes and the latest
-        # can be found in /home/me/my-ip.log, but else the DNS also
-        # auto-updates! Please make this a config variable." -- either
+        # 2026-07-10: an IP that changes, with the latest
+        # found in /home/me/my-ip.log, or else the DNS also
+        # auto-updating, was made a config variable -- either
         # source is independently sufficient; DNS failing shouldn't take
         # the log-file source down with it.
         import socket as socket_module
@@ -774,13 +774,13 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn(">My bookings<", body)
 
     def test_courses_shows_login_banner_when_anonymous(self):
-        # 2026-07-09, the operator: "Make it so that the top-bar is ALWAYS visible
-        # (except for index.html) either with LOGIN or with the BAR." --
+        # 2026-07-09: the top-bar is ALWAYS visible
+        # (except for index.html) either with LOGIN or with the BAR --
         # used to render no banner at all when anonymous; now shows a
         # "Login" link in the same box instead of nothing.
         _status, _headers, body = self.app.courses("GET", {})
         self.assertIn('class="session-banner"', body)
-        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # 2026-07-11: "Login link returns to originating page" --
         # the link now carries ?next= back to this same page.
         self.assertIn('<a href="/my?next=/courses">Login</a>', body)
 
@@ -793,7 +793,7 @@ class SessionBannerTest(unittest.TestCase):
     def test_book_form_shows_login_banner_when_anonymous(self):
         _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
         self.assertIn('class="session-banner"', body)
-        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # 2026-07-11: "Login link returns to originating page" --
         # the link now carries ?next= back to this same course's page.
         self.assertIn('<a href="/my?next=/book/yoga-class-1">Login</a>', body)
 
@@ -822,18 +822,18 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn('id="my-tab-login"', body)
 
     def test_my_page_anonymous_view_still_links_back_to_the_homepage(self):
-        # 2026-07-10, the operator (screenshot of /my's login page): "we miss a
-        # back to https://booking.example.org here". 2026-07-14: "Reuse same boxed
-        # banner is good" -- now the boxed banner's own homepage link
+        # 2026-07-10: a screenshot of /my's login page showed a missing
+        # back link to https://booking.example.org. 2026-07-14: the same boxed
+        # banner is reused -- now the boxed banner's own homepage link
         # (see the test above), not a bare "Back to {site}" <p> link.
         _status, _headers, body = self.app.my("GET", {})
         self.assertIn(f'<a href="{self.settings.base_url}">example.org</a>', body)
 
     def test_page_width_matches_the_homepage_photos_container(self):
-        # 2026-07-11, the operator (screenshot comparing the static homepage's own
-        # photo-backed content column against the much narrower app pages):
-        # "Widen homepage table layout to match photo width" -- clarified
-        # to mean every application page. site/index.html's own
+        # 2026-07-11: a screenshot comparing the static homepage's own
+        # photo-backed content column against the much narrower app pages
+        # led to widening the homepage table layout to match photo width,
+        # clarified to mean every application page. site/index.html's own
         # div.WordSection1 (the container its background photo fills) is
         # max-width:1000px -- every dynamic page here now matches that,
         # and tables stretch to fill it (a bare <table> has no width of
@@ -844,16 +844,16 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn("table{border-collapse:collapse;width:100%}", body)
 
     def test_no_text_renders_smaller_than_a_button_label(self):
-        # 2026-07-11, the operator: "nothing smaller than the current font-size
-        # of your button labels" -- button/input/textarea are the app's
+        # 2026-07-11: nothing should render smaller than the current
+        # font-size of button labels -- button/input/textarea are the app's
         # own 1em baseline (see below); no other rule may declare a
         # font-size below that. A handful of previously-smaller elements
         # (.session-banner/.note/.hint/.date-btn .d-date/.date-btn
         # .d-spots/.hash-cell) now read as secondary/de-emphasized via
-        # font-style:italic instead of a smaller size ("making the smaller
-        # fonts italic instead -- as I had suggested to you before!").
-        # .sort-indicator is DELIBERATELY excluded from this list (2026-07-08,
-        # the operator: "is it just me or does this arrow up look distorted?") --
+        # font-style:italic instead of a smaller size (making the smaller
+        # fonts italic instead of shrinking them).
+        # .sort-indicator is DELIBERATELY excluded from this list (2026-07-08:
+        # the up/down arrow looked distorted when italicized) --
         # italic synthetically shears the up/down-triangle glyph, which has
         # no real italic form in most fonts, making it look skewed/broken
         # rather than merely de-emphasized. It stays at the 1em baseline
@@ -872,8 +872,8 @@ class SessionBannerTest(unittest.TestCase):
             self.assertIn("font-style:italic", rule, f"{selector} should be italic, not smaller")
 
     def test_sort_indicator_is_not_italic(self):
-        # 2026-07-08, the operator (screenshot of /admin's Date column arrow):
-        # "is it just me or does this arrow up look distorted?" -- yes:
+        # 2026-07-08: a screenshot of /admin's Date column arrow showed
+        # it looking distorted -- indeed,
         # font-style:italic was shearing the ▲/▼ glyph. See the previous
         # test's own comment for the full story.
         _status, _headers, body = self.app.courses("GET", {})
@@ -885,10 +885,10 @@ class SessionBannerTest(unittest.TestCase):
     # -- 2026-07-09: booking-page name/email hidden (not just locked) when logged in --
 
     def test_book_page_hides_name_email_fields_when_logged_in(self):
-        # 2026-07-09, the operator, on the earlier prefilled+readonly version:
-        # "This is confusing: If you are logged in ad you book, please
-        # hide Your name + Your email fields (instead of showing them
-        # prefilled)." -- the session banner already says who they're
+        # 2026-07-09: the earlier prefilled+readonly version was
+        # confusing when logged in and booking, so the Your name + Your
+        # email fields are hidden instead of shown prefilled -- the
+        # session banner already says who they're
         # booking as, so no visible "Your name"/"Your email" label+field
         # at all now, just hidden inputs carrying the same values.
         environ = self._login_environ("regular@example.org")
@@ -914,7 +914,7 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn("First time booking with this email?", body)
 
     def test_book_page_error_retry_keeps_fields_hidden_when_logged_in(self):
-        # the operator's fields must stay hidden (not reappear editable) even on
+        # These fields must stay hidden (not reappear editable) even on
         # a re-render after a validation error -- not just the fresh GET.
         environ = self._login_environ("regular@example.org")
         form = {"occurrence_date": self._occ_date(), "name": "Regular", "email": "regular@example.org"}  # no agree
@@ -952,11 +952,9 @@ class SessionBannerTest(unittest.TestCase):
         return [o.date.isoformat() for o in occs[:n]]
 
     def test_confirmed_future_booking_shown_as_booked_badge(self):
-        # the operator, on a screenshot of /my showing 2 future confirmed
-        # bookings the date-picker never mentioned: "It could be nice
-        # here, to show the user that he/she already booked the classes
-        # ... Like here: I have 2 future bookings already booked, they
-        # should be listed." Answers to follow-up questions: FUTURE only,
+        # A screenshot of /my showing 2 future confirmed
+        # bookings the date-picker never mentioned prompted showing the
+        # user that they already booked the classes -- FUTURE only,
         # waitlisted labeled "On waitinglist", not clickable.
         first_date, second_date = self._occ_dates(2)
         environ = self._login_environ("regular@example.org")
@@ -997,7 +995,7 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn(f'value="{first_date}"', body)
 
     def test_past_booking_for_this_course_is_not_shown(self):
-        # the operator: "Only FUTURE bookings!" -- old history has no place here.
+        # Only FUTURE bookings -- old history has no place here.
         environ = self._login_environ("regular@example.org")
         user = self.store.find_user_by_email("regular@example.org")
         self.store.add_registration("yoga-class-1", "2020-01-01", user.user_id, hash_token(new_token()))
@@ -1038,17 +1036,17 @@ class SessionBannerTest(unittest.TestCase):
         self.assertIn('class="session-banner"', body)
 
     def test_banner_links_back_to_the_homepage(self):
-        # 2026-07-09, the operator: "allow in the banner to also go back to
-        # https://booking.example.org".
+        # 2026-07-09: the banner also allows going back to
+        # https://booking.example.org.
         environ = self._login_environ("regular@example.org")
         _status, _headers, body = self.app.courses("GET", environ)
         self.assertIn(f'<a href="{self.settings.base_url}">', body)
 
 
 class AlwaysVisibleBannerRolloutTest(unittest.TestCase):
-    """2026-07-14, the operator, expanding the always-visible-banner request:
-    "also /admin should get the same boxed banner, basically ALL pages
-    except for the index.html!" -- spot-checks a representative page from
+    """2026-07-14: expanding the always-visible-banner request so that
+    /admin also gets the same boxed banner, basically ALL pages
+    except for index.html -- spot-checks a representative page from
     each remaining category that didn't already have one (guest magic
     links, host magic links, admin login/overview, /my/reset,
     /my/confirm(-email), /my/cancel-email-change). Every _room_-specific
@@ -1119,7 +1117,7 @@ class AlwaysVisibleBannerRolloutTest(unittest.TestCase):
 
 
 class MySettingsTest(unittest.TestCase):
-    """2026-07-10, the operator: a self-service /my/settings page to change name
+    """2026-07-10: a self-service /my/settings page to change name
     (immediate) and login email (two-step, dual-address-notified --
     see app/webapp.py's "-- /my/settings --" section for the full
     rationale). Reuses SessionBannerTest's own App/Store construction and
@@ -1156,8 +1154,8 @@ class MySettingsTest(unittest.TestCase):
     # -- auth gating ----------------------------------------------------------
 
     def test_settings_page_requires_login(self):
-        # 2026-07-14, the operator: "Can the page please redirect to login when
-        # the session times out?" -- a missing/expired session now
+        # 2026-07-14: the page should redirect to login when
+        # the session times out -- a missing/expired session now
         # redirects to /my (the login page) instead of a bare 403.
         status, headers, _body = self.app.my_settings("GET", {})
         self.assertEqual(status, "302 Found")
@@ -1250,7 +1248,7 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("/my/confirm-email/", new_body)  # only the new address gets the link
         self.assertNotIn("/my/confirm-email/", old_body)
         self.assertIn("new@example.org", old_body)  # old address is told what it's changing to
-        # 2026-07-11, the operator: "Please provide a link without login" -- the
+        # 2026-07-11: a link without login was requested -- the
         # old address's own cancel link must not require a session.
         self.assertIn("/my/cancel-email-change/", old_body)
         self.assertNotIn("/my/settings", old_body)
@@ -1299,7 +1297,7 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("new@example.org", body)
         user = self.store.find_user_by_email("regular@example.org")
         self.assertEqual(user.email, "regular@example.org")  # unchanged by GET
-        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        # 2026-07-11: audit of every single-submit-button direct-link page.
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_confirm_email_post_applies_change_and_emails_both_addresses(self):
@@ -1336,9 +1334,9 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("invalid or has already been used", body)
 
     def test_confirm_email_post_invalidates_every_session_for_the_account(self):
-        # 2026-07-07, the operator: "Logout user before email is changed (so with
-        # its old email). Then redirect the user back to login page /my
-        # with the link please."
+        # 2026-07-07: logout the user before email is changed (so with
+        # its old email), then redirect the user back to login page /my
+        # with the link.
         environ = self._login_environ("regular@example.org")
         session_id = environ["HTTP_COOKIE"].split("session=", 1)[1]
         self.assertIn(session_id, webapp.SESSIONS)
@@ -1366,8 +1364,8 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("expired", body)
 
     # -- email change: canceling from the CURRENT (old) address's own
-    # no-login link (2026-07-11, the operator: "Please provide a link without
-    # login" -- the old address's notification email used to point at
+    # no-login link (2026-07-11: a link without
+    # login was requested -- the old address's notification email used to point at
     # /my/settings, which needs a session) --------------------------------
 
     def _request_cancel_token(self, environ, new_email: str) -> str:
@@ -1387,7 +1385,7 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("new@example.org", body)
         user = self.store.find_user_by_email("regular@example.org")
         self.assertEqual(user.pending_email, "new@example.org")  # unchanged by GET
-        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        # 2026-07-11: audit of every single-submit-button direct-link page.
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_cancel_email_change_works_without_a_login_session(self):
@@ -1467,8 +1465,8 @@ class ScheduleExceptionsTest(unittest.TestCase):
     """GET /schedule-exceptions (2026-07-16) -- public, read-only JSON list
     of every course's upcoming Course.date_overrides entries, consumed by
     site/index.html's own opportunistic <script> to render a red ATTENTION
-    banner. the operator: "automatically be displayed as an 'ATTENTION'-message in
-    red on index.html and on the booking site for this course.\""""
+    banner. Automatically displayed as an 'ATTENTION'-message in
+    red on index.html and on the booking site for this course."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -1923,16 +1921,16 @@ class BookingFlowTest(unittest.TestCase):
         self.app._sync = lambda *a, **kw: None  # calendar mechanics covered elsewhere
 
         self.sent_emails: list[tuple[str, str, str]] = []
-        # 2026-07-09, the operator: bcc_attendee_emails -- a separate, parallel
+        # 2026-07-09: bcc_attendee_emails -- a separate, parallel
         # list (keyed the same way as self.sent_emails, same order) rather
         # than widening every tuple in self.sent_emails itself, since
         # dozens of existing tests already unpack that one as a plain
         # 3-tuple (to, subject, body); only tests that actually care about
         # the bcc_addrs a given send_mail() call was given read this one.
         self.sent_email_bcc: list[tuple[str, str, tuple]] = []
-        # 2026-07-16, the operator: "add a reply-to header so that if I as host
-        # reply to a registration of a participant mail, the reply will
-        # go to the address of the participant" -- same parallel-list
+        # 2026-07-16: a reply-to header was added so that if the host
+        # replies to a registration of a participant mail, the reply will
+        # go to the address of the participant -- same parallel-list
         # convention as sent_email_bcc just above, for the same reason
         # (only tests that actually care read this one).
         self.sent_email_reply_to: list[tuple[str, str, str | None]] = []
@@ -2001,10 +1999,10 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(subjects, ["Confirm your example.org account"])
 
     def test_almost_there_page_uses_the_same_recap_box_as_every_other_confirmation(self):
-        # 2026-07-07, the operator (comparing this page's old one-off "Your spot
-        # for X on Y" sentence against host-cancel/Booked!/cancel-
-        # confirmation's shared What/When/Where box): "The way you present
-        # 'one course instance' ... should be CONSISTENT EVERYWHERE."
+        # 2026-07-07: this page's old one-off "Your spot
+        # for X on Y" sentence, compared against host-cancel/Booked!/cancel-
+        # confirmation's shared What/When/Where box, needed to present
+        # 'one course instance' CONSISTENTLY EVERYWHERE.
         _status, _headers, body = self._book("newguest@example.org")
         self.assertIn("\U0001F9D8 What:", body)  # same emoji as _course_recap_html elsewhere
         self.assertIn("\U0001F550 When:", body)
@@ -2026,8 +2024,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('action="/my/reset"', body)
 
     def test_returning_unconfirmed_email_resends_without_adding_a_second_pending_row(self):
-        # 2026-07-11, the operator: "silent re-registration for unconfirmed
-        # accounts" -- re-submitting the SAME course+date before
+        # 2026-07-11: silent re-registration for unconfirmed
+        # accounts -- re-submitting the SAME course+date before
         # confirming used to insert a brand-new pending row every time
         # (see Store.has_pending_registration's own docstring for the
         # multi-row-promoted-at-once consequence this closes). The resend
@@ -2101,8 +2099,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Cancel this booking directly: https://example.org/cancel/", email_body)
 
     def test_confirmed_booking_email_greets_by_name(self):
-        # 2026-07-08, the operator: "they should now all start with 'Dear <NAME>',
-        # correct?" -- they didn't yet; added here (and to the waitlisted,
+        # 2026-07-08: emails should all start with 'Dear <NAME>' --
+        # they didn't yet; added here (and to the waitlisted,
         # cancellation, and reinstatement participant emails).
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
         h, s = hash_secret("hunter22")
@@ -2112,8 +2110,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertTrue(email_body.startswith("Dear Regular,\n\n"))
 
     def test_confirmed_booking_email_attaches_a_publish_ics(self):
-        # 2026-07-09, the operator: "Can you please attach a calendar invite also
-        # in the email that is sent to the participant?"
+        # 2026-07-09: a calendar invite is also attached
+        # to the email that is sent to the participant.
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
         h, s = hash_secret("hunter22")
         self.store.set_password(user.user_id, h, s)
@@ -2133,7 +2131,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("METHOD:PUBLISH", ics_text)
         self.assertIn("Dynamic Ashtanga Vinyasa Yoga", ics_text)
 
-    # -- double-booking gap fix (2026-07-10, the operator: "double booking possible?") --
+    # -- double-booking gap fix (2026-07-10: double booking was found to be
+    # possible) --
 
     def test_confirmed_account_cannot_book_the_same_slot_twice(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
@@ -2148,7 +2147,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(self.sent_emails, [])  # no re-notification either
 
     def test_waitlisted_account_cannot_rebook_the_same_slot(self):
-        # the operator explicitly confirmed a second WAITLISTED attempt should be
+        # A second WAITLISTED attempt should be
         # blocked too, not treated as a way to grab an extra spot.
         for i in range(2):
             user = self.store.upsert_user_for_booking(f"guest{i}@example.org", f"Guest{i}")
@@ -2349,11 +2348,11 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(user.password_hash, "")
 
     # -- my_confirm: link expiry + "a newer link was sent" (2026-07-07) -----
-    # the operator: "when will the confirmation links be invalid?" (they never
-    # expired before -- see CONFIRM_TOKEN_TTL_HOURS) and "a new email
-    # should invalidate the pending link ... [and] clicking the
-    # invalidated link should inform the user that there should be a NEW
-    # link coming to him".
+    # Confirmation links now expire (they never
+    # expired before -- see CONFIRM_TOKEN_TTL_HOURS) and a new email
+    # invalidates the pending link -- clicking the
+    # invalidated link informs the user that there should be a NEW
+    # link coming to them.
 
     def test_my_confirm_link_older_than_ttl_shows_expired_not_invalid(self):
         self._book("newguest@example.org")
@@ -2413,7 +2412,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("invalid or has already been used", body)
 
     # -- _send_confirm_email: full https:// URL + expiry note (2026-07-07) --
-    # the operator: "also please write rather https://booking.example.org in the text".
+    # The full https://booking.example.org URL is spelled out in the text.
 
     def test_confirm_email_body_spells_out_the_full_base_url(self):
         self._book("newguest@example.org")
@@ -2427,8 +2426,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("only the link in this latest email will work", body)
 
     def test_confirm_email_opens_with_a_greeting_by_name(self):
-        # 2026-07-07, the operator (screenshot of this email): "please formulate
-        # the email a bit more nicer".
+        # 2026-07-07: a screenshot of this email led to reformulating
+        # it to read a bit nicer.
         self._book("newguest@example.org", name="Alice")
         _, _, body = self.sent_emails[-1]
         self.assertTrue(body.startswith("Dear Alice,"))
@@ -2445,8 +2444,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<a href="/my">Back to login</a>', body)
 
     def test_my_reset_form_itself_also_links_back_to_login(self):
-        # 2026-07-10, the operator (screenshot of this page): "here we are missing
-        # a back button" -- the confirmation page above already had this
+        # 2026-07-10: a screenshot of this page showed a missing
+        # back button -- the confirmation page above already had this
         # link; the initial GET form didn't.
         _status, _headers, body = self.app.my_reset("GET", {})
         self.assertIn('<a href="/my">Back to login</a>', body)
@@ -2478,8 +2477,8 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self._post(self.app.my_reset, (), {"email": email})
         # NOT the (now misleading) "we sent it" page -- the form again,
         # with the button disabled and counting down, same pattern as the
-        # login lockout (the operator, 2026-07-05: "where there is a cooldown
-        # active, it should be visible on the form with the button").
+        # login lockout (2026-07-05: where there is a cooldown
+        # active, it should be visible on the form with the button).
         self.assertNotIn("Check your email", body)
         self.assertIn("Too many attempts", body)
         self.assertIn('id="reset-btn"', body)
@@ -2509,8 +2508,8 @@ class BookingFlowTest(unittest.TestCase):
         # Defense-in-depth against enumeration: the per-email limiter alone
         # never slows down someone trying many DIFFERENT (mostly fake)
         # addresses, since each fresh string gets its own untouched
-        # counter -- this is the gap the operator asked about ("know which client
-        # IP triggered this and have a cooldown by IP").
+        # counter -- this is the gap that was closed by tracking which
+        # client IP triggered this and having a cooldown by IP.
         for k in [f"reset:probe{i}@example.org" for i in range(21)]:
             self.addCleanup(webapp.login_limiter.reset, k)
         for i in range(20):
@@ -2535,10 +2534,10 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(subjects, ["Confirm your example.org account"])
 
     def test_signup_success_message_is_boxed_not_a_bare_paragraph(self):
-        # 2026-07-06 fix: the operator flagged the success message (and the
-        # signup form's own "we'll email you a link" hint) as looking like
-        # stray unstyled sentences on an otherwise-empty page ("This is a
-        # bit ugly" / "same here with the sentence") -- both now render
+        # 2026-07-06 fix: the success message (and the
+        # signup form's own "we'll email you a link" hint) were flagged as
+        # looking like stray unstyled sentences on an otherwise-empty page
+        # -- both now render
         # inside a .card, same visual weight as the form it replaces.
         _status, _headers, body = self._post(
             self.app.my_signup, (), {"name": "New Person", "email": "boxed@example.org"}
@@ -2622,7 +2621,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertFalse(any(h[0] == "Set-Cookie" for h in headers))
         self.assertIn("Email and/or password did not match.", body)
 
-    # -- "Login link returns to originating page" (2026-07-11, the operator) ------
+    # -- "Login link returns to originating page" (2026-07-11) ------
 
     def test_login_page_get_carries_a_safe_next_into_a_hidden_field(self):
         _status, _headers, body = self.app.my("GET", {"QUERY_STRING": "next=/book/yoga-class-1"})
@@ -2704,10 +2703,10 @@ class BookingFlowTest(unittest.TestCase):
         return user, {"HTTP_COOKIE": f"session={sid}"}
 
     # -- /book: hide dates the logged-in guest already holds a spot for
-    # (2026-07-11, the operator, pasted `my-bt list` output showing he was already
-    # `confirmed` for a date /book still offered): "If I am already booked
-    # + confirmed for a date this date should simply be hidden here for
-    # me." -----------------------------------------------------------------
+    # (2026-07-11: `my-bt list` output showed an already
+    # `confirmed` registration for a date /book still offered) -- if
+    # already booked + confirmed for a date, that date should simply be
+    # hidden here. -----------------------------------------------------------------
 
     def test_already_confirmed_date_is_hidden_from_the_picker_when_logged_in(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -2756,7 +2755,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(f'value="{self.occ_date}"', body)
 
     # -- /book: selected-date/radio mismatch on back/forward-cache restore
-    # (2026-07-11, the operator, "BUG: selected date!", screenshot showing a
+    # (2026-07-11: a screenshot showed a
     # different date's radio highlighted than the "Selected date:" text
     # read) -------------------------------------------------------------
 
@@ -2770,14 +2769,14 @@ class BookingFlowTest(unittest.TestCase):
         self._book("regular@example.org", name="Regular")
         _status, _headers, body = self.app.my("GET", environ)
         self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
-        # 2026-07-10, the operator: "add the weekday to the TIME column (e.g. SAT
-        # 10h45-12h45)" -- weekday_time_range_label(), not time_range_label()
+        # 2026-07-10: the weekday was added to the TIME column (e.g. SAT
+        # 10h45-12h45) -- weekday_time_range_label(), not time_range_label()
         # (no spaces around the dash, and a leading 3-letter weekday code).
         self.assertIn("WED 17h15-18h55", body)
         self.assertIn("Example Community Gym, Room 1", body)
         # The shortname legitimately appears once now, as the /book/<shortname>
-        # link target (2026-07-07, the operator: "make the 'Course' string a link to
-        # the course booking page") -- but never as the VISIBLE cell text,
+        # link target (2026-07-07: the 'Course' string was made a link to
+        # the course booking page) -- but never as the VISIBLE cell text,
         # which must stay the human title.
         self.assertNotIn(">yoga-class-1<", body)
 
@@ -2798,8 +2797,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn('<a href="" target="_blank"', body)
 
     def test_location_cell_links_out_when_location_url_is_set(self):
-        # 2026-07-09, the operator: "add a location_url and then use it on /my in
-        # the column location to make those clickable."
+        # 2026-07-09: a location_url was added and used on /my in
+        # the column location to make those clickable.
         store = Store(tempfile.mkdtemp())
         course = make_course(
             shortname="yoga-class-2", weekday="wed", capacity=10,
@@ -2860,9 +2859,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("document.currentScript.previousElementSibling", body)
 
     def test_my_upcoming_table_date_column_defaults_to_ascending_sort(self):
-        # 2026-07-08, the operator (screenshot of /admin?past=1): "Please by
-        # default sort ... by Date ... Like this people see also the sort
-        # arrow and can understand that this page is sortable." Data was
+        # 2026-07-08: a screenshot of /admin?past=1 led to sorting by
+        # Date by default, so people also see the sort
+        # arrow and can understand that this page is sortable. Data was
         # already server-side sorted; only the visual indicator was
         # missing until an actual click. Upcoming is rendered ascending.
         user, environ = self._login_as_guest("regular@example.org")
@@ -2898,8 +2897,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(f'data-dialog="{cancel_id}-dialog" >Cancel', body)  # not "disabled>Cancel"
 
     def test_account_settings_delete_account_dialog_has_exact_requested_wording(self):
-        # 2026-07-14, the operator: "please move the delete button under 'Account
-        # settings': and rename to 'DELETE this account'" -- this used to
+        # 2026-07-14: the delete button moved under 'Account
+        # settings' and was renamed to 'DELETE this account' -- this used to
         # live at the bottom of /my (My bookings); it's on /my/settings
         # (Account settings) now instead.
         _user, environ = self._login_as_guest("regular@example.org")
@@ -2921,8 +2920,8 @@ class BookingFlowTest(unittest.TestCase):
         )
 
     def test_my_logout_clears_session_and_redirects_to_the_homepage(self):
-        # 2026-07-11, the operator: "pressing logout should bring you back to
-        # https://booking.example.org" -- used to redirect to "/my" instead, which
+        # 2026-07-11: pressing logout now brings you back to
+        # https://booking.example.org -- used to redirect to "/my" instead, which
         # was most jarring when the SAME logout form (shared with the
         # static homepage's own JS-rendered banner) was triggered from
         # there: it used to bounce you into the app's own /my login page
@@ -2956,10 +2955,10 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("admin@example.org", to_addrs)
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", participant_mail)
-        # 2026-07-09, the operator (b): guest-initiated cancels label the message
+        # 2026-07-09: guest-initiated cancels label the message
         # from the ATTENDEE's own point of view -- they sent it to the host.
         self.assertIn("Message you sent to the host: can't make it", participant_mail)
-        # 2026-07-08, the operator: guest-facing emails greet by name -- the admin
+        # 2026-07-08: guest-facing emails greet by name -- the admin
         # copy right below deliberately does NOT (it's a receipt to the
         # operator's own inbox, not a letter -- see greeting_html()'s
         # docstring in app/cancellation.py).
@@ -2970,9 +2969,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
         self.assertFalse(admin_mail.startswith("Dear"))
 
-    # -- 2026-07-09, the operator: bcc_attendee_emails -- "add as BCC the given
-    # email address to all mails that go out to the attendees ... so that
-    # for some time I can watch this to ensure that all is OK". Confirms
+    # -- 2026-07-09: bcc_attendee_emails -- a given
+    # email address is BCC'd on all mails that go out to the attendees,
+    # for a time, to ensure that all is OK. Confirms
     # attendee-facing emails carry the configured BCC and admin-facing
     # copies of the same event never do. See app.config.Settings.
     # bcc_attendee_email_list and app.emailer.send_mail's own `bcc_addrs`.
@@ -3033,9 +3032,9 @@ class BookingFlowTest(unittest.TestCase):
         )
         self.assertEqual(bcc_addrs, ("watcher1@example.org", "watcher2@example.org"))
 
-    # -- 2026-07-16, the operator: "add a reply-to header so that if I as host
-    # reply to a registration of a participant mail, the reply will go to
-    # the address of the participant" -- confirms the admin-facing copy
+    # -- 2026-07-16: a reply-to header was added so that if the host
+    # replies to a registration of a participant mail, the reply will go to
+    # the address of the participant -- confirms the admin-facing copy
     # of every registration-status email carries Reply-To: <participant>,
     # while the participant's OWN copy (and any non-participant email)
     # never does.
@@ -3069,8 +3068,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(reply_to, "regular@example.org")
 
     def test_custom_email_templates_folder_overrides_the_cancel_email_wording(self):
-        # 2026-07-09, the operator: "place all email templates into settings.toml
-        # [directory] to easily change something there if needed" --
+        # 2026-07-09: all email templates can be placed into settings.toml
+        # [directory] to easily change something there if needed --
         # end-to-end confirmation that pointing email_templates_folder at
         # a real directory containing just a customized cancel_email.txt
         # actually changes what a real /my/cancel email says, without
@@ -3102,7 +3101,7 @@ class BookingFlowTest(unittest.TestCase):
         self.sent_emails.clear()
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Canceled:"))
-        # 2026-07-09, the operator (c): a prominent standalone sentence, not a
+        # 2026-07-09: a prominent standalone sentence, not a
         # plain "If this was a mistake, you can reinstate it here:" line.
         self.assertIn(
             "In case this was a mistake, you can easily resubscribe: https://example.org/reinstate/",
@@ -3178,7 +3177,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("admin@example.org", to_addrs)
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
         self.assertIn("You canceled this booking:", participant_mail)
-        # 2026-07-09, the operator (b): guest-initiated cancels label the message
+        # 2026-07-09: guest-initiated cancels label the message
         # from the ATTENDEE's own point of view -- they sent it to the host.
         self.assertIn("Message you sent to the host: car trouble", participant_mail)
         admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
@@ -3195,9 +3194,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<textarea name="message"', body)
 
     def test_guest_cancel_confirm_page_shows_the_course_recap(self):
-        # 2026-07-09, the operator: "This page should look like as described for
-        # the admin and like the email ... WHAT WHEN WHERE with emojis and
-        # bold font for the keyword followed by the description."
+        # 2026-07-09: this page should look like as described for
+        # the admin and like the email -- WHAT WHEN WHERE with emojis and
+        # bold font for the keyword followed by the description.
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
         h, s = hash_secret("hunter22")
         self.store.set_password(user.user_id, h, s)
@@ -3210,8 +3209,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Where:</b>", body)
 
     def test_guest_cancel_confirm_page_has_a_never_mind_escape(self):
-        # 2026-07-11, the operator: "Check all other pages that you can reach
-        # with a direct link to have not just one submit button as well!"
+        # 2026-07-11: every page reachable with a direct link should have
+        # not just one submit button.
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
         h, s = hash_secret("hunter22")
         self.store.set_password(user.user_id, h, s)
@@ -3264,7 +3263,7 @@ class BookingFlowTest(unittest.TestCase):
             self._post(self.app.guest_cancel, (token,), {"message": ""})
         self.assertIsNotNone(captured.get("html_body"))
         self.assertIn("\U0001F9D8 What:</b>", captured["html_body"])
-        # 2026-07-09, the operator: "AND CANCEL-ics as well please. Let's be nice :)"
+        # 2026-07-09: a CANCEL-ics is sent too, to be nice about it.
         ics_filename, ics_text, ics_method = captured["ics_attachment"]
         self.assertEqual(ics_method, "CANCEL")
         self.assertIn("METHOD:CANCEL", ics_text)
@@ -3273,9 +3272,9 @@ class BookingFlowTest(unittest.TestCase):
     # -- /admin overview: same shortname-leak audit as /my's table ----------
 
     def test_admin_overview_status_column_is_capitalized(self):
-        # 2026-07-08, the operator (screenshot of raw "confirmed"/"canceled_by_guest"
-        # in the Status column): "I prefer Host and Guest and then also
-        # 'Confirmed' for the status" -- same round as the Guests column's
+        # 2026-07-08: a screenshot of raw "confirmed"/"canceled_by_guest"
+        # in the Status column led to labels Host and Guest and then also
+        # 'Confirmed' for the status -- same round as the Guests column's
         # own Host/Guest capitalization. See storage.status_label() (moved
         # there 2026-07-13 from webapp._status_label so app/cli_list.py
         # can share it too).
@@ -3288,9 +3287,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn("<td>confirmed</td>", body)
 
     def test_admin_overview_date_column_is_nowrap(self):
-        # 2026-07-08, the operator (screenshot of a narrow Date column wrapping
-        # "2025-10-18" onto two lines): "please force the date to be
-        # non-breakable".
+        # 2026-07-08: a screenshot of a narrow Date column wrapping
+        # "2025-10-18" onto two lines led to forcing the date to be
+        # non-breakable.
         self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         admin_sid = webapp._new_session({"kind": "admin"})
@@ -3299,8 +3298,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(f'<td class="nowrap">{self.occ_date}</td>', body)
 
     def test_admin_overview_past_view_sorts_newest_first_by_default(self):
-        # 2026-07-08, the operator: "sorting: include past should by default show
-        # the newest first please" -- the future-only default view stays
+        # 2026-07-08: sorting -- include past should by default show
+        # the newest first -- the future-only default view stays
         # ascending; both past-containing views (Only Past/All) flip to
         # descending. 2026-07-14: "include past" became the dedicated
         # ?scope=past view (see admin_overview()'s own scope-parsing
@@ -3327,12 +3326,12 @@ class BookingFlowTest(unittest.TestCase):
 
     # -- 2026-07-14: All/Only Past/Only Future one-click selectors ----------
     #
-    # the operator, screenshot of the old binary "include past" text link: "please
-    # improve by providing selectors like for my-bt list: (so NOT a drop
+    # A screenshot of the old binary "include past" text link led to
+    # selectors like for my-bt list (so NOT a drop
     # down list, but directly accessible 1-click possibilities to change):
-    # All, Only Past, Only Future and make it so only one of the selectors
-    # can be active at one time. And the active one should be visibly
-    # marked! So by default 'Only Future' should be active and marked."
+    # All, Only Past, Only Future, with only one of the selectors
+    # active at one time, and the active one visibly
+    # marked -- by default 'Only Future' is active and marked.
 
     def test_default_view_marks_only_future_active_and_the_other_two_are_links(self):
         admin_sid = webapp._new_session({"kind": "admin"})
@@ -3418,8 +3417,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertTrue(first < second < third, "expected newest-first row order")
 
     def test_admin_overview_times_booked_header_has_explanatory_subtitle(self):
-        # the operator, screenshot of /admin: "please add a small subtitle
-        # explaining this: Times booked <in-small-below: for now / total>"
+        # A screenshot of /admin prompted a small subtitle
+        # explaining this: Times booked <in-small-below: for now / total>
         # -- the column shows "up-to-now/total" (see
         # test_admin_overview_times_booked_excludes_future_bookings above),
         # which isn't self-explanatory at a glance.
@@ -3433,10 +3432,10 @@ class BookingFlowTest(unittest.TestCase):
         )
 
     def test_admin_overview_times_booked_excludes_future_bookings(self):
-        # 2026-07-08, the operator (screenshot of a guest already showing "9" with
-        # sessions still weeks out): "please have the times booked UP TO
+        # 2026-07-08: a screenshot of a guest already showing "9" with
+        # sessions still weeks out led to counting the times booked UP TO
         # THIS MOMENT / date (always including of course the current
-        # course)", then "actually even better: make it 2/9". Book one
+        # course), refined further to "2/9" style. Book one
         # past (today-or-earlier, via _import_past) and one future session
         # for the same user and confirm the cell reads "1/2".
         #
@@ -3469,9 +3468,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("<td>1/2</td>", body)
 
     def test_admin_overview_cancel_disabled_for_past_confirmed_booking(self):
-        # 2026-07-08, the operator (screenshot of /admin?past=1 showing an enabled
-        # Cancel button on a long-past confirmed row): "PAST bookings
-        # should NOT have a CANCEL button as well :D"
+        # 2026-07-08: a screenshot of /admin?past=1 showing an enabled
+        # Cancel button on a long-past confirmed row led to PAST bookings
+        # not having a CANCEL button.
         user, environ = self._login_as_guest("regular@example.org")
         self._import_past(user.user_id, "2026-01-01", "past-session")
         admin_sid = webapp._new_session({"kind": "admin"})
@@ -3492,7 +3491,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn("disabled", button_html)
 
     def test_admin_overview_cancel_enabled_for_pending_confirmation_booking(self):
-        # 2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        # 2026-07-13: a guest who registered but hasn't yet clicked
         # their account-confirmation email link (STATUS_PENDING_CONFIRMATION)
         # previously had NO way to be canceled -- the Cancel button here was
         # unconditionally disabled for that status. Closing that gap: same
@@ -3533,7 +3532,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("document.currentScript.previousElementSibling", body)
 
     def test_admin_overview_date_column_defaults_to_ascending_sort(self):
-        # 2026-07-08, the operator: same default-sort-indicator request as /my's.
+        # 2026-07-08: same default-sort-indicator request as /my's.
         self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         admin_sid = webapp._new_session({"kind": "admin"})
@@ -3653,14 +3652,14 @@ class BookingFlowTest(unittest.TestCase):
         return occs[1].date.isoformat()
 
     def test_admin_overview_auto_merges_pre_erasure_registrations_on_load(self):
-        # 2026-07-10, the operator: "the merge should be automatically done if you
-        # also display the history in the /admin page" -- if an erased
+        # 2026-07-10: the merge is automatically done if
+        # the history is also displayed in the /admin page -- if an erased
         # guest books again with the SAME email, book() creates a brand-new
         # live user_id (the old email no longer exists in the live table --
         # it's now a hash on the archived row). /admin shows that old
         # registration alongside the live account's own rows.
         #
-        # 2026-07-13, the operator: "/admin should [be] non-mutating" -- this used
+        # 2026-07-13: /admin was made non-mutating -- this used
         # to physically rewrite the archived row's user_id on disk; now
         # it's purely a display-time merge (see
         # cli_list.merge_archived_for_display) -- nothing on disk changes
@@ -3737,14 +3736,14 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn("[erased]", second_body)
 
     def test_admin_overview_merge_drops_a_row_that_would_duplicate_the_live_account(self):
-        # 2026-07-10, the operator's own real bug report: erasing an account with
+        # 2026-07-10: a real bug report -- erasing an account with
         # a canceled booking for some date, then rebooking (and again
         # canceling) that SAME date under a fresh account with the same
         # email, then merging the old archived history back in used to
-        # leave TWO rows for the same course+date -- "it should not be
-        # possible to get 2 rows for the same course, same email and same
-        # slot/date... here the problem might be the ARCHIVE as the 2nd row
-        # was archived!" The archived row is now dropped on merge instead
+        # leave TWO rows for the same course+date, which should not be
+        # possible for the same course, same email and same slot/date --
+        # the problem was the ARCHIVE, as the 2nd row was archived. The
+        # archived row is now dropped on merge instead
         # of duplicated whenever the live account already has its own row
         # for that exact course+date.
         email = "comeback-guest3@example.org"
@@ -3775,8 +3774,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Are you sure?", body)
         self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{cancel_id}-form">', body)
         self.assertIn("Confirm cancellation", body)
-        # 2026-07-10, the operator: "Please add the email address in parenthesis
-        # behind the name here (and for reinstate)" -- lets the admin
+        # 2026-07-10: the email address is added in parenthesis
+        # behind the name here (and for reinstate) -- lets the admin
         # confirm WHICH account with that name they're about to act on.
         self.assertIn("Regular</b> (regular@example.org)", body)
 
@@ -3799,15 +3798,15 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("admin@example.org", to_addrs)
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
         self.assertIn("The host canceled this booking:", participant_mail)
-        # 2026-07-09, the operator (b): host-initiated cancels label the message
+        # 2026-07-09: host-initiated cancels label the message
         # from the ATTENDEE's point of view -- it came from the host.
         self.assertIn("Message from the host: course canceled this week", participant_mail)
-        # 2026-07-09, the operator (c): no reinstate link at all for a host-
+        # 2026-07-09: no reinstate link at all for a host-
         # initiated cancel's participant copy.
         self.assertNotIn("/reinstate/", participant_mail)
         admin_mail = next(b for t, s2, b in self.sent_emails if t == "admin@example.org" and s2.startswith("Canceled:"))
-        # 2026-07-09, the operator (a): "I am the host, so the email should not say
-        # YOU canceled the meeting!!" -- the admin copy must name WHO was
+        # 2026-07-09: as host, the email should not say
+        # YOU canceled the meeting -- the admin copy must name WHO was
         # canceled, not just say "You".
         self.assertIn("You canceled Regular <regular@example.org>'s booking:", admin_mail)
 
@@ -3933,12 +3932,12 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn(reg2.status, ("confirmed", "waitlisted"))
 
     # -- /my/reinstate + /admin/reinstate: undo a cancellation --------------
-    # 2026-07-10, the operator: "there should be then a reschedule button for
-    # canceled meetings which time (WHEN) is in the future" -- clarified in
+    # 2026-07-10: a reschedule button was added for
+    # canceled meetings whose time (WHEN) is in the future -- clarified in
     # discussion that this means undoing the cancel for the SAME occurrence
     # (not moving to a different one), offered both on the guest's own /my
-    # page and, per the operator's follow-up ("ah yes true! (accidental error for
-    # the admin could be use case!)"), on /admin too.
+    # page and, following up (accidental errors are a use case for the
+    # admin too), on /admin too.
 
     def test_my_bookings_table_shows_reinstate_button_for_a_future_canceled_booking(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -3950,8 +3949,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Rebook", body)
 
     def test_my_bookings_reinstate_button_opens_dialog_with_message_field(self):
-        # 2026-07-10, the operator: "Reinstate should, LIKE CANCEL, also ask for a
-        # COMMENT to be sent with the email to the other."
+        # 2026-07-10: Reinstate should, LIKE CANCEL, also ask for a
+        # COMMENT to be sent with the email to the other.
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
@@ -3970,9 +3969,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn(">Rebook<", body)
 
     def test_my_bookings_table_has_no_reinstate_button_for_a_host_canceled_booking(self):
-        # 2026-07-14, the operator (screenshot of a "Canceled by host" row still
-        # showing this button): "a meeting that was canceled by HOST
-        # should NOT have a reinstate button." A host cancellation means
+        # 2026-07-14: a screenshot of a "Canceled by host" row still
+        # showing this button led to a rule -- a meeting that was canceled
+        # by HOST should NOT have a reinstate button. A host cancellation means
         # the session itself isn't happening -- a guest reinstating
         # themselves can't undo that.
         user, environ = self._login_as_guest("regular@example.org")
@@ -3996,8 +3995,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(reloaded.status, STATUS_CANCELED_BY_HOST)
 
     def test_my_cancel_without_a_session_redirects_to_login_instead_of_403(self):
-        # 2026-07-14, the operator: "Can the page please redirect to login when
-        # the session times out?" -- covers every guest-action endpoint
+        # 2026-07-14: the page should redirect to login when
+        # the session times out -- covers every guest-action endpoint
         # that used to return a bare "403 Forbidden"/"log in first".
         status, headers, _body = self._post_with_session(
             self.app.my_cancel, ("bogus-reg-id",), {"message": ""}, {},
@@ -4028,7 +4027,7 @@ class BookingFlowTest(unittest.TestCase):
         )
         participant_mail = next(b for t, s, b in self.sent_emails if t == "regular@example.org" and s.startswith("Rebooked:"))
         self.assertIn("Message: sorry, changed my mind", participant_mail)
-        # 2026-07-08, the operator: same participant-only "Dear NAME," greeting as
+        # 2026-07-08: same participant-only "Dear NAME," greeting as
         # the cancellation email -- the admin copy right below stays bare.
         self.assertTrue(participant_mail.startswith("Dear Regular,\n\n"))
         admin_mail = next(b for t, s, b in self.sent_emails if t == "admin@example.org" and s.startswith("Rebooked:"))
@@ -4177,9 +4176,9 @@ class BookingFlowTest(unittest.TestCase):
         self.assertEqual(self.store.find_by_id(reg.registration_id).status, STATUS_CANCELED_BY_HOST)
 
     # -- /reinstate/<token>: no-login "magic link" from the cancellation ---
-    # email (2026-07-10, the operator: "for /my and /admin ... this POPUP should
-    # be used ... Only from the email there will be a single page for
-    # this ... WHAT, WHEN, WHERE like in the confirmation email").
+    # email (2026-07-10: for /my and /admin, this POPUP should
+    # be used -- only from the email is there a single page for
+    # this, WHAT, WHEN, WHERE like in the confirmation email).
 
     def test_guest_reinstate_page_shows_recap_and_message_field(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -4193,7 +4192,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Example Community Gym, Room 1", body)
         self.assertIn('<textarea name="message" rows="2" class="big-input">', body)
         self.assertIn("Yes, rebook it", body)
-        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        # 2026-07-11: audit of every single-submit-button direct-link page.
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_guest_reinstate_invalid_token_shows_invalid_message(self):
@@ -4251,7 +4250,7 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("200", status)
         self.assertNotIn("/admin/login", status + str(_headers))
         self.assertIn("Dynamic Ashtanga Vinyasa Yoga", body)
-        # 2026-07-11, the operator: audit of every single-submit-button direct-link page.
+        # 2026-07-11: audit of every single-submit-button direct-link page.
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
 
     def test_host_reinstate_invalid_id_shows_invalid_message(self):
@@ -4281,8 +4280,8 @@ class BookingFlowTest(unittest.TestCase):
     # -- /host-cancel: no-login "magic link" from the calendar event -------
 
     def test_host_cancel_needs_no_admin_session(self):
-        # 2026-07-09, the operator, screenshot of being bounced to /admin/login:
-        # "instead it should be a magic link that does not need a password."
+        # 2026-07-09: a screenshot of being bounced to /admin/login led to
+        # using a magic link that does not need a password instead.
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
@@ -4300,11 +4299,11 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("When:</b>", body)
         self.assertIn('<textarea name="message"', body)
         self.assertIn("Confirm cancellation", body)
-        # 2026-07-11, the operator (screenshot of this exact page): "please add a
-        # 'Never mind' button also here that brings you back to the homepage!"
+        # 2026-07-11: a screenshot of this exact page led to adding a
+        # 'Never mind' button here too, to bring you back to the homepage.
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
-        # 2026-07-16, the operator: "please place the reason-box above the course
-        # info-box ... also for single cancel (if applicable)" -- this IS
+        # 2026-07-16: the reason-box is placed above the course
+        # info-box, also for single cancel (if applicable) -- this IS
         # that single-cancel page.
         self.assertLess(body.index("<textarea"), body.index("What:"))
 
@@ -4360,8 +4359,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<textarea name="message"', body)
         self.assertIn("Confirm -- cancel entire session", body)
         self.assertIn('href="/" class="link-button">Never mind</a>', body)
-        # 2026-07-16, the operator, screenshot of this exact page: "please place
-        # the reason-box above the course info-box" -- the Reason
+        # 2026-07-16: a screenshot of this exact page led to placing
+        # the reason-box above the course info-box -- the Reason
         # textarea must render BEFORE the What/When/Where recap box, not
         # after.
         self.assertLess(body.index("<textarea"), body.index("What:"))
@@ -4396,7 +4395,7 @@ class BookingFlowTest(unittest.TestCase):
         participant_mail = next(b for t, s2, b in self.sent_emails if t == "regular@example.org" and s2.startswith("Canceled:"))
         self.assertIn("Message from the host: venue flooded", participant_mail)
         self.assertIn("exception rather than the rule", participant_mail)
-        # 2026-07-09, the operator (c): no reinstate link for a host-initiated
+        # 2026-07-09: no reinstate link for a host-initiated
         # cancel's participant copy, even for the whole-occurrence path.
         self.assertNotIn("/reinstate/", participant_mail)
 
@@ -4455,7 +4454,7 @@ class BookingFlowTest(unittest.TestCase):
             self.assertIn(d, body)
 
     def test_no_past_bookings_shows_a_friendly_message(self):
-        # 2026-07-09 behavior change, the operator: "What about PAST meetings?",
+        # 2026-07-09 behavior change: "What about PAST meetings?" was
         # asked while looking at an account with no bookings at all -- the
         # Past section used to be omitted entirely when empty, which looked
         # indistinguishable from broken/missing rather than genuinely
@@ -4478,9 +4477,10 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("New booking", body)
 
     def test_my_page_no_longer_has_its_own_separate_homepage_link(self):
-        # 2026-07-09, the operator: "Now we can get rid of the ugly green
-        # sentence behind New bookings as we have https://booking.example.org in
-        # the top-bar" -- the banner's own homepage link (see
+        # 2026-07-09: the ugly green
+        # sentence behind New bookings could be removed now that
+        # https://booking.example.org is in
+        # the top-bar -- the banner's own homepage link (see
         # test_my_page_shows_the_same_session_banner_as_courses_and_book
         # below) replaces this dedicated new-tab link.
         user, environ = self._login_as_guest("regular@example.org")
@@ -4489,8 +4489,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertNotIn("opens in a new tab", body)
 
     def test_my_page_shows_the_same_session_banner_as_courses_and_book(self):
-        # 2026-07-09, the operator: "Rather use the BANNER as here to be
-        # CONSISTENT!!" -- /my now shows the same _session_banner_html()
+        # 2026-07-09: the BANNER is used here to be
+        # CONSISTENT -- /my now shows the same _session_banner_html()
         # banner /courses and /book already show, instead of a separate,
         # redundant "Log out" button at the bottom of the page.
         user, environ = self._login_as_guest("regular@example.org")
@@ -4499,8 +4499,8 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("regular@example.org", body)
 
     def test_my_pages_own_banner_omits_the_my_bookings_link(self):
-        # 2026-07-09, the operator, screenshot of /my's own banner: "My bookings
-        # link on the my bookings page (in top-bar) :(" -- a link back to
+        # 2026-07-09: a screenshot of /my's own banner flagged the "My
+        # bookings" link on the my bookings page (in top-bar) -- a link back to
         # the exact page you're already on is dead weight. /courses and
         # /book still show it (see SessionBannerTest below).
         user, environ = self._login_as_guest("regular@example.org")
@@ -4511,8 +4511,8 @@ class BookingFlowTest(unittest.TestCase):
 
     def test_my_page_bottom_row_has_no_log_out_button_or_delete_account_button(self):
         # The banner's own Logout replaces the old standalone "Log out"
-        # button here. 2026-07-14, the operator: "please move the delete button
-        # under 'Account settings': and rename to 'DELETE this account'"
+        # button here. 2026-07-14: the delete button moved
+        # under 'Account settings' and was renamed to 'DELETE this account'
         # -- the destructive delete-account action moved to /my/settings
         # (see MySettingsTest), so /my's own bottom row no longer has
         # either button.
@@ -4582,8 +4582,8 @@ class AdminLoginRateLimitTest(unittest.TestCase):
         self.assertIn("Too many attempts", self._post("wrong", remote_addr=ip))
 
     def test_lockout_shows_a_disabled_button_with_a_live_countdown(self):
-        # 2026-07-05: the operator asked for a visible countdown wherever there's
-        # a login cooldown, matching the resend-button UX -- the button
+        # 2026-07-05: a visible countdown wherever there's
+        # a login cooldown was requested, matching the resend-button UX -- the button
         # itself is disabled server-side (not just cosmetically) via a
         # server-computed (not guessed) remaining-seconds value.
         ip = "203.0.113.5"
@@ -4596,9 +4596,9 @@ class AdminLoginRateLimitTest(unittest.TestCase):
         self.assertIn("Log in", body)
 
     def test_lockout_script_is_byte_stable_across_different_remaining_seconds(self):
-        # 2026-07-07, the operator (repeatable console CSP violation on /my's
+        # 2026-07-07: a repeatable console CSP violation on /my's
         # lockout screen, confirmed via two screenshots showing DIFFERENT
-        # hashes for what should be "the same" script): the countdown
+        # hashes for what should be "the same" script -- the countdown
         # script used to interpolate `seconds` directly into the <script>
         # text, so its hash changed every render and could never match a
         # fixed CSP allow-list. The seconds value must now travel via a
@@ -4661,7 +4661,7 @@ class MyLoginAsAdminTest(unittest.TestCase):
         self.assertEqual(webapp.SESSIONS[sid]["kind"], "admin")
 
     def test_admin_login_via_my_ignores_next_and_still_goes_to_admin(self):
-        # 2026-07-11, the operator: "Login link returns to originating page" --
+        # 2026-07-11: "Login link returns to originating page" --
         # that's a GUEST-only affordance; the admin shortcut (email:
         # "admin") must always land on /admin regardless of any next=
         # a guest-facing page happened to attach to the login link.

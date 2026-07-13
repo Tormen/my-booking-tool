@@ -5,7 +5,7 @@ Description=my-booking GDPR retention purge (one-shot; triggered by the .timer)
 Type=oneshot
 User=my-booking
 Group=my-booking
-# 2026-07-14, the operator: "Can the timer then please call my-bt admin ...."
+# 2026-07-14: switched to calling `my-bt admin gdpr` subcommands directly
 # -- two ExecStart= lines run in sequence (systemd's own documented
 # multi-ExecStart behavior for Type=oneshot), one per `my-bt admin gdpr`
 # leaf, rather than the old direct `python3 -m app.retention` (which ran

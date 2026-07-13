@@ -1,12 +1,12 @@
 """load_settings()'s own TOML-parsing behavior -- most other tests build a
 Settings/Course directly via tests/helpers.py's make_settings/make_course,
 bypassing the TOML file entirely. This file covers what only load_settings()
-itself does: reading real secret files, and (2026-07-09, the operator: "add a
-sorting key ... allowing me to determine the ORDER of the courses on
-https://booking.example.org/courses"; the key was originally named `order`, renamed
-to `order_in_all_courses` the same day -- the operator: "please rename to
-something like order_in_all_courses to be self-explanatory how this
-'order' is actually USED") sorting courses by this optional key before
+itself does: reading real secret files, and (2026-07-09: added a
+sorting key allowing the ORDER of the courses on
+https://booking.example.org/courses to be determined; the key was originally named
+`order`, renamed to `order_in_all_courses` the same day to be
+self-explanatory about how this 'order' is actually USED) sorting courses
+by this optional key before
 they ever reach Settings.courses."""
 import tempfile
 import unittest
@@ -124,8 +124,8 @@ capacity = 10
         self.assertEqual([c.shortname for c in settings.courses], ["tie-b", "tie-a", "tie-c"])
 
     def test_location_url_defaults_to_empty_string_when_omitted(self):
-        # 2026-07-09, the operator: "add a location_url and then use it on /my in
-        # the column location to make those clickable" -- optional, so an
+        # 2026-07-09: a location_url was added and used on /my in
+        # the column location to make those clickable -- optional, so an
         # existing settings.toml with no location_url key anywhere must
         # keep parsing exactly as before.
         toml_path = self._write(self._course_block("no-url"))
@@ -148,8 +148,8 @@ capacity = 10
         )
 
     def test_host_calendar_entry_cc_list_defaults_to_empty_tuple_when_omitted(self):
-        # 2026-07-14, the operator: "list of email addresses that if set on a
-        # course in settings.toml will also be invited as optional (cc)"
+        # 2026-07-14: a list of email addresses that if set on a
+        # course in settings.toml will also be invited as optional (cc)
         # -- optional, so an existing settings.toml with no
         # host_calendar_entry_cc_list key anywhere must keep parsing
         # exactly as before.
@@ -169,9 +169,9 @@ capacity = 10
 
 
 class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
-    """2026-07-07, the operator: "make the reminders (list) a setting. But default
-    to NO reminders" (trainer's own CalDAV event) / "invites to course
-    participants should have reminder 1h before" (guest_reminder_minutes)."""
+    """2026-07-07: the reminders (list) became a setting, defaulting
+    to NO reminders (trainer's own CalDAV event) / invites to course
+    participants have a reminder 1h before (guest_reminder_minutes)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -217,9 +217,9 @@ class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
 
 
 class LoadSettingsBccAttendeeEmailsTest(unittest.TestCase):
-    """2026-07-09, the operator: "add as BCC the given email address to all mails
-    that go out to the attendees ... so that for some time I can watch
-    this to ensure that all is OK" -- optional, comma-separated [smtp]
+    """2026-07-09: BCC a given email address on all mails
+    that go out to the attendees, for a time, to ensure that all is OK
+    -- optional, comma-separated [smtp]
     key; settings.bcc_attendee_email_list is what every attendee-facing
     send_mail() call site actually reads (see app/config.py's own
     docstring on both)."""
@@ -277,9 +277,9 @@ class LoadSettingsBccAttendeeEmailsTest(unittest.TestCase):
 
 
 class LoadSettingsAccountDeletionWarningDaysTest(unittest.TestCase):
-    """2026-07-09, the operator: "Our scheduler that then deletes accounts should
+    """2026-07-09: the scheduler that deletes accounts should
     detect imminent accounts that would need to be deleted and then send
-    out such an email" -- optional [privacy] key, three equivalent ways
+    out such an email -- optional [privacy] key, three equivalent ways
     to disable it (0, "", or omitted -- all fall through `or 0` in
     load_settings() to the same falsy value)."""
 
@@ -332,8 +332,8 @@ class LoadSettingsAccountDeletionWarningDaysTest(unittest.TestCase):
 
 
 class WeekdayTimeRangeLabelTest(unittest.TestCase):
-    """Course.weekday_time_range_label() -- 2026-07-10, the operator: "add the
-    weekday to the TIME column (e.g. SAT 10h45-12h45)" on /my's bookings
+    """Course.weekday_time_range_label() -- 2026-07-10: the
+    weekday was added to the TIME column (e.g. SAT 10h45-12h45) on /my's bookings
     table (app/webapp.py). Tighter than time_range_label() (no spaces
     around the dash) -- deliberately a separate method rather than
     changing time_range_label() itself, which the booking page subtitle
@@ -353,11 +353,11 @@ class WeekdayTimeRangeLabelTest(unittest.TestCase):
 
 
 class CourseDateOverrideTest(unittest.TestCase):
-    """Course.date_overrides + its *_for() lookup helpers -- 2026-07-16,
-    the operator: "add a new config option per course in settings.toml to
-    exceptionally change time for a course on a certain date. Optionally
-    a message ... It should be possible to set a LIST of dates with
-    different times." """
+    """Course.date_overrides + its *_for() lookup helpers -- 2026-07-16:
+    a new config option per course in settings.toml was added to
+    exceptionally change time for a course on a certain date, optionally
+    with a message, supporting a LIST of dates with
+    different times."""
 
     def test_no_overrides_at_all_is_unaffected(self):
         course = make_course(weekday="sat", start_time="10:45", duration_minutes=120)

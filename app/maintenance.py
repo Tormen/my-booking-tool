@@ -1,18 +1,16 @@
 """Sitewide maintenance mode: `my-bt admin site-maintenance on/off/status`
-(renamed from `admin maintenance` 2026-07-14, the operator: "rename my-bt admin
-maintenance to my-bt admin site-maintenance" -- see scripts/my-bt). While ON, the running web app blocks every guest-facing
+(renamed from `admin maintenance` 2026-07-14 -- see scripts/my-bt). While ON, the running web app blocks every guest-facing
 route -- /courses, /book/<shortname>, /cancel/<token>, /reinstate/<token>,
 and every /my/* endpoint (login, signup, reset, confirm, cancel, reinstate,
 settings, delete-account, ...) -- and shows a 503 maintenance page instead
 (see app/webapp.py::App._maintenance_guard, called from each of those).
 
-2026-07-10, the operator originally asked to gate only "any booking URL (like the
-links on index.html)" (courses/book), leaving existing-booking management
-(/my, /admin, /cancel/, /reinstate/, /host-cancel/, /host-reinstate/)
-untouched -- but then, the same day, caught via a real external-IP test
-that this left a real gap: "I was able to click on login and see the
-normal login page from an external IP in maintenance mode. This should
-not be!" The scope above is the corrected version: every GUEST-facing
+2026-07-10: this originally only gated booking URLs (courses/book),
+leaving existing-booking management (/my, /admin, /cancel/, /reinstate/,
+/host-cancel/, /host-reinstate/) untouched -- but a real external-IP
+test the same day found a real gap: /my's own login page was still
+reachable and usable from an external IP during maintenance. The scope
+above is the corrected version: every GUEST-facing
 route is now gated, uniformly, via one shared check instead of N separate
 inlined copies.
 
@@ -38,9 +36,9 @@ maintenance toggle is that it takes effect on the very next request.
 
 This module also renders the identical message as a banner that
 `my-bt admin site-maintenance on/off` inserts into / removes from the TOP of the
-live, deployed index.html at [site].static_site_dir (2026-07-10, the operator:
-"the my-bt should not modify the package installed TEMPLATE folder site"
--- this used to ALSO patch this checkout's own HOME/site/index.html, but
+live, deployed index.html at [site].static_site_dir (2026-07-10:
+my-bt should not modify the package-installed TEMPLATE folder's own
+copy -- this used to ALSO patch this checkout's own HOME/site/index.html, but
 that copy is a template/reference only, never what nginx actually serves;
 static_site_dir is the one real, live location, same as privacy.html/
 terms.html already treat it). index.html is hand-authored and never
@@ -180,8 +178,8 @@ def banner_html(admin_email: str, custom_message: str = "") -> str:
 
 def insert_banner(html: str, banner: str) -> str:
     """Idempotent: strips any existing banner block first, then inserts
-    the given one right after the opening <body ...> tag ("right at the
-    top" per the operator's request), or right at the very start of the document
+    the given one right after the opening <body ...> tag (right at the
+    top of the page), or right at the very start of the document
     if there's no <body> tag at all (an unusual hand-authored page, but
     better to still show the message than silently do nothing)."""
     stripped = remove_banner(html)

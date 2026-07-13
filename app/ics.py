@@ -46,8 +46,8 @@ class VEvent:
     location: str
     start: datetime
     end: datetime
-    # 2026-07-07, the operator: "make the reminders (list) a setting. But default
-    # to NO reminders" -- was (24*60, 60) (1 day + 1h before) for every
+    # 2026-07-07: reminders became a configurable setting, defaulting to
+    # NO reminders -- was (24*60, 60) (1 day + 1h before) for every
     # caller by default; every real call site now passes its own explicit
     # value from Settings (see app/config.py's
     # trainer_calendar_reminder_minutes/guest_calendar_reminder_minutes),
@@ -78,10 +78,10 @@ class VEvent:
     # field existed.
     status: str | None = None
     # organizer/attendees: added 2026-07-14 for
-    # app.config.Course.host_calendar_entry_cc_list (the operator: "list of email
-    # addresses that if set on a course in settings.toml will also be
-    # invited as optional (cc) so that they receive the same invite as
-    # well"). Both default to "off" (None / empty tuple), same
+    # app.config.Course.host_calendar_entry_cc_list -- a list of email
+    # addresses that, when set on a course in settings.toml, are also
+    # invited as optional attendees so they receive the same invite.
+    # Both default to "off" (None / empty tuple), same
     # byte-identical-unless-opted-in convention as alarms_minutes_before
     # above -- a course with no cc list configured renders exactly as
     # before these fields existed. organizer is a plain email address (no
@@ -143,9 +143,9 @@ def parse_uid(ics_text: str) -> str | None:
 
 def parse_sequence(ics_text: str) -> int:
     """RFC 5545 SEQUENCE of the given VEVENT, or 0 if absent (the spec's
-    own default). 2026-07-16, the operator, root-causing a persistent-conflict
-    incident down to the actual DEBUG output he collected (not just more
-    retries): every single UPDATE to an already-existing operator
+    own default). 2026-07-16: root-causing a persistent-conflict incident
+    via DEBUG output (not just more retries) found that every single
+    UPDATE to an already-existing operator
     calendar event was failing with HTTP 412 -- not intermittently, EVERY
     time -- while the one occurrence with no prior event (a brand-new
     create) succeeded. The CalDAV server's (Open-Xchange) own error body

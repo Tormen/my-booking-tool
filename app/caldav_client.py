@@ -67,12 +67,13 @@ class HttpTransport:
             # single successful request).
             log.debug("%s %s -> HTTP %d", method, path, resp.status)
             if resp.status >= 400:
-                # 2026-07-16, the operator, after a persistent-conflict incident
-                # that 6x-ing the retry count didn't actually explain:
-                # "But there must be another problem with the Calendar.
-                # Please do NOT retry more often!!! But rather collect
-                # DEBUG OUTPUT please!!!" On any error response (a 412
-                # conflict included), log everything needed to root-cause
+                # 2026-07-16: a persistent-conflict incident showed that
+                # 6x-ing the retry count alone didn't actually explain the
+                # underlying problem -- retrying more couldn't help if the
+                # real cause was something else entirely, so this needed
+                # DEBUG output to root-cause properly instead. On any
+                # error response (a 412 conflict included), log everything
+                # needed to root-cause
                 # it later -- our own If-Match/If-None-Match (the etag we
                 # THOUGHT was current), every other request header except
                 # Authorization, and the full (untruncated) response body,
@@ -100,10 +101,10 @@ class CalDAVConflictError(CalDAVError):
     ETag we read is already stale -- something else (typically another
     near-simultaneous booking/cancellation/confirmation for the SAME
     occurrence) modified this exact calendar event between our read and
-    our write. 2026-07-07, the operator (a real production 500 on /my/confirm,
-    "PUT ... -> HTTP 412: ... a newer version of the appointment already
-    exists"): a plain retry a few seconds later succeeded on its own, i.e.
-    genuinely transient -- see calendar_sync.sync_occurrence's own retry
+    our write. 2026-07-07: a real production 500 on /my/confirm ("PUT ...
+    -> HTTP 412: ... a newer version of the appointment already exists")
+    turned out to be genuinely transient -- a plain retry a few seconds
+    later succeeded on its own -- see calendar_sync.sync_occurrence's own retry
     loop, which is what this distinct exception type exists to let that
     loop catch specifically, instead of treating every CalDAVError
     (including a real, non-transient failure) as equally retryable."""
@@ -175,9 +176,8 @@ class CalDAVClient:
                 from .ics import parse_uid
                 uid = parse_uid(data_el.text) or ""
                 etag = etag_el.text if etag_el is not None else ""
-                # 2026-07-16, the operator, diagnosing a persistent-conflict
-                # incident ("there must be another problem with the
-                # Calendar"): put_event()/delete_event() below both ASSUME
+                # 2026-07-16, diagnosing a persistent-conflict incident:
+                # put_event()/delete_event() below both ASSUME
                 # this event's href is exactly `<uid>.ics` under
                 # calendar_href, since that's what WE named it when we
                 # created it. If the server ever reports a DIFFERENT href

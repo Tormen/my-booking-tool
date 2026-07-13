@@ -8,10 +8,10 @@ Group=my-booking
 # Reads /var/log/journal via journalctl (for the sshd failed-password
 # check) -- the my-booking user has no other reason to be in this group.
 SupplementaryGroups=systemd-journal
-# 2026-07-14, the operator: "Same for any other script we have lets integrate
-# this into the admin as subcommand(s) please" -- was `python3 -m
-# app.watchdog` directly; `my-bt admin watchdog-check` is the new on-demand
-# equivalent (see scripts/my-bt::cmd_admin_watchdog_check).
+# 2026-07-14: standalone scripts were folded into `my-bt admin` as
+# subcommands -- was `python3 -m app.watchdog` directly; `my-bt admin
+# watchdog-check` is the new on-demand equivalent (see
+# scripts/my-bt::cmd_admin_watchdog_check).
 ExecStart=/opt/my-booking/bin/my-bt --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking admin watchdog-check
 WorkingDirectory=/opt/my-booking
 Environment=PYTHONPATH=/opt/my-booking

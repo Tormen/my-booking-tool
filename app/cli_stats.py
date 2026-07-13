@@ -4,27 +4,19 @@ NOT in scripts/my-bt, for the same reason as every other app/cli_*.py
 module: that script has no .py extension and lives outside `app/`, so
 unittest can't import it directly. See tests/test_cli_stats.py.
 
-2026-07-08, the operator, looking at `my-bt stats`'s original bare per-(course,
-status) count table: "Lets say: total count or just total and then count
-for last session 'last slot' and count for next session 'next slot' and
-also last year, last year to date and this year to date" -- then, twice
-more, correcting two successive (mis-)readings of that one request:
-(1) "You already have a column 'count' ... I assumed this is the total
-number for this course and with this status? If yes then I just meant to
-rename 'count' to total count or just total" -- so the base table's
-shape doesn't change, just its "count" column's name (done in
-scripts/my-bt's cmd_stats, not here); (2) "I just meant to add them as
-ADDITIONAL columns to the existing table! Hence you will have this info
-per status listed" -- so last/next slot and the three year-based windows
-are each computed PER (course, status) -- the same grouping the base
-table already uses -- not confirmed-only/course-only in a separate
-table. On the year-based ones: "add to each count a /xx where xx is the
-number of disjunct participants in this period please (for the single
-course this is not needed)" -- meaning last/next slot (a single
-occurrence date, so count and distinct-participant count are trivially
-the same number) stay a plain count, but the three year-based windows
-(which can span many occurrences the same guest might hold more than one
-registration across) get the "count/distinct" treatment.
+2026-07-08: extended `my-bt stats`'s original bare per-(course, status)
+count table with a "total" column, last/next-occurrence counts ("last
+slot"/"next slot"), and three year-based windows (last year, last year
+to date, this year to date) -- each computed PER (course, status), the
+same grouping the base table already used, rather than confirmed-only/
+course-only in a separate table. The base table's own "count" column was
+renamed to "total" to make room for these (done in scripts/my-bt's
+cmd_stats, not here). Each year-based count also gets a "/xx" showing
+the number of distinct participants in that period, since it can span
+many occurrences the same guest might hold more than one registration
+across; last/next slot (a single occurrence date, so count and
+distinct-participant count are trivially the same number) stay a plain
+count.
 """
 from __future__ import annotations
 
@@ -33,10 +25,9 @@ from datetime import date
 
 def compute_totals_with_distinct(rows: list[dict]) -> dict[tuple[str, str], tuple[int, int]]:
     """For each (course_shortname, status) pair, returns (count, distinct
-    user_id count) across all of `rows`. 2026-07-08, the operator, right after
-    confirming the rest of this design: "and total should also have
-    count/distinct please" -- the base table's own "total" column gets
-    the same "count/distinct" treatment as the year-over-year columns.
+    user_id count) across all of `rows`. 2026-07-08: the base table's own
+    "total" column gets the same "count/distinct" treatment as the
+    year-over-year columns.
 
     `rows` is whatever the caller has already filtered (e.g. `my-bt
     stats`'s own --year/--scope) -- same scope the "total" column always

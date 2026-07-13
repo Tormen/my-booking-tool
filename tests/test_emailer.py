@@ -2,8 +2,8 @@
 other test in this suite patches send_mail itself at whichever module calls
 it, e.g. app.webapp.send_mail, since nothing else needed to verify its
 actual SMTP/MIME mechanics). Added 2026-07-09 alongside the optional
-html_body param (the operator: "format description in email as on page ... box the
-description and put the background color (as on the page)") -- genuinely
+html_body param (the description formatting was requested to match the
+page, including the boxed background color) -- genuinely
 new branching logic (plain-text-only vs. multipart/alternative) worth its
 own direct coverage, since every other test's mock swallows html_body
 without ever exercising what send_mail actually does with it."""
@@ -46,8 +46,8 @@ class SendMailTest(unittest.TestCase):
         self.assertIn("rich body", html_part.get_content())
 
     def test_ics_attachment_is_attached_with_the_right_content_type(self):
-        # 2026-07-09, the operator: "attach a calendar invite also in the email
-        # that is sent to the participant" -- see
+        # 2026-07-09: a calendar invite is also attached to the email
+        # that is sent to the participant -- see
         # app/calendar_sync.py::guest_invite_ics/guest_cancel_ics for the
         # only two builders of the (filename, ics_text, method) tuple.
         with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
@@ -82,9 +82,9 @@ class SendMailTest(unittest.TestCase):
         self.assertIsNone(sent_msg["Bcc"])
 
     def test_bcc_addrs_sets_bcc_header(self):
-        # 2026-07-09, the operator: "add as BCC the given email address to all
-        # mails that go out to the attendees ... so that for some time I
-        # can watch this to ensure that all is OK" -- see
+        # 2026-07-09: a given email address is BCC'd on all
+        # mails that go out to the attendees, for a time, to
+        # ensure that all is OK -- see
         # app.config.Settings.bcc_attendee_email_list, which every
         # attendee-facing call site reads to build this argument.
         with patch("app.emailer.smtplib.SMTP_SSL") as mock_smtp_ssl:
@@ -114,9 +114,9 @@ class SendMailTest(unittest.TestCase):
         self.assertIsNone(sent_msg["Reply-To"])
 
     def test_reply_to_sets_header(self):
-        # 2026-07-16, the operator: "add a reply-to header so that if I as host
-        # reply to a registration of a participant mail, the reply will
-        # go to the address of the participant" -- every admin-facing
+        # 2026-07-16: a reply-to header was added so that if the host
+        # replies to a registration of a participant mail, the reply will
+        # go to the address of the participant -- every admin-facing
         # notification about one specific participant now passes their
         # email here (see app.webapp/app.cancellation/app.cancel_flow's
         # own call sites).

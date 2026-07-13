@@ -101,7 +101,7 @@ def build_occurrences(
 
     out: list[Occurrence] = []
     for d in candidate_dates(course, now.date(), settings.show_next_days):
-        # 2026-07-16, the operator: per-date exceptional time changes -- see
+        # 2026-07-16: per-date exceptional time changes -- see
         # Course.date_overrides/start_hm_for/duration_minutes_for. A date
         # with no override behaves exactly as before (its own start_hm()/
         # duration_minutes).

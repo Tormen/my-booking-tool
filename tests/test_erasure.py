@@ -180,8 +180,8 @@ class FindArchivedUserIdsForEmailTest(unittest.TestCase):
     identity from their current, live email alone. 2026-07-14: moved here
     from tests/test_cli_history.py, which tested it alongside
     app.cli_history.run_merge() -- that module (and the `my-bt admin
-    dearchive` command it backed) was removed entirely as "a clear GDPR
-    violation" (the operator) for permanently re-linking supposedly-erased
+    dearchive` command it backed) was removed entirely as a clear GDPR
+    violation for permanently re-linking supposedly-erased
     history onto a live, identifiable account. This function itself
     stays -- it's read-only (finds ids, moves nothing) and the display-
     time merges that use it were explicitly kept: "the implicit

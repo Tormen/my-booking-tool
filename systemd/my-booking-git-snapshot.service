@@ -5,11 +5,11 @@ Description=my-booking data dir git snapshot (one-shot; triggered by the .timer)
 Type=oneshot
 User=my-booking
 Group=my-booking
-# 2026-07-14, the operator: "Same for any other script we have lets integrate
-# this into the admin as subcommand(s) please" -- was `python3 -m
-# app.git_snapshot` directly; `my-bt admin git-snapshot` already existed
-# as the on-demand equivalent (2026-07-1x), this just points the timer at
-# the same command instead of duplicating the call.
+# 2026-07-14: standalone scripts were folded into `my-bt admin` as
+# subcommands -- was `python3 -m app.git_snapshot` directly; `my-bt
+# admin git-snapshot` already existed as the on-demand equivalent
+# (2026-07-1x), this just points the timer at the same command instead
+# of duplicating the call.
 ExecStart=/opt/my-booking/bin/my-bt --settings /etc/my-booking/settings.toml --data-dir /var/lib/my-booking admin git-snapshot
 WorkingDirectory=/opt/my-booking
 Environment=PYTHONPATH=/opt/my-booking

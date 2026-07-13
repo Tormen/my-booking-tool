@@ -33,8 +33,8 @@ def summarize_problems(checks: list[Check]) -> list[str]:
     """Formats every non-"ok" check as a printable "[LEVEL] label -- detail"
     line, in original order -- everything else is dropped.
 
-    2026-07-08, the operator: "please repeat all warnings at the end of setup and
-    status explicitly." `my-bt admin health`/plain `my-bt admin setup`/
+    2026-07-08: all warnings are now repeated at the end of setup and
+    status too. `my-bt admin health`/plain `my-bt admin setup`/
     `my-bt admin setup -i` each print a dozen-plus numbered sections of
     checks, then only a bare count ("2 warning(s), no hard failures") at
     the very end -- by the time you've scrolled to the bottom, the actual
@@ -143,13 +143,13 @@ def check_directory_fsync_support(data_dir: str | Path) -> list[Check]:
     unsupported mount would otherwise never surface anywhere except a
     routine WARNING line in the app's own log.
 
-    2026-07-15, the operator, on exactly that: "that's the correct call for
-    availability ... but it's also the kind of failure that's invisible
+    2026-07-15: that's the correct call for
+    availability, but it's also the kind of failure that's invisible
     until the one time it matters -- if the actual production mount
     silently doesn't support directory fsync, every write since deploy
     has been getting the weaker guarantee with nobody the wiser. Worth a
-    one-time capability probe ... rather than relying on someone
-    noticing a warning line in a log nobody tails." This is that probe,
+    one-time capability probe, rather than relying on someone
+    noticing a warning line in a log nobody tails. This is that probe,
     wired into `my-bt admin setup`/`admin health` so it's re-checked on
     every real run of either -- not just once at process startup (see
     app/serve.py's own startup check for that half)."""
@@ -241,9 +241,9 @@ def check_path_group_and_selinux(label: str, path: str | Path, expected_group: s
     """Generic, reusable group-ownership + SELinux-file-context audit for
     ANY single data path (file or directory) my-booking reads or writes.
 
-    2026-07-16, the operator: "audit group+permissions+SELinux ... for ALL data
-    paths, INCLUDING any user-configurable ones [in settings.toml] --
-    e.g. an email-templates directory." Before this, every path grew its
+    2026-07-16: extended the group+permissions+SELinux audit to ALL data
+    paths, including user-configurable ones in settings.toml (e.g. an
+    email-templates directory). Before this, every path grew its
     own bespoke, slightly different check: check_data_dir_ownership
     above only ever checks `*.csv` OWNER uid (never group, never
     SELinux), and (until this change) `data_dir`/`log_file`/
@@ -388,12 +388,12 @@ def check_caldav_calendars(raw: dict) -> list[Check]:
 
 
 def check_calendar_invite_format(raw: dict, data_dir: str | Path) -> list[Check]:
-    """2026-07-15, the operator, after watching a real `setup -i` run print
-    "[warn] couldn't check/resync calendar invite format: ..." and then,
-    a few lines later, "Done -- all checks pass now" anyway: "setup and
-    health should BOTH (a) repeat any warn or error at the end (b) ...
-    exit 1 to FAIL on any warning or error ... you classified this as a
-    warning, but for me this is an error." The resync ATTEMPT (a live
+    """2026-07-15: a real `setup -i` run once printed "[warn] couldn't
+    check/resync calendar invite format: ..." and then, a few lines
+    later, "Done -- all checks pass now" anyway -- setup and health should
+    BOTH repeat any warn/error at the end AND exit 1 on any warning or
+    error; this specific case had been classified as a warning, but is
+    actually treated as an error. The resync ATTEMPT (a live
     CalDAV write) only ever happens in `setup -i` -- see
     app.calendar_sync.resync_if_format_changed() -- but whether it
     actually SUCCEEDED is a cheap, local, no-network fact: does the
@@ -429,8 +429,8 @@ def check_calendar_invite_format(raw: dict, data_dir: str | Path) -> list[Check]
 
 
 def check_calendar_invite_resync_skips(data_dir: str | Path) -> list[Check]:
-    """2026-07-15/16, the operator, from a real production `setup -i` run: 3
-    occurrences hit persistent CalDAV conflicts during a resync (see
+    """2026-07-15/16: a real production `setup -i` run showed 3
+    occurrences hitting persistent CalDAV conflicts during a resync (see
     app.calendar_sync.resync_all_future_calendar_events's own docstring),
     got skipped, and the run still printed "[ok] ... resynced 6 upcoming
     occurrence(s)" then "Done -- all checks pass now" -- because the
@@ -522,8 +522,8 @@ def check_settings_fresh(settings_path: str, unit: str = "my-booking.service") -
     """settings.toml is read exactly once, at app/serve.py's startup -- see
     that module's main(). There's no file-watching or SIGHUP-triggered
     reload, so an edit made *after* `unit` last (re)started is correct on
-    disk but not live yet. Hit in practice 2026-07-05: the operator edited a
-    course description on the server, the file was correct, but the
+    disk but not live yet. Hit in practice 2026-07-05: after a
+    course description was edited on the server, the file was correct, but the
     booking page kept showing the old text because my-booking.service
     hadn't been restarted -- nothing flagged this, so it looked like a
     bug rather than a pending restart. Silent (returns []) if `unit`
@@ -610,11 +610,11 @@ def check_nginx_locations() -> list[Check]:
 
 # Fixed, generic filename for the (optional) real, hand-hardened nginx
 # vhost conf kept directly in this checkout's site/ dir -- see
-# site/nginx-locations.conf.example. 2026-07-10, the operator: "rename
-# booking.example.org.conf to nginx-locations.conf ... like this all content in
-# site/ works the same" -- every OTHER real-vs-.example pair in site/
-# (index.html, impressum.html, terms.html, privacy.html.tmpl) already uses
-# one fixed, domain-agnostic name; the nginx conf used to be the one
+# site/nginx-locations.conf.example. 2026-07-10: renamed from a
+# domain-specific filename to this fixed one, so every OTHER
+# real-vs-.example pair in site/
+# (index.html, impressum.html, terms.html, privacy.html.tmpl) uses
+# the same one fixed, domain-agnostic name; the nginx conf used to be the one
 # exception (named after the operator's own domain), which meant this module had
 # to glob for "*.conf" instead of just checking one known path. Fixed name
 # everywhere now -- no more globbing, no more guessing.
@@ -632,7 +632,7 @@ def check_nginx_conf_repo_file(home: str) -> list[Check]:
     added to the app, and both nginx/my-booking.conf(.example) and
     check_nginx_locations()'s own required-list were updated for it -- but
     the separate, real, hand-hardened nginx conf sitting in this repo was
-    NOT, and nothing caught that gap until the operator noticed it by inspection.
+    NOT, and nothing caught that gap until it was noticed by manual inspection.
     check_nginx_locations() above only ever looks at the LIVE,
     already-deployed `nginx -T` output, so it can't help BEFORE a stale
     file like this is actually deployed; this check looks at the file
@@ -682,9 +682,9 @@ def check_nginx_conf_deployed(raw: dict) -> list[Check]:
 
     Unlike every other optional check gated on a settings.toml path
     ([site].static_site_dir, [watchdog].nginx_access_log, ...), a problem
-    found HERE is reported as "fail", not "warn" (2026-07-10, the operator:
-    "can actually check the correctness ... and then truly ERROR out in
-    case there is a problem") -- configuring this path at all is a
+    found HERE is reported as "fail", not "warn" (2026-07-10: this path
+    can actually be checked for correctness, so a real problem should
+    truly ERROR out, not just warn) -- configuring this path at all is a
     deliberate statement that this file is real and matters, so a gap in
     it is treated as a hard failure, the same way a missing/broken secret
     already is in check_secrets()."""
@@ -846,7 +846,7 @@ _ACCESS_LOG_RE = re.compile(r"^[ \t]*access_log[ \t]+([^\s;]+)(?:[ \t]+[^\s;]+)*
 # semicolon on the SAME line, which it always did in this module's own
 # tests (every fixture there has a log format name like "main" between the
 # path and the `;`, so the greedy path match stopped at the space before
-# it). the operator's real nginx-locations.conf has no format name --
+# it). A real production nginx-locations.conf has no format name --
 # `access_log /var/log/nginx/booking.example.org.access.log;` with the `;` directly
 # against the path -- so the path group greedily consumed the `;` too, and
 # rather than backtracking, `(?:\s+\S+)*` happily matched on into the NEXT
@@ -1022,10 +1022,9 @@ def _resolve_static_source(home: str, name: str) -> Path | None:
 def _diffable_static_page_text(text: str) -> str:
     """Strips `my-bt admin site-maintenance on`'s banner block (if present) before
     comparing a deployed static page against this checkout's own source
-    (2026-07-10, the operator, looking at a vimdiff `setup -i` offered him: "my-bt
-    setup -i should know about the maintenance mode and ignore any change
-    linked to this, and should not propose this vimdiff if this is the
-    only difference"). Without this, `index.html` legitimately differs
+    (2026-07-10: `setup -i` should know about maintenance mode and
+    ignore any change caused only by that banner, rather than proposing
+    a vimdiff for it). Without this, `index.html` legitimately differs
     from the checkout's copy the ENTIRE time maintenance mode is on (the
     banner is inserted directly into the live file, see app/maintenance.py
     -- that's the whole point, it needs to show up immediately) --
@@ -1245,9 +1244,9 @@ def _my_booking_can_read(path: Path) -> bool | None:
     check inspected `st_mode` bits directly (owner/group/other), which is
     blind to POSIX ACLs. `setfacl` (the fix this check itself recommends!)
     grants access via an ACL entry, not a mode-bit change -- so the old
-    check kept reporting "can't read" even immediately after the operator ran
-    the exact setfacl command it printed, nagging him to redo a fix that
-    had already worked. `runuser -u my-booking -- test -r <path>` asks
+    check kept reporting "can't read" even immediately after running
+    the exact setfacl command it printed, nagging the operator to redo
+    a fix that had already worked. `runuser -u my-booking -- test -r <path>` asks
     the kernel directly, so it's correct regardless of ACLs, SELinux, or
     anything else that could affect real access -- the same "ask the
     system, don't model it" approach check_rpm_verify/check_selinux/
@@ -1273,7 +1272,7 @@ def check_watchdog_nginx_access(raw: dict) -> list[Check]:
     nothing about the underlying file's owner/group/mode/ACLs, which is
     nginx's/the distro's call, not this app's. Fedora's nginx package
     typically leaves /var/log/nginx root:root, not readable by another
-    unprivileged user by default -- this is the concrete gap the operator hit in
+    unprivileged user by default -- this is the concrete gap hit in
     practice 2026-07-05 setting the watchdog up for real. A no-op ([]) if
     nginx_access_log isn't configured at all -- see check_secrets() for
     the same "not configured yet" convention."""

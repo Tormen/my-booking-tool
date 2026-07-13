@@ -50,10 +50,9 @@ See /usr/share/doc/%{name}/README.md after installing.
 %build
 python3 -m py_compile app/*.py
 
-# 2026-07-08/09, the operator: "can you please built into the script a zsh
-# compatible shell auto-complete", then, once reminded it wasn't actually
-# built yet: "as we have the package you are right though that we can do
-# this via the rpm!" -- generated HERE, from THIS EXACT build's own
+# 2026-07-08/09: the requested zsh-compatible shell auto-complete, once
+# reminded it wasn't actually built yet, was identified as a good fit for
+# the RPM build -- generated HERE, from THIS EXACT build's own
 # scripts/my-bt (MY_BOOKING_HOME=$(pwd) so its `from app import ...`
 # resolves against this checkout rather than the installed /opt/my-booking
 # path, same trick used to run it standalone before %install has even
@@ -65,8 +64,8 @@ python3 -m py_compile app/*.py
 # single build.
 MY_BOOKING_HOME=$(pwd) python3 scripts/my-bt --print-zsh-completion > _my-bt.zsh-completion
 
-# 2026-07-13, the operator: "Can the test be run as part of the rpm build or
-# deploy? Then I would drop [`my-bt test`]." -- tests/ isn't installed by
+# 2026-07-13: the tests were made to run as part of the rpm build itself,
+# so `my-bt test` could be dropped -- tests/ isn't installed by
 # %install below (never shipped in the final package, same effective
 # result as .git being excluded from the source tarball entirely), but it
 # DOES land in the extracted source tree %check runs from, since
@@ -93,8 +92,9 @@ install -d %{buildroot}/opt/my-booking/bin
 install -m 644 app/*.py %{buildroot}/opt/my-booking/app/
 install -m 755 scripts/my-bt %{buildroot}/opt/my-booking/bin/my-bt
 
-# 2026-07-09, the operator: "place all email templates into settings.toml
-# [directory] to easily change something there if needed" -- installed
+# 2026-07-09: email templates were moved to a directory referenced by
+# settings.toml, so wording can easily be changed there if needed --
+# installed
 # one level up from app/ (i.e. directly under /opt/my-booking, mirroring
 # site/ below) so app/email_templates.py's own Path(__file__)-relative
 # default resolution (".../app/email_templates.py" -> parent.parent)
@@ -181,13 +181,12 @@ install -m 644 site/privacy.html.tmpl %{buildroot}/opt/my-booking/site/privacy.h
 # fire on a stock RPM install no matter how complete the SOURCE checkout's
 # own copy was (scripts/build-rpm.sh's materialize-from-.example step
 # guarantees this file exists by the time %install runs, same as
-# privacy.html.tmpl). the operator: "That's the whole point HAVING this file
-# locally!!"
+# privacy.html.tmpl) -- the whole point of having this file locally.
 install -m 644 site/nginx-locations.conf %{buildroot}/opt/my-booking/site/nginx-locations.conf
 install -m 644 site/nginx-locations.conf.example %{buildroot}/opt/my-booking/site/nginx-locations.conf.example
 
-# 2026-07-08, the operator: "I just don't like spreading files all across the
-# system without good reason" -- this bare, non-hardened reference (just
+# 2026-07-08: to avoid spreading files all across the
+# system without good reason, this bare, non-hardened reference (just
 # the proxied location blocks, no rate limiting/CSP/security headers) used
 # to live under %{_datadir}/%{name} (a separate top-level directory) for
 # no reason stronger than "it's pure read-only package data, so FHS says
@@ -218,9 +217,9 @@ getent group my-booking >/dev/null || groupadd -r my-booking
 getent passwd my-booking >/dev/null || \
   useradd -r -g my-booking -d %{_sharedstatedir}/my-booking -s /sbin/nologin my-booking
 
-# 2026-07-10, the operator: "can the rpm package check that no one is logged in
-# currently before proceeding, and fail if there is an open session
-# reported by my-bt" -- only matters on an UPGRADE ($1 -ge 2, same test
+# 2026-07-10: the rpm package now checks that no one is logged in
+# currently before proceeding, and fails if there is an open session
+# reported by my-bt -- only matters on an UPGRADE ($1 -ge 2, same test
 # %post already uses below): a first install has no running service yet
 # to protect. Shells out to the OLD my-bt (still fully intact at %pre
 # time -- rpm hasn't touched any files yet on an upgrade), which queries
@@ -262,11 +261,10 @@ if [ "$1" -ge 2 ] 2>/dev/null; then
   echo "my-booking-tool: upgraded; service restarted if running."
 fi
 
-# 2026-07-08, the operator: "this should be enabled by default (and rather
-# manually disabled if wished so, the installer should inform the
-# installing user that this kind of mechanism is part of the rpm
-# package) as long with the other recurring services that are
-# installed with the package." Only on a GENUINE first install ($1 ==
+# 2026-07-08: this should be enabled by default (manually disabled if
+# wished, with the installer informing the installing user that this
+# mechanism is part of the rpm package), along with the other recurring
+# services installed with the package. Only on a GENUINE first install ($1 ==
 # 1) -- never on an upgrade, so an admin who deliberately disabled one
 # of these is never silently re-enabled just by upgrading the package.
 # my-booking.service itself is deliberately NOT included here: it needs

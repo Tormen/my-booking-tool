@@ -30,9 +30,9 @@ from .storage import (
 
 log = logging.getLogger("my_booking.calendar_sync")
 
-# 2026-07-07, the operator (a real production 500 on /my/confirm, root-caused via
+# 2026-07-07: a real production 500 on /my/confirm, root-caused via
 # journalctl to "PUT ... -> HTTP 412 ... a newer version of the appointment
-# already exists"): two near-simultaneous requests touching the SAME
+# already exists". Two near-simultaneous requests touching the SAME
 # occurrence (e.g. two guests booking/confirming for the same course+date
 # within a few seconds of each other) can each read this event's current
 # ETag, then race to PUT/DELETE it -- whichever loses gets a 412. A plain
@@ -50,8 +50,8 @@ log = logging.getLogger("my_booking.calendar_sync")
 # handling logs, at DEBUG level, whether the re-read ETag actually
 # CHANGED between attempts -- added when it was still an open question
 # whether this was a genuinely concurrent writer (ETag should differ,
-# often differently again, each retry) or "something else". the operator
-# collected exactly that DEBUG output from a real run and it WAS
+# often differently again, each retry) or "something else". DEBUG
+# output collected from a real run confirmed it WAS
 # something else: the ETag was identical on every retry, and the
 # server's own error named the real cause -- see parse_sequence()'s
 # docstring in app/ics.py and this function's own 2026-07-16 update
@@ -60,15 +60,12 @@ log = logging.getLogger("my_booking.calendar_sync")
 # a genuinely different incident turns up here in the future.
 _SYNC_CONFLICT_MAX_ATTEMPTS = 3
 
-# 2026-07-16, the operator ("Please make the calendar sync work :)"): a previous
+# 2026-07-16: a previous
 # version of this comment introduced _BULK_RESYNC_MAX_ATTEMPTS=6 with
 # increasing backoff, reasoning that 3 DIFFERENT occurrences hitting a
 # persistent conflict in the same run was probably just an active
-# concurrent writer that needed more time. the operator's follow-up, after
-# thinking it over: "But there must be another problem with the
-# Calendar. Please do NOT retry more often!!! But rather collect DEBUG
-# OUTPUT please!!!" -- correctly skeptical that simply retrying longer
-# was the right fix for something that hit 3 unrelated occurrences at
+# concurrent writer that needed more time. That reasoning didn't hold up:
+# simply retrying longer isn't the right fix for something that hit 3 unrelated occurrences at
 # once; that pattern is just as consistent with a real, structural bug
 # (e.g. a stale-etag comparison bug of ours, or the server naming
 # resources differently than we assume -- see query_events()'s own
@@ -83,11 +80,10 @@ _SYNC_CONFLICT_MAX_ATTEMPTS = 3
 # `my-bt -D` / `MY_BOOKING_DEBUG=1` actually gives enough to root-cause
 # it, instead of trying to paper over it with more patience.
 
-# 2026-07-09, the operator, the standing rule (see SOLUTION-DESIGN.md section 24):
-# "If we change anything with the CALENDAR INVITE(s) (host and/or
-# attendee): Please ensure that the existing (future) calendar invites are
-# updated as well (maybe either on install or on the next moment you touch
-# this calendar invite again ?)." The "next moment you touch it again" half
+# 2026-07-09, the standing rule (see SOLUTION-DESIGN.md section 24):
+# any change to the CALENDAR INVITE(s) (host and/or attendee) must
+# ensure existing (future) calendar invites are updated too, either on
+# install or the next time this calendar invite is touched. The "next moment you touch it again" half
 # is already free (sync_occurrence() always recomputes from scratch). This
 # constant plus resync_if_format_changed() below cover the "on install"
 # half: bump this integer by 1 in the SAME commit as any change to what
@@ -110,15 +106,14 @@ CALENDAR_INVITE_FORMAT_VERSION = 1
 # into a raw print_fn() line that nothing else re-checks).
 CALENDAR_INVITE_FORMAT_VERSION_MARKER_NAME = ".calendar_invite_format_version"
 
-# 2026-07-15/16, the operator, on a real production `setup -i` run: 3 occurrences
-# hit persistent CalDAV conflicts (stale ETag, still conflicting after
+# 2026-07-15/16: a real production `setup -i` run showed 3 occurrences
+# hitting persistent CalDAV conflicts (stale ETag, still conflicting after
 # every retry) during a resync, got skipped (see resync_all_future_
 # calendar_events()'s own 2026-07-15 docstring update), and the run still
 # printed "[ok] calendar invite format changed -- resynced 6 upcoming
 # occurrence(s)" and finished with "Done -- all checks pass now" --
 # because that message only ever reported the SUCCESS count, never
-# whether anything was skipped. "-- 13. Calendar invite format -- says
-# 'OK' but if you look at the output... I am NOT so sure!" This marker
+# whether anything was skipped. This marker
 # records exactly which occurrences (if any) were skipped on the LAST
 # resync attempt, so app.cli_checks.check_calendar_invite_resync_skips()
 # can keep flagging it in every later `admin health`/`admin setup` run
@@ -131,7 +126,7 @@ CALENDAR_INVITE_RESYNC_SKIPPED_MARKER_NAME = ".calendar_invite_resync_skipped"
 class ResyncResult:
     """Return type for resync_all_future_calendar_events()/resync_if_
     format_changed() -- `fixed` alone (the old plain-int return value)
-    silently lost exactly the information the operator needed: whether
+    silently lost exactly the information needed: whether
     EVERYTHING resynced cleanly, or some occurrences were skipped after
     a persistent CalDAV conflict. `skipped` is one human-readable line
     per skipped occurrence (course + date + the error that caused it),
@@ -231,18 +226,17 @@ def sync_occurrence(
 ) -> None:
     """Call this after every registration/cancellation for the occurrence.
 
-    2026-07-16, the operator: a prior version of this function accepted
+    2026-07-16: a prior version of this function accepted
     `max_attempts`/`retry_delay_seconds`/`sleep_fn` overrides so the bulk
     resync below could retry harder than a live request. Reverted --
-    "But there must be another problem with the Calendar. Please do NOT
-    retry more often!!! But rather collect DEBUG OUTPUT please!!!" Every
+    retrying longer wasn't actually the right fix. Every
     caller (live booking/cancellation AND the bulk resync) now uses the
     exact same 3-attempts/zero-delay behavior; see
     _SYNC_CONFLICT_MAX_ATTEMPTS's own docstring for why more patience
     isn't the fix being reached for here.
 
-    the operator was right: the DEBUG output he collected (real production log,
-    `MY_BOOKING_DEBUG=1`) found the actual bug. Every single UPDATE to an
+    The DEBUG output collected from a real production log
+    (`MY_BOOKING_DEBUG=1`) found the actual bug. Every single UPDATE to an
     already-existing operator event was failing with HTTP 412 -- not
     intermittently, EVERY time, while a brand-new create succeeded fine
     -- and the ETag reported as "current" after re-reading was IDENTICAL
@@ -272,8 +266,8 @@ def sync_occurrence(
     as someone else's guest -- see _self_or_guest), the timestamp of that
     registrant's LAST action (registered_at for active/waiting, canceled_at
     + canceled_by for canceled), and a cancel link (2026-07-06: added the
-    Name/Email/Self-Guest columns so the operator can see WHO is on his calendar
-    without cross-referencing the CSV -- previously the invite only showed
+    Name/Email/Self-Guest columns so the operator can see WHO is on the
+    calendar without cross-referencing the CSV -- previously the invite only showed
     counts and cancel links, no identities at all).
     Canceled registrants are never dropped from the invite -- they stay
     visible, separately labeled, so the host can see who left and when
@@ -359,8 +353,8 @@ def sync_occurrence(
     if canceled:
         lines.append(f"{len(canceled)} canceled")
     if active or waiting:
-        # 2026-07-13, the operator: "the CALDAV invite needs BOTH: cancel link per
-        # participant AND the course cancel link for ALL of them" -- a
+        # 2026-07-13: the CALDAV invite needs both a cancel link per
+        # participant AND a course cancel link for ALL of them -- a
         # second, ALWAYS-present link alongside every individual
         # participant's own "cancel:" line below, for the "illness/venue
         # unavailable, cancel the whole session at once" case (see
@@ -426,7 +420,7 @@ def sync_occurrence(
         # forever. Re-set on each retry attempt below too.
         sequence=(_sequence + 1) if etag is not None else 0,
         alarms_minutes_before=settings.trainer_calendar_reminder_minutes,
-        # 2026-07-14, the operator: host_calendar_entry_cc_list -- see
+        # 2026-07-14: host_calendar_entry_cc_list -- see
         # Course's own field docstring. organizer is only set when there's
         # actually a cc list to attach (an ATTENDEE with no ORGANIZER is
         # invalid iTIP); this deployment's own caldav_username is the
@@ -485,9 +479,9 @@ def resync_after_course_rename(
     shortname. Left alone, the NEXT booking/cancellation on that
     occurrence would silently create a second, fresh event under the new
     uid while the stale one keeps sitting there forever, unrecognized and
-    never cleaned up -- a real duplicate on the operator's actual calendar,
-    2026-07-08: "rename lux-wed-mindfulness to lux-wed-mind ... provide a
-    command to migrate the existing data".
+    never cleaned up -- a real duplicate hit in production,
+    2026-07-08, when a course was renamed (lux-wed-mindfulness ->
+    lux-wed-mind), which prompted this migration command for existing data.
 
     For each occurrence_date (today or later) that has at least one
     CONFIRMED registration under `new_shortname` (i.e. would currently
@@ -547,17 +541,16 @@ def resync_all_future_calendar_events(
     description from the CURRENT registration data, exactly as if a fresh
     booking/cancellation had just happened on it.
 
-    2026-07-09, the operator, after noticing a real occurrence's calendar event
+    2026-07-09, after noticing a real occurrence's calendar event
     was still missing the "cancel entire session" line added on 2026-07-13
-    (screenshot: 2026-07-11's invite showing only per-participant cancel
-    links): "If we change anything with the CALENDAR INVITE(s) (host
-    and/or attendee): Please ensure that the existing (future) calendar
-    invites are updated as well (maybe either on install or on the next
-    moment you touch this calendar invite again ?)" -- then, once reminded
-    an already-EMAILED guest .ics can't be edited after the fact: "so then
-    nothing is to do for the invites that got emailed already... only for
-    future invites which should already be the case. So we only talk
-    about the HOST invites here." Scope confirmed: this is about the
+    (2026-07-11's invite showing only per-participant cancel
+    links): any change to the CALENDAR INVITE(s) (host
+    and/or attendee) must ensure existing (future) calendar
+    invites are updated too, either on install or the next
+    time this calendar invite is touched. An already-EMAILED guest .ics
+    can't be edited after the fact, so there's nothing to do for invites
+    already emailed -- only for future invites, which is already the
+    case. Scope confirmed: this is about the
     operator's own live CalDAV event only.
 
     An occurrence that gets ANY new booking/cancellation before it starts
@@ -594,24 +587,22 @@ def resync_all_future_calendar_events(
     skips THAT occurrence (logged as a warning) -- every other occurrence
     still gets its fresh resync.
 
-    2026-07-15/16, the operator, on a real production run where exactly this
-    happened to 3 occurrences: the plain-int return value this used to
+    2026-07-15/16: a real production run showed exactly this
+    happening to 3 occurrences: the plain-int return value this used to
     have made the skip itself invisible to every caller -- `setup -i`
     printed "[ok] ... resynced 6 upcoming occurrence(s)" with no hint 3
     others were skipped, and "Done -- all checks pass now" right below
-    it. "-- 13. Calendar invite format -- says 'OK' but if you look at
-    the output... I am NOT so sure!" Returns a ResyncResult now instead:
+    it, even though the underlying result was NOT actually fully clean.
+    Returns a ResyncResult now instead:
     `fixed` is still the success count, but `skipped` (one line per
     skipped occurrence) is what actually gets checked/reported from here
     on -- see record_resync_skips() and app.cli_checks.
     check_calendar_invite_resync_skips().
 
-    2026-07-16, the operator ("Please make the calendar sync work :)"): a prior
+    2026-07-16: a prior
     version of this gave each occurrence extra attempts with backoff here
-    (a background job can afford to wait out a concurrent writer). the operator's
-    follow-up reverted that: "But there must be another problem with the
-    Calendar. Please do NOT retry more often!!! But rather collect DEBUG
-    OUTPUT please!!!" -- so this now uses the exact same
+    (a background job can afford to wait out a concurrent writer). That
+    was reverted -- retrying longer wasn't actually the right fix -- so this now uses the exact same
     sync_occurrence() behavior (3 attempts, zero delay) as a live
     request, no special-casing. See _SYNC_CONFLICT_MAX_ATTEMPTS's own
     docstring for the richer DEBUG-level diagnostics added in its place."""
@@ -664,10 +655,10 @@ def resync_if_format_changed(
     "ran, nothing to do" outcome) if it ran, or None if NEITHER
     condition applies (truly nothing to do, both markers left alone).
 
-    2026-07-16, the operator, after being told the fix for a persistent-conflict
+    2026-07-16: previously, the fix for a persistent-conflict
     incident wouldn't take effect until someone remembered to separately
-    run `my-bt admin resync-calendar` by hand: "but WHY can't my-bt setup
-    then NOT to THIS???" -- fair complaint. The format-version check
+    run `my-bt admin resync-calendar` by hand -- fixed so `my-bt setup`
+    picks this up automatically instead. The format-version check
     alone used to be the ONLY thing this function looked at, so a
     format-unchanged marker made it return None immediately even when
     check_calendar_invite_resync_skips() had known, already-recorded
@@ -737,9 +728,8 @@ def resync_if_format_changed(
     return result
 
 
-# -- Emailed guest invite/cancel attachments (2026-07-09, the operator: "Can you
-# please attach a calendar invite also in the email that is sent to the
-# participant?") ------------------------------------------------------------
+# -- Emailed guest invite/cancel attachments (2026-07-09: also attach a
+# calendar invite to the email sent to the participant) ---------------------
 #
 # Deliberately separate from sync_occurrence() above: that function builds
 # ONE shared operator-facing event (all participants + a "Participants:"
@@ -788,8 +778,8 @@ def guest_invite_ics(settings: Settings, course: Course, occurrence_date: date) 
 
 def guest_cancel_ics(settings: Settings, course: Course, occurrence_date: date) -> tuple[str, str]:
     """Returns (filename, ics_text) for a METHOD:CANCEL attachment on a
-    cancellation email (2026-07-09, the operator: "AND CANCEL-ics as well please.
-    Let's be nice :)") -- same UID as the original guest_invite_ics() above,
+    cancellation email (2026-07-09: adds a CANCEL-ics too, as a courtesy)
+    -- same UID as the original guest_invite_ics() above,
     SEQUENCE bumped to 1 and STATUS:CANCELLED set, so a calendar app that
     both (a) previously imported the PUBLISH invite via UID and (b) honors
     plain (non-REQUEST) CANCEL/SEQUENCE semantics will remove or gray out

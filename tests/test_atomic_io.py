@@ -2,8 +2,8 @@
 app/storage.py's own _LockedCsv._atomic_write so every OTHER module that
 writes a file to disk (config, secrets, marker/state files, rendered
 static pages) gets the same temp-file+fsync+rename+dir-fsync pattern,
-not just the CSV storage layer. 2026-07-15, the operator: "yes please ALL
-writes linked to my-booking-tool, my-bt and the site."
+not just the CSV storage layer. 2026-07-15: extended to cover ALL
+writes linked to my-booking-tool, my-bt and the site.
 
 See tests/test_storage.py::AtomicWriteDirFsyncIntegrationTest for the
 CSV-specific integration point (a real _LockedCsv write calling this)."""
@@ -25,11 +25,11 @@ from app.atomic_io import (
 
 
 class ProbeDirFsyncSupportTest(unittest.TestCase):
-    """2026-07-15, the operator, on fsync_dir()'s own best-effort/never-raises
-    design: "that's the correct call for availability ... but it's also
-    the kind of failure that's invisible until the one time it matters
-    ... worth a one-time capability probe at startup". probe_dir_fsync_
-    support() is that probe -- same underlying operation as fsync_dir(),
+    """2026-07-15: fsync_dir()'s best-effort/never-raises design is the
+    correct call for availability, but it's also the kind of failure that's
+    invisible until the one time it matters, which is worth a one-time
+    capability probe at startup. probe_dir_fsync_support() is that probe --
+    same underlying operation as fsync_dir(),
     but meant to be called once and reacted to loudly on a False result
     (see app.cli_checks.check_directory_fsync_support and
     app.serve.main's startup check), not silently logged and moved past."""
@@ -247,8 +247,8 @@ class AtomicWriteTextTest(unittest.TestCase):
 
 
 class SecureDataPathTest(unittest.TestCase):
-    """2026-07-09: real production incident on the operator's own VPS -- he ran
-    `my-bt cancel` directly as root, leaving registrations.csv root:root
+    """2026-07-09: real production incident on the operator's own VPS --
+    `my-bt cancel` was run directly as root, leaving registrations.csv root:root
     mode 0600 -- completely unreadable by my-booking-watchdog.service (runs
     as the unprivileged my-booking user/group), which then crashed with
     PermissionError on its very next scheduled read. secure_data_path is

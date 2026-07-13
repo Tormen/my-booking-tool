@@ -62,9 +62,9 @@ STATUS_CANCELED_BY_HOST = "canceled_by_host"
 # see Store.confirm_pending_registration.
 STATUS_PENDING_CONFIRMATION = "pending_confirmation"
 
-# 2026-07-08, the operator (screenshot of /admin?past=1's Status column reading
-# raw "confirmed"/"canceled_by_guest" etc.): "I prefer Host and Guest and
-# then also 'Confirmed' for the status" -- same round as the Guests
+# 2026-07-08: /admin?past=1's Status column used to read
+# raw "confirmed"/"canceled_by_guest" etc. -- humanized to "Host"/"Guest"
+# and "Confirmed", same round as the Guests
 # column's own Host/Guest capitalization (see app/cli_list.py's
 # annotate_admin_party_label). Display-only: the underlying STATUS_*
 # values above are never touched. Falls back to a generic "Title Case,
@@ -99,9 +99,9 @@ def format_display_timestamp(iso_str: str) -> str:
     """Renders a now_iso()-produced (or any ISO-8601) timestamp for a human
     to read, e.g. in the operator's own CalDAV event description
     (calendar_sync.py's Participants table) or /admin's overview table.
-    2026-07-07, the operator (screenshot of that Participants table showing
-    "registered 2026-07-07T00:47:57+00:00"): "please use for TIMESTAMPS
-    wherever you currently have this format ... YYYY-MM-DD_HHMM.SS".
+    2026-07-07: that Participants table used to show raw ISO timestamps
+    like "registered 2026-07-07T00:47:57+00:00" -- reformatted to
+    YYYY-MM-DD_HHMM.SS everywhere this format is used.
 
     Deliberately display-only: the underlying CSV/storage value stays the
     real ISO-8601 string untouched (registered_at/canceled_at as written by
@@ -111,9 +111,9 @@ def format_display_timestamp(iso_str: str) -> str:
     empty canceled_at on a still-active registration), same "don't blow up
     on a blank/legacy value" spirit as the rest of this module.
 
-    2026-07-08, the operator (screenshot of /admin?past=1's Registered column
-    showing "2025-10-18_0000.00" for SimplyMeet.me-imported rows): "if we
-    have no time, then please display just the date" -- app/migrate_
+    2026-07-08: /admin?past=1's Registered column showed
+    "2025-10-18_0000.00" for SimplyMeet.me-imported rows -- when there is
+    no real time, just the date is displayed instead. app/migrate_
     simplymeet.py's own docstring documents exactly why these are all
     midnight: the export has no real "booking created at" timestamp, so
     `registered_at` is set to a placeholder ("<occurrence_date>T00:00:00",
@@ -122,9 +122,8 @@ def format_display_timestamp(iso_str: str) -> str:
     exact 00:00:00 is treated as "no real time recorded" and rendered as
     just the date, rather than a misleadingly precise-looking "_0000.00".
 
-    2026-07-14, the operator (screenshot of /admin's Registered column): "In the
-    GUI please split the timestamp with a space between date and time"
-    then "(and add a 'h' between HH and MM)" -- the date/time separator
+    2026-07-14: /admin's Registered column gained a space between date
+    and time, and an "h" between HH and MM -- the date/time separator
     changed from "_" to " ", and HHMM from bare digits to HH"h"MM (e.g.
     "2026-07-08_1149.54" -> "2026-07-08 11h49.54"), matching the "17h15"
     convention already used everywhere else in this app for a time-of-day.
@@ -139,9 +138,9 @@ def format_display_timestamp(iso_str: str) -> str:
         return iso_str
     if dt.time() == time(0, 0, 0):
         return dt.strftime("%Y-%m-%d")
-    # 2026-07-14, the operator: "In the GUI please split the timestamp with a
-    # space between date and time." then "(and add a 'h' between HH and
-    # MM)" -- "2026-07-08_1149.54" -> "2026-07-08 11h49.54", matching the
+    # 2026-07-14: split the timestamp with a
+    # space between date and time, and added an "h" between HH and
+    # MM -- "2026-07-08_1149.54" -> "2026-07-08 11h49.54", matching the
     # "17h15"-style HH"h"MM convention already used everywhere else in
     # this app for a time-of-day (course start times, occurrence display).
     return dt.strftime("%Y-%m-%d %Hh%M.%S")
@@ -166,9 +165,9 @@ class User:
     confirm_token_hash: str = ""
     confirm_token_created_at: str = ""
     # The hash that confirm_token_hash held just before its last overwrite
-    # (2026-07-07, the operator: "a new email should invalidate the pending link
-    # ... and clicking the invalidated link should inform the user that
-    # there should be a NEW link coming to him"). set_confirm_token() always
+    # (2026-07-07: a new confirm-token request should invalidate the old
+    # pending link, and clicking the invalidated link should tell the
+    # user a NEW link is on its way). set_confirm_token() always
     # ALREADY invalidated the old link (find_user_by_confirm_token_hash
     # simply stops matching it), but the guest just saw "invalid or already
     # used" with no clue a fresher one is on its way. Keeping just the ONE
@@ -196,10 +195,10 @@ class User:
     pending_email_token_hash: str = ""
     pending_email_token_created_at: str = ""
     prev_pending_email_token_hash: str = ""
-    # A SEPARATE token from pending_email_token_hash above (2026-07-11,
-    # the operator: "Please provide a link without login" -- the "notify the old
-    # address" email's cancel link pointed at /my/settings, login
-    # required). Deliberately its own field, not a reuse of the confirm
+    # A SEPARATE token from pending_email_token_hash above (2026-07-11:
+    # the "notify the old
+    # address" email's cancel link used to point at /my/settings, login
+    # required -- now a no-login link). Deliberately its own field, not a reuse of the confirm
     # token: the confirm token is only ever emailed to the NEW address and
     # is good for COMPLETING the change, so handing that same secret to
     # the OLD address's "cancel this" link would let whoever holds it
@@ -208,11 +207,9 @@ class User:
     # change (see clear_pending_email/find_user_by_pending_email_cancel_token_hash),
     # never confirm it.
     pending_email_cancel_token_hash: str = ""
-    # 2026-07-09, the operator: "the scheduler that then deletes accounts should
-    # detect imminent accounts that would need to be deleted and then send
-    # out such an email" (a dormant-account warning, like the Notion
-    # screenshot he shared -- "your account will be deleted in 90 days,
-    # log in to keep it"). "Only ONE email" per dormancy period -- this is
+    # 2026-07-09: the scheduler that deletes accounts also
+    # sends a dormant-account warning email first. "Only ONE email" per
+    # dormancy period -- this is
     # the guard against re-sending it every night once someone's within
     # the warning window. Set by app.retention.send_account_deletion_
     # warnings() the first time it warns this account; cleared again by
@@ -258,10 +255,10 @@ def _git_commit_data_file(path: Path, message: str) -> None:
     an archived/*.csv), right after _LockedCsv writes it -- a per-write
     companion to app/git_snapshot.py's existing HOURLY, whole-directory
     snapshot (see that module's docstring and README.md "GDPR notes" ->
-    "Data dir git snapshot"). 2026-07-07, the operator: "after any change to any
-    of the CSV files: CUD ... please directly do a git commit ... Commit
-    message should state what changed without revealing personal data ...
-    as a safety net in case of ANY bugs" -- the hourly snapshot alone could
+    "Data dir git snapshot"). 2026-07-07: after any create/update/delete
+    to any CSV file, a git commit is made directly (message stating what
+    changed without revealing personal data), as a safety net in case of
+    ANY bugs -- the hourly snapshot alone could
     leave up to an hour of changes unrecovered if something went wrong
     right after; this closes that gap with an immediate, per-operation
     commit, while the hourly one keeps covering what this can't (anything
@@ -290,8 +287,8 @@ def _git_commit_data_file(path: Path, message: str) -> None:
 
     Every Store method that mutates a CSV passes its own short, generic
     description (e.g. "cancel registration", "set password") as the
-    message -- never an email, name, or other guest-supplied value, per
-    the operator's own "without revealing personal data" instruction.
+    message -- never an email, name, or other guest-supplied value, to
+    keep commit messages free of personal data.
 
     Deliberately swallows every failure (git not installed, repo somehow
     unwritable, nothing staged because the rewrite was byte-identical,
@@ -336,8 +333,8 @@ def _git_commit_data_file(path: Path, message: str) -> None:
 
 # The systemd-managed service account every long-running/scheduled piece of
 # my-booking-tool runs as (see systemd/*.service's User=/Group=my-booking).
-# 2026-07-09, real production incident on the operator's own VPS: he ran `my-bt
-# cancel` directly as root, rewriting registrations.csv as root:root mode
+# 2026-07-09, real production incident: running `my-bt
+# cancel` directly as root rewrote registrations.csv as root:root mode
 # 0600 -- the very next my-booking-watchdog.timer tick crashed with
 # PermissionError just trying to READ it, since the watchdog is deliberately
 # sandboxed to run as this unprivileged account and nothing more. CSV writes
@@ -379,8 +376,8 @@ class _LockedCsv:
 
     def __enter__(self):
         if self.readonly:
-            # 2026-07-10, the operator, real incident: a non-privileged user ("me",
-            # not in the my-booking group) ran `my-bt users` and silently
+            # 2026-07-10, real incident: a non-privileged user (not in the
+            # my-booking group) ran `my-bt users` and silently
             # got "(no matching rows)" instead of an error. The OLD guard
             # here was `if not self.path.exists(): return [], ...` --
             # pathlib's Path.exists() swallows ANY OSError, including
@@ -402,9 +399,9 @@ class _LockedCsv:
             return rows, self._set_rows_to_write
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        # Unconditional, not just "if freshly created": 2026-07-09, the operator:
-        # "my-bt needs to ensure that touching the files if my-bt is ran as
-        # root do not change permission or ownership under /var/lib" -- a
+        # Unconditional, not just "if freshly created": 2026-07-09: a
+        # root-run my-bt must never change permission or ownership under
+        # /var/lib -- a
         # directory that was itself CREATED by an earlier root-run command
         # (before this fix existed, or before some future bug reintroduces
         # a root-run path) would otherwise never get repaired, since the
@@ -432,11 +429,11 @@ class _LockedCsv:
         try:
             if exc_type is None and self._to_write is not None:
                 self._atomic_write(self._to_write)
-                # 2026-07-07, the operator: "after any change to any of the CSV
-                # files: CUD ... please directly do a git commit ...
-                # Commit message should state what changed without
-                # revealing personal data ... as a safety net in case of
-                # ANY bugs" -- every successful write, from every Store
+                # 2026-07-07: after any create/update/delete
+                # to any CSV file, a git commit is made directly (message
+                # stating what changed without
+                # revealing personal data), as a safety net in case of
+                # ANY bugs -- every successful write, from every Store
                 # method, gets committed here in ONE place rather than
                 # relying on each call site to remember to. Best-effort:
                 # see _git_commit_data_file's own docstring for why a git
@@ -469,7 +466,7 @@ def _read_csv_plain(path: Path, fieldnames: list[str]) -> list[dict]:
     """Read-only, unlocked (reporting/CLI use) -- creates nothing, returns []
     if the file doesn't exist yet.
 
-    2026-07-10, the operator, real incident: `my-bt users`, run by a non-
+    2026-07-10, real incident: `my-bt users`, run by a non-
     privileged user not in the my-booking group, silently printed "(no
     matching rows)" instead of an error. The old `if not path.exists():
     return []` guard is the reason -- pathlib's Path.exists() swallows
@@ -817,10 +814,10 @@ class Store:
         operations, this closes the race where two people booking the last
         spot at the same moment could both land as confirmed past capacity.
 
-        2026-07-10, the operator: "it should not be possible to get 2 rows for the
-        same course, same email and same slot/date... If I cancel: This is
-        canceled. If then I rebook, then it should update the canceled
-        booking, NOT add a 2nd one." -- app.webapp.App.book() already
+        2026-07-10: it should not be possible to get 2 rows for the
+        same course, same email and same slot/date -- if a guest cancels
+        and then rebooks, the canceled row is updated in place, not
+        duplicated. app.webapp.App.book() already
         rejects a rebooking attempt outright while an existing row is still
         ACTIVE (see Store.has_active_registration), so by the time this is
         called from there, any existing row for this exact
@@ -901,8 +898,8 @@ class Store:
         Store.upsert_user_for_booking, called by the caller before this)
         and can later set a password to manage their own booking via /my.
 
-        2026-07-10, the operator: "it should not be possible to get 2 rows for the
-        same course, same email and same slot/date" -- same invariant
+        2026-07-10: it should not be possible to get 2 rows for the
+        same course, same email and same slot/date -- same invariant
         add_registration_checking_capacity now enforces, applied per party
         member here too: if a member already has ANY row (typically a
         canceled one, from booking-then-canceling-then-being-added-to-a-
@@ -1004,8 +1001,8 @@ class Store:
             return [Registration(**r) for r in rows if r["user_id"] == user_id]
 
     def has_active_registration(self, course_shortname: str, occurrence_date: str, user_id: str) -> bool:
-        """2026-07-10, the operator (screenshot of /my): "double booking possible?"
-        -- yes: add_registration_checking_capacity/
+        """2026-07-10: double booking was actually possible --
+        add_registration_checking_capacity/
         add_party_registrations_checking_capacity only ever checked
         AGGREGATE capacity for a course+date, never whether THIS user
         already holds a spot there. Used by app.webapp.App.book() and
@@ -1018,8 +1015,8 @@ class Store:
         and on purpose (see book()'s own comment on that branch: re-sending
         the confirmation email on every attempt is intentional, not a bug).
         A returning user already WAITLISTED for this session still counts
-        as "active" here too -- the operator confirmed he wants a second waitlist
-        attempt blocked the same as a second confirmed booking, not treated
+        as "active" here too -- a second waitlist
+        attempt is blocked the same as a second confirmed booking, not treated
         as a way to grab a plus-one spot."""
         with _LockedCsv(self.registrations_path, REG_FIELDS, readonly=True) as (rows, _write):
             return any(
@@ -1032,8 +1029,8 @@ class Store:
 
     def has_pending_registration(self, course_shortname: str, occurrence_date: str, user_id: str) -> bool:
         """The STATUS_PENDING_CONFIRMATION twin of has_active_registration()
-        above (2026-07-11, the operator: "silent re-registration for unconfirmed
-        accounts" -- a still-unconfirmed guest re-submitting the /book form
+        above (2026-07-11: silent re-registration for unconfirmed
+        accounts -- a still-unconfirmed guest re-submitting the /book form
         for the exact same course+date, e.g. an accidental double-click or
         a "did that even work?" retry, used to insert ANOTHER bare
         add_registration() row every single time, with no dedup at all
@@ -1075,7 +1072,7 @@ class Store:
 
     def find_canceled_by_guest_token_hash(self, token_hash: str) -> Registration | None:
         """The reinstate twin of find_by_guest_token_hash() above (2026-07-10:
-        the operator wants a no-login "magic link" reinstate page reachable from
+        a no-login "magic link" reinstate page reachable from
         the cancellation email, same trust model as /cancel/<token>'s own
         link) -- matches CANCELED_BY_GUEST/CANCELED_BY_HOST instead of
         CONFIRMED/WAITLISTED, everything else identical. The hash this
@@ -1110,7 +1107,7 @@ class Store:
         cancel). Idempotent: canceling an already canceled registration is
         a no-op returning False.
 
-        2026-07-13, the operator: a guest who registered but hasn't yet clicked
+        2026-07-13: a guest who registered but hasn't yet clicked
         their account-confirmation email link (STATUS_PENDING_CONFIRMATION
         -- see this status's own docstring) previously couldn't be
         canceled by ANY path at all, host or guest -- a real gap, since
@@ -1120,9 +1117,9 @@ class Store:
         calendar-sync consequence, same as it never having reserved
         anything in the first place.
 
-        `reinstate_token_hash` (2026-07-10, the operator: a no-login "magic link"
+        `reinstate_token_hash` (2026-07-10: a no-login "magic link"
         reinstate page reachable straight from the cancellation email,
-        "like for cancel link") -- when given AND this call actually
+        matching the existing cancel link's own trust model) -- when given AND this call actually
         changes the row, OVERWRITES `guest_cancel_token_hash` with it in
         this same locked write. This is deliberate, not incidental: the
         ORIGINAL cancel token's plaintext was never persisted (only its
@@ -1162,9 +1159,9 @@ class Store:
             return changed
 
     def reinstate(self, registration_id: str, capacity: int) -> Registration | None:
-        """Undo a cancellation (2026-07-10, the operator: "there should be then a
-        reschedule button for canceled meetings which time (WHEN) is in the
-        future" -- clarified in discussion to mean "undo the cancel", not
+        """Undo a cancellation (2026-07-10: a reschedule button for
+        canceled meetings whose time (WHEN) is still in the
+        future -- meaning "undo the cancel", not
         move to a different occurrence). Only acts on a currently
         CANCELED_BY_GUEST/CANCELED_BY_HOST row -- a no-op (returns None)
         for anything else, e.g. a double-click/resubmit after the first
@@ -1407,9 +1404,9 @@ class Store:
     def rename_course_shortname(self, old_shortname: str, new_shortname: str) -> int:
         """Rewrites `course_shortname` from `old_shortname` to
         `new_shortname` on every registration row -- live AND archived --
-        e.g. after renaming a course in settings.toml (2026-07-08, the operator:
-        "rename lux-wed-mindfulness to lux-wed-mind ... provide a command
-        to migrate the existing data AFTER I installed this change").
+        e.g. after renaming a course in settings.toml (2026-07-08: a
+        course was renamed from lux-wed-mindfulness to lux-wed-mind,
+        which prompted this migration command for existing data).
 
         Deliberately does NOT touch settings.toml itself (a one-line
         manual edit, not a bulk data operation) and does NOT touch the

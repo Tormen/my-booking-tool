@@ -3,8 +3,8 @@ mechanism that lets a fresh clone of the public template repo (which only
 has settings.toml.example / site/*.html.example) still build, while a
 real deployment's real files are ALWAYS preferred and NEVER read-modified
 or deleted. This is the single most safety-critical function added for
-"make this sharable" -- the operator's explicit requirement was that his real,
-customized files must never be erased or silently replaced by the
+"make this sharable" -- the explicit requirement was that the operator's
+real, customized files must never be erased or silently replaced by the
 generic examples, so this is tested directly and thoroughly.
 
 scripts/render-site.py has no package (`scripts/` isn't a Python package,

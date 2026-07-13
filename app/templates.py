@@ -9,11 +9,9 @@ def esc(value) -> str:
     return html.escape(str(value), quote=True)
 
 
-# 2026-07-11, the operator (screenshot of a Cancel submission sitting at 2.05s in
-# devtools' Network tab): "(a) the buttons remain all clickable .. not sure
-# what would happen if you would fire again or click cancel finally... (b)
-# there is no indication that the button press was taken into consideration
-# and that the system is working on it (spinning wheel or so)." A cancel/
+# 2026-07-11: a real Cancel submission was observed sitting at 2.05s in
+# devtools' Network tab with every button still clickable and no
+# indication at all that the click had been registered. A cancel/
 # reinstate/booking POST is a plain (non-fetch) form submission followed by a
 # full-page redirect -- there's a real, sometimes multi-second gap between
 # the click and the new page replacing this one, during which the OLD page's
@@ -56,7 +54,7 @@ _SUBMIT_FEEDBACK_SCRIPT = """<script>
 def page(title: str, body: str, banner: str = "") -> str:
     """Every page in the app gets `_SUBMIT_FEEDBACK_SCRIPT` appended
     automatically (2026-07-11) -- see that constant's own docstring/comment
-    above for why (the operator: submissions with no feedback, buttons stayed
+    above for why (submissions with no feedback, buttons stayed
     clickable during a slow one). No per-page opt-in needed or possible.
 
     `banner` (2026-07-06, see app/webapp.py's _session_banner_html) is
@@ -65,17 +63,16 @@ def page(title: str, body: str, banner: str = "") -> str:
     /courses when reached with an active guest session. Blank by default
     for every other page, unchanged from before this existed.
 
-    .submit-row is flex+gap (2026-07-09, the operator: "buttons too close") --
-    previously adjacent buttons/forms in the same row relied on plain
+    .submit-row is flex+gap (2026-07-09: adjacent buttons were too close
+    together) -- previously adjacent buttons/forms in the same row relied on plain
     inline whitespace for spacing, which visually collapsed them together
     (worst on /my's bottom row). One shared fix here covers every
     .submit-row in the app, not just /my's.
 
-    .guests-section/.guest-row (2026-07-09, the operator, screenshot of the
-    booking form's "+ Add participant" rows: "lets please group each
-    guest with it's remove link visibly. and visibly separate the guests
-    from the main user ... here this is too close and so is the + Add
-    participant link below") -- previously neither class had ANY CSS at
+    .guests-section/.guest-row (2026-07-09: the booking form's "+ Add
+    participant" rows needed each guest visibly grouped with its own
+    remove link, and visibly separated from the main user's own fields
+    and the "+ Add participant" link below) -- previously neither class had ANY CSS at
     all, so a guest row was just three bare, unboxed form fields blending
     into the main "Your email" field above and the "+ Add participant"
     link below. .guests-section now gets a top border + padding to set
@@ -86,11 +83,10 @@ def page(title: str, body: str, banner: str = "") -> str:
     .guest-row elements are actually created (client-side, one per "+ Add
     participant" click).
 
-    body max-width is 1000px (2026-07-11, the operator, screenshot comparing the
-    STATIC homepage's own photo-backed content column against the much
-    narrower app pages: "Widen homepage table layout to match photo
-    width" -- clarified to mean every application page, not just
-    site/index.html's own table) -- matches site/index.html's own
+    body max-width is 1000px (2026-07-11: widen the app's table layout to
+    match the STATIC homepage's own photo-backed content column, which
+    was noticeably wider than the app pages -- applied to every
+    application page, not just site/index.html's own table) -- matches site/index.html's own
     `div.WordSection1{{max-width:1000px}}`, the container the homepage's
     background photo fills, so every dynamic page (courses/book/my/admin)
     now lines up with that same width instead of its own narrower
@@ -100,27 +96,24 @@ def page(title: str, body: str, banner: str = "") -> str:
     bookings table and /admin's overview table wouldn't actually have
     gotten any wider just from the body change alone.
 
-    Font sizes are harmonized app-wide (2026-07-11, the operator: "nothing
-    smaller than the current font-size of your button labels" -- button
+    Font sizes are harmonized app-wide (2026-07-11: nothing should be
+    smaller than the button labels' own font-size -- button
     labels are `input,button,textarea{{font-size:1em}}` below, i.e. the
     same as ordinary body text). Every rule that was previously SMALLER
     than 1em (`.session-banner`, `.note`, `.hint`, `.date-btn .d-date`,
     `.date-btn .d-spots`, `.sort-indicator`, `.hash-cell` -- all were
     .8em-.95em) had its own font-size declaration dropped, so it now
     inherits the same ambient 1em as everything else, and gained
-    `font-style:italic` instead (the operator, same round: "making the smaller
-    fonts italic instead -- as I had suggested to you before!") so these
+    `font-style:italic` instead so these
     still read visually as secondary/de-emphasized text without actually
     being smaller than a button label. Deliberately scoped to the app
     pages only, not site/index.html -- see that file's own top-of-file
     comment for why its content (a raw Word paste) isn't touched here.
 
-    `.id-input` (2026-07-08, the operator, screenshot of /admin/login's password
-    field stretched across the full-width 1000px body: "the Name, Email,
-    Password fields should not be that wide ... wide enough for really
-    long passwords (maybe 50 chars) and emails like
-    firstname.doublebarrelled-name@long-company.example" -- 54 chars;
-    confirmed "50 chars is OK" as the sizing target) caps `.big-input`'s
+    `.id-input` (2026-07-08: /admin/login's password field was stretched
+    across the full-width 1000px body -- Name/Email/Password fields
+    should not be that wide, just wide enough for really long passwords
+    and emails; 50 characters was settled on as the sizing target) caps `.big-input`'s
     own `width:100%` at `max-width:50ch` -- `ch` scales with `.big-input`'s
     own font-size, so this is a character-count cap, not a fixed pixel
     width. Applied ALONGSIDE `big-input` (`class="big-input id-input"`),
@@ -128,8 +121,8 @@ def page(title: str, body: str, banner: str = "") -> str:
     `<input>` fields app-wide (every page that has one -- login, signup,
     admin login, /my settings, the booking form's own guest rows).
     Also applied to the `type="search"` table-filter boxes on /my and
-    /admin (2026-07-08, the operator: "lets also set the filter to 50 chars
-    width" -- overriding this docstring's earlier reasoning that they
+    /admin (2026-07-08: capped to the same 50-char width -- overriding
+    this docstring's earlier reasoning that they
     should stay full-width to visually pair with their table). Still
     deliberately NOT applied to `.big-input` textareas (the Cancel/
     Reinstate reason/message boxes -- free text benefits from the full

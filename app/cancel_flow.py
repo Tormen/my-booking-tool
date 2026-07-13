@@ -181,7 +181,7 @@ def cancel_and_promote(
             # consistency review). No fresh cancel link here: the original
             # waitlist-join token's plaintext isn't recoverable from its
             # stored hash, and regenerating one would need a DB write for a
-            # link the operator didn't specifically ask for -- /my already lists
+            # link that wasn't specifically requested -- /my already lists
             # this booking with its own Cancel button now that every guest
             # has an account, so that's the invite instead.
             intro = "A spot opened up and you were next on the waitlist -- you're now confirmed:"
@@ -249,7 +249,7 @@ def cancel_occurrence(
     message: str = "",
     sync_fn: Callable[[str, str], None] | None = None,
 ) -> CancelOccurrenceResult:
-    """"Cancel the entire session" (2026-07-13, the operator: the operator canceling
+    """"Cancel the entire session" (2026-07-13: lets the operator cancel
     one whole course occurrence at once -- illness, venue unavailable, ...
     -- rather than one guest's booking). Cancels EVERY live confirmed/
     waitlisted/pending-confirmation registration for this (course_shortname,

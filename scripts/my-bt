@@ -95,10 +95,10 @@ def _print_rows(rows: list[dict], fmt: str) -> None:
 def _print_single_row_kv(row: dict, fmt: str) -> None:
     """Vertical 'key : value' layout for exactly ONE entity (a single
     registration, a course's own settings.toml definition, a user's own
-    profile row) -- 2026-07-09, the operator, on a 14-column registration
+    profile row) -- 2026-07-09: a 14-column registration
     wrapping illegibly across the terminal in the normal horizontal
-    _print_rows table: "show works on a single entity -> please use more
-    human friendly output ... a simple: key : value table". json/csv stay
+    _print_rows table prompted a request for friendlier output for a
+    single entity, i.e. a simple key : value table. json/csv stay
     exactly as they already were (already machine-readable, nothing to
     fix there); only the default 'table' format gets this treatment.
     Multi-row `show` results (an occurrence with several bookings,
@@ -162,18 +162,17 @@ def cmd_list(args) -> None:
     attendee's full history, live and pre-erasure combined, the same "N
     (incl. M pre-erasure)" merge /admin's overview shows.
 
-    2026-07-13, the operator: "the default command shows it cleant up without
-    technical ids ... can you mimick the view of the web-interface?" --
+    2026-07-13: the default command was changed to show a cleaned-up view
+    without technical ids, mimicking the view of the web interface --
     default output is close to /admin's own table (see
     app.cli_list.build_clean_registration_view -- Times booked/Guests are
     the SAME shared helpers admin_overview() itself now calls, so the
     numbers/wording can't drift between the two), but Date leads (2026-
-    07-08, the operator: "put this as first column") and Registered/Guests are
-    both hidden unless -V/--verbose is passed (same the operator message: "don't
-    show when they registered by default but only with my-bt list -V";
-    Guests followed same day: "the 'guests' here is additional fluff as
-    any guest will have their own line here" -- true, each party member
-    is already its own row) -- default columns: Date, Id, Status, Course,
+    07-08: moved to the first column) and Registered/Guests are
+    both hidden unless -V/--verbose is passed (registration time stays
+    hidden by default, only shown with `my-bt list -V`; Guests was
+    dropped the same day as additional fluff, since each guest already
+    gets their own line) -- default columns: Date, Id, Status, Course,
     Name, Email, Times booked. Rows are always sorted by occurrence_date
     (then course) regardless of -V/-r/--format.
 
@@ -231,8 +230,8 @@ def cmd_list(args) -> None:
         _print_rows(rows, args.format)
         return
 
-    # Short ids (2026-07-13, the operator: "a bit like what git does with its
-    # commit ids") are only ever assigned over LIVE registrations -- the
+    # Short ids (2026-07-13, inspired by how git assigns its short
+    # commit ids) are only ever assigned over LIVE registrations -- the
     # same universe `my-bt cancel`'s short-id resolution searches (see
     # cmd_cancel), since only a live row can actually be canceled by one.
     # An archived row shown in this same `list` output (--all/--past)
@@ -248,8 +247,9 @@ def cmd_list(args) -> None:
 
 def cmd_users(args) -> None:
     """`my-bt users` -- list attendee accounts across live/archived/all.
-    2026-07-08, the operator: "I have no guests, I have clients or participants
-    in a yoga course. guest is who they can bring." -- "attendee" for the
+    2026-07-08: the studio has no "guests" as such, only clients/
+    participants in a yoga course, with "guest" reserved for whoever they
+    bring along -- "attendee" for the
     account/person themselves, "guest" reserved for the +1 they bring
     (party_id/invited_by_user_id -- see app.cli_list's own Guests column,
     unchanged).
@@ -259,23 +259,22 @@ def cmd_users(args) -> None:
     column (password/token hashes and all -- pin_hash/pin_salt are still
     stripped either way, see below).
 
-    2026-07-08, the operator: "please have name joined last_login last_course
-    email" (email now last, not 2nd), "last_course = last confirmed
-    course" (new column, computed from ALL registrations regardless of
-    this command's own --live/--archive scope -- see
-    app.cli_list.compute_last_confirmed_course), "please only make email
-    as wide as needed!" (erased users' hashed email is now shown as
-    "[erased]" instead of the raw ~70-char hash), and "please only use
-    YYYY-MM-DD for the columns and only with -V show also the
-    timestamp" -- see -V/--verbose below.
+    2026-07-08: the column order was changed to name, joined, last_login,
+    last_course, email (email now last, not 2nd); last_course = last
+    confirmed course (new column, computed from ALL registrations
+    regardless of this command's own --live/--archive scope -- see
+    app.cli_list.compute_last_confirmed_course); email is only made as
+    wide as needed (erased users' hashed email is now shown as
+    "[erased]" instead of the raw ~70-char hash); and dates use
+    YYYY-MM-DD by default, with the full timestamp only shown with -V --
+    see -V/--verbose below.
 
-    2026-07-14, the operator, changing the DEFAULT scope (bare `my-bt users`,
-    no flags): "actually no: by default my-bt users should show --live
-    users that logged in (that has a last_login date) Then you add --all
-    to show both --live and --archived" -- confirmed exact semantics
-    after a follow-up: "--live shows ALL live users also the ones that
-    have no login date / --archive shows only the archived users / --all
-    shows both / it all makes sense, no?" So: --live/--archive are
+    2026-07-14: the DEFAULT scope (bare `my-bt users`,
+    no flags) was changed so that by default my-bt users shows --live
+    users that have logged in (i.e. have a last_login date); --all
+    then shows both --live and --archived. The exact semantics settled on
+    were: --live shows ALL live users, including those with no login
+    date; --archive shows only the archived users; --all shows both. So: --live/--archive are
     UNCHANGED from before (every live row, or every archived row, no
     login filter either way); --all is the old bare-default behavior
     (live+archived combined, still no login filter); and the new bare
@@ -284,8 +283,8 @@ def cmd_users(args) -> None:
     subset of --live. See the `users` subparser's own --all/--live/
     --archive registration below for the argparse side of this.
 
-    2026-07-10, the operator: "already shows last_login! so lets add a column:
-    session still active?" -- only meaningful for the clean (non-raw)
+    2026-07-10: since last_login was already shown, a "session still
+    active?" column was added -- only meaningful for the clean (non-raw)
     view, so the live /internal/status query (same one `my-bt status`
     itself makes, see _query_internal_status) only happens when we're
     actually about to build that view; a plain -r/--raw dump stays a
@@ -293,10 +292,10 @@ def cmd_users(args) -> None:
     app.cli_list.build_clean_user_view's own docstring for what a query
     failure renders as ("(unknown)", not a false "(offline)").
 
-    Also see `my-bt users logout` below (same message: "lets add 'logout
-    <EMAIL>' and 'logout --all' as possibilities to my-bt users") --
-    the actual command stays `my-bt admin logout` (the operator, on where it
-    should live: "we have BOTH"), this is just also reachable from here."""
+    Also see `my-bt users logout` below (added so `logout <EMAIL>` and
+    `logout --all` are also reachable from `my-bt users`) --
+    the actual command stays `my-bt admin logout` since it belongs in
+    both places, this is just also reachable from here."""
     store = _store(args)
     if args.scope is None:
         rows = [r for r in store.read_users(scope="live") if r.get("last_login_at")]
@@ -327,8 +326,8 @@ def _show_registration_by_full_id(full_id: str, store, users_by_id: dict, fmt: s
     detail, "party" column (app.cli_list.annotate_party_info) computed
     across ALL rows in that row's scope first (so a sibling party member
     elsewhere in the file is actually found), then narrowed to just the
-    requested row. 2026-07-09, the operator, on this wrapping illegibly across
-    the terminal as a 14-column ONE-row table: printed as a vertical
+    requested row. 2026-07-09: this used to wrap illegibly across
+    the terminal as a 14-column ONE-row table, so it's now printed as a vertical
     key : value listing instead (see _print_single_row_kv)."""
     for scope in ("live", "archived"):
         rows = app_cli_list.annotate_party_info(store.read_registrations(scope=scope), users_by_id)
@@ -352,8 +351,8 @@ def _show_course(course, fmt: str) -> None:
 
 
 def _show_occurrence(rows: list[dict], users_by_id: dict, all_rows: list[dict], fmt: str) -> None:
-    """One or more registrations sharing an occurrence_date (2026-07-08,
-    the operator: `show <date>` -- possibly more than one course meets on the
+    """One or more registrations sharing an occurrence_date (2026-07-08:
+    `show <date>` was designed for the case where more than one course meets on the
     same date, all shown together, each row's own "course" column makes
     that unambiguous to read). Same clean columns `my-bt list` uses, NOT
     narrowed to live-only (a lookup, not an action) -- no short "id"
@@ -401,11 +400,11 @@ def _report_ambiguous(label: str, rows: list[dict], fmt: str) -> None:
 def cmd_show(args) -> None:
     """`my-bt show <query>` -- shows ANY entity: a registration/booking,
     a course, a course-occurrence, or a user, auto-detected from ONE
-    free-form `query` (2026-07-08, the operator: "show should be used to show
-    any entity! this can be a booking or a course or a course-occurance
-    or a user"), OR force a specific type with --course/--user (same
-    day: "keep the explicit parameters like --course and --user to FORCE
-    a specific type if needed").
+    free-form `query` (2026-07-08: `show` is meant to display any
+    entity, whether a booking, a course, a course occurrence, or a user),
+    OR force a specific type with --course/--user (kept as explicit
+    parameters the same day, specifically to force
+    a specific type if needed).
 
     Auto-detection order (see app.cli_show.classify_show_query for the
     full rationale): (1) exact full registration_id; (2) a short id (see
@@ -461,8 +460,8 @@ def cmd_show(args) -> None:
         return
 
     if not args.query:
-        # 2026-07-09, the operator: "Why does my-bt show not show the --help like
-        # the others?" -- query/--course/--user are all optional (a
+        # 2026-07-09: my-bt show used to not show the --help like
+        # the others -- query/--course/--user are all optional (a
         # mutually exclusive group, none required), so argparse itself
         # never errors on a bare `my-bt show` the way it does for e.g.
         # `my-bt cancel` (whose query/--id/--date group IS required) --
@@ -500,16 +499,16 @@ def cmd_show(args) -> None:
 
 def cmd_stats(args) -> None:
     """`my-bt stats` -- one row per (course, status): a "total" column
-    (renamed from "count" -- 2026-07-08, the operator: "I just meant to rename
-    'count' to total count or just total", clarifying that this table's
+    (renamed from "count" -- 2026-07-08: the rename to "total" was purely
+    cosmetic, clarifying that this table's
     shape was never meant to change), plus, as extra columns on that SAME
-    row (2026-07-08, the operator: "I just meant to add them as ADDITIONAL
-    columns to the existing table! Hence you will have this info per
-    status listed"): last/next occurrence counts and a year-over-year
-    comparison, each computed for that exact (course, status) -- not
+    row (2026-07-08: last/next occurrence counts and a year-over-year
+    comparison were added as ADDITIONAL
+    columns on the existing table, so this info is listed per
+    status): each computed for that exact (course, status) -- not
     confirmed-only, not course-only. "total" itself is also "count/
-    distinct" (2026-07-08, the operator: "and total should also have
-    count/distinct please"), same as the year-over-year columns. See
+    distinct" (2026-07-08: extended the same way, with a
+    count/distinct breakdown), same as the year-over-year columns. See
     app/cli_stats.py for the actual computation (kept there, not here,
     so it's unit-testable).
 
@@ -551,9 +550,9 @@ def cmd_stats(args) -> None:
 
 
 def _fmt_count_distinct(count_distinct: tuple[int, int] | None) -> str:
-    """"count/distinct" for a year-over-year cell -- 2026-07-08, the operator:
-    "add to each count a /xx where xx is the number of disjunct
-    participants in this period" -- "0/0" (not blank) for a (course,
+    """"count/distinct" for a year-over-year cell -- 2026-07-08: each
+    count also shows a /xx suffix for the number of distinct
+    participants in this period -- "0/0" (not blank) for a (course,
     status, window) with nothing in it, so the column stays numeric/
     sortable in --format csv rather than mixing in empty strings."""
     if count_distinct is None:
@@ -593,8 +592,9 @@ def cmd_erase(args) -> None:
     means this command has a real network/CalDAV dependency and can
     fail/take longer if the CalDAV server is unreachable.
 
-    2026-07-16, the operator: "--email should be optional here simply, my-bt
-    admin erase operator@example.org should work as well" -- the email can now
+    2026-07-16: --email was made optional so a plain positional email
+    address, e.g. `my-bt admin erase someone@example.com`, works too --
+    the email can now
     be given as a plain positional argument (`email_pos`) instead of
     always needing `--email` spelled out; both are accepted (an
     explicit --email still works, e.g. for a script that already used
@@ -623,8 +623,8 @@ def cmd_erase(args) -> None:
     print("erased" if ok else "no such user (nothing to erase)")
 
 
-# 2026-07-14, the operator: "lets remove this command from my-bt admin please as
-# this is a clear GDPR violation" -- `my-bt admin dearchive` (formerly
+# 2026-07-14: this command was removed from my-bt admin as
+# a clear GDPR violation -- `my-bt admin dearchive` (formerly
 # `my-bt merge`) used to permanently re-attach an erased identity's
 # pre-erasure booking history onto a live, identifiable account, i.e.
 # deliberately re-linking data that Art. 17 erasure had de-linked.
@@ -632,17 +632,17 @@ def cmd_erase(args) -> None:
 # Store.merge_archived_registrations() (the only things that ever called
 # it) are gone too, see their own removal. The READ-ONLY equivalent
 # (on-the-fly, nothing persisted -- `/admin` and `my-bt list --all`/
-# `--past` via app.cli_list.merge_archived_for_display) explicitly stays;
-# the operator: "the implicit functionality of this baked into /admin and my-bt
-# list should stay."
+# `--past` via app.cli_list.merge_archived_for_display) explicitly stays,
+# since that implicit functionality baked into /admin and my-bt
+# list is meant to remain.
 
 
 def cmd_admin_rename_course(args) -> None:
     """`my-bt admin rename-course --from OLD --to NEW` -- migrates
     existing data after a course's shortname changes in settings.toml
-    (2026-07-08, the operator: "rename lux-wed-mindfulness to lux-wed-mind ...
-    provide a command to migrate the existing data AFTER I installed
-    this change"). Run this AFTER settings.toml already has --to as a
+    (2026-07-08: written after renaming lux-wed-mindfulness to
+    lux-wed-mind and needing a command to migrate the existing data
+    after installing that change). Run this AFTER settings.toml already has --to as a
     real [[course]] shortname -- this command does NOT edit
     settings.toml itself.
 
@@ -701,10 +701,10 @@ def cmd_admin_resync_calendar(args) -> None:
     one's description from scratch. Run this once, by hand, any time
     `app.calendar_sync.sync_occurrence()`'s own description format
     changes (see that function's own docstring, and SOLUTION-DESIGN.md's
-    standing note on this) -- 2026-07-09, the operator, on noticing a real
-    occurrence's invite was still missing the "cancel entire session"
-    line added days earlier: "please ensure that the existing (future)
-    calendar invites are updated as well." Only the operator's OWN CalDAV
+    standing note on this) -- 2026-07-09: a real
+    occurrence's invite was found still missing the "cancel entire session"
+    line added days earlier, which meant existing (future)
+    calendar invites needed to be updated too. Only the operator's OWN CalDAV
     event is ever touched here -- an already-emailed guest's personal
     .ics attachment can't be retroactively edited; see
     app.calendar_sync.resync_all_future_calendar_events's own
@@ -718,8 +718,8 @@ def cmd_admin_resync_calendar(args) -> None:
     app_calendar_sync.record_resync_skips(args.data_dir, result)
     print(f"{result.fixed} upcoming occurrence(s) re-synced")
     if result.skipped:
-        # 2026-07-15/16, the operator, from a real run where this went unnoticed
-        # entirely: a persistent CalDAV conflict must be loud here, not
+        # 2026-07-15/16: a real run where this went unnoticed
+        # entirely showed that a persistent CalDAV conflict must be loud here, not
         # just a WARNING line in the log -- and this command must exit
         # nonzero so a script/cron wrapper actually notices too, same
         # "any warning -> exit 1" policy as `admin setup`/`admin health`.
@@ -795,9 +795,9 @@ def cmd_cancel(args) -> None:
     if the CalDAV server is unreachable, unlike `my-bt erase`'s status
     check-style commands.
 
-    2026-07-13, the operator: "would it be possible that my-bt lists a short-id
-    that can also be used with my-bt cancel to cancel a booking? a bit
-    like what git does with its commit ids" -- --id now accepts EITHER the
+    2026-07-13: `my-bt list`'s short-id column was extended to also work
+    with my-bt cancel, so a booking can be canceled by short id the same
+    way git accepts short commit ids -- --id now accepts EITHER the
     full id OR one of `my-bt list`'s own short "id" column values (see
     app.cli_list.assign_short_ids/resolve_short_id): tried as a full id
     first (the exact same store.find_by_id() lookup as before, so nothing
@@ -805,19 +805,19 @@ def cmd_cancel(args) -> None:
     as a short-id prefix against the LIVE registration set if that exact
     lookup comes back empty.
 
-    2026-07-13, the operator: "cancel entire course" -- `--date YYYY-MM-DD`
+    2026-07-13: "cancel entire session" -- `--date YYYY-MM-DD`
     (mutually exclusive with --id) cancels EVERY live confirmed/
     waitlisted/pending-confirmation registration for one occurrence at
     once, via app.cancel_flow.cancel_occurrence -- the same function
     behind the web admin's /admin checkbox and the no-login
     `/host-cancel-occurrence/<course>/<date>` magic link, so all three
-    paths share one implementation. --course is optional ("as usually a
-    single date for me holds a single course"): auto-detected from that
+    paths share one implementation. --course is optional, since usually a
+    single date holds a single course: auto-detected from that
     date's live cancelable registrations if omitted, erroring with the
     list of candidates if more than one course actually has a booking on
     that date.
 
-    2026-07-09, the operator: "make cancel also SMART like show" -- a bare
+    2026-07-09: cancel was made SMART like show -- a bare
     positional `query` (mutually exclusive with --id/--date, same shape as
     `show`'s own query/--course/--user group) is auto-classified via
     app.cli_cancel.classify_cancel_query: a registration id (short or
@@ -885,9 +885,9 @@ def cmd_cancel(args) -> None:
         return
 
     if not args.yes:
-        # 2026-07-09, the operator: "Please present the booking in the form like
-        # show (for the fields you line up here in 1 line). and then ask
-        # below that: Cancel ? - Type 'yes' to confirm:" -- same vertical
+        # 2026-07-09: the booking is presented in the same form as
+        # show (the fields lined up in 1 line), then asks
+        # "Cancel ? - Type 'yes' to confirm:" below it -- same vertical
         # key : value layout _print_single_row_kv gives `show`'s own
         # single-entity results, for the same reason: illegible crammed
         # into one line, easy to read stacked. Just the fields that were
@@ -932,15 +932,15 @@ def cmd_admin_gdpr(args) -> None:
     erasure, and `admin gdpr bookings` / `admin gdpr accounts` for the
     per-row listing (each with its own --purge to act).
 
-    2026-07-14, the operator, restructuring the former top-level `gdpr-retention`
-    (renamed 2026-07-13 from `purge-retention`) into this shape: "add:
-    my-bt admin gdpr this by default tells you the set retention period on
-    top and then gives you status on accounts and bookings (OVERVIEW /
-    stats)." Moved under `admin` (site-administration) rather than staying
+    2026-07-14: restructured the former top-level `gdpr-retention`
+    (renamed 2026-07-13 from `purge-retention`) into this shape, so that
+    my-bt admin gdpr by default tells you the set retention period on
+    top and then gives you status on accounts and bookings (an overview /
+    stats). Moved under `admin` (site-administration) rather than staying
     top-level, since it now covers accounts too, not just bookings.
     `erase` (formerly its own top-level-under-admin command) joined this
-    group the same day, same reasoning: "lets move this to my-admin gdpr
-    please" -- it's GDPR machinery too, no reason for it to sit apart
+    group the same day, same reasoning -- it's GDPR machinery too, no
+    reason for it to sit apart
     from `bookings`/`accounts`."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
@@ -959,8 +959,8 @@ def cmd_admin_gdpr(args) -> None:
     )
     print(f"{accounts_due} account(s) past their retention window (see `admin gdpr accounts`)")
 
-    # 2026-07-14, the operator: "please also provide a table with the currently
-    # expected purge counts per month for accounts and for bookings" --
+    # 2026-07-14: also provides a table with the currently
+    # expected purge counts per month for accounts and for bookings --
     # one combined table, merging both dicts' month keys (plain "YYYY-MM"
     # strings sort correctly lexicographically, no date parsing needed).
     # Includes past-due months too (matches bookings_due/accounts_due
@@ -1015,8 +1015,9 @@ def cmd_admin_gdpr_accounts(args) -> None:
     only if [privacy].how_many_days_before_account_deletion_send_warning_mail
     is configured) AND erases every account already past its deadline
     (app.retention.purge_dormant_accounts -- always runs, regardless of
-    whether the warning is enabled; 2026-07-14, the operator: "yes regardless"
-    and "tied to retention_months exactly, this is the GDPR law").
+    whether the warning is enabled; 2026-07-14: confirmed this should
+    happen regardless, and tied exactly to retention_months, since that is
+    the GDPR-mandated deadline).
     Read-only without --purge."""
     settings = app_config.load_settings(args.settings)
     store = _store(args)
@@ -1043,8 +1044,8 @@ def cmd_admin_logout(args) -> None:
     """`my-bt admin logout EMAIL` / `my-bt admin logout --all` -- force-
     clears active session(s) on the LIVE running process (see
     app/webapp.py::internal_logout), the same in-memory SESSIONS dict
-    `my-bt status`'s "active sessions" line already reads. 2026-07-10,
-    the operator: added specifically so `setup -i`'s "Restart my-booking.service
+    `my-bt status`'s "active sessions" line already reads. 2026-07-10:
+    added specifically so `setup -i`'s "Restart my-booking.service
     now?" step (and the RPM's own %pre gate before an upgrade) have
     something concrete to point at instead of just refusing and leaving
     you stuck -- clear sessions on purpose here, then retry."""
@@ -1099,10 +1100,10 @@ def cmd_git_snapshot(args) -> None:
 
 def cmd_maintenance(args) -> None:
     """`my-bt admin site-maintenance on|off|status [-m/--message TEXT]` --
-    sitewide maintenance toggle (2026-07-10, the operator: "add my-bt commands to
-    set / unset a maintenance mode"; renamed from `admin maintenance`
-    2026-07-14, the operator: "rename my-bt admin site-maintenance to my-bt admin
-    site-maintenance" -- disambiguates from any future per-course/per-
+    sitewide maintenance toggle (2026-07-10: added my-bt commands to
+    set/unset a maintenance mode; renamed from `admin maintenance` to
+    `admin site-maintenance` on
+    2026-07-14 to disambiguate from any future per-course/per-
     feature "maintenance" concept). The actual state/rendering logic
     lives in app/maintenance.py (see its own module docstring for the
     full design -- a data-dir JSON flag file, not settings.toml, so it
@@ -1115,8 +1116,8 @@ def cmd_maintenance(args) -> None:
     an idempotent, clearly-marked banner into the TOP of the live,
     deployed index.html at [site].static_site_dir, if configured.
 
-    2026-07-10, the operator: "the my-bt should not modify the package installed
-    TEMPLATE folder site" -- this used to ALSO patch this checkout's own
+    2026-07-10: my-bt should not modify the package-installed
+    TEMPLATE folder site -- this used to ALSO patch this checkout's own
     HOME/site/index.html (the package's install location), but that copy
     is a template/reference only (never what nginx actually serves, see
     README.md "Static-site pages" and "Generic template vs. your real
@@ -1218,15 +1219,15 @@ def _fmt_ts(iso: str | None) -> str:
 
 
 def _print_live_status(payload: dict) -> None:
-    """The concise, default `my-bt status` output the operator asked for
+    """The concise, default `my-bt status` output requested
     (2026-07-13): server-up summary, maintenance mode (highlighted if
     ON), and the live logged-in-user list -- everything the full
     per-check report (-V/--verbose, see cmd_status) would otherwise bury
     a long scroll below.
 
-    2026-07-10, the operator: "redesign the output ... to follow the pattern:
-    field   value and align the values" plus "add the # of active
-    sessions" -- prompted by asking whether an RPM upgrade could refuse
+    2026-07-10: the output was redesigned to follow a
+    field / value pattern with the values aligned, plus adding the # of active
+    sessions -- prompted by asking whether an RPM upgrade could refuse
     to proceed while someone's logged in. Turned out unnecessary for
     that (SESSIONS is in-memory -- ANY service restart already clears it,
     RPM upgrade or not, and nothing is lost besides having to log back
@@ -1286,17 +1287,16 @@ def cmd_status(args) -> None:
     actually up and answering requests right now (queried directly over
     HTTP on its own loopback port -- see _query_internal_status), whether
     maintenance mode is on (highlighted if so), and who's currently
-    logged in (any unexpired session -- 2026-07-13, the operator: "logged in
-    means: unexpired sessions" -- with since-when-connected and their
+    logged in (any unexpired session -- 2026-07-13: "logged in"
+    was defined as meaning any unexpired session -- with since-when-connected and their
     current/last-loaded page+timestamp, read straight out of the live
     process's own in-memory SESSIONS dict, see
     app/webapp.py::internal_status).
 
-    2026-07-13, the operator: originally this command also had a -V/--verbose
+    2026-07-13: originally this command also had a -V/--verbose
     flag that additionally printed a long settings/secrets/systemd/
     SELinux/nginx install-health report -- moved out into its own command,
-    `my-bt admin health`, instead ("status as discussed (but the -V is now:
-    admin health)"). Keeps `status` fast and purely about "is it alive
+    `my-bt admin health`, instead. Keeps `status` fast and purely about "is it alive
     right now"; `admin health` is for actually diagnosing an install
     problem."""
     payload, error = _query_internal_status(args.internal_url)
@@ -1315,8 +1315,8 @@ def cmd_admin_watchdog_check(args) -> None:
     docstring for all four). Emails settings.admin_email ONE combined
     alert if anything fired, same as the timer -- this is not a dry run.
 
-    2026-07-14, the operator: "Same for any other script we have lets integrate
-    this into the admin as subcommand(s) please" -- watchdog had no CLI
+    2026-07-14: the same standing preference for integrating scripts as
+    admin subcommands applied here too -- watchdog had no CLI
     equivalent before this; see systemd/my-booking-watchdog.service for
     the timer now calling this instead of `python3 -m app.watchdog`
     directly."""
@@ -1459,13 +1459,13 @@ def cmd_admin_health(args) -> None:
     # works even without the nginx binary reachable. Unlike the checkout
     # check above, a problem found here is reported as "fail": setting
     # this path is a deliberate statement that this exact file is real
-    # and matters (2026-07-10, the operator: "truly ERROR out in case there is
-    # a problem").
+    # and matters (2026-07-10: this should truly ERROR out in case there
+    # is a problem).
     if raw:
         checks.extend(cli_checks.check_nginx_conf_deployed(raw))
 
     # -- calendar invite format ----------------------------------------------------
-    # 2026-07-15, the operator (real production `setup -i` run): the marker-file
+    # 2026-07-15, from a real production `setup -i` run: the marker-file
     # check was printed as a raw "[warn] ..." line inside interactive_setup()
     # only, never a structured Check -- so it didn't count towards fails/
     # warns, wasn't repeated in the "Still need attention" summary, and
@@ -1478,7 +1478,7 @@ def cmd_admin_health(args) -> None:
     if raw:
         checks.extend(cli_checks.check_calendar_invite_format(raw, data_dir))
 
-    # 2026-07-15/16, the operator, from a real production run: 3 occurrences hit
+    # 2026-07-15/16, from a real production run: 3 occurrences hit
     # persistent CalDAV conflicts during a resync, got skipped, and NEITHER
     # of the checks above caught it -- check_calendar_invite_format() only
     # asks "did an attempt happen for the current format version", never
@@ -1490,13 +1490,13 @@ def cmd_admin_health(args) -> None:
     checks.extend(cli_checks.check_calendar_invite_resync_skips(data_dir))
 
     # -- maintenance mode ---------------------------------------------------------
-    # 2026-07-11, the operator: "maintenance happens enough often that it is
-    # annoying to have to check what this warning was about.. so please do
-    # this at the end as last check so that it's easily visible." Used to
+    # 2026-07-11: maintenance happens often enough that it was annoying to
+    # have to check what this warning was about, so it was moved to
+    # the end as the last check, for visibility. Used to
     # sit right after the data-dir/git-snapshot check, near the top of a
-    # long list -- easy to miss in a scroll-back, and the operator toggles
-    # maintenance mode often enough that this specific WARN was the one he
-    # kept having to hunt for. Deliberately last of every check group here
+    # long list -- easy to miss in a scroll-back, and maintenance mode gets
+    # toggled often enough that this specific WARN was the one that
+    # kept needing to be hunted for. Deliberately last of every check group here
     # (both `print_report()`/plain `setup` and `interactive_setup()`/
     # `setup -i` already did this -- see their own "12. Maintenance mode"
     # steps -- only plain `status` hadn't caught up).
@@ -1512,8 +1512,8 @@ def cmd_admin_health(args) -> None:
             line += f" -- {detail}"
         print(line)
 
-    # 2026-07-08, the operator: "please repeat all warnings at the end of setup
-    # and status explicitly" -- by the bottom of a long report the actual
+    # 2026-07-08: all warnings are also repeated at the end of setup
+    # and status explicitly -- by the bottom of a long report the actual
     # WARN/FAIL lines are long since scrolled past; repeat just those,
     # together, right before the final pass/fail summary below.
     problems = cli_checks.summarize_problems(checks)
@@ -1528,9 +1528,9 @@ def cmd_admin_health(args) -> None:
               "then re-run `my-bt admin health`.")
         sys.exit(1)
     elif warns:
-        # 2026-07-10, the operator: "please make my-bt status FAIL in case of any
-        # warning so that this is more visible. because a missing location
-        # is a real (potential) problem." -- a WARN used to be purely
+        # 2026-07-10: my-bt status now FAILs in case of any
+        # warning, for better visibility, since a missing location
+        # is a real (potential) problem -- a WARN used to be purely
         # cosmetic (exit 0), which let a real, actionable gap (e.g. a
         # missing nginx `location` block, silently making a whole route
         # unreachable through nginx) sail straight past `my-bt admin health &&
@@ -1556,9 +1556,9 @@ def cmd_setup(args) -> None:
     privacy page if [site].static_site_dir is configured). Both plain and
     `-i` exit non-zero if any check comes back WARN or FAIL (reflecting
     the CURRENT state after whatever `-i` just fixed, not the state it
-    started at) -- same policy as `status` (2026-07-10, the operator: wants
-    `setup` scriptable/cron-checkable the same way `status` already is;
-    caught in practice the same day: `my-bt setup -i && my-bt status` ran
+    started at) -- same policy as `status` (2026-07-10: `setup` needed to
+    be scriptable/cron-checkable the same way `status` already is;
+    caught in practice the same day, when `my-bt setup -i && my-bt status` ran
     `status` unconditionally, because only the plain branch exited
     non-zero at first) -- so `my-bt setup [-i] && <next step>` is a safe
     gate either way, not just a human-readable report."""
@@ -1577,9 +1577,9 @@ def cmd_setup(args) -> None:
 
 
 class _HelpfulArgumentParser(argparse.ArgumentParser):
-    """2026-07-13, the operator: "please always show the -h version instead a
-    shortened usage version only, e.g. when calling 'my-bt' or 'my-bt
-    history'" -- argparse's default error() (hit on a missing required
+    """2026-07-13: always show the full -h version instead of a
+    shortened usage version, e.g. when calling 'my-bt' or 'my-bt
+    history' -- argparse's default error() (hit on a missing required
     subcommand, e.g. bare `my-bt`, or a missing required argument, e.g.
     `my-bt history` with no --email) prints only the one-line usage
     summary before the error, not the full option list/help text -- easy
@@ -1587,7 +1587,7 @@ class _HelpfulArgumentParser(argparse.ArgumentParser):
     SAME output -h/--help would instead. add_subparsers() defaults
     `parser_class` to `type(self)` (see argparse's own source), so every
     subparser built off this one -- `my-bt history`, `my-bt cancel`, etc.
-    -- inherits this too, covering both cases the operator named with the one
+    -- inherits this too, covering both cases named with the one
     override."""
     def error(self, message):
         self.print_help(sys.stderr)
@@ -1599,11 +1599,11 @@ def _add_subcommand(subparsers, name: str, summary: str, extra: str = "", **kwar
     the same one-sentence summary shown in its parent's own listing, plus
     (where there's something worth adding) one more sentence of detail.
 
-    2026-07-08, the operator, on `my-bt admin -h` printing a bare usage+options
-    dump with no explanation of what "admin" even is: "There should be a
-    sentence here about the admin command as such" -- then, generalizing
-    it to every subcommand: "you need to have AT LEAST what my-bt -h
-    gives you about the command but maybe even 1 sentence more or so."
+    2026-07-08: `my-bt admin -h` used to print a bare usage+options
+    dump with no explanation of what "admin" even is, which needed a
+    sentence about the admin command as such -- generalized
+    to every subcommand needing AT LEAST what `my-bt -h`
+    gives about the command, plus maybe 1 sentence more.
     argparse only ever shows `description=` when a leaf parser's own
     `-h`/`--help` is invoked directly -- `help=` alone (what every
     add_parser() call here used before this existed) only surfaces in
@@ -1615,11 +1615,11 @@ def _add_subcommand(subparsers, name: str, summary: str, extra: str = "", **kwar
 
 
 # -- zsh completion -----------------------------------------------------
-# 2026-07-08, the operator: "can you please built into the script a zsh
-# compatible shell auto-complete that is auto-installing in the users
-# home dir on first run" -- then, once reminded this had never actually
-# been built and asked to do it: "as we have the package you are right
-# though that we can do this via the rpm!" -- so instead of my-bt writing
+# 2026-07-08: the request was for a zsh-compatible shell auto-complete
+# built into the script, auto-installing in the user's home dir on
+# first run -- then, once reminded this had never actually
+# been built, the RPM packaging was identified as the right vehicle for
+# it -- so instead of my-bt writing
 # to the user's own $HOME/.zshrc at runtime (fragile: fighting over one
 # shared dotfile, needing to detect whether it's already been added,
 # surviving the user's own edits...), packaging/my-booking-tool.spec's
@@ -1676,8 +1676,8 @@ def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
     system already handles that everywhere. See _zsh_join for how these
     get assembled into an actual multi-line _arguments invocation.
 
-    2026-07-09, the operator: "as much autocomplete as possible also if it
-    recognises a course-name maybe if this is possible?" -- every
+    2026-07-09: extended to be as much autocomplete as possible,
+    including recognizing course names -- every
     `--course` option (dest == "course") gets a `:course:
     _mb_course_shortnames` value-completion suffix, so `--course <TAB>`
     offers real course shortnames parsed live from settings.toml (see
@@ -1707,7 +1707,7 @@ def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
             # function did exactly that) leaves it as inert literal
             # characters instead, which _arguments then can't parse at
             # all ("invalid argument: (-D --debug){-D,--debug}[...]" --
-            # a real failure the operator hit on the actual VPS, not caught here
+            # a real failure hit on the actual VPS, not caught here
             # since there's no zsh in this sandbox to actually execute
             # the generated script against).
             group = f"({' '.join(opts)})"
@@ -1818,7 +1818,7 @@ def _zsh_case_block(name: str, sp: argparse.ArgumentParser, depth: int, indent: 
     (`bookings`/`accounts`/`erase`, a THIRD level, added the same day):
     `my-bt admin gdpr -h` always listed them correctly (plain argparse
     introspection, unaffected by this bug), but zsh tab-completion after
-    `my-bt admin gdpr ` showed nothing -- confirmed by the operator on the real
+    `my-bt admin gdpr ` showed nothing -- confirmed on the real
     VPS. Rewritten to recurse to whatever depth the real argparse tree
     actually has. Depth-suffixed zsh state names (cmd0/args0, cmd1/args1,
     cmd2/args2, ...) mean a nested `_arguments -C` call at any depth can
@@ -1897,7 +1897,7 @@ def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
     needing REAL DATA beyond that (an actual registration id/date/email)
     would need to shell out to `my-bt` itself per keystroke (the
     argcomplete approach) -- a much bigger dependency/latency trade-off
-    than the operator asked for here, so deliberately not attempted.
+    than was called for here, so deliberately not attempted.
     """
     top_entries = "\n".join(f"      {e}" for e in _zsh_subcommand_entries(parser))
     top_choices = _zsh_subparser_choices(parser)
@@ -1915,8 +1915,8 @@ def generate_zsh_completion(parser: argparse.ArgumentParser) -> str:
 # %{{_datadir}}/zsh/site-functions/_my-bt, already on every zsh's fpath by
 # default -- open a new shell (or run `compinit`) to pick it up.
 
-# 2026-07-09, the operator: "as much autocomplete as possible also if it
-# recognises a course-name maybe if this is possible?" -- a LIVE parse of
+# 2026-07-09: extended to be as much autocomplete as possible,
+# including recognizing course names -- a LIVE parse of
 # the real settings.toml at completion time (via $MY_BOOKING_SETTINGS,
 # same env var scripts/my-bt's own --settings default already respects),
 # not a list frozen into this file at build time: course shortnames can
@@ -1983,11 +1983,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="also append this run's output to settings.toml's [logging].log_file "
              "(configure that first -- see README.md 'Logs & debugging')",
     )
-    # 2026-07-09, the operator: bare `my-bt` (or `my-bt admin` -- any group that
+    # 2026-07-09: bare `my-bt` (or `my-bt admin` -- any group that
     # needs a further sub-command) printed argparse's default "the
     # following arguments are required: command" error and exited 2 --
-    # "as the --help is displayed to me this is not an error, no need to
-    # write this". `required=True` (removed here and on admin_sub below)
+    # since help is displayed anyway, this isn't really an error and
+    # shouldn't be treated as one. `required=True` (removed here and on admin_sub below)
     # is what made a missing sub-command an *error* in the first place;
     # `_help_parser` records, on each subparsers-owning parser, which
     # parser's help to show if parsing stops there with no leaf `func`
@@ -2020,17 +2020,17 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     def raw_arg(sp, what: str):
-        # 2026-07-13, the operator: "--raw or -r always shows the TABLE for users
-        # and list etc. and the default command shows it cleant up without
-        # technical ids to ideally have a compact readable output ... for
-        # my-bt list: can you mimick the view of the web-interface?" --
-        # default output is now the same compact, human-readable shape
+        # 2026-07-13: --raw/-r always shows the raw TABLE for users
+        # and list etc., while the default command shows a cleaned-up view
+        # without technical ids, for a compact, readable output that
+        # mimics the web interface -- default output is now the same
+        # compact, human-readable shape
         # /admin's own web table shows (no registration_id/user_id/
         # party_id/token hashes); -r/--raw brings back every raw CSV
         # column, exactly what this command printed unconditionally before
         # 2026-07-13. Deliberately a SEPARATE axis from -V/--verbose
-        # (`status`) -- the operator, same round: "this is better not to overload
-        # -V with different meanings" -- -V adds MORE detail on top of a
+        # (`status`) -- the same round settled on not overloading
+        # -V with a second meaning -- -V adds MORE detail on top of a
         # summary, -r/--raw swaps the SHAPE of what's already there.
         sp.add_argument(
             "-r", "--raw", action="store_true",
@@ -2081,8 +2081,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--live: every live account, including ones that have never logged in. --archive: "
         "only archived accounts (see `my-bt erase`). --all: live + archived combined, no "
         "login-date filter (2026-07-14: this used to be the bare default; the bare default "
-        "is now the narrower logged-in-live view above, the operator: \"actually no: by default "
-        "my-bt users should show --live users that logged in\"). Same -r/--raw and --format "
+        "is now the narrower logged-in-live view above, i.e. --live users that have "
+        "actually logged in). Same -r/--raw and --format "
         "options as `my-bt list`. See also `my-bt users logout` below.",
     )
     users_scope = sp.add_mutually_exclusive_group()
@@ -2117,10 +2117,10 @@ def build_parser() -> argparse.ArgumentParser:
     lo = _add_subcommand(
         users_sub, "logout",
         "force-log-out an attendee (or --all for everyone) -- same command as `my-bt admin logout`.",
-        "2026-07-10, the operator: \"lets add 'logout <EMAIL>' and 'logout --all' as possibilities to "
-        "my-bt users\" -- discoverable from here too since you're probably already looking at "
+        "2026-07-10: 'logout <EMAIL>' and 'logout --all' were added as possibilities to "
+        "my-bt users -- discoverable from here too since you're probably already looking at "
         "`my-bt users`'s new 'session' column when you reach for this, but the actual command "
-        "stays `my-bt admin logout` (the operator, on where it should live: \"we have BOTH\") -- this "
+        "stays `my-bt admin logout`, since it belongs in both places -- this "
         "is the exact same cmd_admin_logout, just reachable from a second spot.",
     )
     lo.add_argument("email_pos", nargs="?", metavar="EMAIL", help="attendee's login email (or use --all below)")
@@ -2201,7 +2201,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_status)
 
     # -- admin: heavier/riskier site-administration actions, grouped under
-    # one namespace (2026-07-13, the operator's own restructuring proposal) --
+    # one namespace (2026-07-13 restructuring) --
     # rarely-needed-day-to-day commands live here instead of cluttering
     # the top level next to `list`/`status`/`cancel`, which you reach for
     # far more often.
@@ -2232,8 +2232,7 @@ def build_parser() -> argparse.ArgumentParser:
         "Same effect as an attendee self-erasing via /my, just host-initiated. "
         "2026-07-14: moved here from `admin erase` to sit alongside the rest of GDPR. "
         "2026-07-16: the email can be given as a plain positional argument now too, "
-        "not just --email (the operator: \"--email should be optional here simply, "
-        "my-bt admin erase operator@example.org should work as well\").",
+        "not just --email, e.g. `my-bt admin erase someone@example.com`.",
     )
     ge.add_argument(
         "email_pos", nargs="?", metavar="EMAIL",
@@ -2262,7 +2261,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp = _add_subcommand(
         admin_sub, "logout",
         "force-log-out an attendee (or --all for everyone) from the LIVE running service.",
-        "2026-07-10, the operator: prompted by `setup -i`'s \"Restart my-booking.service now?\" "
+        "2026-07-10: prompted by `setup -i`'s \"Restart my-booking.service now?\" "
         "step refusing to proceed while sessions are active (SESSIONS is in-memory -- a "
         "restart silently drops every one) -- this is the one-line fix it now points you "
         "at: clear them on purpose, then retry. Same effect as the RPM's own %pre gate "
@@ -2359,7 +2358,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    # 2026-07-08/09, the operator: zsh completion (see generate_zsh_completion's
+    # 2026-07-08/09: zsh completion (see generate_zsh_completion's
     # own docstring above) -- generated at RPM %build time, not a real
     # user-facing subcommand, so this is checked directly against
     # sys.argv rather than added to build_parser()'s own subparsers
@@ -2370,7 +2369,7 @@ def main() -> None:
         sys.stdout.write(generate_zsh_completion(build_parser()))
         return
     args = build_parser().parse_args()
-    # 2026-07-09, the operator: bare `my-bt` or `my-bt admin` (any group needing a
+    # 2026-07-09: bare `my-bt` or `my-bt admin` (any group needing a
     # further sub-command) should behave exactly like `-h`/`--help` --
     # full help, exit 0 -- not argparse's default required-subcommand
     # error. See build_parser()'s own comment on `_help_parser` for how
@@ -2424,8 +2423,8 @@ def main() -> None:
     # systemd/my-booking-*.service) bypasses those main()s entirely --
     # cmd_admin_gdpr_bookings/cmd_admin_gdpr_accounts/cmd_git_snapshot/
     # cmd_admin_watchdog_check all call the underlying function directly,
-    # never that module's main(). Caught while answering the operator's question
-    # "does my-bt log anything into journal otherwise?"
+    # never that module's main(). Caught while investigating whether
+    # my-bt logs anything into the journal otherwise.
     #
     # log_fh is not None only when -L/--log successfully opened THE SAME
     # log_path and installed the Tee above -- in that case configure_

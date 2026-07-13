@@ -1,6 +1,6 @@
 # REPLACE-ME-YOUR-DOMAIN - main site + proxied booking app.
-# HARDENED nginx vhost reference. This is the operator's own real, production
-# config for booking.example.org, anonymized (see "REPLACE-ME" markers below) --
+# HARDENED nginx vhost reference. This is the real, production config
+# for booking.example.org, anonymized (see "REPLACE-ME" markers below) --
 # a genuinely richer starting point than the bare nginx/my-booking.conf
 # (which is just the location blocks, no rate limiting/headers/CSP at
 # all). Copy this to site/nginx-locations.conf (untracked -- a FIXED
@@ -67,7 +67,7 @@ server {
     #     button and shows "Please wait..." the instant any form is
     #     submitted, so a slow POST doesn't look like nothing happened and
     #     can't be double-submitted from the UI), three more
-    #     (2026-07-07, fixing a real CSP violation the operator hit on /my's
+    #     (2026-07-07, fixing a real CSP violation on /my's
     #     lockout screen): the password-reset page's resend-cooldown
     #     script, the "Almost there" page's fetch-based resend-cooldown
     #     script, and the login/signup/reset/admin-login lockout-countdown
@@ -91,8 +91,8 @@ server {
     #     violation).
     #   - 2026-07-08: the sortable/filterable-table script's hash changed
     #     again (still the same one shared by /my and /admin) -- added the
-    #     data-default-sort="asc"|"desc" on-load behavior (the operator: "by
-    #     default sort ... by Date ... so people see the sort arrow"). Body
+    #     data-default-sort="asc"|"desc" on-load behavior (default sort is
+    #     now by Date, so the sort arrow is visible on load). Body
     #     changed, so the hash did too; regenerated and swapped in below.
     #   - style-src needs 'unsafe-inline': index.html's script injects new
     #     elements with inline style="..." at runtime (innerHTML), which a

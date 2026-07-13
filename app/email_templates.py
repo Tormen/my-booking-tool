@@ -1,11 +1,9 @@
 """Minimal, stdlib-only macro/variable templating for guest-facing emails
-(2026-07-09, the operator: "Add support for MAKROS in the templates, you need
-support for VARIABLES anyways. Then the cancel_email.html for instance
-should DEFINE how the final email is assembled (e.g. which makros are
-used where / in which order)." -- following up on
-`settings.toml`'s `email_templates_folder`: "place all email templates
-into settings.toml [directory] to easily change something there if
-needed").
+(2026-07-09: templates needed support for macros as well as variables,
+so a template file like cancel_email.html can DEFINE how the final
+email is assembled -- e.g. which macros are used where and in which
+order -- following up on `settings.toml`'s own `email_templates_folder`
+option for placing custom templates in an external directory).
 
 Design: a template file (e.g. `email_templates/cancel_email.txt`) is
 plain text/HTML with `{{name}}`-style placeholders. "Variables" and

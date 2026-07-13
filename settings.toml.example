@@ -8,13 +8,11 @@ base_url    = "https://example.org"
 # with this file) and `my-bt setup -i` can regenerate it directly there.
 # Comment out / remove to skip that check entirely.
 static_site_dir = "/var/www/example.org"
-# Optional. 2026-07-09, the operator: "Add a settings.toml variable:
-# email_templates_folder = and place all email templates into the
-# settings.toml [directory] to easily change something there if needed."
-# Every guest-facing email (booking confirmed/waitlisted, canceled,
-# reinstated, promoted-from-waitlist, account confirm/reset, email-change
-# -- 2026-07-14: swept across all of them, not just the cancel_email
-# pilot) reads a matching file HERE first if it exists; a missing file
+# Optional: a directory of custom email templates to use instead of
+# this repo's own built-in ones. Every guest-facing email (booking
+# confirmed/waitlisted, canceled, reinstated, promoted-from-waitlist,
+# account confirm/reset, email-change) reads a matching file HERE first
+# if it exists; a missing file
 # here (or leaving this unset entirely) falls back to this repo's own
 # built-in copy under email_templates/, so you only need to place the
 # SPECIFIC template(s) you actually want to customize. Templates use
@@ -72,9 +70,8 @@ port          = 465
 username      = "calendar@example.org"
 password_file = "/etc/my-booking/secrets/smtp_password"
 from_address  = "admin@example.org"
-# Optional, comma-separated. 2026-07-09, the operator: "add as BCC the given email
-# address to all mails that go out to the attendees ... so that for some
-# time I can watch this to ensure that all is OK". Applied only to
+# Optional, comma-separated: BCC these addresses on every attendee-facing
+# email, e.g. to monitor what guests actually receive. Applied only to
 # attendee/guest-facing emails (booking confirmed/waitlisted, promoted,
 # canceled, reinstated, account confirm/reset/email-change) -- never to the
 # separate admin-facing copy of the same event (that already goes straight
@@ -149,10 +146,8 @@ canceled_retention_months = 6
 # (`openssl rand -hex 32`); rotating it means previously-erased emails can no
 # longer be recognized as "the same erased person" if they ever come up again.
 erasure_pepper_file = "/etc/my-booking/secrets/erasure_pepper"
-# Optional. 2026-07-09, the operator: "the scheduler that then deletes accounts
-# should detect imminent accounts that would need to be deleted and then
-# send out such an email" -- a dormant-account warning (one email, not a
-# series of nudges) sent this many days BEFORE an account would reach
+# Optional: a dormant-account warning (one email, not a series of
+# nudges) sent this many days BEFORE an account would reach
 # retention_months above of inactivity (User.last_login_at, falling back
 # to created_at if it has never logged in again since booking). 0 (the
 # default), a blank string, or leaving this commented out all disable the
@@ -229,10 +224,9 @@ sshd_failure_threshold = 5
 # course's bookings becomes a clickable link (opens in a new tab) instead
 # of plain text. Omit it entirely to keep plain text, exactly as before
 # this existed.
-# host_calendar_entry_cc_list is optional (2026-07-14, the operator: "list of
-# email addresses that if set on a course in settings.toml will also be
-# invited as optional (cc) so that they receive the same invite as well"):
-# each address gets added as an ATTENDEE (ROLE=OPT-PARTICIPANT, RSVP=FALSE
+# host_calendar_entry_cc_list is optional: a list of email addresses to
+# also invite (cc) on this course's own calendar entry. Each address gets
+# added as an ATTENDEE (ROLE=OPT-PARTICIPANT, RSVP=FALSE
 # -- a courtesy copy, not a scheduling request) on THIS course's own HOST
 # calendar event (never the guest's personal .ics). Omit entirely (the
 # default) for no ORGANIZER/ATTENDEE properties at all, exactly as before
@@ -255,10 +249,10 @@ language    = "en"
 description = "Example weekly class. Replace this with your own description."
 # subtitle  = "Mondays -- Example Community Center"
 order_in_all_courses = 10
-# [[course.date_override]] (2026-07-16, the operator: "add a new config option
-# per course in settings.toml to exceptionally change time for a course
-# on a certain date"): any number of these per course (must come directly
-# after that course's own fields, before the next [[course]] block, same
+# [[course.date_override]]: any number of these per course, to
+# exceptionally change the time for this course on a specific date (must
+# come directly after that course's own fields, before the next
+# [[course]] block, same
 # TOML nested-array-of-tables rule as everywhere else), each a one-off
 # exception to the normal weekly weekday/start_time/duration_minutes
 # above, for exactly ONE date. `duration_minutes` is optional -- omit it

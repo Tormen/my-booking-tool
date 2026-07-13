@@ -85,7 +85,7 @@ class CancelAndPromoteCourseRemovedTest(unittest.TestCase):
 
 class CancelOccurrenceTest(unittest.TestCase):
     """app.cancel_flow.cancel_occurrence() -- "cancel the entire session"
-    (2026-07-13, the operator). Uses `sync_fn` throughout (like
+    (added 2026-07-13). Uses `sync_fn` throughout (like
     CancelAndPromoteCourseRemovedTest above) so these tests don't need a
     real/fake CalDAV client -- calendar-sync mechanics are already covered
     by test_calendar_sync.py; what's new here is WHICH rows get touched and
@@ -168,13 +168,13 @@ class CancelOccurrenceTest(unittest.TestCase):
         self.assertEqual(to_addrs.count("admin@example.org"), 2)  # one admin copy per canceled participant
 
         guest1_mail = next(b for t, s, b in self.sent_emails if t == "guest1@example.org")
-        # 2026-07-09, the operator (b): host-initiated cancels label the message
+        # 2026-07-09: host-initiated cancels label the message
         # from the ATTENDEE's point of view -- it came from the host.
         self.assertIn("Message from the host: venue flooded", guest1_mail)
         self.assertIn("exception rather than the rule", guest1_mail)
         self.assertIn("Book the next occurrence of this course: https://", guest1_mail)
         self.assertIn("/book/yoga-class-1", guest1_mail)
-        # 2026-07-09, the operator (c): no reinstate link at all for a host-
+        # 2026-07-09: no reinstate link at all for a host-
         # initiated cancel's participant copy.
         self.assertNotIn("/reinstate/", guest1_mail)
 

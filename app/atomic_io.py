@@ -1,9 +1,10 @@
 """Shared crash-safe file write helper.
 
-2026-07-15, the operator, on hard-reboot data safety, after `app/storage.py`'s
-CSV writes were audited and hardened: "yes please ALL writes linked to
-my-booking-tool, my-bt and the site" -- not just the CSV storage layer.
-This module is the one place that pattern lives, so every other module
+2026-07-15: after `app/storage.py`'s CSV writes were audited and
+hardened for hard-reboot data safety, the same protection was extended
+to every write linked to my-booking-tool/my-bt/the site, not just the
+CSV storage layer. This module is the one place that pattern lives, so
+every other module
 that writes a file to disk that matters (config, secrets, marker/state
 files, rendered static pages) uses the same crash-safe primitive instead
 of a bare `Path.write_text()`, which can leave a torn/partial file behind
@@ -20,10 +21,10 @@ crash, only ever sees the complete old file or the complete new one,
 never a torn one), then fsync() the containing directory too (see
 fsync_dir's own docstring for why the rename itself needs this).
 
-2026-07-10, the operator, second real production incident: `secure_data_path`
+2026-07-10, second real production incident: `secure_data_path`
 (chmod/chgrp/root-only-chown) used to live in app/storage.py, CSV-only --
-see its own docstring for the two incidents ("the operator's own VPS ...
-PermissionError") that shaped it. Any OTHER file under the same shared
+see its own docstring for the two production PermissionError incidents
+that shaped it. Any OTHER file under the same shared
 data directory (calendar_sync.py's resync markers, maintenance.py's
 maintenance-flag) is written through THIS module's atomic_write_text
 instead of _LockedCsv, and is exposed to the exact same root-run-my-bt-
@@ -71,8 +72,8 @@ def secure_data_path(path, mode: int = 0o640) -> None:
     Either way, the write this is securing must never fail just because
     the permissions touch-up couldn't fully complete.
 
-    2026-07-09, real production incident #1 (the operator ran `my-bt cancel`
-    directly as root, leaving registrations.csv root:root mode 0600 --
+    2026-07-09, real production incident #1 (running `my-bt cancel`
+    directly as root left registrations.csv root:root mode 0600 --
     unreadable by my-booking-watchdog.service, a READ-only consumer):
     chmod-to-0640 + chgrp-to-SERVICE_GROUP fixed that one.
 
@@ -197,14 +198,13 @@ def probe_dir_fsync_support(dir_path: str | Path) -> bool:
     startup, or from a `my-bt admin setup`/`admin health` check) rather
     than trusted to a routine per-write log line.
 
-    2026-07-15, the operator, reviewing fsync_dir()'s best-effort/never-raises
-    design: "that's the correct call for availability ... but it's also
-    the kind of failure that's invisible until the one time it matters
-    -- if the actual production mount silently doesn't support directory
-    fsync, every write since deploy has been getting the weaker
-    guarantee with nobody the wiser. Worth a one-time capability probe
-    at startup ... log loudly ... rather than relying on someone
-    noticing a warning line in a log nobody tails."
+    2026-07-15: fsync_dir()'s best-effort/never-raises design is correct
+    for availability, but it's also the kind of failure that's invisible
+    until the one time it matters -- if the actual production mount
+    silently doesn't support directory fsync, every write since deploy
+    has been getting the weaker guarantee with nobody the wiser. Worth a
+    one-time capability probe at startup that logs loudly, rather than
+    relying on someone noticing a warning line in a log nobody tails.
 
     Same underlying operation as fsync_dir() (open the directory
     read-only, fsync it, close it) -- the difference is entirely in what
@@ -212,8 +212,8 @@ def probe_dir_fsync_support(dir_path: str | Path) -> bool:
     ignore it and move on (an unsupported mount must never turn a
     successful write into a crash); this function's callers are expected
     to react loudly -- see app.cli_checks.check_directory_fsync_support
-    (surfaced through `my-bt admin setup`/`admin health`, with the operator's
-    own standing "any warning -> exit 1" policy) and app.serve.main's
+    (surfaced through `my-bt admin setup`/`admin health`, following this
+    project's standing "any warning -> exit 1" policy) and app.serve.main's
     startup check (logs at ERROR level and emails admin_email once per
     service start, not just a routine WARNING)."""
     return fsync_dir(dir_path)

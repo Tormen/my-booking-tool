@@ -14,9 +14,10 @@
      inside a small embedded iframe. Viewed standalone, it behaves like a
      normal same-tab link -- no downside either way.
 
-     2026-07-09, the operator: "if you are logged in, https://booking.example.org should
-     show the same banner and not 'Login' button." The <script> at the
-     bottom of <body> opportunistically upgrades this on load: it asks
+     2026-07-09: a logged-in guest visiting the homepage should see the
+     same banner as the dynamic pages, not a plain "Login" button. The
+     <script> at the bottom of <body> opportunistically upgrades this on
+     load: it asks
      GET /my/session (same-origin fetch, so it carries the guest's session
      cookie automatically even though this page's own JS can never read
      that cookie directly) and, only if it comes back logged in, swaps

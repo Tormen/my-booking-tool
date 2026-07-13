@@ -135,9 +135,9 @@ def _set_user_row(store: Store, user_id: str, **fields) -> None:
 
 
 class SendAccountDeletionWarningsTest(unittest.TestCase):
-    """2026-07-09, the operator: "Our scheduler that then deletes accounts should
+    """2026-07-09: the scheduler that deletes accounts should
     detect imminent accounts that would need to be deleted and then send
-    out such an email" -- see app.retention.send_account_deletion_
+    out such an email -- see app.retention.send_account_deletion_
     warnings's own docstring for the full story (reuses retention_months
     as the dormancy threshold, last_login_at falling back to created_at,
     exactly ONE email per dormancy period)."""
@@ -323,10 +323,10 @@ class RegistrationPurgeDateTest(unittest.TestCase):
 
 class PurgeDormantAccountsTest(unittest.TestCase):
     """purge_dormant_accounts() -- the actual account-erasure enforcement
-    (2026-07-14, the operator: "now we also need the account purge after the same
-    duration"). Runs regardless of whether the warning email is enabled
-    or was ever sent (the operator: "yes regardless"), tied exactly to
-    retention_months (the operator: "this is the GDPR law")."""
+    (2026-07-14: the account purge is also needed after the same
+    duration). Runs regardless of whether the warning email is enabled
+    or was ever sent, tied exactly to
+    retention_months (per GDPR law)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -385,9 +385,9 @@ class PurgeDormantAccountsTest(unittest.TestCase):
 class PurgeCountsByMonthTest(unittest.TestCase):
     """registration_purge_counts_by_month() / account_deletion_counts_by_month()
     -- the "expected purge counts per month" table `my-bt admin gdpr`
-    prints (2026-07-14, the operator: "please also provide a table with the
+    prints (2026-07-14: a table was requested with the
     currently expected purge counts per month for accounts and for
-    bookings"). Both just bucket the same per-row/per-account dates
+    bookings). Both just bucket the same per-row/per-account dates
     registration_purge_date()/account_deletion_date() already compute,
     by "YYYY-MM"."""
 

@@ -1,20 +1,17 @@
-"""Logic behind `my-bt show`'s query classification. 2026-07-08, the operator:
-"show should be used to show any entity! this can be a booking or a
-course or a course-occurance or a user!" -- generalized from "show one
-registration by id" (its original, narrower shape) to auto-detecting
-which of those four `show` means from a single free-form query, e.g.
+"""Logic behind `my-bt show`'s query classification. 2026-07-08:
+generalized from "show one registration by id" (its original, narrower
+shape) to auto-detecting which of FOUR entity types (booking, course,
+course-occurrence, or user) a single free-form query means, e.g.
 `my-bt show ada@example.com` or `my-bt show lux-fri-yoga` or `my-bt show
-2026-07-10`, same day: "is there no way to have a shorter 'shorter ID'?"
-led to short ids actually being resolved here now too (the OLD `show`
-never did -- see cmd_show's own history in scripts/my-bt, it only ever
-compared against the full registration_id, despite its own -h text
-already claiming short ids worked).
+2026-07-10`. Same day, short ids were added to the set of things this
+can resolve (the OLD `show` never did -- see cmd_show's own history in
+scripts/my-bt, it only ever compared against the full registration_id,
+despite its own -h text already claiming short ids worked).
 
-Also same day: "why do I need to repeat myself ... :(" then "keep the
-explicit parameters like --course and --user to FORCE a specific type
-if needed" -- so scripts/my-bt's cmd_show tries auto-detection (see
+Also same day: scripts/my-bt's cmd_show tries auto-detection (see
 classify_show_query below) UNLESS --course/--user was passed, in which
-case that type is used directly, no guessing.
+case that type is used directly, no guessing -- avoids having to repeat
+information already given via an explicit flag.
 
 Deliberately NOT in scripts/my-bt, for the same reason as every other
 app/cli_*.py module: that script has no .py extension and lives outside
@@ -35,11 +32,11 @@ def looks_like_registration_id(query: str, min_length: int) -> bool:
     digits only (dashes ignored, case-insensitive) and at least
     `min_length` characters once dashes are stripped.
 
-    2026-07-08, the operator, describing the free-text search: "across all the
-    possibilities (email address, name, shortname, date, only NOT in
-    registration ID ;))" -- i.e. id lookup and free-text search are two
-    separate paths, not one fuzzy blend where a name might accidentally
-    get mistaken for an id fragment (or vice versa). Requiring hex-only
+    2026-07-08: the free-text search covers email address, name,
+    shortname, and date, but deliberately NOT registration ID -- id
+    lookup and free-text search are two separate paths, not one fuzzy
+    blend where a name might accidentally get mistaken for an id
+    fragment (or vice versa). Requiring hex-only
     AND a minimum length keeps a short, all-hex name (e.g. "Ada", "Cafe"
     are technically valid hex) from ever being tried as an id at all --
     `min_length` should be the same SHORT_ID_LENGTH `my-bt list` displays
@@ -70,8 +67,8 @@ def find_users_by_name_or_email(query: str, users: list[dict]) -> list[dict]:
     """Case-insensitive SUBSTRING match against each user's name OR
     email -- same "type part of it" search the web admin's own
     client-side table filter offers, just server-side and restricted to
-    these two fields (not every column) since name/email are what the operator
-    described wanting to search by."""
+    these two fields (not every column), since those are the fields a
+    user search is expected to match on."""
     q = query.strip().lower()
     return [u for u in users if q in u.get("email", "").lower() or q in u.get("name", "").lower()]
 

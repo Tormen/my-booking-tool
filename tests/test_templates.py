@@ -4,8 +4,8 @@ from app.templates import _SUBMIT_FEEDBACK_SCRIPT, page
 
 
 class SubmitFeedbackScriptTest(unittest.TestCase):
-    """2026-07-11, the operator (screenshot of a Cancel submission sitting at 2.05s
-    in devtools, buttons still clickable, no feedback at all): every page()
+    """2026-07-11: a screenshot of a Cancel submission sitting at 2.05s
+    in devtools, buttons still clickable, no feedback at all, showed every page()
     render now carries a small global script that disables every button and
     labels the clicked one "Please wait..." the instant ANY form on the page
     is submitted -- see _SUBMIT_FEEDBACK_SCRIPT's own docstring in
@@ -13,7 +13,7 @@ class SubmitFeedbackScriptTest(unittest.TestCase):
     opt-in per page like app/webapp.py's _DIALOG_WIRING_SCRIPT), so it's a
     my-booking-tool-wide default covering every current and future form,
     Cancel/Reinstate/booking/settings/delete-account alike -- exactly what
-    the operator asked for ("make it a my-booking wide default for all forms")."""
+    was asked for -- a my-booking wide default for all forms."""
 
     def test_every_page_carries_the_script_exactly_once(self):
         html = page("Some title", "<p>body</p>")
@@ -48,8 +48,8 @@ class SubmitFeedbackScriptTest(unittest.TestCase):
 
 
 class PageFaviconTest(unittest.TestCase):
-    """2026-07-08, the operator (screenshot of /admin/login with a browser-console
-    404 for /favicon.ico, comparing it against site/index.html which
+    """2026-07-08: a screenshot of /admin/login with a browser-console
+    404 for /favicon.ico, compared against site/index.html which
     explicitly declares favicon <link> tags under /favicon/): page() --
     every dynamically-rendered page (courses/book/my/admin/admin-login
     alike) -- had NO <link rel="icon"> of its own. Absent one, a browser
@@ -78,12 +78,12 @@ class PageFaviconTest(unittest.TestCase):
 
 
 class IdInputWidthTest(unittest.TestCase):
-    """2026-07-08, the operator (screenshot of /admin/login's password field
+    """2026-07-08: a screenshot of /admin/login's password field
     stretched across the full-width 1000px body, section 14's own width
-    change): "the Name, Email, Password fields should not be that wide
-    ... wide enough for really long passwords (maybe 50 chars) and emails
-    like firstname.doublebarrelled-name@long-company.example" (54
-    chars) -- confirmed "50 chars is OK" as the actual target. `.id-input`
+    change, showed the Name, Email, Password fields should not be that
+    wide -- but wide enough for really long passwords (maybe 50 chars) and
+    emails like firstname.doublebarrelled-name@long-company.example (54
+    chars); 50 chars was confirmed as the actual target. `.id-input`
     caps `.big-input`'s own width:100% at a character-count width (ch
     scales with .big-input's own font-size) rather than a fixed pixel
     value, applied alongside (not instead of) `.big-input` on every
@@ -105,10 +105,10 @@ class IdInputWidthTest(unittest.TestCase):
 
 
 class BigInputDisplayBlockTest(unittest.TestCase):
-    """2026-07-09, the operator (screenshot of /my's login form, Email box visibly
-    wider/further left than the Password box below it): "the 2 boxes
-    should be aligned!", then "This is a regression. This was already nice
-    before." Root cause: `label{display:block;margin-top:.6em}` (see
+    """2026-07-09: a screenshot of /my's login form showed the Email box
+    visibly wider/further left than the Password box below it -- the 2
+    boxes should be aligned, and this was a regression from previously
+    nice alignment. Root cause: `label{display:block;margin-top:.6em}` (see
     templates.py's own <style> block) puts each "Email <input>"/"Password
     <input>" label on its own block, but the INPUT itself defaults to
     inline-block, sitting on the SAME line as its label's text -- so

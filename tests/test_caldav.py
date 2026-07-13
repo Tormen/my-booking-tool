@@ -112,8 +112,8 @@ class CalDAVClientTest(unittest.TestCase):
             self.client.put_event("/caldav/YogaBookings/", "some-uid", "ICS...", etag='"old"')
 
     def test_put_event_412_raises_the_specific_conflict_subclass(self):
-        # 2026-07-07, the operator (a real production 500 on /my/confirm,
-        # root-caused to a stale-ETag CalDAV 412): calendar_sync.
+        # 2026-07-07: a real production 500 on /my/confirm was
+        # root-caused to a stale-ETag CalDAV 412 -- calendar_sync.
         # sync_occurrence's retry loop needs to catch THIS conflict case
         # specifically (and re-fetch a fresh ETag), not every CalDAVError
         # indiscriminately -- a genuine, non-transient failure should
@@ -138,9 +138,9 @@ class CalDAVClientTest(unittest.TestCase):
         self.client.delete_event("/caldav/YogaBookings/", "some-uid", etag='"old"')  # no raise
 
     def test_query_events_logs_uid_etag_and_both_hrefs_at_debug(self):
-        # 2026-07-16, the operator: "But there must be another problem with the
-        # Calendar. Please do NOT retry more often!!! But rather collect
-        # DEBUG OUTPUT please!!!" -- one candidate root cause is the
+        # 2026-07-16: retrying more often wasn't fixing the underlying
+        # calendar problem, so debug output is collected instead -- one
+        # candidate root cause is the
         # server reporting a different href for an event than the one
         # put_event()/delete_event() assume (`<uid>.ics`); this just
         # confirms the raw facts (uid, etag, reported href, assumed

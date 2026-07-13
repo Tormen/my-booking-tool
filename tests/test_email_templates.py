@@ -1,7 +1,7 @@
-"""app/email_templates.py -- 2026-07-09, the operator: "Add support for MAKROS in
-the templates, you need support for VARIABLES anyways. Then the
-cancel_email.html for instance should DEFINE how the final email is
-assembled" -- see that module's own docstring for the full design
+"""app/email_templates.py -- 2026-07-09: support for MACROS in
+the templates was added, building on VARIABLE support already present, so
+cancel_email.html for instance can DEFINE how the final email is
+assembled -- see that module's own docstring for the full design
 (variables and macros are the same substitution mechanism; only the
 ASSEMBLY ORDER moves into the template file, not what each piece
 renders)."""
@@ -16,7 +16,7 @@ from .helpers import make_settings
 
 class RenderTemplateTest(unittest.TestCase):
     def test_substitutes_a_single_placeholder(self):
-        self.assertEqual(render_template("Hello {{name}}!", name="the operator"), "Hello the operator!")
+        self.assertEqual(render_template("Hello {{name}}!", name="Alice"), "Hello Alice!")
 
     def test_substitutes_multiple_placeholders_in_any_order(self):
         rendered = render_template("{{b}}{{a}}{{b}}", a="A", b="B")
@@ -24,7 +24,7 @@ class RenderTemplateTest(unittest.TestCase):
 
     def test_missing_context_value_raises_key_error_naming_the_placeholder(self):
         with self.assertRaises(KeyError) as ctx:
-            render_template("Hello {{typo}}!", name="the operator")
+            render_template("Hello {{typo}}!", name="Alice")
         self.assertIn("typo", str(ctx.exception))
 
     def test_a_values_own_literal_braces_are_not_re_scanned(self):
