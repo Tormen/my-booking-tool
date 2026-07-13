@@ -198,6 +198,24 @@ install -m 644 site/nginx-locations.conf.example %{buildroot}/opt/my-booking/sit
 # the one place.
 install -m 644 nginx/my-booking.conf %{buildroot}/opt/my-booking/site/my-booking.conf.example
 
+# index_embedded.html.tmpl (2026-07-16) -- an OPTIONAL twin of
+# privacy.html.tmpl above: a no-JavaScript variant of the homepage, meant
+# for embedding this site via <iframe> on another site (see
+# site/index_embedded.html.tmpl.example's own docstring). Unlike
+# privacy.html.tmpl/nginx-locations.conf above, this is NOT forced into
+# existence by scripts/build-rpm.sh's materialize-from-.example step, and
+# deliberately not packaged here as a real %config(noreplace) file either
+# -- most deployments don't need an iframe-embeddable variant at all, and
+# packaging a generic, auto-materialized real copy for every install would
+# make every fresh install look "opted in" to app/cli_checks.py::
+# check_index_embedded_drift, nagging operators who never asked for this.
+# Only the tracked .example starting point is shipped here; a deployment
+# that DOES want this feature places its own real
+# /opt/my-booking/site/index_embedded.html.tmpl directly (`my-bt setup -i`
+# picks it up regardless of whether rpm itself put it there -- see
+# README.md "Static-site pages").
+install -m 644 site/index_embedded.html.tmpl.example %{buildroot}/opt/my-booking/site/index_embedded.html.tmpl.example
+
 install -d %{buildroot}%{_sharedstatedir}/my-booking
 
 install -d %{buildroot}%{_docdir}/%{name}
@@ -209,8 +227,15 @@ install -m 644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 # the same reason -- see the maintainer's local notes. Only the generic README.md and
 # the site/*.html below (real if you have them, else the generic
 # .example placeholders -- see scripts/build-rpm.sh) get shipped.
+#
+# site/index_embedded.html (2026-07-16) is included here unconditionally --
+# unlike its own .tmpl above, the RENDERED output always exists by the time
+# %install runs regardless of whether a real .tmpl was ever created:
+# scripts/render-site.py falls back to index_embedded.html.tmpl.example the
+# same way it already does for privacy.html.tmpl, so this is exactly as
+# safe as the other reference copies on this line.
 install -d %{buildroot}%{_docdir}/%{name}/site
-install -m 644 site/index.html site/privacy.html site/terms.html site/impressum.html %{buildroot}%{_docdir}/%{name}/site/
+install -m 644 site/index.html site/privacy.html site/terms.html site/impressum.html site/index_embedded.html %{buildroot}%{_docdir}/%{name}/site/
 
 %pre
 getent group my-booking >/dev/null || groupadd -r my-booking
@@ -377,6 +402,7 @@ exit 0
 %config(noreplace) /opt/my-booking/site/nginx-locations.conf
 /opt/my-booking/site/nginx-locations.conf.example
 /opt/my-booking/site/my-booking.conf.example
+/opt/my-booking/site/index_embedded.html.tmpl.example
 %config(noreplace) /etc/my-booking/settings.toml
 /etc/my-booking/settings.toml.example
 %dir %attr(700,my-booking,my-booking) /etc/my-booking/secrets
@@ -394,6 +420,7 @@ exit 0
 %doc %{_docdir}/%{name}/site/privacy.html
 %doc %{_docdir}/%{name}/site/terms.html
 %doc %{_docdir}/%{name}/site/impressum.html
+%doc %{_docdir}/%{name}/site/index_embedded.html
 
 %changelog
 # REPLACE-ME (forks): use your own name/email on entries for your own real

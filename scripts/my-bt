@@ -1114,7 +1114,9 @@ def cmd_maintenance(args) -> None:
     checks on every guarded request (see app/maintenance.py's own
     docstring for exactly which routes that covers), AND directly patches
     an idempotent, clearly-marked banner into the TOP of the live,
-    deployed index.html at [site].static_site_dir, if configured.
+    deployed index.html (and, if it's been generated, index_embedded.html
+    -- 2026-07-16, see app/site_render.py's own docstring for what that
+    second page is) at [site].static_site_dir, if configured.
 
     2026-07-10: my-bt should not modify the package-installed
     TEMPLATE folder site -- this used to ALSO patch this checkout's own
@@ -1130,6 +1132,7 @@ def cmd_maintenance(args) -> None:
     `off` reverses both. `status` only reports the current state --
     touches nothing."""
     from app import maintenance as app_maintenance
+    from app import site_render as app_site_render
 
     raw = app_config.load_raw_toml(args.settings)
     admin_email = (raw or {}).get("site", {}).get("admin_email", "")
@@ -1145,7 +1148,17 @@ def cmd_maintenance(args) -> None:
             print("maintenance mode: off")
         return
 
-    targets = [Path(static_site_dir) / "index.html"] if static_site_dir else []
+    # index_embedded.html (2026-07-16): an optional page (see
+    # app/cli_checks.py::check_index_embedded_drift) -- apply_banner_to_file()
+    # already no-ops (returns False) on a target that doesn't exist yet, and
+    # the reporting loop below already prints "[skip] ... does not exist"
+    # for that case, same as index.html itself before it's ever been
+    # deployed -- so it's safe to always include this target, regardless of
+    # whether this deployment actually uses index_embedded.html at all.
+    targets = (
+        [Path(static_site_dir) / "index.html", Path(static_site_dir) / app_site_render.EMBEDDED_OUTPUT_NAME]
+        if static_site_dir else []
+    )
 
     enabling = args.maintenance_command == "on"
     if enabling:

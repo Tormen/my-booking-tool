@@ -910,6 +910,133 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         self.assertFalse((nginx_root / "privacy.html").exists())
 
 
+class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
+    """index_embedded.html (2026-07-16) -- optional twin of privacy.html's
+    own regen offer (InteractiveSetupStaticSiteTest above): only ever
+    offered once site/index_embedded.html.tmpl (the real, hand-customized
+    template) actually exists in `home` -- see
+    site/index_embedded.html.tmpl.example's own docstring."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+        self.static_dir = self.home / "live"
+        self.static_dir.mkdir()
+        doc_site_patcher = patch("app.cli_checks._DOC_SITE_DIR", self.home / "no-such-doc-site")
+        doc_site_patcher.start()
+        self.addCleanup(doc_site_patcher.stop)
+
+    def _write_embedded_tmpl(self):
+        (self.home / "site" / "index_embedded.html.tmpl").write_text(
+            "<html><body>${schedule_exceptions_html}</body></html>"
+        )
+
+    def test_no_real_template_is_never_prompted(self):
+        # The .example alone (no real .tmpl) isn't enough to opt in.
+        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
+        prompt = FakePrompts({})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
+
+    def test_accepting_regenerates_the_live_page(self):
+        self._write_embedded_tmpl()
+        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
+        prompt = FakePrompts({"Re)generate": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        self.assertTrue(out.exists())
+        self.assertIn("MANAGED BY my-bt", out.read_text())
+
+    def test_declining_leaves_it_unwritten(self):
+        self._write_embedded_tmpl()
+        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
+        prompt = FakePrompts({"Re)generate": False})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertFalse((self.static_dir / site_render.EMBEDDED_OUTPUT_NAME).exists())
+
+    def test_not_prompted_when_already_matching(self):
+        self._write_embedded_tmpl()
+        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        site_render.write_index_embedded_html(
+            self.home / "site" / "index_embedded.html.tmpl", (), "2026-07-10", out,
+        )
+        # default=True: would write again if (wrongly) asked+accepted -- also
+        # accepts the unrelated privacy.html regen prompt this fixture's own
+        # site/privacy.html.tmpl triggers, so this asserts specifically on
+        # "no index_embedded.html prompt", not the full (unrelated) call list.
+        prompt = FakePrompts({}, default=True)
+        before = out.read_text()
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
+        self.assertEqual(out.read_text(), before)
+
+    def test_new_date_override_triggers_a_regen_offer(self):
+        self._write_embedded_tmpl()
+        course = {
+            "shortname": "trier", "title": "Yoga", "location": "Trier", "weekday": "sat",
+            "start_time": "10:45", "duration_minutes": 120, "capacity": 10,
+            "date_override": [{"date": "2026-07-18", "start_time": "09:45"}],
+        }
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        site_render.write_index_embedded_html(
+            self.home / "site" / "index_embedded.html.tmpl", (), "2026-07-10", out,
+        )  # deployed with NO overrides baked in yet
+        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[course])
+        prompt = FakePrompts({"Re)generate": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertIn("ATTENTION", out.read_text())
+
+    def test_regen_preserves_an_active_maintenance_banner(self):
+        self._write_embedded_tmpl()
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        # Deployed, stale (so a regen is actually offered), WITH an active
+        # maintenance banner already inserted -- the banner must survive
+        # the regen, not get silently dropped by a blind overwrite.
+        stale = site_render.render_index_embedded_html(
+            self.home / "site" / "index_embedded.html.tmpl", (), "2026-06-01",
+        )
+        banner = maintenance.banner_html("admin@example.org", "back Monday")
+        out.write_text(maintenance.insert_banner(stale, banner))
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "admin_email": "admin@example.org"}, course=[])
+        data_dir = self.home / "data"
+        data_dir.mkdir()
+        maintenance.enable(data_dir, message="back Monday")
+        prompt = FakePrompts({"Re)generate": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home), data_dir=str(data_dir),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertIn("MAINTENANCE-BANNER:START", out.read_text())
+        self.assertIn("back Monday", out.read_text())
+
+
 class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
     """[site].nginx_conf_path: read directly off disk (never via `nginx -T`
     or a checkout glob), and -- unlike static_site_dir's own vimdiff offer

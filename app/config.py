@@ -456,20 +456,19 @@ def _read_secret(path_str: str) -> str:
     return value
 
 
-def load_settings(toml_path: str | Path) -> Settings:
-    toml_path = Path(toml_path)
-    with toml_path.open("rb") as f:
-        raw = tomllib.load(f)
-
-    site = raw["site"]
-    cal = raw["calendar"]
-    smtp = raw["smtp"]
-    admin = raw["admin"]
-    defaults = raw.get("defaults", {})
-    privacy = raw.get("privacy", {})
-    logging_cfg = raw.get("logging", {})
-    watchdog = raw.get("watchdog", {})
-
+def courses_from_raw(raw: dict) -> tuple[Course, ...]:
+    """Parses every `[[course]]` (and nested `[[course.date_override]]`)
+    sub-table into real `Course`/`CourseDateOverride` objects, straight off
+    the *raw* parsed TOML -- no secrets touched, so a caller that only has
+    `raw` (e.g. `my-bt status`/`setup`, or app/site_render.py's
+    index_embedded.html rendering) can get real `Course` objects (needed
+    for `Course.time_range_label_for()`, used to render an upcoming
+    date_override's exceptional time) without needing a fully loaded
+    `Settings` -- which would require every secret file to exist first.
+    Factored out of load_settings() (2026-07-16), which now just calls this
+    -- the parsing logic itself hasn't changed, only where it lives, so
+    load_settings()'s own behavior (including its duplicate-shortname
+    check) is unchanged."""
     courses = [
         Course(
             shortname=c["shortname"],
@@ -507,7 +506,62 @@ def load_settings(toml_path: str | Path) -> Settings:
     # course left at the default order_in_all_courses=0 keeps its original
     # settings.toml position relative to every other 0-order course, so
     # this is a no-op unless order_in_all_courses is actually set somewhere.
-    courses = tuple(sorted(courses, key=lambda c: c.order_in_all_courses))
+    return tuple(sorted(courses, key=lambda c: c.order_in_all_courses))
+
+
+def today_in_raw_timezone(raw: dict) -> str:
+    """"YYYY-MM-DD" for "now" in `[site].timezone` -- falls back to UTC if
+    the raw dict doesn't have one yet (e.g. an incomplete settings.toml a
+    health check is still allowed to inspect). Shared by
+    app/webapp.py::schedule_exceptions and app/site_render.py's
+    index_embedded.html rendering so both agree on what "today" means when
+    filtering upcoming_date_overrides() below."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    tz_name = raw.get("site", {}).get("timezone") or "UTC"
+    return datetime.now(ZoneInfo(tz_name)).date().isoformat()
+
+
+def upcoming_date_overrides(courses, today: str) -> list[dict]:
+    """Every CourseDateOverride across `courses` whose date is >= `today`
+    ("YYYY-MM-DD"), sorted (date, then shortname) -- the exact computation
+    app/webapp.py::schedule_exceptions used to do inline for its public
+    JSON endpoint (2026-07-16). Factored out here so that live endpoint AND
+    app/site_render.py's static index_embedded.html rendering share one
+    definition of "upcoming" and can never drift apart on it -- each item:
+    {course_shortname, course_title, date, time_label, message}."""
+    items = [
+        {
+            "course_shortname": course.shortname,
+            "course_title": course.title,
+            "date": override.date,
+            "time_label": course.time_range_label_for(override.date),
+            "message": override.message,
+        }
+        for course in courses
+        for override in course.date_overrides
+        if override.date >= today
+    ]
+    items.sort(key=lambda it: (it["date"], it["course_shortname"]))
+    return items
+
+
+def load_settings(toml_path: str | Path) -> Settings:
+    toml_path = Path(toml_path)
+    with toml_path.open("rb") as f:
+        raw = tomllib.load(f)
+
+    site = raw["site"]
+    cal = raw["calendar"]
+    smtp = raw["smtp"]
+    admin = raw["admin"]
+    defaults = raw.get("defaults", {})
+    privacy = raw.get("privacy", {})
+    logging_cfg = raw.get("logging", {})
+    watchdog = raw.get("watchdog", {})
+
+    courses = courses_from_raw(raw)
 
     return Settings(
         timezone=site["timezone"],

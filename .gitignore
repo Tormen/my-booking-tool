@@ -11,6 +11,8 @@
 /site/privacy.html.tmpl
 /site/terms.html
 /site/nginx-locations.conf
+/site/index_embedded.html
+/site/index_embedded.html.tmpl
 
 # Early drafts of the same real legal content above, kept locally for
 # history but not meant for the public template repo.

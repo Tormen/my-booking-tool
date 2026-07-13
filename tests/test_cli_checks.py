@@ -1305,6 +1305,71 @@ class CheckStaticSiteDriftTest(unittest.TestCase):
         self.assertIn("doesn't match", checks[0][2])
 
 
+class CheckIndexEmbeddedDriftTest(unittest.TestCase):
+    """check_index_embedded_drift (2026-07-16) -- mirrors
+    CheckStaticSiteDriftTest above, plus the "optional -- absent .tmpl is
+    silent, not a warning" behavior that's unique to this one."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.tmpl_path = self.dir / "index_embedded.html.tmpl"
+        self.tmpl_path.write_text(
+            "<html><body>${schedule_exceptions_html}</body></html>", encoding="utf-8",
+        )
+        self.static_dir = self.dir / "live"
+        self.static_dir.mkdir()
+
+    def _raw(self, static_site_dir=None, timezone="UTC", course=None) -> dict:
+        raw = {"site": {"timezone": timezone}}
+        if static_site_dir:
+            raw["site"]["static_site_dir"] = static_site_dir
+        if course:
+            raw["course"] = [course]
+        return raw
+
+    def test_static_site_dir_not_configured_is_a_noop(self):
+        checks = cli_checks.check_index_embedded_drift(self._raw(), self.tmpl_path)
+        self.assertEqual(checks, [])
+
+    def test_template_missing_is_a_silent_noop_not_a_warning(self):
+        # Optional feature (unlike privacy.html.tmpl): absence just means
+        # "not opted into", never something to report.
+        missing_tmpl = self.dir / "does-not-exist.html.tmpl"
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), missing_tmpl)
+        self.assertEqual(checks, [])
+
+    def test_not_deployed_yet_warns(self):
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), self.tmpl_path)
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("not deployed yet", checks[0][2])
+
+    def test_matching_deployed_page_is_ok(self):
+        site_render.write_index_embedded_html(self.tmpl_path, (), "2026-07-10", self.static_dir / "index_embedded.html")
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), self.tmpl_path)
+        self.assertEqual(checks[0][1], "ok")
+
+    def test_new_course_date_override_makes_deployed_page_stale(self):
+        course = {"shortname": "trier", "title": "Yoga", "location": "Trier", "weekday": "sat",
+                  "start_time": "10:45", "duration_minutes": 120, "capacity": 10}
+        # Deployed with NO overrides; settings.toml has since gained one.
+        site_render.write_index_embedded_html(self.tmpl_path, (), "2026-07-10", self.static_dir / "index_embedded.html")
+        course["date_override"] = [{"date": "2026-07-18", "start_time": "09:45"}]
+        checks = cli_checks.check_index_embedded_drift(
+            self._raw(str(self.static_dir), course=course), self.tmpl_path
+        )
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("doesn't match", checks[0][2])
+
+    def test_active_maintenance_banner_is_not_reported_as_drift(self):
+        out_path = self.static_dir / "index_embedded.html"
+        site_render.write_index_embedded_html(self.tmpl_path, (), "2026-07-10", out_path)
+        maintenance.apply_banner_to_file(out_path, True, "admin@example.org", "back Monday")
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), self.tmpl_path)
+        self.assertEqual(checks[0][1], "ok")
+
+
 class CheckStaticSiteComplianceTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

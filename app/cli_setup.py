@@ -21,7 +21,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from . import cli_checks, security as app_security, site_render
+from . import cli_checks, maintenance, security as app_security, site_render
 from .atomic_io import atomic_write_text
 
 # Same env-var-with-localhost-default convention as scripts/my-bt's own
@@ -153,6 +153,14 @@ def tmpl_path(home: str) -> Path:
     return Path(home) / "site" / site_render.TEMPLATE_NAME
 
 
+def embedded_tmpl_path(home: str) -> Path:
+    # 2026-07-16: the real, optional site/index_embedded.html.tmpl (see
+    # site/index_embedded.html.tmpl.example's own docstring) -- same
+    # real-or-.example resolution as tmpl_path() above, just for the
+    # second generated page.
+    return Path(home) / "site" / site_render.EMBEDDED_TEMPLATE_NAME
+
+
 def _course_summary(raw: dict) -> str:
     return ", ".join(c.get("shortname", "?") for c in raw.get("course", [])) or "(none configured)"
 
@@ -168,6 +176,12 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
     printed and interactive modes (and `status`, for the ones it also
     reports) can't drift out of sync with each other."""
     config_paths = [settings_path, str(tmpl_path(home))]
+    # index_embedded.html.tmpl is optional (see embedded_tmpl_path's own
+    # comment) -- only tracked for .rpmnew merges once it actually exists,
+    # same "not opted into -- nothing to report" gating
+    # check_index_embedded_drift below already applies.
+    if embedded_tmpl_path(home).exists():
+        config_paths.append(str(embedded_tmpl_path(home)))
     return {
         "secrets": cli_checks.check_secrets(raw),
         "rpmnew": cli_checks.check_rpmnew(config_paths),
@@ -179,6 +193,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "nginx_conf_repo_file": cli_checks.check_nginx_conf_repo_file(home),
         "nginx_conf_deployed": cli_checks.check_nginx_conf_deployed(raw),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
+        "index_embedded_drift": cli_checks.check_index_embedded_drift(raw, embedded_tmpl_path(home)),
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
         "static_pages_reachable": cli_checks.check_static_pages_reachable(raw),
@@ -291,7 +306,7 @@ def print_report(
 
     print_fn("\n8. Static site (site/*.html on your live host):")
     static_site_checks = (
-        report["static_site"] + report["static_site_compliance"]
+        report["static_site"] + report["index_embedded_drift"] + report["static_site_compliance"]
         + report["static_pages_deployed"] + report["static_pages_reachable"]
         + report["static_site_dir_group_selinux"]
     )
@@ -703,6 +718,48 @@ def interactive_setup(
                 print_fn(f"[ok] wrote {out_path}")
             except OSError as exc:
                 print_fn(f"[fail] could not write {out_path}: {exc}")
+
+        # index_embedded.html (2026-07-16): same render-from-template
+        # mechanism as privacy.html just above, just optional -- only
+        # offered at all once site/index_embedded.html.tmpl (the real,
+        # hand-customized template) actually exists in this checkout; see
+        # site/index_embedded.html.tmpl.example's own docstring for what
+        # it's for (a no-JavaScript variant of the homepage, meant for the
+        # <iframe>-embed use case).
+        embedded_t = embedded_tmpl_path(home)
+        if embedded_t.exists():
+            embedded_out_path = Path(static_site_dir) / site_render.EMBEDDED_OUTPUT_NAME
+            embedded_drift_checks = cli_checks.check_index_embedded_drift(raw, embedded_t)
+            for label, level, detail in embedded_drift_checks:
+                print_fn(f"[{level}] {label}: {detail}")
+            embedded_needs_regen = any(level != "ok" for _, level, _ in embedded_drift_checks)
+            if embedded_needs_regen and prompt(
+                f"(Re)generate {embedded_out_path} from current settings.toml now?"
+            ):
+                try:
+                    from . import config as app_config
+
+                    courses = app_config.courses_from_raw(raw)
+                    today = app_config.today_in_raw_timezone(raw)
+                    rendered = site_render.render_index_embedded_html(embedded_t, courses, today)
+                    # Re-apply an active maintenance banner (2026-07-16):
+                    # `my-bt admin site-maintenance on/off` patches this
+                    # file directly, same as index.html (see
+                    # app/maintenance.py, scripts/my-bt::cmd_maintenance) --
+                    # a blind overwrite here would silently drop that
+                    # banner mid-maintenance-window, only to have it
+                    # missing until the next `site-maintenance on/off` toggle
+                    # happened to run again.
+                    state = maintenance.read_state(data_dir)
+                    if state.enabled:
+                        admin_email = raw.get("site", {}).get("admin_email", "")
+                        rendered = maintenance.insert_banner(
+                            rendered, maintenance.banner_html(admin_email, state.message)
+                        )
+                    atomic_write_text(embedded_out_path, rendered)
+                    print_fn(f"[ok] wrote {embedded_out_path}")
+                except OSError as exc:
+                    print_fn(f"[fail] could not write {embedded_out_path}: {exc}")
 
         # index.html/impressum.html/terms.html: hand-authored, so never
         # auto-copied silently -- but actively OFFER to act on each one

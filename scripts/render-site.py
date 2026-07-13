@@ -78,6 +78,17 @@ TEMPLATES = [
     ("site/privacy.html.tmpl", "site/privacy.html"),
 ]
 
+# index_embedded.html (2026-07-16) -- rendered separately from the loop
+# above, not folded into TEMPLATES: it substitutes upcoming
+# [[course.date_override]] entries, not the [privacy] retention numbers
+# every TEMPLATES entry shares, so it needs its own settings-derived inputs
+# (see app.config.courses_from_raw / today_in_raw_timezone) rather than
+# site_render.write_privacy_html's two plain numbers. See
+# app/site_render.py's own docstring and site/index_embedded.html.tmpl.example
+# for what this second page is for.
+EMBEDDED_TEMPLATE_REL = "site/index_embedded.html.tmpl"
+EMBEDDED_OUTPUT_REL = "site/index_embedded.html"
+
 
 def render(settings_path: Path | None = None) -> tuple[list[str], dict]:
     settings_path = resolve_real_or_example(settings_path or DEFAULT_SETTINGS)
@@ -94,6 +105,15 @@ def render(settings_path: Path | None = None) -> tuple[list[str], dict]:
             tmpl_path, retention_months, canceled_retention_months, REPO_ROOT / out_rel
         )
         written.append(out_rel)
+
+    from app import config as app_config
+
+    embedded_tmpl_path = resolve_real_or_example(REPO_ROOT / EMBEDDED_TEMPLATE_REL)
+    courses = app_config.courses_from_raw(raw)
+    today = app_config.today_in_raw_timezone(raw)
+    site_render.write_index_embedded_html(embedded_tmpl_path, courses, today, REPO_ROOT / EMBEDDED_OUTPUT_REL)
+    written.append(EMBEDDED_OUTPUT_REL)
+
     values = {"retention_months": retention_months, "canceled_retention_months": canceled_retention_months}
     return written, values
 
@@ -101,10 +121,13 @@ def render(settings_path: Path | None = None) -> tuple[list[str], dict]:
 def main() -> int:
     written, values = render()
     for out_rel in written:
-        print(
-            f"wrote {out_rel} (retention_months={values['retention_months']}, "
-            f"canceled_retention_months={values['canceled_retention_months']})"
-        )
+        if out_rel == "site/privacy.html":
+            print(
+                f"wrote {out_rel} (retention_months={values['retention_months']}, "
+                f"canceled_retention_months={values['canceled_retention_months']})"
+            )
+        else:
+            print(f"wrote {out_rel}")
     return 0
 
 

@@ -23,7 +23,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse
 
-from . import maintenance, site_render
+from . import config, maintenance, site_render
 from .caldav_client import CalDAVClient, HttpTransport
 
 Check = tuple[str, str, str]  # (label, "ok"|"warn"|"fail", detail)
@@ -974,7 +974,7 @@ def check_static_pages_reachable(raw: dict) -> list[Check]:
     if Path(nginx_root).resolve() == Path(static_site_dir).resolve():
         return []  # same directory -- every file is trivially reachable, nothing to report
     checks: list[Check] = []
-    for name in (site_render.OUTPUT_NAME,) + _STATIC_PAGES_TO_DEPLOY:
+    for name in (site_render.OUTPUT_NAME, site_render.EMBEDDED_OUTPUT_NAME) + _STATIC_PAGES_TO_DEPLOY:
         managed = Path(static_site_dir) / name
         if not managed.exists():
             continue  # not deployed at all yet -- already covered by other checks
@@ -1222,6 +1222,57 @@ def check_static_site_drift(raw: dict, template_path: str | Path) -> list[Check]
     )]
 
 
+def check_index_embedded_drift(raw: dict, template_path: str | Path) -> list[Check]:
+    """Mirrors check_static_site_drift above, for the second generated
+    page: index_embedded.html, a no-JavaScript variant of the homepage
+    meant for embedding this site via `<iframe>` on another site (see
+    site/index_embedded.html.tmpl.example's own docstring). Compares the
+    LIVE deployed copy against what the CURRENT settings.toml --
+    specifically, any upcoming [[course.date_override]] entries -- would
+    actually render right now: this page can't fetch that live via
+    JavaScript the way site/index.html's own small script does (that's the
+    whole point of it -- no scripts at all), so staying in sync depends
+    entirely on regenerating it whenever the schedule changes.
+
+    UNLIKE check_static_site_drift, this is a no-op (empty list) if the
+    real site/index_embedded.html.tmpl doesn't exist in this checkout at
+    all -- this page is optional (most deployments don't embed their site
+    via iframe elsewhere), so its absence isn't itself something to report,
+    unlike privacy.html.tmpl, which every install needs real legal text
+    for.
+
+    Compares with the maintenance banner stripped from both sides (same
+    `_diffable_static_page_text` helper check_static_pages_deployed()
+    already uses for index.html) -- `my-bt admin site-maintenance on/off`
+    inserts/removes that banner directly in the deployed file (see
+    app/maintenance.py, scripts/my-bt::cmd_maintenance), so an active
+    maintenance window must never look like settings.toml drift here."""
+    static_site_dir = raw.get("site", {}).get("static_site_dir")
+    if not static_site_dir:
+        return []
+    template_path = Path(template_path)
+    if not template_path.exists():
+        return []  # optional page, not opted into -- nothing to check
+
+    courses = config.courses_from_raw(raw)
+    today = config.today_in_raw_timezone(raw)
+    expected = site_render.render_index_embedded_html(template_path, courses, today)
+
+    deployed_path = Path(static_site_dir) / site_render.EMBEDDED_OUTPUT_NAME
+    if not deployed_path.exists():
+        return [(f"static site ({deployed_path})", "warn",
+                  "index_embedded.html.tmpl found but not deployed yet -- "
+                  "run `my-bt setup -i` to generate and deploy it")]
+    actual = deployed_path.read_text(encoding="utf-8", errors="replace")
+    if _diffable_static_page_text(actual) == _diffable_static_page_text(expected):
+        return [(f"static site ({deployed_path})", "ok", "matches current settings.toml")]
+    return [(
+        f"static site ({deployed_path})", "warn",
+        "doesn't match current settings.toml (course date_override entries changed "
+        "since it was last generated) -- run `my-bt setup -i` to regenerate",
+    )]
+
+
 # Sentinel left in every tracked site/*.html.example placeholder (see
 # site/index.html.example etc.) specifically so this check has something
 # reliable to grep for -- if you see this in a LIVE page, the generic
@@ -1234,7 +1285,7 @@ _UNSUBSTITUTED_PLACEHOLDER = re.compile(r"\$\{[a-zA-Z_][a-zA-Z0-9_]*\}")
 # (stale retention numbers) is already covered by check_static_site_drift
 # above, so this only adds the placeholder-marker check for it, same as
 # the other three.
-_SITE_PAGES = ("index.html", "impressum.html", "terms.html", "privacy.html")
+_SITE_PAGES = ("index.html", "impressum.html", "terms.html", "privacy.html", site_render.EMBEDDED_OUTPUT_NAME)
 
 
 def _my_booking_can_read(path: Path) -> bool | None:

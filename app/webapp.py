@@ -124,7 +124,7 @@ from .cancellation import (
     attention_html, booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text,
     intro_html, send_cancellation_emails, send_reinstatement_emails,
 )
-from .config import Settings
+from .config import Settings, upcoming_date_overrides
 from .email_templates import load_email_template, render_template
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
@@ -1052,23 +1052,17 @@ class App:
         stale banner for a session that no longer exists; remove the
         override from settings.toml if that ever actually happens.
         Past dates (before today, in settings.timezone) are filtered out
-        so this doesn't grow forever."""
+        so this doesn't grow forever.
+
+        2026-07-16: the actual filter+sort logic moved to
+        app.config.upcoming_date_overrides (dict-based, so
+        app/site_render.py's static index_embedded.html rendering -- see
+        that file's own docstring -- can share the exact same "what counts
+        as upcoming" definition instead of drifting from this endpoint)."""
         if method != "GET":
             return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
         today = datetime.now(ZoneInfo(self.settings.timezone)).date().isoformat()
-        items = [
-            {
-                "course_shortname": course.shortname,
-                "course_title": course.title,
-                "date": override.date,
-                "time_label": course.time_range_label_for(override.date),
-                "message": override.message,
-            }
-            for course in self.settings.courses
-            for override in course.date_overrides
-            if override.date >= today
-        ]
-        items.sort(key=lambda it: (it["date"], it["course_shortname"]))
+        items = upcoming_date_overrides(self.settings.courses, today)
         return "200 OK", [("Content-Type", "application/json")], json.dumps(items)
 
     # -- /book ---------------------------------------------------------------

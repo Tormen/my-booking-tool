@@ -483,5 +483,104 @@ class LoadSettingsDateOverrideTest(LoadSettingsCourseOrderTest):
         self.assertEqual([o.date for o in overrides], ["2026-07-18", "2026-08-01"])
 
 
+class CoursesFromRawTest(LoadSettingsDateOverrideTest):
+    """courses_from_raw() (2026-07-16, factored out of load_settings() so a
+    raw-dict-only caller -- e.g. app/site_render.py's index_embedded.html
+    rendering, app/cli_checks.py's health checks -- can get real Course
+    objects without needing every secret file to exist first) must parse
+    IDENTICALLY to what load_settings() itself produces for the exact same
+    input -- reuses LoadSettingsDateOverrideTest's own
+    secrets+MINIMAL_HEADER+date_override fixture so both can be loaded from
+    one file."""
+
+    def test_matches_load_settings_courses_for_the_same_file(self):
+        from app.config import courses_from_raw, load_raw_toml
+
+        toml_path = self._write(self._course_block_with_override(
+            "trier", date="2026-07-18", start_time="09:45", message="Back at 13h.",
+        ))
+        settings = load_settings(toml_path)
+        raw = load_raw_toml(toml_path)
+        self.assertEqual(courses_from_raw(raw), settings.courses)
+
+    def test_duplicate_shortname_raises(self):
+        from app.config import courses_from_raw
+
+        raw = {"course": [
+            {"shortname": "dup", "title": "A", "location": "L", "weekday": "mon",
+             "start_time": "10:00", "duration_minutes": 60, "capacity": 5},
+            {"shortname": "dup", "title": "B", "location": "L", "weekday": "tue",
+             "start_time": "10:00", "duration_minutes": 60, "capacity": 5},
+        ]}
+        with self.assertRaises(ValueError):
+            courses_from_raw(raw)
+
+    def test_no_course_table_is_an_empty_tuple(self):
+        from app.config import courses_from_raw
+
+        self.assertEqual(courses_from_raw({}), ())
+
+
+class TodayInRawTimezoneTest(unittest.TestCase):
+    def test_uses_configured_timezone(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from app.config import today_in_raw_timezone
+
+        raw = {"site": {"timezone": "Europe/Berlin"}}
+        expected = datetime.now(ZoneInfo("Europe/Berlin")).date().isoformat()
+        self.assertEqual(today_in_raw_timezone(raw), expected)
+
+    def test_falls_back_to_utc_when_missing(self):
+        from datetime import datetime, timezone
+
+        from app.config import today_in_raw_timezone
+
+        expected = datetime.now(timezone.utc).date().isoformat()
+        self.assertEqual(today_in_raw_timezone({}), expected)
+
+
+class UpcomingDateOverridesTest(unittest.TestCase):
+    def test_filters_past_dates(self):
+        from app.config import upcoming_date_overrides
+
+        course = make_course(
+            shortname="trier",
+            date_overrides=(
+                CourseDateOverride(date="2026-07-01", start_time="09:00"),
+                CourseDateOverride(date="2026-07-18", start_time="09:45", message="Back at 13h."),
+            ),
+        )
+        items = upcoming_date_overrides([course], "2026-07-10")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["date"], "2026-07-18")
+        self.assertEqual(items[0]["course_shortname"], "trier")
+        self.assertEqual(items[0]["message"], "Back at 13h.")
+
+    def test_sorted_by_date_then_shortname(self):
+        from app.config import upcoming_date_overrides
+
+        course_a = make_course(shortname="b-course", date_overrides=(
+            CourseDateOverride(date="2026-08-01", start_time="09:00"),
+        ))
+        course_b = make_course(shortname="a-course", date_overrides=(
+            CourseDateOverride(date="2026-08-01", start_time="09:00"),
+        ))
+        course_c = make_course(shortname="z-course", date_overrides=(
+            CourseDateOverride(date="2026-07-20", start_time="09:00"),
+        ))
+        items = upcoming_date_overrides([course_a, course_b, course_c], "2026-07-10")
+        self.assertEqual(
+            [(it["date"], it["course_shortname"]) for it in items],
+            [("2026-07-20", "z-course"), ("2026-08-01", "a-course"), ("2026-08-01", "b-course")],
+        )
+
+    def test_no_overrides_is_empty_list(self):
+        from app.config import upcoming_date_overrides
+
+        self.assertEqual(upcoming_date_overrides([make_course()], "2026-07-10"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

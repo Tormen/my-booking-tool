@@ -145,7 +145,7 @@ app/                        the application (stdlib-only Python package)
   erasure.py                GDPR Art. 17 orchestration
   retention.py              GDPR Art. 5(1)(e) purge job (the "cronjob")
   git_snapshot.py           hourly auto-commit of the data dir to its own git repo
-  site_render.py            renders site/privacy.html -- see "Static-site pages"
+  site_render.py            renders site/privacy.html + site/index_embedded.html -- see "Static-site pages"
   maintenance.py            `my-bt admin site-maintenance on/off/status` -- see "Maintenance mode"
   cli_checks.py             `my-bt admin health`/`admin setup` health checks -- pure, unit-tested
   cli_setup.py              `my-bt admin setup`/`admin setup -i` report + walkthrough logic
@@ -698,7 +698,10 @@ something seems off, or after any install/reinstall (this is what plain
 - If `[site].static_site_dir` is set: whether the live `privacy.html` at
   that path actually matches what current `settings.toml` values would
   render (see "Static-site pages" below) -- catches a `retention_months`
-  edit that hasn't been pushed out to the live page yet -- and whether any
+  edit that hasn't been pushed out to the live page yet -- and, if you've
+  opted into `index_embedded.html` (see "Static-site pages" below), whether
+  IT matches what current `settings.toml` course `date_override` entries
+  would render -- and whether any
   live `site/*.html` page still contains a leftover `REPLACE-ME` or
   `${...}` placeholder (i.e. the generic template was published without
   being customized).
@@ -1434,6 +1437,55 @@ means "12px from the box's right edge" (which tracks the box's own
   matching whatever checkbox text you show on the booking form itself
   (`app/webapp.py`) -- keep the two in sync by hand.
 
+**`index_embedded.html` -- a no-JavaScript variant for `<iframe>` embedding
+(2026-07-16):** `site/index.html`'s two `<script>` blocks (the Login/Logout
+swap and the schedule-exceptions banner, both above) make same-origin
+`fetch()` calls that, from *inside* a third-party `<iframe>` embed on
+another site, can look like tracking behavior to privacy-conscious browsers
+and extensions -- one real report: a visitor got a security warning opening
+a page that embeds `booking.example.org` in an `<iframe>`, and the embedded content
+failed to render at all. `index_embedded.html` has **no `<script>` tags
+whatsoever**, so there's nothing for a script/tracker blocker, or a stale
+Content-Security-Policy `script-src` hash, to ever catch. Two direct
+consequences:
+- The Login button is always plain, static "Login" -- never session-aware
+  (no swap to "My bookings"/"Log out"; that swap needs a live `fetch()`,
+  which wouldn't reliably work from inside a third-party iframe anyway, see
+  above).
+- The schedule-exceptions banner is baked in **at generation time** from
+  whatever upcoming `[[course.date_override]]` entries `settings.toml` has,
+  not fetched live in the visitor's browser.
+- Every link meant to be clicked from inside the embedding iframe (Login,
+  every course's booking link, and the footer's legal-page links) uses
+  `target="_blank" rel="noopener noreferrer"` -- opens in a new tab rather
+  than trying to load inside the small embedded iframe (the booking flow
+  and `/my` genuinely need JavaScript to work, which is exactly the kind of
+  script execution that should happen in a normal top-level tab, not inside
+  the constrained/blocked iframe context) -- `rel="noopener noreferrer"` is
+  the plain-HTML defense against the new tab getting a `window.opener`
+  handle back to the embedding page.
+
+**Optional, and generated like `privacy.html` above, not hand-authored like
+`index.html`:** this page doesn't exist at all until you copy
+`site/index_embedded.html.tmpl.example` to `site/index_embedded.html.tmpl`
+(untracked, same convention as `privacy.html.tmpl`) and fill in your own
+title/description/course list. Once that real `.tmpl` exists:
+- `scripts/render-site.py`/`scripts/build-rpm.sh` render this checkout's own
+  `site/index_embedded.html` (the `%doc` reference copy) the same way they
+  already do for `privacy.html`.
+- `my-bt admin health`/`admin setup -i` compare the LIVE deployed copy in
+  `[site].static_site_dir` against what current `settings.toml` would
+  render right now, and `setup -i` offers to (re)generate it -- this is
+  what catches "you added/removed a `date_override` but never regenerated
+  this page," since it can't fetch that live the way `index.html` does.
+  If the real `.tmpl` doesn't exist yet, this whole check is silent (`[]`,
+  not a warning) -- most deployments don't embed their site via `<iframe>`
+  elsewhere, so its absence is never itself a problem to report.
+- `my-bt admin site-maintenance on/off` patches the maintenance banner into
+  this file too, exactly like `index.html` (see "Maintenance mode" below) --
+  `setup -i`'s own regeneration re-applies an active banner rather than
+  silently dropping it, if maintenance happens to be on when you regenerate.
+
 **Language:** the `.example` templates are English-only. Whether to
 support more languages (and which ones) is entirely your call, based on
 who actually uses your instance -- hand-edit the HTML for now, there's no
@@ -1521,14 +1573,17 @@ one-off "Back to `{yourdomain}`" text link.
 idempotent, clearly-marked banner (HTML comments delimit it, so re-running
 `on`/`off` any number of times never duplicates or corrupts it) right
 after the LIVE, deployed `index.html`'s `<body>` tag, i.e. at
-`[site].static_site_dir` if configured. `index.html` is hand-authored and
-never auto-copied otherwise (see "Static-site pages" above), but
-maintenance needs to show up immediately, not at the next manual copy, so
-this is a deliberate exception: an explicit, dedicated command whose
-entire purpose is to touch this exact file, not a background auto-sync.
-If `static_site_dir` isn't configured, `on`/`off` still flip the flag file
-(the app-side gating above still works) but print a note that no banner
-was written anywhere. (2026-07-10: my-bt should not modify
+`[site].static_site_dir` if configured -- and, if it's ever been generated,
+`index_embedded.html`'s too (2026-07-16, see "Static-site pages" above).
+`index.html` is hand-authored and never auto-copied otherwise (see
+"Static-site pages" above), but maintenance needs to show up immediately,
+not at the next manual copy, so this is a deliberate exception: an
+explicit, dedicated command whose entire purpose is to touch these exact
+files, not a background auto-sync. `index_embedded.html` not existing yet
+(the common case -- it's optional) is silently skipped, same as any other
+missing target. If `static_site_dir` isn't configured, `on`/`off` still
+flip the flag file (the app-side gating above still works) but print a
+note that no banner was written anywhere. (2026-07-10: my-bt should not modify
 the package-installed TEMPLATE folder site -- this used to ALSO patch
 this checkout's own `HOME/site/index.html`, i.e. `/opt/my-booking/site/`
 on a stock install, but that copy is a template/reference only, never
