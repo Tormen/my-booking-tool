@@ -23,6 +23,13 @@ server {
     access_log /var/log/nginx/REPLACE-ME-YOUR-DOMAIN.access.log;
     error_log  /var/log/nginx/REPLACE-ME-YOUR-DOMAIN.error.log;
 
+    # HARDENING: cap request bodies at the same 64 KiB the app itself now
+    # enforces (app/webapp.py::MAX_REQUEST_BODY_BYTES, 2026-07-14 -- keep
+    # the two in sync). No form in this app comes anywhere near this; the
+    # nginx default (1m) was needlessly generous for a booking site with
+    # no uploads at all.
+    client_max_body_size 64k;
+
     # REPLACE-ME: optional extra include(s) for your own distro/setup's
     # generic hardening snippets, if you have any (e.g. Fedora's stock
     # restrictions.conf). Not required by this app -- purely whatever

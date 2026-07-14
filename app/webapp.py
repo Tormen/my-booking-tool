@@ -227,6 +227,17 @@ _TIMING_EQUALIZER_HASH, _TIMING_EQUALIZER_SALT = hash_secret("timing-equalizer")
 # years -- see my()'s docstring.
 MY_PAST_BOOKINGS_LIMIT = 3
 
+# Upper bound on any request body this app itself will read (2026-07-14,
+# repo-review open question, resolved): nginx already caps proxied bodies
+# (client_max_body_size -- see site/nginx-locations.conf(.example), kept
+# in sync with this value), but the app read CONTENT_LENGTH unbounded --
+# fine behind nginx, not for a direct connection to the loopback port.
+# 64 KiB is orders of magnitude above any real form here (the largest, a
+# booking POST with max_guests guest rows, is well under 4 KiB); an
+# oversized body is treated as an empty/blank submission (see _read_form)
+# or an ignored CSP report (see csp_report) -- never half-parsed.
+MAX_REQUEST_BODY_BYTES = 64 * 1024
+
 
 def _client_ip(environ: dict) -> str:
     """Best-effort real client IP, for per-source rate limiting -- NOT for
@@ -1131,6 +1142,14 @@ class App:
             size = int(environ.get("CONTENT_LENGTH", 0) or 0)
         except ValueError:
             size = 0
+        if size > MAX_REQUEST_BODY_BYTES:
+            # Treated as a blank submission (every handler then shows its
+            # own normal validation error), never half-parsed -- see
+            # MAX_REQUEST_BODY_BYTES's comment. WARNING: same visibility
+            # class as the rate-limiter rejections the watchdog counts.
+            log.warning("request body of %d bytes exceeds the %d-byte cap -- ignored",
+                        size, MAX_REQUEST_BODY_BYTES)
+            return {}
         raw = environ["wsgi.input"].read(size).decode("utf-8") if size else ""
         return {k: v[0] for k, v in parse_qs(raw).items()}
 
@@ -1283,7 +1302,7 @@ class App:
         whether it's absent vs. blank."""
         if method != "GET":
             return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
-        today = datetime.now(ZoneInfo(self.settings.timezone)).date().isoformat()
+        today = self._today().isoformat()
         items = upcoming_date_overrides(self.settings.courses, today)
         payload = {"items": items, "custom_message": self.settings.custom_attention_message}
         return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
@@ -1325,6 +1344,13 @@ class App:
             size = int(environ.get("CONTENT_LENGTH", 0) or 0)
         except ValueError:
             size = 0
+        if size > MAX_REQUEST_BODY_BYTES:
+            # A real browser's CSP report is a few hundred bytes -- an
+            # oversized one is noise/abuse, not a report worth parsing.
+            # Still 204 (this endpoint must never error, see below).
+            log.warning("CSP report body of %d bytes exceeds the %d-byte cap -- ignored",
+                        size, MAX_REQUEST_BODY_BYTES)
+            return "204 No Content", [], ""
         raw = environ["wsgi.input"].read(size).decode("utf-8", errors="replace") if size else ""
         client_ip = _client_ip(environ)
         try:
@@ -2077,6 +2103,23 @@ class App:
             return 'Check <a href="/my">My bookings</a> for confirmation and a link in case you need to cancel your booking.'
         return "Check your email for confirmation and a link in case you need to cancel your booking."
 
+    def _today(self) -> date:
+        """Today's date in [site].timezone -- the app's ONE definition of
+        "today" for every guest/admin-facing day-boundary decision
+        (upcoming-vs-past split on /my and /admin, cancel/rebook button
+        gating and their server-side re-checks, the already-booked badge
+        filter). 2026-07-14 (repo-review open question, resolved): these
+        used to compare against the UTC date, while /schedule-exceptions
+        already used [site].timezone -- for Europe/Berlin the UTC date
+        lags local by 1-2h around midnight, so a session just after
+        midnight local still read as "upcoming" on the previous day and
+        cancel buttons stayed enabled 1-2h longer than intended. One
+        helper now, so the boundary can never fork again. Retention/
+        watchdog jobs deliberately stay on UTC: their own stored
+        timestamps are UTC, they run at 03:30 local where both dates
+        agree, and their granularity is months, not hours."""
+        return datetime.now(ZoneInfo(self.settings.timezone)).date()
+
     def _site_label(self) -> str:
         """A short, human name for this deployment to put in guest-facing
         emails that otherwise have no other context (e.g. the account
@@ -2244,7 +2287,7 @@ class App:
         # the real bookable date-boxes below.
         already_booked = []
         if logged_in_user is not None:
-            today_iso = datetime.now(timezone.utc).date().isoformat()
+            today_iso = self._today().isoformat()
             already_booked = sorted(
                 (
                     r for r in self.store.registrations_for_user(logged_in_user.user_id)
@@ -2587,7 +2630,7 @@ class App:
                 "Not found", "<p>This link is invalid or already used.</p>", banner=banner
             )
         course = self.settings.course(reg.course_shortname)
-        if course is None or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date():
+        if course is None or date.fromisoformat(reg.occurrence_date) < self._today():
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Not found", "<p>This booking can no longer be rebooked.</p>", banner=banner
             )
@@ -2747,7 +2790,7 @@ class App:
         session = _get_session(environ)
         if session and session.get("kind") == "guest":
             all_regs = self.store.registrations_for_user(session["user_id"])
-            today = datetime.now(timezone.utc).date()
+            today = self._today()
             upcoming = sorted(
                 (r for r in all_regs if date.fromisoformat(r.occurrence_date) >= today),
                 key=lambda r: r.occurrence_date,
@@ -3464,7 +3507,7 @@ class App:
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
             course = self.settings.course(reg.course_shortname)
-            if course and date.fromisoformat(reg.occurrence_date) >= datetime.now(timezone.utc).date():
+            if course and date.fromisoformat(reg.occurrence_date) >= self._today():
                 updated = self.store.reinstate(registration_id, course.capacity)
                 if updated is not None:
                     self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
@@ -3765,12 +3808,17 @@ class App:
         site = self._site_label()
         confirm_url = f"{self.settings.base_url}/my/confirm-email/{token}"
         cancel_url = f"{self.settings.base_url}/my/cancel-email-change/{cancel_token}"
+        # greeting (2026-07-14, repo-review wording pass): the email-change
+        # notices were the last guest-facing emails without the "Dear
+        # NAME," greeting every other one carries (SOLUTION-DESIGN #19) --
+        # both copies go to the same person, just different inboxes.
+        greeting = f"Dear {user.name},\n\n"
         send_mail(
             self.settings, new_email, f"Confirm your new email for your {site} account",
             render_template(
                 load_email_template(self.settings, "email_change_new.txt"),
-                site=site, old_email=user.email, new_email=new_email, confirm_url=confirm_url,
-                ttl_hours=str(CONFIRM_TOKEN_TTL_HOURS),
+                greeting=greeting, site=site, old_email=user.email, new_email=new_email,
+                confirm_url=confirm_url, ttl_hours=str(CONFIRM_TOKEN_TTL_HOURS),
             ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
@@ -3778,23 +3826,27 @@ class App:
             self.settings, user.email, f"Email change requested for your {site} account",
             render_template(
                 load_email_template(self.settings, "email_change_current.txt"),
-                site=site, old_email=user.email, new_email=new_email, cancel_url=cancel_url,
+                greeting=greeting, site=site, old_email=user.email, new_email=new_email,
+                cancel_url=cancel_url,
             ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
 
-    def _send_email_change_confirmed_emails(self, old_email: str, new_email: str) -> None:
+    def _send_email_change_confirmed_emails(self, old_email: str, new_email: str, name: str) -> None:
         """Sent once (in my_confirm_email, right after Store.apply_pending_email
         actually swaps the email) -- to BOTH the new (now active) and old
         (now removed) addresses, so neither side is left guessing which
         one won. Deliberately plain-text only (no ics/html) -- this is a
-        one-line account notice, not a booking."""
+        one-line account notice, not a booking. `name` (2026-07-14,
+        repo-review wording pass) feeds the same "Dear NAME," greeting
+        every other guest-facing email carries."""
         site = self._site_label()
+        greeting = f"Dear {name},\n\n"
         send_mail(
             self.settings, new_email, f"Your {site} login email is now confirmed",
             render_template(
                 load_email_template(self.settings, "email_change_confirmed_new.txt"),
-                site=site, new_email=new_email,
+                greeting=greeting, site=site, new_email=new_email,
             ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
@@ -3802,7 +3854,7 @@ class App:
             self.settings, old_email, f"Your {site} login email has changed",
             render_template(
                 load_email_template(self.settings, "email_change_confirmed_old.txt"),
-                site=site, new_email=new_email,
+                greeting=greeting, site=site, new_email=new_email,
             ),
             bcc_addrs=self.settings.bcc_attendee_email_list,
         )
@@ -4032,7 +4084,7 @@ class App:
             # account (this browser included), so the link below has to be
             # a fresh login, not a still-logged-in settings page.
             _invalidate_all_sessions_for_user(user.user_id)
-            self._send_email_change_confirmed_emails(old_email, new_email)
+            self._send_email_change_confirmed_emails(old_email, new_email, updated.name)
             body = (f'<p>Your login email is now <b>{esc(new_email)}</b>.</p>'
                     '<p>Please <a href="/my">log in</a> again with your new email.</p>')
             return "200 OK", [("Content-Type", "text/html")], page("Email confirmed", body, banner=banner)
@@ -4173,7 +4225,7 @@ class App:
         scope = parse_qs(environ.get("QUERY_STRING", "")).get("scope", ["future"])[0]
         if scope not in ("past", "all"):
             scope = "future"
-        today = datetime.now(timezone.utc).date()
+        today = self._today()
         # scope="all" (not all_registrations()/find_user_by_id(), which are
         # live-only) so an erased guest's past registrations still show up
         # here instead of silently vanishing -- their user row moved to the
@@ -4599,7 +4651,7 @@ class App:
         form = self._read_form(environ)
         message = sanitize_csv_field(form.get("message", "").strip())
         course = self.settings.course(reg.course_shortname)
-        if course and date.fromisoformat(reg.occurrence_date) >= datetime.now(timezone.utc).date():
+        if course and date.fromisoformat(reg.occurrence_date) >= self._today():
             updated = self.store.reinstate(registration_id, course.capacity)
             if updated is not None:
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
@@ -4729,7 +4781,7 @@ class App:
         if (
             reg.status not in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST)
             or course is None
-            or date.fromisoformat(reg.occurrence_date) < datetime.now(timezone.utc).date()
+            or date.fromisoformat(reg.occurrence_date) < self._today()
         ):
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Not found", "<p>This booking can no longer be rebooked.</p>", banner=banner

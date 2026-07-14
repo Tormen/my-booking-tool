@@ -13,7 +13,8 @@ Used from two places:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 
 from .caldav_client import CalDAVClient
 from .cancel_flow import cancel_and_promote
@@ -47,7 +48,10 @@ def erase_user_by_email(
     if user is None:
         return False
 
-    today = today or datetime.now(timezone.utc).date()
+    # Default "today" in [site].timezone, matching app/webapp.py::App._today
+    # (2026-07-14 review: one day-boundary definition app-wide -- this
+    # decides which bookings count as "future" and get force-canceled).
+    today = today or datetime.now(ZoneInfo(settings.timezone)).date()
     for reg in store.registrations_for_user(user.user_id):
         if reg.status in (STATUS_CONFIRMED, STATUS_WAITLISTED) and date.fromisoformat(reg.occurrence_date) >= today:
             store.cancel(reg.registration_id, canceled_by="guest", host_message="account deleted by guest")

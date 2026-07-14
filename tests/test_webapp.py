@@ -1372,6 +1372,20 @@ class MySettingsTest(unittest.TestCase):
         self.assertNotIn("/my/settings", old_body)
         self.assertNotIn("/my/cancel-email-change/", new_body)  # only the OLD address gets this one
 
+    def test_every_email_change_notice_greets_by_name(self):
+        # 2026-07-14 (repo-review wording pass): the four email-change
+        # notices were the LAST guest-facing emails without the "Dear
+        # NAME," greeting every other one carries (SOLUTION-DESIGN #19)
+        # -- the request pair and the confirmation pair alike.
+        environ = self._login_environ("regular@example.org")
+        self.app.my_settings_email("POST", self._post_environ(environ, {"email": "new@example.org"}))
+        new_body = next(b for to, _s, b in self.sent_emails if to == "new@example.org")
+        token = re.search(r"/my/confirm-email/([A-Za-z0-9_-]+)", new_body).group(1)
+        self.app.my_confirm_email("POST", token, self._post_environ({}, {}))
+        self.assertEqual(len(self.sent_emails), 4)  # request pair + confirmation pair
+        for _to, subject, body in self.sent_emails:
+            self.assertTrue(body.startswith("Dear Regular,\n\n"), f"{subject}: {body[:60]!r}")
+
     def test_settings_page_shows_pending_change_and_hides_request_form(self):
         environ = self._login_environ("regular@example.org")
         self.app.my_settings_email("POST", self._post_environ(environ, {"email": "new@example.org"}))
@@ -2043,6 +2057,75 @@ class LateBookingQuorumTest(unittest.TestCase):
         start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
         occ = self._occ(10, start, capacity=10)
         self.assertIsNone(app._late_booking_rejection(occ, now))
+
+
+class RequestBodyCapTest(unittest.TestCase):
+    """MAX_REQUEST_BODY_BYTES (2026-07-14 review, resolved open question):
+    nginx caps proxied bodies, but the app itself read CONTENT_LENGTH
+    unbounded -- fine behind nginx, not for a direct connection to the
+    loopback port. An oversized body must be treated as a blank
+    submission / ignored report, never half-parsed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = App(make_settings(), Store(self._tmp.name))
+
+    def _environ(self, body: bytes, content_length: int | None = None) -> dict:
+        return {
+            "CONTENT_LENGTH": str(len(body) if content_length is None else content_length),
+            "wsgi.input": io.BytesIO(body),
+        }
+
+    def test_read_form_treats_an_oversized_body_as_blank(self):
+        environ = self._environ(b"email=x%40example.org", content_length=webapp.MAX_REQUEST_BODY_BYTES + 1)
+        self.assertEqual(self.app._read_form(environ), {})
+
+    def test_read_form_still_parses_a_normal_body(self):
+        environ = self._environ(b"email=x%40example.org")
+        self.assertEqual(self.app._read_form(environ), {"email": "x@example.org"})
+
+    def test_read_form_accepts_a_body_exactly_at_the_cap(self):
+        filler = b"a=" + b"x" * (webapp.MAX_REQUEST_BODY_BYTES - 2)
+        self.assertEqual(len(filler), webapp.MAX_REQUEST_BODY_BYTES)
+        form = self.app._read_form(self._environ(filler))
+        self.assertEqual(form["a"], "x" * (webapp.MAX_REQUEST_BODY_BYTES - 2))
+
+    def test_csp_report_ignores_an_oversized_body_with_204(self):
+        environ = self._environ(b"{}", content_length=webapp.MAX_REQUEST_BODY_BYTES + 1)
+        status, _headers, body = self.app.csp_report("POST", environ)
+        self.assertEqual(status, "204 No Content")
+        self.assertEqual(body, "")
+
+    def test_nginx_confs_carry_the_matching_client_max_body_size(self):
+        # The nginx-side cap must stay in sync with the app's own -- both
+        # tracked conf references state it as "<KiB>k".
+        expected = f"client_max_body_size {webapp.MAX_REQUEST_BODY_BYTES // 1024}k;"
+        root = Path(__file__).resolve().parent.parent
+        for rel in ("site/nginx-locations.conf.example", "nginx/my-booking.conf"):
+            with self.subTest(conf=rel):
+                self.assertIn(expected, (root / rel).read_text(encoding="utf-8"))
+
+
+class TodayInSiteTimezoneTest(unittest.TestCase):
+    """App._today() -- the app's ONE definition of "today" (2026-07-14
+    review, resolved open question: /my, /admin and the cancel/rebook
+    gates used the UTC date while /schedule-exceptions used
+    [site].timezone; unified on the latter). Deterministic without
+    freezing time: Etc/GMT-14 is UTC+14 and Etc/GMT+12 is UTC-12 (POSIX
+    inverts the sign), 26 hours apart -- their calendar dates never agree
+    at any instant, so if _today() followed the UTC clock instead of the
+    configured timezone, the two Apps below would return the same date."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+
+    def test_today_follows_site_timezone_not_the_utc_clock(self):
+        east = App(make_settings(timezone="Etc/GMT-14"), self.store)
+        west = App(make_settings(timezone="Etc/GMT+12"), self.store)
+        self.assertGreater(east._today(), west._today())
 
 
 class HtmlToTextTest(unittest.TestCase):

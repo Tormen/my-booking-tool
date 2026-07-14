@@ -1,4 +1,4 @@
-Your {{site}} login is changing from {{old_email}} to {{new_email}}.
+{{greeting}}Your {{site}} login is changing from {{old_email}} to {{new_email}}.
 
 Click below to confirm:
 

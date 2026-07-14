@@ -1,1 +1,1 @@
-Your {{site}} booking account's login email has changed from this address to {{new_email}}. This address can no longer be used to log in.
+{{greeting}}Your {{site}} booking account's login email has changed from this address to {{new_email}}. This address can no longer be used to log in.
