@@ -2437,12 +2437,16 @@ class App:
                 # its CSP hash) stay untouched. The server never trusts
                 # their values for a logged-in session anyway (see
                 # book()'s own identity override).
-                identity_fields_html = (
+                # Rendered INSIDE the guests card, above "+ Add
+                # participant" (2026-07-14 follow-up, same day: the note
+                # "dangled" between the dates card and the guests card) --
+                # see card_identity_html's slot in the body f-string below.
+                card_identity_html = (
                     f'<input type="hidden" id="book-name" name="name" value="{esc(logged_in_user.name)}">'
                     f'<input type="hidden" id="book-email" name="email" value="{esc(logged_in_user.email)}">'
-                    f'<p>Booking as <b>{esc(logged_in_user.name)}</b> ({esc(logged_in_user.email)}).</p>'
+                    f'<p class="booking-as">Booking as <b>{esc(logged_in_user.name)}</b> ({esc(logged_in_user.email)}).</p>'
                 )
-                identity_and_tabs_html = identity_fields_html
+                identity_and_tabs_html = ""
             else:
                 # Anonymous: the Sign-up tab is just this SAME Name/Email
                 # pair (no separate form, no separate button -- typing them
@@ -2481,7 +2485,7 @@ class App:
                     signup_fields_html,
                     active_tab=active_tab,
                 )
-                identity_fields_html = ""  # lives in the Sign-up tab-panel above instead
+                card_identity_html = ""  # anonymous: identity lives in the Sign-up tab-panel above instead
             # 2026-07-13, the operator: keep the ORIGINAL element order -- course
             # description, date selection, THEN the tabbed identity area,
             # THEN guests, THEN ack, THEN the Book button. #book-form
@@ -2517,6 +2521,7 @@ class App:
             </form>
             {identity_and_tabs_html}
             <div class="card">
+              {card_identity_html}
               <div class="guests-section">
                 <div id="guest-rows"></div>
                 <button type="button" id="add-guest-btn" class="link-button">+ Add participant</button>

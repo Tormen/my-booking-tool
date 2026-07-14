@@ -187,7 +187,17 @@ label{{display:block;margin-top:.6em}}
 .date-badge .ribbon{{position:absolute;top:.6em;right:-3.2em;width:11em;transform:rotate(45deg);
   background:#666;color:#fff;font-weight:bold;text-align:center;padding:.15em 0;
   box-shadow:0 1px 2px rgba(0,0,0,.25)}}
-.selected-box{{background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.7em 1em;margin:.8em 0}}
+/* margin-bottom 0 (2026-07-14, live screenshot): the box's own .8em
+   bottom margin stacked on the card's 1em padding read as a stray gap
+   under "Selected date" -- the card's padding alone is enough there. */
+.selected-box{{background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.7em 1em;margin:.8em 0 0}}
+/* The logged-in booking-identity line, rendered INSIDE the guests card
+   above the add-participant link (2026-07-14, live screenshot: it
+   dangled between two cards) -- top margin 0 so it doesn't double up
+   with the card's own padding. NOTE: this <style> block ships on every
+   page, so comments here must not quote visible UI strings verbatim
+   (tests and greps over page text would match the comment first). */
+.booking-as{{margin:0 0 .8em}}
 .description{{background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;padding:1em 1.2em;margin:.8em 0}}
 .description ul,.description ol{{margin:.4em 0;padding-left:1.4em}}
 .description p:first-child{{margin-top:0}} .description p:last-child{{margin-bottom:0}}

@@ -962,9 +962,18 @@ class SessionBannerTest(unittest.TestCase):
         # byte-identical.
         environ = self._login_environ("regular@example.org")
         _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
-        self.assertIn("Booking as <b>Regular</b> (regular@example.org).", body)
+        self.assertIn(
+            '<p class="booking-as">Booking as <b>Regular</b> (regular@example.org).</p>', body,
+        )
         self.assertIn('<input type="hidden" id="book-name" name="name" value="Regular">', body)
         self.assertIn('<input type="hidden" id="book-email" name="email" value="regular@example.org">', body)
+        # 2026-07-14 follow-up: the note lives INSIDE the guests card,
+        # above "+ Add participant" -- after the date picker, before the
+        # link (it used to dangle between the two cards). Anchored on
+        # element ids, not prose -- the <style> block earlier in the page
+        # may mention UI wording in its own comments.
+        self.assertLess(body.index('id="selected-date-text"'), body.index('class="booking-as"'))
+        self.assertLess(body.index('class="booking-as"'), body.index('id="add-guest-btn"'))
         # No visible/greyed identity form fields anymore...
         self.assertNotIn("readonly>", body)
         self.assertNotIn("Your name", body)
@@ -1004,7 +1013,9 @@ class SessionBannerTest(unittest.TestCase):
         post_environ = dict(environ, CONTENT_LENGTH=str(len(body_bytes)), **{"wsgi.input": io.BytesIO(body_bytes)})
         _status, _headers, body = self.app.book("POST", "yoga-class-1", post_environ)
         self.assertIn("acknowledge the participation terms", body)
-        self.assertIn("Booking as <b>Regular</b> (regular@example.org).", body)
+        self.assertIn(
+            '<p class="booking-as">Booking as <b>Regular</b> (regular@example.org).</p>', body,
+        )
         self.assertIn('<input type="hidden" id="book-name" name="name" value="Regular">', body)
         self.assertNotIn("readonly>", body)
 
@@ -3015,9 +3026,11 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("Your email", panel)
         self.assertIn("First time booking with this email?", panel)
         # Page order: dates before the tabs, tabs before guests/ack/book.
+        # Anchored on element ids, not prose -- the <style> block earlier
+        # in the page may mention UI wording in its own comments.
         self.assertLess(body.index("Dates available"), body.index('id="book-tab-login"'))
-        self.assertLess(body.index('id="book-panel-signup"'), body.index("+ Add participant"))
-        self.assertLess(body.index("+ Add participant"), body.index("participation terms"))
+        self.assertLess(body.index('id="book-panel-signup"'), body.index('id="add-guest-btn"'))
+        self.assertLess(body.index('id="add-guest-btn"'), body.index("participation terms"))
 
     def test_failed_login_submitted_on_book_page_redisplays_book_page_with_error_on_login_tab(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
