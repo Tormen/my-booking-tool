@@ -1043,7 +1043,7 @@ class SessionBannerTest(unittest.TestCase):
         # A screenshot of /my showing 2 future confirmed
         # bookings the date-picker never mentioned prompted showing the
         # user that they already booked the classes -- FUTURE only,
-        # waitlisted labeled "On waitinglist", not clickable.
+        # waitlisted labeled "On waitlist", not clickable.
         first_date, second_date = self._occ_dates(2)
         environ = self._login_environ("regular@example.org")
         user = self.store.find_user_by_email("regular@example.org")
@@ -1057,7 +1057,7 @@ class SessionBannerTest(unittest.TestCase):
         # The still-bookable second date stays a real, selectable option.
         self.assertIn(f'value="{second_date}"', body)
 
-    def test_waitlisted_future_booking_labeled_on_waitinglist(self):
+    def test_waitlisted_future_booking_labeled_on_waitlist(self):
         first_date = self._occ_dates(1)[0]
         environ = self._login_environ("regular@example.org")
         user = self.store.find_user_by_email("regular@example.org")
@@ -1065,7 +1065,7 @@ class SessionBannerTest(unittest.TestCase):
             "yoga-class-1", first_date, user.user_id, hash_token(new_token()), status=STATUS_WAITLISTED,
         )
         _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
-        self.assertIn('<span class="ribbon">On waitinglist</span>', body)
+        self.assertIn('<span class="ribbon">On waitlist</span>', body)
         self.assertNotIn(">Booked<", body)
 
     def test_canceled_booking_is_not_shown_at_all(self):
@@ -2501,7 +2501,7 @@ class BookingFlowTest(unittest.TestCase):
         token = self._confirm_token_from_last_email()
         _status, headers, body = self._post(self.app.my_confirm, (token,), {"password": "hunter22"})
         self.assertIn("Account &amp; booking confirmed", body)
-        self.assertIn("did succeed for", body)
+        self.assertIn("went through for", body)
         self.assertIn("at 17h15 - 18h55 (Example Community Gym, Room 1)", body)
         self.assertTrue(any(h[0] == "Set-Cookie" for h in headers))
         user = self.store.find_user_by_email("newguest@example.org")
@@ -2797,6 +2797,26 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('id="my-tab-login" name="my-tab" class="tab-radio" checked', body)
         self.assertIn('id="my-tab-signup" name="my-tab" class="tab-radio" ', body)
         self.assertNotIn('id="my-tab-signup" name="my-tab" class="tab-radio" checked', body)
+
+    def test_login_burns_one_hash_verification_whether_or_not_the_email_exists(self):
+        # Timing equalizer (2026-07-14, repo-review): scrypt used to run
+        # ONLY when the submitted email had a confirmed account, so "does
+        # this email have an account?" was measurable from response time
+        # alone (~100ms of scrypt vs. an instant miss) -- the one
+        # enumeration channel left after /my/reset was carefully made
+        # response-identical. Every failed attempt must now cost exactly
+        # one verify_secret call: real-account-wrong-password, unknown
+        # email, and unconfirmed (no password yet) alike.
+        user = self.store.upsert_user_for_booking("known@example.org", "Known")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        self.store.upsert_user_for_booking("unconfirmed@example.org", "NoPasswordYet")
+        for email in ("known@example.org", "unknown@example.org", "unconfirmed@example.org"):
+            with patch("app.webapp.verify_secret", return_value=False) as spy:
+                _status, _headers, body = self._post(self.app.my, (), {"email": email, "password": "wrong"})
+            self.assertEqual(spy.call_count, 1, f"expected exactly one scrypt for {email}")
+            self.assertIn("Email and/or password did not match.", body)
+            webapp.login_limiter.reset(f"guest:{email}")
 
     # -- /my password login --------------------------------------------------
 

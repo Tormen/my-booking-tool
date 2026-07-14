@@ -423,6 +423,20 @@ class BareCommandMainBehaviorTest(unittest.TestCase):
         self.assertIn("error:", err.getvalue())
 
 
+class ListStatusChoicesTest(unittest.TestCase):
+    """2026-07-14 (repo-review): `my-bt list --status` offered every status
+    EXCEPT pending_confirmation -- a real, first-class status /admin's own
+    table displays, with no way to filter on it from the CLI."""
+
+    def test_every_storage_status_is_a_valid_list_status_filter(self):
+        from app.storage import STATUS_LABELS
+
+        parser = my_bt_mod.build_parser()
+        for status in STATUS_LABELS:
+            args = parser.parse_args(["list", "--status", status])
+            self.assertEqual(args.status, status)
+
+
 class NoStaleRemovedCommandReferencesTest(unittest.TestCase):
     """2026-07-14 (repo-wide review, finding G2): `my-bt list --all`'s help
     text and cmd_list's docstring still told operators to run `my-bt admin

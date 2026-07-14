@@ -152,7 +152,7 @@ class CalDAVClient:
 
     def query_events(self, calendar_href: str, start: datetime, end: datetime) -> list[tuple[str, str, str]]:
         """Returns list of (uid, ics_text, etag) overlapping [start, end)."""
-        url = self.base_url.rsplit("/", 1)[0] if False else self._absolute(calendar_href)
+        url = self._absolute(calendar_href)
         body = f"""<?xml version="1.0" encoding="utf-8" ?>
 <C:calendar-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:prop><D:getetag/><C:calendar-data/></D:prop>

@@ -1,4 +1,4 @@
-{{intro}}
+{{greeting}}{{intro}}
 
 {{details}}
 Manage or cancel this booking: {{manage_url}}

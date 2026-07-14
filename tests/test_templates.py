@@ -128,5 +128,20 @@ class BigInputDisplayBlockTest(unittest.TestCase):
         self.assertIn("display:block", html.split(".big-input{", 1)[1].split("}", 1)[0])
 
 
+class GuestsSectionSeparatorTest(unittest.TestCase):
+    """2026-07-14: the '+ Add participant' link must sit ABOVE the
+    horizontal separator line, with the acknowledge checkbox and Book
+    button below it (explicit request, from a live screenshot of the real
+    booking page) -- implemented by flipping .guests-section's separator
+    border from top to bottom. Locked in here so a future CSS cleanup
+    can't silently flip it back."""
+
+    def test_separator_is_a_bottom_border_below_the_guests_block(self):
+        html = page("Some title", "<p>body</p>")
+        rule = html.split(".guests-section{", 1)[1].split("}", 1)[0]
+        self.assertIn("border-bottom:1px solid", rule)
+        self.assertNotIn("border-top", rule)
+
+
 if __name__ == "__main__":
     unittest.main()

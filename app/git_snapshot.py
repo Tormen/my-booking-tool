@@ -128,13 +128,10 @@ def main() -> None:  # pragma: no cover - exercised via systemd, not tests
     # WARNING, not INFO: same reasoning as retention.py -- runs once an
     # hour via the systemd timer, cheap, and this is the only confirmation
     # it actually ran and what it did, worth seeing in `journalctl -u
-    # my-booking-git-snapshot.service` at the default (non-debug) log level.
-    if result.status == "committed":
-        log.warning("git snapshot: %s", result.detail)
-    elif result.status == "no_changes":
-        log.warning("git snapshot: %s", result.detail)
-    else:
-        log.warning("git snapshot: %s", result.detail)
+    # my-booking-git-snapshot.service` at the default (non-debug) log
+    # level. One line regardless of outcome -- result.detail already says
+    # which of committed/no_changes/not_a_repo happened.
+    log.warning("git snapshot: %s", result.detail)
 
 
 if __name__ == "__main__":  # pragma: no cover

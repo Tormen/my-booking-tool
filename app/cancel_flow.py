@@ -30,7 +30,8 @@ from typing import Callable
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancellation import (
-    booking_details_text, course_recap_html, html_email_body, intro_html, send_cancellation_emails,
+    booking_details_text, course_recap_html, greeting_html, html_email_body, intro_html,
+    send_cancellation_emails,
 )
 from .config import Settings
 from .email_templates import load_email_template, render_template
@@ -192,15 +193,22 @@ def cancel_and_promote(
             details = booking_details_text(course, occurrence_date_str)
             recap_html = course_recap_html(course, occurrence_date_str)
             manage_link_html = f'<p>Manage or cancel this booking: <a href="{my_url}">{my_url}</a></p>'
+            # greeting (2026-07-14, repo-review wording pass): this was the
+            # ONE guest-facing booking email still missing the "Dear NAME,"
+            # greeting every other one has carried since 2026-07-08 (see
+            # cancellation.greeting_html's own docstring / SOLUTION-DESIGN
+            # #19) -- an oversight, not a decision; this module was
+            # factored out before that rule landed.
             send_mail(
                 settings, user.email, f"You're in! {course.title} on {occurrence_date_str}",
                 render_template(
                     load_email_template(settings, "promoted_email.txt"),
-                    intro=intro, details=details, manage_url=my_url,
+                    greeting=f"Dear {user.name},\n\n", intro=intro, details=details, manage_url=my_url,
                 ),
                 html_body=html_email_body(render_template(
                     load_email_template(settings, "promoted_email.html"),
-                    intro=intro_html(intro), recap=recap_html, manage_link=manage_link_html,
+                    greeting=greeting_html(user.name), intro=intro_html(intro),
+                    recap=recap_html, manage_link=manage_link_html,
                 )),
                 ics_attachment=(ics_filename, ics_text, "PUBLISH"),
                 bcc_addrs=settings.bcc_attendee_email_list,

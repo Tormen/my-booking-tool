@@ -212,6 +212,14 @@ CONFIRM_TOKEN_TTL_HOURS = 24
 # assigned (see _parse_guest_entries).
 _GUEST_EMAIL_FIELD_RE = re.compile(r"^guest_email_(\d+)$")
 
+# A real scrypt hash of a throwaway value, computed once at import -- what
+# _attempt_login() verifies a submitted password against whenever there's
+# no real stored hash to check (unknown email, or a not-yet-confirmed
+# account), so both outcomes cost one scrypt and response time can't
+# reveal whether an email has a confirmed account. See the timing-equalizer
+# comment at its one call site.
+_TIMING_EQUALIZER_HASH, _TIMING_EQUALIZER_SALT = hash_secret("timing-equalizer")
+
 # 2026-07-06: "/my should always show the past 3 courses they scheduled."
 # Upcoming bookings are always shown in full (there's rarely more than a
 # couple at once); past bookings are capped at this many (most recent
@@ -1588,9 +1596,13 @@ class App:
             # one-off sentence.
             body = (
                 f"<p>Almost there -- we've emailed <b>{esc(email)}</b> a link to confirm your account.</p>"
-                "<p>Once you click the link in the email and set a password.</p>"
-                f"<p>Only then will your place in the course be reserved:"
-                f"{self._already_booked_guests_note(already_booked_guests)}</p>"
+                # 2026-07-14 wording pass (repo-review): this used to be a
+                # sentence fragment ("Once you click the link in the email
+                # and set a password.") followed by "Only then will your
+                # place in the course be reserved:" ending on a dangling
+                # colon -- merged into one plain sentence.
+                "<p>Your place in the course is only reserved once you click that link "
+                f"and set a password.{self._already_booked_guests_note(already_booked_guests)}</p>"
                 + _course_recap_html(course, occ_date)
                 + '<div class="hint">Didn\'t get it? '
                 '<form method="post" action="/my/reset" id="resend-form" data-resend-inline-form style="display:inline">'
@@ -2224,7 +2236,7 @@ class App:
         # bookings -- now shown here too. Rules, in order: (1) only
         # FUTURE bookings, no past history, so filtered to
         # occurrence_date >= today; (2) canceled bookings are ignored,
-        # and waitlisted ones are shown as "On waitinglist"; (3) a diagonal
+        # and waitlisted ones are shown as "On waitlist"; (3) a diagonal
         # ribbon across the date-box corner, in place
         # of a plain greyed-out box, with contrasted font color -- see
         # .date-badge/.ribbon in templates.py's <style> block; (4) not
@@ -2259,7 +2271,7 @@ class App:
                 + esc(r.occurrence_date) + "</span>"
                 + (f'<span class="d-override-time">{esc(override_time)}</span>' if override_time else "")
                 + '<span class="ribbon">'
-                + ("On waitinglist" if r.status == STATUS_WAITLISTED else "Booked")
+                + ("On waitlist" if r.status == STATUS_WAITLISTED else "Booked")
                 + "</span></span></span>"
             )
 
@@ -2672,16 +2684,25 @@ class App:
             return "Too many attempts -- try again later.", login_limiter.retry_after(key, now=now), None, None
         user = self.store.find_user_by_email(email)
         # user.password_hash is empty for a not-yet-confirmed account --
-        # bail out before verify_secret rather than feeding it an empty
-        # hash/salt.
-        if user and user.password_hash and verify_secret(password, user.password_hash, user.password_salt):
-            # See the admin branch's own 2026-07-11 comment above -- a
-            # successful login shouldn't cost anything against this
-            # budget, only a wrong password should.
-            login_limiter.reset(key)
-            sid = _new_session({"kind": "guest", "user_id": user.user_id})
-            self.store.touch_login(user.user_id)
-            return None, 0.0, sid, None
+        # never feed verify_secret an empty hash/salt.
+        if user and user.password_hash:
+            if verify_secret(password, user.password_hash, user.password_salt):
+                # See the admin branch's own 2026-07-11 comment above -- a
+                # successful login shouldn't cost anything against this
+                # budget, only a wrong password should.
+                login_limiter.reset(key)
+                sid = _new_session({"kind": "guest", "user_id": user.user_id})
+                self.store.touch_login(user.user_id)
+                return None, 0.0, sid, None
+        else:
+            # Timing equalizer (2026-07-14, repo-review): scrypt only ever
+            # ran for emails that HAVE a confirmed account, so "email
+            # exists" was measurable from response time alone (~100ms of
+            # scrypt vs. an instant miss) -- the one enumeration channel
+            # left after /my/reset was carefully made response-identical.
+            # Burn an equivalent, throwaway verification on a fixed dummy
+            # hash so a miss costs the same as a wrong password.
+            verify_secret(password, _TIMING_EQUALIZER_HASH, _TIMING_EQUALIZER_SALT)
         return "Email and/or password did not match.", 0.0, None, None
 
     # -- /my (guest self-service) --------------------------------------------
@@ -3340,7 +3361,7 @@ class App:
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
                 self._send_booking_result_email(user, course, reg.occurrence_date, updated.status, new_cancel_token)
                 # Status suffix only for the non-obvious outcome (waitlisted)
-                # -- "did succeed" below already says what confirmed means,
+                # -- "went through" below already says what confirmed means,
                 # no need to repeat it on every line too.
                 status_suffix = "" if updated.status == STATUS_CONFIRMED else f" -- {updated.status}"
                 confirmed_lines.append(
@@ -3353,7 +3374,7 @@ class App:
             if confirmed_lines:
                 plural = "s" if len(confirmed_lines) != 1 else ""
                 summary = (
-                    f"<p>Your course booking{plural} did succeed for:</p><ul>"
+                    f"<p>Your course booking{plural} went through for:</p><ul>"
                     + "".join(f"<li>{esc(line)}</li>" for line in confirmed_lines) + "</ul>"
                 )
             else:

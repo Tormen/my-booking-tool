@@ -63,8 +63,12 @@ server {
     #     external scripts/images/frames) - everything is same-origin, so
     #     default-src 'self' is safe as the baseline for everything not
     #     called out below.
-    #   - FIFTEEN distinct inline <script> blocks exist site-wide as of this
-    #     app version: index.html's login-button script (same-origin
+    #   - TEN distinct inline <script> blocks exist site-wide as of this
+    #     app version (FIFTEEN hashes are allow-listed below: one per
+    #     current script plus superseded versions' hashes, deliberately
+    #     kept per the "ADD, never replace" rule -- rollback safety;
+    #     counts corrected 2026-07-14, the notes below used to conflate
+    #     scripts with hashes): index.html's login-button script (same-origin
     #     fetch() to /my/session only), the booking-form validation script
     #     shared by all /book/<slug> pages, the sortable/filterable-table
     #     script shared by /my and /admin's own tables, the confirm-dialog
@@ -114,10 +118,11 @@ server {
     #     page's own script hash not matching anything allow-listed here.
     #     Nobody had noticed because sort/filter is a nice-to-have, not a
     #     blocking control, so it silently did nothing on /my and /admin
-    #     for an unknown stretch of time. All thirteen are allow-listed
-    #     by exact SHA-256 hash below instead of 'unsafe-inline', so any
-    #     future/injected inline script that isn't byte-identical to these
-    #     thirteen is blocked outright. These thirteen hashes match the app
+    #     for an unknown stretch of time. Every current script is
+    #     allow-listed by exact SHA-256 hash below instead of
+    #     'unsafe-inline', so any future/injected inline script that
+    #     isn't byte-identical to an allow-listed one is blocked
+    #     outright. These hashes match the app
     #     as shipped in this repo right now -- if you ever hand-edit any of
     #     app's inline scripts, regenerate the hashes (or run
     #     `my-bt admin health`/`admin setup`, which now checks this
@@ -142,9 +147,9 @@ server {
     #     those fields. New hash ADDED via app.cli_checks.
     #     expected_csp_hashes() at the time -- old one kept per this
     #     comment's own "ADD, never replace" rule (rollback safety), which
-    #     is why FOURTEEN hashes are allow-listed below for THIRTEEN
-    #     distinct scripts currently in use -- one of them (this one) has
-    #     two entries, old and new.
+    #     is why the allow-list below carries more hashes than there are
+    #     distinct scripts currently in use -- a superseded version's
+    #     hash stays alongside its replacement.
     #   - 2026-07-16: the schedule-exceptions script's "details" link got
     #     target="_top" added (iframe/SameSite break-out fix -- see
     #     app/webapp.py::_login_form_html()'s own docstring for the fuller
@@ -162,8 +167,9 @@ server {
     #     body changing without its hash landing here -- fails at
     #     `python3 -m unittest` time going forward, same as
     #     check_csp_hashes_deployed() already does for the live server. Now
-    #     FIFTEEN hashes total for THIRTEEN distinct scripts (two of them --
-    #     the booking-form script and this one -- have two entries apiece).
+    #     FIFTEEN hashes total for the TEN distinct scripts currently in
+    #     use -- the extra five are superseded versions' hashes, kept per
+    #     the "ADD, never replace" rule.
     #   - 2026-07-08: the sortable/filterable-table script's hash changed
     #     again (still the same one shared by /my and /admin) -- added the
     #     data-default-sort="asc"|"desc" on-load behavior (default sort is

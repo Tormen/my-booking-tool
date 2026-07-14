@@ -710,24 +710,28 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
 
     def test_example_file_has_no_leftover_replace_me_in_the_csp_hash_count(self):
         # A cheap drift check this file's own comment block warns about:
-        # the prose says how many inline <script> blocks/hashes exist, and
-        # that number must match how many 'sha256-...' entries actually
-        # appear in script-src, or the comment itself is already lying the
-        # moment it's read. See test_example_file_has_every_static_script_
-        # hash_current below for the real, content-aware check (2026-07-13
-        # -- this one alone wouldn't have caught either real staleness
-        # incident, since the COUNT can still be right while one of the
-        # hashes itself is wrong).
+        # the prose says how many hashes are allow-listed, and that number
+        # must match how many 'sha256-...' entries actually appear in
+        # script-src, or the comment itself is already lying the moment
+        # it's read. 2026-07-14 (repo-review): the prose used to conflate
+        # "distinct scripts" with "allow-listed hashes" (and so did this
+        # test, asserting the HASH count against the "distinct ... blocks"
+        # sentence) -- the comment now states both numbers separately:
+        # N distinct current scripts, M hashes (superseded versions' hashes
+        # kept per "ADD, never replace"). This checks the HASH claim; the
+        # script count has no cheap ground truth here (it's 8 app constants
+        # + the real index.html's own blocks, checked content-aware by
+        # test_example_file_has_every_static_script_hash_current below).
         example = Path(__file__).resolve().parent.parent / "site" / "nginx-locations.conf.example"
         text = example.read_text(encoding="utf-8")
         hash_count = len(re.findall(r"'sha256-[A-Za-z0-9+/=]+'", text))
         digit_words = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "FIVE",
                        6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN",
                        11: "ELEVEN", 12: "TWELVE", 13: "THIRTEEN", 14: "FOURTEEN",
-                       15: "FIFTEEN"}
+                       15: "FIFTEEN", 16: "SIXTEEN", 17: "SEVENTEEN", 18: "EIGHTEEN"}
         expected_word = digit_words.get(hash_count)
         self.assertIsNotNone(expected_word, f"unexpected hash count {hash_count} -- extend digit_words")
-        self.assertIn(f"{expected_word} distinct inline <script> block", text)
+        self.assertIn(f"{expected_word} hashes", text)
 
     def test_example_file_has_every_static_script_hash_current(self):
         """The "rpm build" half of the CSP-hash automation the operator asked for

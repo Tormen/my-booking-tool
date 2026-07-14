@@ -2272,7 +2272,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--course", help="filter by course shortname")
     sp.add_argument(
-        "--status", choices=["confirmed", "waitlisted", "canceled_by_guest", "canceled_by_host"],
+        # pending_confirmation added 2026-07-14 (repo-review): it's a real,
+        # first-class status (a brand-new email's booking before the
+        # confirm-link click) that /admin's own table and `my-bt show`
+        # both display -- there was just no way to FILTER on it here.
+        "--status",
+        choices=["confirmed", "waitlisted", "pending_confirmation", "canceled_by_guest", "canceled_by_host"],
         help="filter to one status",
     )
     sp.add_argument("--email", help="filter by (partial, case-insensitive) attendee email")

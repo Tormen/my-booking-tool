@@ -80,6 +80,14 @@ install -m 644 "$HERE"/settings.toml.example /etc/my-booking/settings.toml.examp
 install -m 644 "$HERE"/systemd/my-booking.service /etc/systemd/system/
 install -m 644 "$HERE"/systemd/my-booking-retention.service /etc/systemd/system/
 install -m 644 "$HERE"/systemd/my-booking-retention.timer /etc/systemd/system/
+# 2026-07-14 (review finding G1): the watchdog and git-snapshot pairs were
+# never installed by this script (both postdate it) -- the RPM always
+# ships all four; without them an install.sh system silently ran with no
+# abuse watchdog and no hourly data-dir snapshot at all.
+install -m 644 "$HERE"/systemd/my-booking-watchdog.service /etc/systemd/system/
+install -m 644 "$HERE"/systemd/my-booking-watchdog.timer /etc/systemd/system/
+install -m 644 "$HERE"/systemd/my-booking-git-snapshot.service /etc/systemd/system/
+install -m 644 "$HERE"/systemd/my-booking-git-snapshot.timer /etc/systemd/system/
 systemctl daemon-reload
 
 # SELinux: unlike the RPM path, `install` here doesn't go through rpm's

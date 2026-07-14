@@ -1119,7 +1119,7 @@ during `rpmbuild` (`packaging/my-booking-tool.spec`'s `%check` section),
 aborting the build on any failure, so there's no separate step to remember
 before shipping a package.
 
-912+ tests covering slot generation (including DST via `zoneinfo`, and that
+1500+ tests covering slot generation (including DST via `zoneinfo`, and that
 occurrences stay bookable right up to start), CSV storage/locking/CSV-injection
 guarding, atomic capacity-checked booking (no overbooking race), the
 late-booking quorum gate (`min_required_participants`), the CalDAV client
