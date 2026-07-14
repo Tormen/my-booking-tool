@@ -1061,8 +1061,20 @@ def cmd_admin_logout(args) -> None:
         print("error: pass either an email or --all, not both", file=sys.stderr)
         sys.exit(1)
     if not args.all and not args.email_pos:
-        print("error: `my-bt admin logout EMAIL` or `my-bt admin logout --all`", file=sys.stderr)
-        sys.exit(1)
+        # 2026-07-14: a bare `my-bt admin logout` used to print only a
+        # terse usage error -- unhelpful exactly when the RPM's %pre gate
+        # or `setup -i` just told you to run this command. Show WHO could
+        # be logged out instead: the same active-sessions overview those
+        # gates print (which itself ends with the exact
+        # `admin logout EMAIL`/`--all` commands to copy-paste).
+        from app import cli_checks
+
+        payload, error = _query_internal_status(args.internal_url)
+        if error:
+            print(f"can't check active sessions: {error}", file=sys.stderr)
+            sys.exit(1)
+        print(cli_checks.format_active_sessions_overview(payload))
+        return
     params = {"all": "1"} if args.all else {"email": args.email_pos}
     payload, error = _post_internal_logout(args.internal_url, **params)
     if error:
@@ -2490,7 +2502,8 @@ def build_parser() -> argparse.ArgumentParser:
         "restart silently drops every one) -- this is the one-line fix it now points you "
         "at: clear them on purpose, then retry. Same effect as the RPM's own %pre gate "
         "before an upgrade. EMAIL logs out just that one attendee (every device); --all "
-        "also clears any admin session.",
+        "also clears any admin session. Run bare (no EMAIL, no --all) to first LIST "
+        "who's currently logged in (2026-07-14: it used to just error).",
     )
     sp.add_argument("email_pos", nargs="?", metavar="EMAIL", help="attendee's login email (or use --all below)")
     sp.add_argument("--all", action="store_true", help="log out EVERY active session, guest and admin alike")

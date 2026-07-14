@@ -156,6 +156,52 @@ class AdminLogoutArgsTest(unittest.TestCase):
         self.assertFalse(args.all)
         self.assertIsNone(args.email_pos)
 
+    def test_bare_logout_lists_active_sessions_instead_of_erroring(self):
+        # 2026-07-14: a bare `my-bt admin logout` used to print only a
+        # terse usage error -- unhelpful exactly when the RPM's %pre gate
+        # or `setup -i` just told you to run it. It now shows WHO could be
+        # logged out (the same overview those gates print, which itself
+        # ends with the exact EMAIL/--all commands to run next).
+        args = my_bt_mod.build_parser().parse_args(["admin", "logout"])
+        payload = {
+            "session_timeout_seconds": 14400,
+            "sessions": [{
+                "kind": "guest", "who": "test2@example.org", "name": "Mr. Test 2",
+                "connected_since": "2026-07-14T13:43:00+00:00",
+                "expires_at": "2026-07-14T17:43:00+00:00",
+                "last_page": "/book/trier-sat-yoga",
+                "last_seen": "2026-07-14T13:43:00+00:00",
+            }],
+        }
+        out = io.StringIO()
+        with mock.patch.object(my_bt_mod, "_query_internal_status", return_value=(payload, None)):
+            with contextlib.redirect_stdout(out):
+                my_bt_mod.cmd_admin_logout(args)  # must NOT raise/exit
+        output = out.getvalue()
+        self.assertIn("test2@example.org", output)
+        self.assertIn("Mr. Test 2", output)
+        self.assertIn("my-bt admin logout EMAIL", output)
+        self.assertIn("--all", output)
+
+    def test_bare_logout_with_no_sessions_says_so(self):
+        args = my_bt_mod.build_parser().parse_args(["admin", "logout"])
+        payload = {"session_timeout_seconds": 14400, "sessions": []}
+        out = io.StringIO()
+        with mock.patch.object(my_bt_mod, "_query_internal_status", return_value=(payload, None)):
+            with contextlib.redirect_stdout(out):
+                my_bt_mod.cmd_admin_logout(args)
+        self.assertIn("(no active sessions)", out.getvalue())
+
+    def test_bare_logout_with_unreachable_service_still_errors(self):
+        args = my_bt_mod.build_parser().parse_args(["admin", "logout"])
+        err = io.StringIO()
+        with mock.patch.object(my_bt_mod, "_query_internal_status", return_value=(None, "connection refused")):
+            with contextlib.redirect_stderr(err):
+                with self.assertRaises(SystemExit) as ctx:
+                    my_bt_mod.cmd_admin_logout(args)
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertIn("can't check active sessions", err.getvalue())
+
 
 class UsersLogoutArgsTest(unittest.TestCase):
     """2026-07-10: 'logout <EMAIL>' and 'logout --all' were added
