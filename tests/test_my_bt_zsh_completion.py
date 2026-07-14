@@ -4,17 +4,21 @@ shell auto-complete was requested to be built into the script, shipped via
 the rpm package, and to work over all levels -- as much autocomplete as
 possible, including recognizing a course-name where possible.
 
-No real zsh is available in this environment to actually source/exercise
-the generated script, so these tests are structural: they check the
-output is well-formed zsh _arguments/_describe syntax (balanced braces,
-every spec line in a multi-line _arguments call backslash-continued
-except the last, no unescaped colons in a positional's message field --
-see generate_zsh_completion's own docstring for why that specific rule
-matters) rather than actually running it. The operator's own
-rebuild/install cycle is what actually exercises this against a real zsh
-(see feedback_run_targeted_tests_during_dev -- full suite + real usage is
-the operator's own job at install time, not this repo's job to re-verify
-here).
+These tests are structural (no zsh dependency, so they run anywhere the
+suite runs, rpmbuild's %check included): they check the output is
+well-formed zsh _arguments/_describe syntax (balanced braces, every spec
+line in a multi-line _arguments call backslash-continued except the
+last, no unescaped colons in a positional's message field -- see
+generate_zsh_completion's own docstring for why that specific rule
+matters) rather than actually running it. 2026-07-14: the generated
+script WAS additionally exercised against a real interactive zsh (zpty
+pty harness, TAB pressed at every depth: top level, admin, admin gdpr,
+admin health, users, list --<TAB>, --format/--status value completion,
+live --course shortname completion from settings.toml, site-maintenance
+choices) -- all correct; that harness stays a dev-machine tool rather
+than a suite dependency, since zsh isn't guaranteed wherever this suite
+runs. The operator's own rebuild/install cycle re-exercises it against
+the real zsh either way.
 
 scripts/my-bt has no .py extension and lives outside app/, so it's loaded
 via importlib.machinery.SourceFileLoader, same as test_my_bt_argparse.py.
@@ -127,6 +131,90 @@ class GenerateZshCompletionStructureTest(unittest.TestCase):
         admin_sp = my_bt_mod._zsh_subparser_choices(parser)["admin"]
         for name in my_bt_mod._zsh_subparser_choices(admin_sp):
             self.assertIn(f"            {name})", self.script, f"missing admin sub-case label for {name!r}")
+
+
+class CompletionCompletenessAuditTest(unittest.TestCase):
+    """2026-07-14 ("Please check the auto-complete to be complete"): a
+    full-tree audit -- EVERY subcommand name, --option string, and
+    positional choice anywhere in build_parser()'s real argparse tree
+    must appear in the generated script, at whatever depth. A new
+    command/flag/choice added later fails here immediately instead of
+    silently shipping without completion (the exact bug `admin gdpr`'s
+    third level once hit -- see _zsh_case_block's own docstring)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = my_bt_mod.generate_zsh_completion(my_bt_mod.build_parser())
+
+    def _walk(self, parser, path):
+        import argparse
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, sp in action.choices.items():
+                    yield ("command", path + [name], name)
+                    yield from self._walk(sp, path + [name])
+            else:
+                for opt in action.option_strings:
+                    if opt not in ("-h", "--help"):
+                        yield ("option", path, opt)
+                if not action.option_strings and action.choices:
+                    for c in action.choices:
+                        yield ("choice", path, str(c))
+
+    def test_every_command_option_and_choice_appears(self):
+        for kind, path, token in self._walk(my_bt_mod.build_parser(), ["my-bt"]):
+            with self.subTest(kind=kind, at=" ".join(path), token=token):
+                self.assertIn(token, self.script)
+
+
+class CompletionValueSpecTest(unittest.TestCase):
+    """2026-07-14 completeness audit, the VALUE half: options that take an
+    argument must say so in their spec (or zsh treats the typed value as
+    the next positional and derails the rest of the line), and options
+    with choices= must offer those exact choices."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = my_bt_mod.generate_zsh_completion(my_bt_mod.build_parser())
+
+    def test_format_option_offers_its_choices(self):
+        self.assertIn(":format:(table csv json)", self.script)
+
+    def test_status_option_offers_every_storage_status(self):
+        from app.storage import STATUS_LABELS
+        for status in STATUS_LABELS:
+            self.assertIn(status, self.script.split(":status:(", 1)[1].split(")", 1)[0])
+
+    def test_settings_and_data_dir_complete_paths(self):
+        self.assertIn(":settings file:_files", self.script)
+        self.assertIn(":data dir:_files -/", self.script)
+
+    def test_every_value_taking_option_declares_a_value_slot(self):
+        # e.g. --email/--last/--internal-url offer nothing (needs live
+        # data) but must still consume their argument word -- check a few
+        # representatives got the empty-action slot, not flag-only specs.
+        self.assertRegex(self.script, r"--email\[[^]]*\]:email:")
+        self.assertRegex(self.script, r"--last\[[^]]*\]:last:")
+        self.assertRegex(self.script, r"--internal-url\[[^]]*\]:internal url:")
+
+    def test_flag_options_stay_flag_only(self):
+        # A store_true flag must NOT gain a value slot -- that would tell
+        # zsh it consumes the next word. --yes is a plain single-alias
+        # flag; --raw is the {-r,--raw} brace form -- neither may be
+        # followed by a ':message:action' suffix after its ']'.
+        self.assertRegex(self.script, r"--yes\[[^]]*\]'")
+        self.assertNotRegex(self.script, r"--yes\[[^]]*\]:")
+        self.assertNotRegex(self.script, r"--raw\}'\[[^]]*\]:")
+
+    def test_email_positionals_do_not_offer_course_names(self):
+        # logout/erase EMAIL used to fall back to course-shortname
+        # completion -- actively wrong candidates. Their positional spec
+        # must end with an empty action now; show/cancel's free-form
+        # `query` keeps course completion (a shortname IS one valid
+        # thing to type there).
+        for m in re.finditer(r"'(\d+):([^:']*):_mb_course_shortnames'", self.script):
+            self.assertIn("anything", m.group(2).lower(),
+                          f"course completion on a non-query positional: {m.group(0)!r}")
 
 
 class PrintZshCompletionFlagTest(unittest.TestCase):

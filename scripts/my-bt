@@ -1900,6 +1900,30 @@ def _expand_help_text(parser: argparse.ArgumentParser, action: argparse.Action) 
         return help_text
 
 
+def _zsh_option_value_spec(action: argparse.Action) -> str:
+    """The ':message:action' value-completion suffix for one --option's
+    _arguments spec -- "" for a true flag (takes no argument). See
+    _zsh_option_specs's own docstring for the 2026-07-14 completeness
+    audit this implements."""
+    if action.nargs == 0 or isinstance(
+        action, (argparse._StoreTrueAction, argparse._StoreConstAction,
+                 argparse._HelpAction, argparse._VersionAction)
+    ):
+        return ""
+    if action.dest == "course":
+        return ":course:_mb_course_shortnames"
+    if action.choices:
+        return f":{action.dest}:({' '.join(str(c) for c in action.choices)})"
+    if action.dest == "settings":
+        return ":settings file:_files"
+    if action.dest == "data_dir":
+        return ":data dir:_files -/"
+    # Value-taking, but nothing sensible to offer without live data
+    # (email/id/date/duration/url/message/...) -- empty action: no
+    # candidates, but zsh still knows the flag consumes this word.
+    return f":{action.dest.replace('_', ' ')}:"
+
+
 def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
     """One RAW (un-indented, no line-continuation) zsh _arguments spec
     string per --option/-o this parser itself defines (NOT its own
@@ -1914,9 +1938,21 @@ def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
     offers real course shortnames parsed live from settings.toml (see
     generate_zsh_completion's own module docstring for the shell
     function itself and why it's a live parse, not a build-time-frozen
-    list). Every OTHER option stays flag-only -- appending a value
-    completer to a plain store_true flag would incorrectly tell zsh that
-    flag takes an argument."""
+    list).
+
+    2026-07-14 (completion completeness audit): every OTHER value-taking
+    option used to be emitted flag-only, which told zsh the flag takes
+    NO argument at all -- `--status <TAB>`/`--format <TAB>` offered
+    nothing, and worse, zsh then treated the typed VALUE as the next
+    positional, derailing everything after it on the line. Now:
+    `choices=[...]` options complete their real choices; --settings
+    completes files and --data-dir directories; every other value-taking
+    option declares an (empty-action) value slot -- offering nothing is
+    correct there (an email/id/date needs live data, see the module
+    docstring on the argcomplete trade-off), but the argument word is at
+    least consumed correctly. store_true/store_const/help/version flags
+    stay flag-only, exactly as before -- appending a value completer to
+    those would incorrectly tell zsh they take an argument."""
     specs = []
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
@@ -1925,7 +1961,7 @@ def _zsh_option_specs(parser: argparse.ArgumentParser) -> list[str]:
         if not opts:
             continue
         desc = _zsh_escape(_expand_help_text(parser, action))
-        value = ":course:_mb_course_shortnames" if action.dest == "course" else ""
+        value = _zsh_option_value_spec(action)
         if len(opts) > 1:
             # zsh's own idiom for "these aliases are mutually exclusive
             # with each other, both get this same description" is
@@ -1992,8 +2028,17 @@ def _zsh_positional_specs(parser: argparse.ArgumentParser) -> list[str]:
         if action.choices:
             choices_str = " ".join(str(c) for c in action.choices)
             specs.append(f"'{position}:{message}:({choices_str})'")
-        else:
+        elif action.dest == "query":
+            # show/cancel's free-form query -- a course shortname is ONE
+            # of the valid things to type there, and the one this script
+            # can cheaply offer.
             specs.append(f"'{position}:{message}:_mb_course_shortnames'")
+        else:
+            # 2026-07-14 (completeness audit): logout/erase's EMAIL
+            # positional used to get course-shortname completion too --
+            # actively wrong candidates. No candidates at all is correct
+            # (emails need live data); the word is still consumed.
+            specs.append(f"'{position}:{message}:'")
     return specs
 
 
