@@ -78,15 +78,14 @@ TEMPLATES = [
     ("site/privacy.html.tmpl", "site/privacy.html"),
 ]
 
-# index_embedded.html (2026-07-16) -- rendered separately from the loop
-# above, not folded into TEMPLATES: it substitutes upcoming
-# [[course.date_override]] entries, not the [privacy] retention numbers
-# every TEMPLATES entry shares, so it needs its own settings-derived inputs
-# (see app.config.courses_from_raw / today_in_raw_timezone) rather than
-# site_render.write_privacy_html's two plain numbers. See
-# app/site_render.py's own docstring and site/index_embedded.html.tmpl.example
-# for what this second page is for.
-EMBEDDED_TEMPLATE_REL = "site/index_embedded.html.tmpl"
+# index_embedded.html -- rendered separately from the loop above, not
+# folded into TEMPLATES: it's DERIVED from site/index.html itself (real or
+# .example, same resolve_real_or_example() fallback as everything else
+# here), not rendered from a `.tmpl` + plain settings.toml numbers -- see
+# app.site_render.derive_index_embedded_html's own docstring for the three
+# transformations applied (strip <script> blocks, retarget known links,
+# splice in the schedule-exceptions banner).
+EMBEDDED_SOURCE_REL = "site/index.html"
 EMBEDDED_OUTPUT_REL = "site/index_embedded.html"
 
 
@@ -108,11 +107,28 @@ def render(settings_path: Path | None = None) -> tuple[list[str], dict]:
 
     from app import config as app_config
 
-    embedded_tmpl_path = resolve_real_or_example(REPO_ROOT / EMBEDDED_TEMPLATE_REL)
+    embedded_source_path = resolve_real_or_example(REPO_ROOT / EMBEDDED_SOURCE_REL)
     courses = app_config.courses_from_raw(raw)
     today = app_config.today_in_raw_timezone(raw)
-    site_render.write_index_embedded_html(embedded_tmpl_path, courses, today, REPO_ROOT / EMBEDDED_OUTPUT_REL)
-    written.append(EMBEDDED_OUTPUT_REL)
+    base_url = raw.get("site", {}).get("base_url", "")
+    new_tab_links = bool(raw.get("site", {}).get("index_embedded_new_tab_links", True))
+    custom_attention_message = raw.get("site", {}).get("custom_attention_message", "")
+    try:
+        site_render.write_derived_index_embedded_html(
+            embedded_source_path.read_text(encoding="utf-8"), courses, today, base_url, new_tab_links,
+            REPO_ROOT / EMBEDDED_OUTPUT_REL, custom_attention_message,
+        )
+        written.append(EMBEDDED_OUTPUT_REL)
+    except site_render.IndexEmbeddedDerivationError as exc:
+        # Best-effort, not fatal to the build: a customized real
+        # site/index.html that's missing something this derivation depends
+        # on (see that exception's own docstring) shouldn't break
+        # scripts/build-rpm.sh for a site that never touched anything
+        # related to the <iframe>-embed feature -- print and move on,
+        # leaving whatever site/index_embedded.html (if any) already exists
+        # from a previous run untouched.
+        print(f"warning: could not derive {EMBEDDED_OUTPUT_REL} from {embedded_source_path}: {exc}",
+              file=sys.stderr)
 
     values = {"retention_months": retention_months, "canceled_retention_months": canceled_retention_months}
     return written, values

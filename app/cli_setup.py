@@ -16,6 +16,7 @@ import re
 import secrets as _secrets
 import shutil
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -79,6 +80,27 @@ def _run_tolerant(cmd: list[str], print_fn: Callable[[str], None]) -> None:
         subprocess.call(cmd)
     except FileNotFoundError:
         print_fn(f"[fail] {cmd[0]}: not installed -- run this step manually: {' '.join(cmd)}")
+
+
+def _default_run_nginx_test() -> bool:
+    """Runs `nginx -t`, letting its own stdout/stderr print straight to the
+    terminal (same as every other `run([...])` call in this walkthrough),
+    but -- unlike those, which are fire-and-forget via subprocess.call's
+    discarded return value -- actually reports whether it passed.
+
+    Needed specifically for the CSP self-heal step below: `run` itself
+    (subprocess.call, return value thrown away) can't tell a caller
+    whether `nginx -t` passed, which is fine for the existing "reload now?"
+    prompt (a human is watching the output either way) but not safe enough
+    to gate an automatic revert-on-failure. A missing `nginx` binary counts
+    as failure here (can't verify, so don't trust the edit), unlike
+    `_run_tolerant`'s more forgiving treatment of a missing tool elsewhere
+    in this file -- there's nothing tolerant about silently keeping a CSP
+    edit nobody could actually verify."""
+    try:
+        return subprocess.call(["nginx", "-t"]) == 0
+    except FileNotFoundError:
+        return False
 
 
 _WATCHDOG_HEADER_RE = re.compile(r"^\[watchdog\][ \t]*\r?\n", re.MULTILINE)
@@ -153,14 +175,6 @@ def tmpl_path(home: str) -> Path:
     return Path(home) / "site" / site_render.TEMPLATE_NAME
 
 
-def embedded_tmpl_path(home: str) -> Path:
-    # 2026-07-16: the real, optional site/index_embedded.html.tmpl (see
-    # site/index_embedded.html.tmpl.example's own docstring) -- same
-    # real-or-.example resolution as tmpl_path() above, just for the
-    # second generated page.
-    return Path(home) / "site" / site_render.EMBEDDED_TEMPLATE_NAME
-
-
 def _course_summary(raw: dict) -> str:
     return ", ".join(c.get("shortname", "?") for c in raw.get("course", [])) or "(none configured)"
 
@@ -176,12 +190,6 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
     printed and interactive modes (and `status`, for the ones it also
     reports) can't drift out of sync with each other."""
     config_paths = [settings_path, str(tmpl_path(home))]
-    # index_embedded.html.tmpl is optional (see embedded_tmpl_path's own
-    # comment) -- only tracked for .rpmnew merges once it actually exists,
-    # same "not opted into -- nothing to report" gating
-    # check_index_embedded_drift below already applies.
-    if embedded_tmpl_path(home).exists():
-        config_paths.append(str(embedded_tmpl_path(home)))
     return {
         "secrets": cli_checks.check_secrets(raw),
         "rpmnew": cli_checks.check_rpmnew(config_paths),
@@ -193,7 +201,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "nginx_conf_repo_file": cli_checks.check_nginx_conf_repo_file(home),
         "nginx_conf_deployed": cli_checks.check_nginx_conf_deployed(raw),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
-        "index_embedded_drift": cli_checks.check_index_embedded_drift(raw, embedded_tmpl_path(home)),
+        "index_embedded_drift": cli_checks.check_index_embedded_drift(raw),
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
         "static_pages_reachable": cli_checks.check_static_pages_reachable(raw),
@@ -222,6 +230,9 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "maintenance": cli_checks.check_maintenance_mode(data_dir),
         "calendar_invite_format": cli_checks.check_calendar_invite_format(raw, data_dir),
         "calendar_invite_resync_skips": cli_checks.check_calendar_invite_resync_skips(data_dir),
+        "active_sessions": cli_checks.check_active_sessions(),
+        "csp_violations": cli_checks.check_csp_violations(raw),
+        "csp_hashes_deployed": cli_checks.check_csp_hashes_deployed(raw),
     }
 
 
@@ -249,6 +260,21 @@ def print_report(
 
     print_fn("my-booking-tool: setup steps (generated fresh from current state,")
     print_fn("full detail also in README.md)\n")
+
+    # 2026-07-13: unlike every numbered step below (all read from
+    # settings.toml/the filesystem), this one queries the LIVE running
+    # process directly, same as `my-bt status` -- surfaced here,
+    # unnumbered, right up front, because it's a WARNING about safety
+    # (someone's actively using the site right now), not a config/install
+    # check. A single compact line (report["active_sessions"]) drives the
+    # warn/fail tally below; the full breakdown of who/since-when/timeout
+    # is worth showing in full immediately under it.
+    if report["active_sessions"]:
+        show(report["active_sessions"])
+        payload, _err = cli_checks.fetch_active_sessions()
+        if payload:
+            print_fn(cli_checks.format_active_sessions_overview(payload))
+        print_fn("")
 
     print_fn("1. Secrets in /etc/my-booking/secrets/ (mode 600, owned by my-booking):")
     show(report["secrets"])
@@ -353,6 +379,29 @@ def print_report(
         print_fn("   [SKIP] caldav_url/username/password not fully configured yet -- not checked")
     show(report["calendar_invite_resync_skips"])
 
+    print_fn("\n14. CSP violations reported by browsers ([logging].log_file, if configured):")
+    if report["csp_violations"]:
+        show(report["csp_violations"])
+    elif raw.get("logging", {}).get("log_file"):
+        print_fn("   [OK  ] none in the last [watchdog].window_minutes")
+    else:
+        print_fn("   [SKIP] [logging].log_file not configured -- not checked")
+
+    # 2026-07-13: the PROACTIVE half of the CSP-hash automation (contrast
+    # step 14 above, which is purely reactive -- it can only ever surface a
+    # stale hash AFTER a real browser has hit it and reported back). This
+    # instead computes every inline <script> hash the app can currently
+    # produce from source (app.cli_checks.expected_csp_hashes()) and
+    # compares it against what's actually allow-listed in the live nginx
+    # CSP header right now -- built after this exact class of bug (a
+    # forgotten hash update) hit production four separate times (see
+    # site/nginx-locations.conf's own dated incident notes).
+    print_fn("\n15. CSP script hashes deployed (checked live via `nginx -T`):")
+    if report["csp_hashes_deployed"]:
+        show(report["csp_hashes_deployed"])
+    else:
+        print_fn("   [SKIP] nginx/the matching vhost/its CSP header not detected -- not checked")
+
     print_fn("\nRun `my-bt setup --interactive` to be walked through what's left.")
 
     all_checks = [c for group in report.values() for c in group]
@@ -385,6 +434,7 @@ def interactive_setup(
     print_fn: Callable[[str], None] = print,
     data_dir: str = "/var/lib/my-booking",
     check_active_sessions: Callable[[], tuple[int | None, str | None]] = _default_check_active_sessions,
+    run_nginx_test: Callable[[], bool] = _default_run_nginx_test,
 ) -> tuple[int, int]:
     """Runs the interactive walkthrough and returns (fails, warns) -- the
     same CURRENT-state counts (after whatever this walkthrough just fixed)
@@ -398,6 +448,26 @@ def interactive_setup(
     status` ran status unconditionally)."""
     if run is None:
         run = lambda cmd: _run_tolerant(cmd, print_fn)  # noqa: E731
+
+    # 2026-07-13: refuse the WHOLE walkthrough outright while anyone's
+    # actively logged in, mirroring the RPM's own %pre gate before an
+    # upgrade (packaging/my-booking-tool.spec) -- before this, only step
+    # 6's own "Restart my-booking.service now?" prompt (below) had any
+    # session-awareness at all, so a run where settings.toml was already
+    # fresh (nothing to restart) sailed straight through every other step
+    # -- nginx reload, systemd enable, group membership, SELinux -- with
+    # someone live on the site, even though the RPM would have refused an
+    # upgrade in the exact same situation. Uses the raw payload (not just
+    # a count, unlike check_active_sessions above) so the refusal can show
+    # WHO exactly is logged in, not just how many.
+    sessions_payload, _sessions_err = cli_checks.fetch_active_sessions()
+    if sessions_payload and sessions_payload.get("sessions"):
+        n = len(sessions_payload["sessions"])
+        print_fn(f"my-bt setup --interactive: refusing to proceed -- {n} active session(s) right now.\n")
+        print_fn(cli_checks.format_active_sessions_overview(sessions_payload))
+        print_fn("\nWait for them to log out/expire (see `my-bt status`), or force-clear them")
+        print_fn("yourself with the command above, then re-run `my-bt setup -i`.")
+        return 1, 0
 
     print_fn("my-bt setup --interactive: walking through remaining steps.")
     print_fn("Already-done steps are shown and skipped without asking.\n")
@@ -497,9 +567,24 @@ def interactive_setup(
             print_fn("  /opt/my-booking/site/my-booking.conf.example")
         print_fn("to your existing vhost (not automated -- this would mean")
         print_fn("guessing at and editing your hand-maintained nginx config).")
-    if prompt("Run `nginx -t && systemctl reload nginx` now?"):
-        run(["nginx", "-t"])
-        run(["systemctl", "reload", "nginx"])
+    # 2026-07-13: the reload prompt used to live right here, BEFORE the
+    # [site].nginx_conf_path vimdiff-reconciliation block below ever runs
+    # -- so a real run could reload nginx with the OLD on-disk content,
+    # THEN immediately be offered a vimdiff merge that changes that same
+    # file (e.g. adding a new CSP script-src hash), landing on disk only
+    # AFTER the reload already happened. The 2026-07-13 patch before this
+    # one added a second, follow-up reload prompt right after that vimdiff
+    # to paper over the gap, but that just meant TWO separate reload
+    # prompts in one run, in a confusing order (reload, then a merge that
+    # itself asks to reload again) -- exactly what the operator flagged from a
+    # real run ("vimdiff still happens after nginx restart"). Fixed
+    # properly this time: no reload prompt here at all -- one single,
+    # unconditional prompt at the very end of this whole nginx section
+    # (below), asked only once every possible content change (location-
+    # block hint above, plus any vimdiff merge/rename below) is already
+    # known, so accepting it always reloads the FINAL, fully-reconciled
+    # config, not a stale snapshot from partway through this section.
+    nginx_content_changed = False
 
     # Real, personal nginx vhost conf kept directly in this checkout's
     # site/ dir at the fixed name site/nginx-locations.conf -- informational
@@ -595,6 +680,64 @@ def interactive_setup(
                 source.read_text(encoding="utf-8", errors="replace")
             if not same and prompt(f"Open vimdiff {live_now} {source} now?"):
                 run(["vimdiff", str(live_now), str(source)])
+                # 2026-07-13: no reload prompt here -- see the
+                # nginx_content_changed comment above step 4's location
+                # checks for why. Just record that the on-disk config may
+                # have changed; the ONE reload prompt for this whole
+                # section fires once, at the very end, after this AND the
+                # rename branch below have both had a chance to run.
+                nginx_content_changed = True
+
+        # CSP hash self-heal (2026-07-16, the operator: "can we automate and fix
+        # this within the build or setup so that the setup does not break
+        # out with an error but maybe can self-heal?"). Runs against
+        # whichever file is actually live right now, same as the vimdiff
+        # reconciliation just above. check_csp_hashes_deployed() itself
+        # stays read-only (still used as-is by plain `status`/`health`,
+        # and by the non-interactive branch of this same walkthrough) --
+        # this is the ONE place that actually edits the live CSP header,
+        # gated behind an explicit prompt, additive-only
+        # (csp_script_src_patch()), and verified with a REAL `nginx -t`
+        # pass/fail check (run_nginx_test(), not the fire-and-forget `run`
+        # used elsewhere in this section, which throws its exit code away)
+        # before the edit is ever kept -- reverted to the original content
+        # immediately if that check fails, so this can never leave a
+        # broken CSP header on a live web server. Deliberately still
+        # prompt-gated even though the location-block hint above and the
+        # vimdiff/rename branches around it already imply a fair amount of
+        # trust in this walkthrough -- a bad CSP edit breaks every inline
+        # script on the site at once, not just one page, so this is the
+        # one nginx change in this whole section that stays opt-in no
+        # matter what.
+        live_for_csp = deployed if deployed.exists() else live_file
+        if live_for_csp is not None and live_for_csp.exists():
+            csp_warn_detail = next(
+                (detail for _, level, detail in cli_checks.check_csp_hashes_deployed(raw) if level == "warn"),
+                None,
+            )
+            if csp_warn_detail and prompt(
+                f"CSP script hashes deployed: {csp_warn_detail} -- add the missing hash(es) to "
+                f"{live_for_csp} and verify with `nginx -t` now?"
+            ):
+                expected = cli_checks.expected_csp_hashes(raw)
+                currently_deployed = cli_checks._nginx_csp_script_hashes(raw) or set()
+                to_add = sorted({h for h in expected.values() if h not in currently_deployed})
+                original_text = live_for_csp.read_text(encoding="utf-8")
+                try:
+                    patched_text = cli_checks.csp_script_src_patch(original_text, to_add)
+                except ValueError as exc:
+                    print_fn(f"[fail] couldn't patch {live_for_csp}: {exc} -- left untouched")
+                else:
+                    atomic_write_text(live_for_csp, patched_text)
+                    if run_nginx_test():
+                        print_fn(f"[ok] added {len(to_add)} CSP hash(es) to {live_for_csp} -- nginx -t passed")
+                        nginx_content_changed = True
+                    else:
+                        atomic_write_text(live_for_csp, original_text)
+                        print_fn(
+                            f"[fail] `nginx -t` did not pass after adding {len(to_add)} hash(es) -- "
+                            f"reverted {live_for_csp} to its original content, nothing was left broken"
+                        )
 
         # Renaming into place: the alternative fix, only still relevant if
         # you didn't just update the setting above. Unlike that offer, this
@@ -607,11 +750,24 @@ def interactive_setup(
                 try:
                     live_file.rename(deployed)
                     print_fn(f"[ok] renamed {live_file} -> {deployed}")
-                    if prompt("Run `nginx -t && systemctl reload nginx` to pick it up now?"):
-                        run(["nginx", "-t"])
-                        run(["systemctl", "reload", "nginx"])
+                    nginx_content_changed = True
                 except OSError as exc:
                     print_fn(f"[fail] could not rename {live_file}: {exc}")
+
+    # ONE reload prompt for the whole nginx section, asked here at the end
+    # -- after the location-block hint above AND any vimdiff-merge/rename
+    # against [site].nginx_conf_path just above have all already had their
+    # chance to change what's actually on disk -- so accepting this always
+    # reloads the fully-reconciled config, never a stale mid-section
+    # snapshot. See nginx_content_changed's own comment near the top of
+    # step 4 for the real run that prompted this reordering.
+    reload_prompt = (
+        "Run `nginx -t && systemctl reload nginx` to pick up these changes now?"
+        if nginx_content_changed else "Run `nginx -t && systemctl reload nginx` now?"
+    )
+    if prompt(reload_prompt):
+        run(["nginx", "-t"])
+        run(["systemctl", "reload", "nginx"])
 
     # 5. group membership
     print_fn("\n-- 5. my-booking group membership --")
@@ -719,48 +875,6 @@ def interactive_setup(
             except OSError as exc:
                 print_fn(f"[fail] could not write {out_path}: {exc}")
 
-        # index_embedded.html (2026-07-16): same render-from-template
-        # mechanism as privacy.html just above, just optional -- only
-        # offered at all once site/index_embedded.html.tmpl (the real,
-        # hand-customized template) actually exists in this checkout; see
-        # site/index_embedded.html.tmpl.example's own docstring for what
-        # it's for (a no-JavaScript variant of the homepage, meant for the
-        # <iframe>-embed use case).
-        embedded_t = embedded_tmpl_path(home)
-        if embedded_t.exists():
-            embedded_out_path = Path(static_site_dir) / site_render.EMBEDDED_OUTPUT_NAME
-            embedded_drift_checks = cli_checks.check_index_embedded_drift(raw, embedded_t)
-            for label, level, detail in embedded_drift_checks:
-                print_fn(f"[{level}] {label}: {detail}")
-            embedded_needs_regen = any(level != "ok" for _, level, _ in embedded_drift_checks)
-            if embedded_needs_regen and prompt(
-                f"(Re)generate {embedded_out_path} from current settings.toml now?"
-            ):
-                try:
-                    from . import config as app_config
-
-                    courses = app_config.courses_from_raw(raw)
-                    today = app_config.today_in_raw_timezone(raw)
-                    rendered = site_render.render_index_embedded_html(embedded_t, courses, today)
-                    # Re-apply an active maintenance banner (2026-07-16):
-                    # `my-bt admin site-maintenance on/off` patches this
-                    # file directly, same as index.html (see
-                    # app/maintenance.py, scripts/my-bt::cmd_maintenance) --
-                    # a blind overwrite here would silently drop that
-                    # banner mid-maintenance-window, only to have it
-                    # missing until the next `site-maintenance on/off` toggle
-                    # happened to run again.
-                    state = maintenance.read_state(data_dir)
-                    if state.enabled:
-                        admin_email = raw.get("site", {}).get("admin_email", "")
-                        rendered = maintenance.insert_banner(
-                            rendered, maintenance.banner_html(admin_email, state.message)
-                        )
-                    atomic_write_text(embedded_out_path, rendered)
-                    print_fn(f"[ok] wrote {embedded_out_path}")
-                except OSError as exc:
-                    print_fn(f"[fail] could not write {embedded_out_path}: {exc}")
-
         # index.html/impressum.html/terms.html: hand-authored, so never
         # auto-copied silently -- but actively OFFER to act on each one
         # your checkout has a real (or .example) source for, instead of
@@ -803,6 +917,69 @@ def interactive_setup(
                 continue  # already in sync -- already reported "[ok]" above
             if prompt(f"Open vimdiff {deployed} {source} now?"):
                 run(["vimdiff", str(deployed), str(source)])
+
+        # index_embedded.html: DERIVED fresh from the LIVE index.html above
+        # (not this checkout's own copy -- the live file is authoritative
+        # for whatever's actually being embedded right now) plus current
+        # settings.toml, gated on [site].index_embedded_enabled (off by
+        # default -- most deployments don't embed their site via <iframe>
+        # elsewhere). Runs AFTER the index.html copy/vimdiff loop just
+        # above on purpose: any index.html drift is reconciled first, so
+        # this always derives from the version you just confirmed is
+        # correct. Same copy-if-missing/vimdiff-if-different UX as
+        # index.html itself -- NOT a separate generated-page mechanism, see
+        # app.site_render.derive_index_embedded_html's own docstring.
+        if raw.get("site", {}).get("index_embedded_enabled"):
+            live_index_path = Path(static_site_dir) / "index.html"
+            if not live_index_path.exists():
+                print_fn(f"[skip] index_embedded.html: {live_index_path} isn't deployed yet -- "
+                         "nothing to derive it from")
+            else:
+                from . import config as app_config
+
+                courses = app_config.courses_from_raw(raw)
+                today = app_config.today_in_raw_timezone(raw)
+                base_url = (raw.get("site", {}).get("base_url") or "").rstrip("/")
+                new_tab_links = bool(raw.get("site", {}).get("index_embedded_new_tab_links", True))
+                custom_attention_message = raw.get("site", {}).get("custom_attention_message", "")
+                derived = None
+                try:
+                    derived = site_render.derive_index_embedded_html(
+                        live_index_path.read_text(encoding="utf-8", errors="replace"),
+                        courses, today, base_url, new_tab_links, custom_attention_message,
+                    )
+                except site_render.IndexEmbeddedDerivationError as exc:
+                    print_fn(f"[fail] index_embedded.html: {exc}")
+
+                if derived is not None:
+                    embedded_out_path = Path(static_site_dir) / site_render.EMBEDDED_OUTPUT_NAME
+                    if not embedded_out_path.exists():
+                        if prompt(f"Derive and copy {embedded_out_path} from index.html now?"):
+                            try:
+                                atomic_write_text(embedded_out_path, derived)
+                                print_fn(f"[ok] wrote {embedded_out_path}")
+                            except OSError as exc:
+                                print_fn(f"[fail] could not write {embedded_out_path}: {exc}")
+                    else:
+                        deployed_text = embedded_out_path.read_text(encoding="utf-8", errors="replace")
+                        same = cli_checks._diffable_static_page_text(deployed_text) == \
+                            cli_checks._diffable_static_page_text(derived)
+                        if same:
+                            print_fn(f"[ok] {embedded_out_path} matches current index.html + settings.toml")
+                        elif prompt(
+                            f"{embedded_out_path} doesn't match what index.html + settings.toml would "
+                            "currently derive -- open vimdiff against the freshly-derived version now?"
+                        ):
+                            tmp_fd, tmp_path_str = tempfile.mkstemp(
+                                prefix="index_embedded.derived.", suffix=".html"
+                            )
+                            tmp_path = Path(tmp_path_str)
+                            try:
+                                with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                                    f.write(derived)
+                                run(["vimdiff", str(embedded_out_path), str(tmp_path)])
+                            finally:
+                                tmp_path.unlink(missing_ok=True)
 
         # Reachability from nginx's actual root -- a per-file symlink, never
         # a static_site_dir rewrite (see check_static_pages_reachable()'s

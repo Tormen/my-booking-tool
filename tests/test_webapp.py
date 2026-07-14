@@ -335,6 +335,74 @@ class BookPageDateOverrideTest(unittest.TestCase):
         self.assertIn("2026-07-18", html.split("ATTENTION")[1][:50])
         self.assertEqual(html.count("ATTENTION"), 1)
 
+    def test_custom_attention_message_appended_after_hr_alongside_an_override(self):
+        # 2026-07-13: [site].custom_attention_message is shown in the SAME
+        # box as any auto-generated override line, below it, separated by
+        # <hr> -- see app.cancellation.join_attention_sections.
+        app = App(make_settings(custom_attention_message="On vacation."), self.store)
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45", message="early"),),
+        )
+        _, _, html = app._book_page(course, [self._occ(date(2026, 7, 18))])
+        self.assertEqual(html.count("ATTENTION"), 1)
+        self.assertIn("early", html)
+        self.assertIn("<hr>On vacation.", html)
+
+
+class BookPageDateBoxOverrideTimeTest(unittest.TestCase):
+    """2026-07-13, the operator: the exceptional start time was only ever
+    mentioned in the ATTENTION banner above the date picker -- easy to
+    miss once focused on the date-picker itself. Repeated here in that
+    date's own box too (bold + signal color, see .d-override-time in
+    app/templates.py)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.app = App(make_settings(), self.store)
+
+    def _occ(self, d) -> Occurrence:
+        start = datetime(d.year, d.month, d.day, 10, 0, tzinfo=timezone.utc)
+        end = datetime(d.year, d.month, d.day, 11, 15, tzinfo=timezone.utc)
+        return Occurrence("trier-sat-yoga", d, start, end, 1, 10)
+
+    def test_overridden_date_box_shows_the_new_time_range(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        _, _, html = self.app._book_page(course, [self._occ(date(2026, 7, 18))])
+        self.assertIn('<span class="d-override-time">9h45 - 11h45</span>', html)
+
+    def test_non_overridden_date_box_has_no_override_time_span(self):
+        # NOTE: the substring "d-override-time" alone would ALSO match
+        # this class's own CSS rule in the page's <style> block (always
+        # present, regardless of whether it's ever used) -- must check for
+        # the actual <span> tag, not just the class name appearing anywhere.
+        course = make_course(weekday="sat", start_time="10:45", duration_minutes=120)
+        _, _, html = self.app._book_page(course, [self._occ(date(2026, 7, 18))])
+        self.assertNotIn('<span class="d-override-time">', html)
+
+    def test_only_the_overridden_date_among_several_gets_the_span(self):
+        course = make_course(
+            weekday="sat", start_time="10:45", duration_minutes=120,
+            date_overrides=(CourseDateOverride(date="2026-07-18", start_time="09:45"),),
+        )
+        _, _, html = self.app._book_page(
+            course, [self._occ(date(2026, 7, 18)), self._occ(date(2026, 7, 25))],
+        )
+        self.assertEqual(html.count('<span class="d-override-time">'), 1)
+
+    def test_custom_attention_message_alone_shows_banner_with_no_hr(self):
+        app = App(make_settings(custom_attention_message="On vacation."), self.store)
+        course = make_course(weekday="sat", start_time="10:45", duration_minutes=120)
+        _, _, html = app._book_page(course, [self._occ(date(2026, 7, 18))])
+        self.assertIn("ATTENTION", html)
+        self.assertIn("On vacation.", html)
+        self.assertNotIn("<hr>", html)
+
 
 class CoursesPageTest(unittest.TestCase):
     """/courses (2026-07-06): the "overview page as simplymeet.me" that
@@ -884,26 +952,40 @@ class SessionBannerTest(unittest.TestCase):
 
     # -- 2026-07-09: booking-page name/email hidden (not just locked) when logged in --
 
-    def test_book_page_hides_name_email_fields_when_logged_in(self):
-        # 2026-07-09: the earlier prefilled+readonly version was
-        # confusing when logged in and booking, so the Your name + Your
-        # email fields are hidden instead of shown prefilled -- the
-        # session banner already says who they're
-        # booking as, so no visible "Your name"/"Your email" label+field
-        # at all now, just hidden inputs carrying the same values.
+    def test_book_page_shows_readonly_name_email_fields_when_logged_in(self):
+        # 2026-07-13, the operator: reverted from the 2026-07-09 hidden-fields
+        # version back to visible+readonly (grey) -- now that a real
+        # Login form is embeddable right on this page (see
+        # _login_form_html()), a successful login should land on the SAME
+        # visible end state typing name+email directly produces, not an
+        # invisible one.
         environ = self._login_environ("regular@example.org")
         _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
-        self.assertIn('<input type="hidden" name="name" value="Regular">', body)
-        self.assertIn('<input type="hidden" name="email" value="regular@example.org">', body)
-        self.assertNotIn("Your name", body)
-        self.assertNotIn("Your email", body)
+        self.assertIn(
+            '<input class="big-input id-input" id="book-name" name="name" value="Regular" readonly>', body,
+        )
+        self.assertIn(
+            '<input class="big-input id-input" id="book-email" name="email" type="email" '
+            'value="regular@example.org" readonly>', body,
+        )
+        self.assertIn("Your name", body)
+        self.assertIn("Your email", body)
         # Irrelevant once already logged in with a password.
         self.assertNotIn("First time booking with this email?", body)
+        # And the tabbed Login/Sign-up component itself should NOT show
+        # once already logged in -- nothing left to log in for.
+        self.assertNotIn('id="book-tab-login"', body)
+        self.assertNotIn('id="my-login-btn"', body)
 
     def test_book_page_fields_stay_editable_when_anonymous(self):
         _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
-        self.assertIn('<input class="big-input id-input" name="name" required>', body)
-        self.assertIn('<input class="big-input id-input" name="email" type="email" required>', body)
+        self.assertIn(
+            '<input class="big-input id-input" id="book-name" name="name" form="book-form" required>', body,
+        )
+        self.assertIn(
+            '<input class="big-input id-input" id="book-email" name="email" type="email" '
+            'form="book-form" required>', body,
+        )
         self.assertIn("Your name", body)
         self.assertIn("Your email", body)
         # Only the CSS selector "input[readonly]" (always present in the
@@ -913,17 +995,23 @@ class SessionBannerTest(unittest.TestCase):
         self.assertNotIn('name="email" type="email" value=', body)
         self.assertIn("First time booking with this email?", body)
 
-    def test_book_page_error_retry_keeps_fields_hidden_when_logged_in(self):
-        # These fields must stay hidden (not reappear editable) even on
-        # a re-render after a validation error -- not just the fresh GET.
+    def test_book_page_error_retry_keeps_fields_readonly_when_logged_in(self):
+        # These fields must stay readonly+prefilled (not reappear blank
+        # and editable) even on a re-render after a validation error --
+        # not just the fresh GET.
         environ = self._login_environ("regular@example.org")
         form = {"occurrence_date": self._occ_date(), "name": "Regular", "email": "regular@example.org"}  # no agree
         body_bytes = urlencode(form).encode()
         post_environ = dict(environ, CONTENT_LENGTH=str(len(body_bytes)), **{"wsgi.input": io.BytesIO(body_bytes)})
         _status, _headers, body = self.app.book("POST", "yoga-class-1", post_environ)
         self.assertIn("acknowledge the participation terms", body)
-        self.assertIn('<input type="hidden" name="name" value="Regular">', body)
-        self.assertIn('<input type="hidden" name="email" value="regular@example.org">', body)
+        self.assertIn(
+            '<input class="big-input id-input" id="book-name" name="name" value="Regular" readonly>', body,
+        )
+        self.assertIn(
+            '<input class="big-input id-input" id="book-email" name="email" type="email" '
+            'value="regular@example.org" readonly>', body,
+        )
 
     def test_logged_in_booking_ignores_submitted_email_and_uses_session_identity(self):
         # readonly is client-side only -- the server must not trust a
@@ -1021,6 +1109,36 @@ class SessionBannerTest(unittest.TestCase):
         badge_html = body.split('<span class="date-btn date-badge">', 1)[1].split("</span></span></span>", 1)[0]
         self.assertNotIn("<input", badge_html)
         self.assertNotIn("<label", badge_html)
+
+    def test_already_booked_badge_for_an_overridden_date_shows_override_time(self):
+        # 2026-07-16, caught live: once logged in and already booked for a
+        # date carrying a course.date_override, THAT date drops out of
+        # `occurrences` (it's no longer offered as a new pick) -- which
+        # used to silently drop BOTH the ATTENTION banner above the date
+        # picker AND that date's own override-time reminder, right when
+        # the guest most needs it (they're still attending that exact,
+        # earlier-starting session).
+        first_date = self._occ_dates(1)[0]
+        course = make_course(
+            shortname="yoga-class-1", weekday="wed", capacity=10,
+            date_overrides=(CourseDateOverride(date=first_date, start_time="09:00"),),
+        )
+        settings = make_settings(courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        app = App(settings, self.store)
+        app.caldav = self.app.caldav
+        app._sync = lambda *a, **kw: None
+        environ = self._login_environ("regular@example.org")
+        user = self.store.find_user_by_email("regular@example.org")
+        self.store.add_registration("yoga-class-1", first_date, user.user_id, hash_token(new_token()))
+        _status, _headers, body = app.book("GET", "yoga-class-1", environ)
+        self.assertIn("ATTENTION", body)
+        self.assertIn(first_date, body)
+        badge_start = body.index('<span class="date-btn date-badge">')
+        badge_end = body.index("</span></span></span>", badge_start) + len("</span></span></span>")
+        badge_html = body[badge_start:badge_end]
+        self.assertIn(f'<span class="d-date">{first_date}</span>', badge_html)
+        self.assertIn('<span class="d-override-time">9h00 - 10h40</span>', badge_html)
+        self.assertIn('<span class="ribbon">Booked</span>', badge_html)
 
     def test_booking_result_page_also_shows_banner_when_logged_in(self):
         environ = self._login_environ("regular@example.org")
@@ -1462,41 +1580,43 @@ class MySessionStatusTest(unittest.TestCase):
 
 
 class ScheduleExceptionsTest(unittest.TestCase):
-    """GET /schedule-exceptions (2026-07-16) -- public, read-only JSON list
-    of every course's upcoming Course.date_overrides entries, consumed by
-    site/index.html's own opportunistic <script> to render a red ATTENTION
-    banner. Automatically displayed as an 'ATTENTION'-message in
-    red on index.html and on the booking site for this course."""
+    """GET /schedule-exceptions (2026-07-16) -- public, read-only JSON of
+    every course's upcoming Course.date_overrides entries plus the
+    site-wide [site].custom_attention_message, consumed by site/index.html's
+    own opportunistic <script> to render a red ATTENTION banner. Response
+    shape (2026-07-13): {"items": [...], "custom_message": "..."} -- was a
+    bare array before custom_message existed."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.store = Store(self._tmp.name)
 
-    def _app(self, courses):
-        settings = make_settings(courses=courses)
+    def _app(self, courses, **settings_kwargs):
+        settings = make_settings(courses=courses, **settings_kwargs)
         return App(settings, self.store)
 
-    def test_no_overrides_anywhere_gives_an_empty_list(self):
+    def test_no_overrides_anywhere_gives_an_empty_items_list(self):
         course = make_course(shortname="plain")
         app = self._app((course,))
         _status, _headers, body = app.schedule_exceptions("GET", {})
-        self.assertEqual(json.loads(body), [])
+        self.assertEqual(json.loads(body), {"items": [], "custom_message": ""})
 
     def test_upcoming_override_is_included_with_expected_fields(self):
         course = make_course(
-            shortname="trier", title="Trier Yoga",
+            shortname="trier", title="Trier Yoga", weekday="sat",
             date_overrides=(CourseDateOverride(
                 date="9999-12-31", start_time="09:45", message="I need to leave early.",
             ),),
         )
         app = self._app((course,))
         _status, _headers, body = app.schedule_exceptions("GET", {})
-        items = json.loads(body)
+        items = json.loads(body)["items"]
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["course_shortname"], "trier")
         self.assertEqual(items[0]["course_title"], "Trier Yoga")
         self.assertEqual(items[0]["date"], "9999-12-31")
+        self.assertEqual(items[0]["weekday"], "Saturday")
         self.assertEqual(items[0]["message"], "I need to leave early.")
         self.assertIn("9h45", items[0]["time_label"])
 
@@ -1506,7 +1626,7 @@ class ScheduleExceptionsTest(unittest.TestCase):
         )
         app = self._app((course,))
         _status, _headers, body = app.schedule_exceptions("GET", {})
-        self.assertEqual(json.loads(body), [])
+        self.assertEqual(json.loads(body)["items"], [])
 
     def test_sorted_by_date_then_course_shortname(self):
         course_a = make_course(
@@ -1520,11 +1640,17 @@ class ScheduleExceptionsTest(unittest.TestCase):
         )
         app = self._app((course_a, course_b, course_c))
         _status, _headers, body = app.schedule_exceptions("GET", {})
-        items = json.loads(body)
+        items = json.loads(body)["items"]
         self.assertEqual(
             [(it["date"], it["course_shortname"]) for it in items],
             [("9999-01-01", "c-course"), ("9999-06-01", "a-course"), ("9999-06-01", "b-course")],
         )
+
+    def test_custom_message_included_even_with_no_overrides(self):
+        course = make_course(shortname="plain")
+        app = self._app((course,), custom_attention_message="On vacation.")
+        _status, _headers, body = app.schedule_exceptions("GET", {})
+        self.assertEqual(json.loads(body), {"items": [], "custom_message": "On vacation."})
 
     def test_post_not_allowed(self):
         course = make_course(shortname="plain")
@@ -1537,6 +1663,62 @@ class ScheduleExceptionsTest(unittest.TestCase):
         app = self._app((course,))
         _status, headers, _body = app.schedule_exceptions("GET", {})
         self.assertIn(("Content-Type", "application/json"), headers)
+
+
+class CspReportTest(unittest.TestCase):
+    """POST /csp-report (2026-07-13) -- the browser's own CSP
+    violation-report target (see site/nginx-locations.conf.example's
+    report-uri directive). Public, unauthenticated by design (the browser
+    reporting on itself); logs and always returns 204, never raises on a
+    malformed body."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.app = App(make_settings(), self.store)
+
+    def _post(self, body_bytes: bytes, **extra_environ):
+        environ = {"CONTENT_LENGTH": str(len(body_bytes)), "wsgi.input": io.BytesIO(body_bytes)}
+        environ.update(extra_environ)
+        return self.app.csp_report("POST", environ)
+
+    def test_get_not_allowed(self):
+        status, _headers, _body = self.app.csp_report("GET", {})
+        self.assertEqual(status, "405 Method Not Allowed")
+
+    def test_valid_report_logs_and_returns_204(self):
+        # assertLogs doesn't work here -- tests/helpers.py's module-level
+        # logging.disable(logging.CRITICAL) suppresses records below CRITICAL
+        # at the logger level itself, before any handler (including
+        # assertLogs' own) ever sees them. Same "patch the module's `log`
+        # object directly" workaround already used elsewhere (e.g.
+        # tests/test_calendar_sync.py, tests/test_serve.py).
+        report = json.dumps({"csp-report": {
+            "blocked-uri": "https://evil.example/", "violated-directive": "frame-ancestors",
+            "document-uri": "https://booking.example.org/",
+        }}).encode()
+        with patch("app.webapp.log") as m_log:
+            status, headers, body = self._post(report, HTTP_X_FORWARDED_FOR="203.0.113.9")
+        self.assertEqual(status, "204 No Content")
+        self.assertEqual(body, "")
+        self.assertEqual(headers, [])
+        m_log.warning.assert_called_once()
+        args = m_log.warning.call_args.args
+        formatted = args[0] % args[1:]
+        self.assertIn("203.0.113.9", formatted)
+        self.assertIn("frame-ancestors", formatted)
+        self.assertIn("evil.example", formatted)
+
+    def test_malformed_body_is_logged_not_raised(self):
+        with patch("app.webapp.log") as m_log:
+            status, _headers, _body = self._post(b"not json at all")
+        self.assertEqual(status, "204 No Content")
+        m_log.warning.assert_called_once()
+
+    def test_empty_body_does_not_raise(self):
+        status, _headers, _body = self._post(b"")
+        self.assertEqual(status, "204 No Content")
 
 
 class RecordPageViewTest(unittest.TestCase):
@@ -1678,6 +1860,26 @@ class InternalStatusEndpointTest(unittest.TestCase):
         row = next(s for s in payload["sessions"] if s["who"] == "never-viewed@example.org")
         self.assertIsNone(row["last_page"])
         self.assertIsNone(row["last_seen"])
+
+    def test_guest_session_reports_account_name(self):
+        user = self.store.upsert_user_for_booking("named@example.org", "Guest One")
+        self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        row = next(s for s in payload["sessions"] if s["who"] == "named@example.org")
+        self.assertEqual(row["name"], "Guest One")
+
+    def test_admin_session_has_no_name(self):
+        self._new_tracked_session({"kind": "admin"})
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        row = next(s for s in payload["sessions"] if s["kind"] == "admin")
+        self.assertEqual(row["name"], "")
+
+    def test_payload_reports_the_fixed_session_timeout(self):
+        _status, _headers, body = self.app.internal_status("GET", {})
+        payload = json.loads(body)
+        self.assertEqual(payload["session_timeout_seconds"], webapp.SESSION_TTL_SECONDS)
 
     def test_connected_since_is_session_creation_time(self):
         before = time.time()
@@ -2625,11 +2827,31 @@ class BookingFlowTest(unittest.TestCase):
 
     def test_login_page_get_carries_a_safe_next_into_a_hidden_field(self):
         _status, _headers, body = self.app.my("GET", {"QUERY_STRING": "next=/book/yoga-class-1"})
-        card_start = body.index('<form method="post" action="/my" class="card">')
+        card_start = body.index('<form method="post" action="/my" class="card" target="_top">')
         card_end = body.index("</form>", card_start)
         self.assertIn(
             '<input type="hidden" name="next" value="/book/yoga-class-1">', body[card_start:card_end]
         )
+
+    # -- iframe break-out: target="_top" on session-creating forms
+    #    (2026-07-16) -- see _login_form_html()'s own docstring for the
+    #    SameSite=Lax/cross-site-iframe reasoning. -----------------------
+
+    def test_login_form_targets_top_frame_on_my(self):
+        _status, _headers, body = self.app.my("GET", {})
+        self.assertIn('<form method="post" action="/my" class="card" target="_top">', body)
+
+    def test_login_form_targets_top_frame_on_book_page(self):
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn('<form method="post" action="/book/yoga-class-1" class="card" target="_top">', body)
+
+    def test_signup_form_targets_top_frame_on_my(self):
+        _status, _headers, body = self.app.my("GET", {})
+        self.assertIn('<form method="post" action="/my/signup" class="card" target="_top">', body)
+
+    def test_book_form_targets_top_frame(self):
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn('id="book-form" autocomplete="off" target="_top"', body)
 
     def test_login_page_get_drops_an_unsafe_next(self):
         _status, _headers, body = self.app.my("GET", {"QUERY_STRING": "next=https://evil.example/"})
@@ -2649,6 +2871,100 @@ class BookingFlowTest(unittest.TestCase):
         )
         self.assertEqual(status, "302 Found")
         self.assertEqual(dict(headers)["Location"], "/book/yoga-class-1")
+
+    # -- portable Login/Sign-up tab component embedded on /book/<shortname> --
+    # (2026-07-13) the operator's final shape: the tabs are ONLY about identity
+    # capture. Login tab posts to THIS page's own URL, handled by book()'s
+    # own POST branch. Sign-up tab is just the SAME Name/Email fields
+    # already used for booking (no separate button) -- everything else
+    # (dates, guests, ack, the Book button) stays in ONE always-visible
+    # section outside the tabs, identical for both paths, in the original
+    # page order (description, dates, THEN identity, THEN guests/ack/book).
+
+    def test_book_page_shows_login_signup_tabs_when_anonymous(self):
+        _status, _headers, body = self.app.book("GET", "yoga-class-1", {})
+        self.assertNotIn("Already have an account?", body)
+        self.assertIn('id="book-tab-login"', body)
+        self.assertIn('id="book-tab-signup"', body)
+        self.assertIn('id="book-panel-login"', body)
+        self.assertIn('id="book-panel-signup"', body)
+        # Login tab is the default/open one on a fresh, error-free load
+        # (2026-07-16, the operator).
+        self.assertIn('id="book-tab-login" name="book-tab" class="tab-radio" checked', body)
+        self.assertNotIn('id="book-tab-signup" name="book-tab" class="tab-radio" checked', body)
+        card_start = body.index('<form method="post" action="/book/yoga-class-1" class="card" target="_top">')
+        card_end = body.index("</form>", card_start)
+        card = body[card_start:card_end]
+        self.assertIn('name="login_submit" value="1"', card)
+        self.assertIn('name="email"', card)
+        self.assertIn('name="password"', card)
+        # No dedicated Sign-up submit button -- the Book button below
+        # triggers sign-up & booking together, same as always.
+        self.assertNotIn('id="my-signup-btn"', body)
+        # No `next` field needed here -- this form's own action already IS
+        # the page to land back on, nothing to redirect to.
+        self.assertNotIn('name="next"', card)
+        # The Sign-up tab holds the SAME Name/Email fields as the booking
+        # form -- not a second, duplicate set -- associated back to
+        # #book-form via form="book-form" (not nested inside it, since a
+        # <form> can't nest inside the Login tab's own separate <form>).
+        panel_start = body.index('id="book-panel-signup"')
+        panel_end = body.index("</div>", panel_start)
+        panel = body[panel_start:panel_end]
+        self.assertIn('name="name" form="book-form"', panel)
+        self.assertIn('name="email" type="email" form="book-form"', panel)
+        self.assertIn("Your name", panel)
+        self.assertIn("Your email", panel)
+        self.assertIn("First time booking with this email?", panel)
+        # Page order: dates before the tabs, tabs before guests/ack/book.
+        self.assertLess(body.index("Dates available"), body.index('id="book-tab-login"'))
+        self.assertLess(body.index('id="book-panel-signup"'), body.index("+ Add participant"))
+        self.assertLess(body.index("+ Add participant"), body.index("participation terms"))
+
+    def test_failed_login_submitted_on_book_page_redisplays_book_page_with_error_on_login_tab(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        status, _headers, body = self._post(
+            self.app.book, ("yoga-class-1",),
+            {"login_submit": "1", "email": "regular@example.org", "password": "wrong"},
+        )
+        # Still 200 -- redisplays the SAME booking page, not a redirect and
+        # not the standalone /my page.
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Email and/or password did not match.", body)
+        self.assertIn("Dates available", body)
+        self.assertIn('id="book-form"', body)
+        self.assertNotIn('id="my-tab-login"', body)  # not the standalone /my tabs page
+        # A failed login attempt reopens on the Login tab, not Sign-up.
+        self.assertIn('id="book-tab-login" name="book-tab" class="tab-radio" checked', body)
+
+    def test_successful_login_submitted_on_book_page_redirects_back_to_the_same_book_page(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        h, s = hash_secret("hunter22")
+        self.store.set_password(user.user_id, h, s)
+        status, headers, _body = self._post(
+            self.app.book, ("yoga-class-1",),
+            {"login_submit": "1", "email": "regular@example.org", "password": "hunter22"},
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/book/yoga-class-1")
+        self.assertIn("Set-Cookie", dict(headers))
+
+    def test_failed_login_on_standalone_my_page_always_stays_on_my(self):
+        # `next` only ever matters on SUCCESS -- a failed attempt against
+        # /my's own tabbed page always redisplays /my itself, regardless of
+        # what `next` was carried along (2026-07-13 correction: this used
+        # to redispatch to _book_page() based on `next`, which showed the
+        # error on the wrong page relative to where the form was actually
+        # submitted).
+        status, _headers, body = self._post(
+            self.app.my, (),
+            {"email": "nobody@example.org", "password": "wrong", "next": "/book/yoga-class-1"},
+        )
+        self.assertEqual(status, "200 OK")
+        self.assertIn("Email and/or password did not match.", body)
+        self.assertIn('id="my-tab-login"', body)
 
     def test_successful_login_with_no_next_still_lands_on_my(self):
         user = self.store.upsert_user_for_booking("regular@example.org", "Regular")

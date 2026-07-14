@@ -122,7 +122,7 @@ from .cancel_flow import (
 )
 from .cancellation import (
     attention_html, booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text,
-    intro_html, send_cancellation_emails, send_reinstatement_emails,
+    intro_html, join_attention_sections, send_cancellation_emails, send_reinstatement_emails,
 )
 from .config import Settings, upcoming_date_overrides
 from .email_templates import load_email_template, render_template
@@ -189,14 +189,28 @@ MIN_PASSWORD_LENGTH = 8
 CONFIRM_TOKEN_TTL_HOURS = 24
 
 # Guest bookings (2026-07, "+ Add participant" on the booking form, mirroring
-# SimplyMeet.me's own UX): a hard ceiling on how many guest rows book()
-# will ever look for (guest_email_0.. guest_email_{settings.max_guests-1}),
-# so a hand-crafted POST can't make it scan an unbounded number of form
-# fields. The form's own JS also stops offering "+ Add participant" once
-# this many rows exist -- see _book_page()'s guest-rows script. Now a
-# configurable Settings.max_guests (2026-07-09: made configurable,
-# defaulting to 3 -- see settings.toml
+# SimplyMeet.me's own UX): a hard ceiling on how many guests book() will
+# ever ADMIT per booking. The form's own JS also stops offering "+ Add
+# participant" once this many rows exist -- see _book_page()'s guest-rows
+# script. Now a configurable Settings.max_guests (2026-07-09: made
+# configurable, defaulting to 3 -- see settings.toml
 # [defaults].max_guests); this was a fixed constant of 9 before.
+#
+# 2026-07-14 (repo-wide review, finding B1): the ceiling used to also cap
+# the INDEX namespace scanned (guest_email_0..guest_email_{max_guests-1})
+# -- but the form's own JS assigns row indices from a counter that never
+# reuses a removed row's index, so "add 3, remove 1, add 1" produced a
+# guest_email_3 field the fixed-range scan silently ignored: the booking
+# succeeded WITHOUT that guest, no error shown. _parse_guest_entries now
+# scans whatever guest_email_<n> fields are actually present on the form
+# (bounded by the request body nginx already caps, so still not
+# unbounded work) and enforces max_guests on the COUNT of guests
+# submitted instead -- loudly, as a form error, never a silent trim.
+
+# See the max_guests comment above -- matches a submitted booking form's
+# own guest_email_<n> field names, whatever indices the form's JS actually
+# assigned (see _parse_guest_entries).
+_GUEST_EMAIL_FIELD_RE = re.compile(r"^guest_email_(\d+)$")
 
 # 2026-07-06: "/my should always show the past 3 courses they scheduled."
 # Upcoming bookings are always shown in full (there's rarely more than a
@@ -500,6 +514,10 @@ _RESEND_INLINE_COOLDOWN_SCRIPT = """<script>
 })();
 </script>"""
 
+_DEFAULT_LOGIN_RESET_HINT = (
+    '<p><a href="/my/reset">Forgot your password, or still need to confirm your account?</a></p>'
+)
+
 _LOCKOUT_COUNTDOWN_SCRIPT = """<script>
 (function() {
   var btn = document.querySelector("[data-lockout-btn]");
@@ -609,7 +627,9 @@ def _course_subtitle_html(course) -> str:
     return f'<p class="subtitle">{esc(text)}</p>' if text else ""
 
 
-def _course_date_overrides_html(course, occurrences) -> str:
+def _course_date_overrides_html(
+    course, occurrences, custom_message: str = "", extra_dates: tuple[str, ...] = (),
+) -> str:
     """One red ATTENTION line per exceptional date-override (Course.
     date_overrides, 2026-07-16) that's actually still a real, currently
     shown occurrence on this booking page -- deliberately cross-checked
@@ -617,24 +637,39 @@ def _course_date_overrides_html(course, occurrences) -> str:
     a stale override left in settings.toml for a date that's already
     past, or that fell off the schedule for some other reason (a
     calendar conflict, say), never shows a banner for a session nobody
-    can actually book. Automatically displayed as an
-    "ATTENTION" message in red on the booking site for this
-    course. Empty string (no banner at all) when none of the shown
-    occurrences have a date-override.
+    can actually book. This course's own page already makes the weekday
+    and course obvious from context, so (unlike the site-wide banner on
+    index.html/index_embedded.html, app.config.upcoming_date_overrides)
+    these lines stay in the original "On <date>, this session starts at
+    <time> instead" shape -- no bullet list, no leading weekday.
 
-    override.message is operator-authored (settings.toml) -- same trust
-    boundary as Course.description, deliberately NOT esc()'d here, see
-    attention_html()'s own docstring."""
-    occ_dates = sorted({o.date.isoformat() for o in occurrences})
+    `extra_dates` (2026-07-16, the operator -- caught live: a guest already
+    booked/waitlisted for an overridden date stopped seeing this banner
+    entirely the moment they logged in, since _book_page() filters THAT
+    exact date out of `occurrences` -- it's not offered as a NEW pick
+    anymore, but the guest still needs the reminder for the session
+    they're already attending) -- lets _book_page() fold its own
+    already-booked dates back in here even though they're no longer part
+    of `occurrences` itself.
+
+    `custom_message` is [site].custom_attention_message (2026-07-13,
+    app/config.py) -- shown BELOW any override lines above, separated by
+    a `<hr>` (see join_attention_sections()), or on its own if this
+    course has no current override. Empty string (no banner at all) only
+    when there's neither an override line nor a custom message.
+
+    override.message/custom_message are both operator-authored
+    (settings.toml) -- same trust boundary as Course.description,
+    deliberately NOT esc()'d here, see attention_html()'s own docstring."""
+    occ_dates = sorted({o.date.isoformat() for o in occurrences} | set(extra_dates))
     lines = [
         f"On {esc(d)}, this session starts at <b>{esc(course.time_range_label_for(d))}</b> instead"
         + (f" -- {msg}" if (msg := course.override_message_for(d)) else "")
         for d in occ_dates
         if course.override_for(d) is not None
     ]
-    if not lines:
-        return ""
-    return attention_html("<br>".join(lines))
+    overrides_part = "<br>".join(lines)
+    return attention_html(join_attention_sections(overrides_part, custom_message))
 
 
 def _course_recap_html(course, occ_date: str) -> str:
@@ -738,6 +773,176 @@ _SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
   });
 })();
 </script>"""
+
+
+# 2026-07-13: extracted from _book_page()'s big f-string into its own
+# static, non-interpolated module constant, same pattern as every other
+# per-page script above (_RESEND_COOLDOWN_SCRIPT etc.) -- this was the ONE
+# remaining per-page inline <script> still built inline with {{/}} brace-
+# escaping. Byte-for-byte verified identical to the previously-rendered
+# output before this refactor (see app.cli_checks.expected_csp_hashes(),
+# which reads this constant directly to compute its CSP hash
+# automatically -- the whole point of extracting it: this class of bug
+# (a hand-edited inline script whose CSP hash never gets recomputed) has
+# now hit this project three separate times, see site/nginx-locations.
+# conf's own dated incident notes).
+_BOOKING_FORM_SCRIPT = """<script>
+            (function() {
+              // Progressive enhancement only: the button starts enabled and
+              // the required/pattern attributes above already block an
+              // invalid submit without any JS at all -- this just adds a
+              // nicer disabled state + live date/label switching on top for
+              // guests with JS enabled.
+              var form = document.getElementById("book-form");
+              var radios = form.querySelectorAll('input[name="occurrence_date"]');
+              var selText = document.getElementById("selected-date-text");
+              var submitBtn = document.getElementById("book-submit");
+              // 2026-07-13: by id, not form.querySelector('[name=...]') --
+              // these two fields no longer always live inside #book-form's
+              // own DOM subtree. When anonymous, they're rendered inside
+              // the Sign-up tab-panel instead (a sibling of this form, not
+              // a descendant), associated with it purely via each input's
+              // own form="book-form" attribute (a <form> can't nest inside
+              // another <form>, and the Login tab right next to it needs
+              // its own) -- form.querySelector() only ever searches
+              // descendants, so it would find nothing there. Unique ids
+              // work regardless of where the fields physically sit, and
+              // there's only ever one of each per page.
+              var nameEl = document.getElementById("book-name");
+              var emailEl = document.getElementById("book-email");
+              // Same reasoning as nameEl/emailEl above -- the ack
+              // checkbox now lives below the identity area, outside
+              // #book-form's own tags too, associated via form="book-form".
+              var agreeEl = document.getElementById("book-agree");
+
+              // Guest rows ("+ Add participant", mirroring SimplyMeet.me's
+              // own UX) -- each row's fields are named guest_email_<n>/
+              // guest_name_<n> (never repeated -- see app/webapp.py::
+              // _parse_guest_entries(); form-encoded POST bodies here only
+              // ever keep the FIRST value of a repeated name, so distinct
+              // per-row names are required, not just a style choice).
+              var guestRowsEl = document.getElementById("guest-rows");
+              var addGuestBtn = document.getElementById("add-guest-btn");
+              var partyWarning = document.getElementById("party-warning");
+              var guestIndex = 0;
+              // 2026-07-13: read from the form's own data-max-guests
+              // attribute (set above, same pattern data-book-label
+              // already used) instead of interpolating the number
+              // directly into this script's text -- a raw interpolated
+              // value here meant this script's body (and therefore its
+              // CSP script-src hash) changed with [site].max_guests,
+              // exactly the bug already fixed for the other per-call-site
+              // scripts (see site/nginx-locations.conf.example's own CSP
+              // comment): a fixed allow-listed hash could never reliably
+              // match it. Stable now regardless of max_guests.
+              var MAX_GUESTS = parseInt(form.dataset.maxGuests, 10) || 1;
+
+              function guestRowCount() { return guestRowsEl ? guestRowsEl.children.length : 0; }
+
+              function updatePartyWarning() {
+                var r = currentRadio();
+                if (!r || !partyWarning) return;
+                var spotsLeft = parseInt(r.dataset.spotsLeft, 10);
+                var partySize = 1 + guestRowCount();
+                if (r.dataset.full !== "1" && !isNaN(spotsLeft) && partySize > spotsLeft) {
+                  var spotWord = spotsLeft === 1 ? "spot" : "spots";
+                  var peopleWord = partySize === 1 ? "person" : "people";
+                  partyWarning.textContent = "Only " + spotsLeft + " confirmed " + spotWord +
+                    " left for this session, but your party is " + partySize + " " + peopleWord +
+                    ". Submitting will place your whole group on the waitlist together -- " +
+                    "remove a guest above to get confirmed instantly instead.";
+                  partyWarning.style.display = "";
+                } else {
+                  partyWarning.style.display = "none";
+                }
+              }
+
+              function addGuestRow() {
+                if (!guestRowsEl || guestRowCount() >= MAX_GUESTS) return;
+                var i = guestIndex++;
+                var row = document.createElement("div");
+                row.className = "guest-row";
+                // form="book-form" (2026-07-13): guest rows live inside
+                // #guest-rows, itself now outside #book-form's own tags
+                // (see this script's own opening comment on nameEl/emailEl/
+                // agreeEl) -- every field submitting WITH the booking
+                // needs this attribute now, dynamically-created ones
+                // included.
+                row.innerHTML =
+                  '<label>Guest email <span class="req">(required)</span>' +
+                  '<input class="big-input id-input" name="guest_email_' + i + '" type="email" ' +
+                    'form="book-form" required></label>' +
+                  '<label>Guest name <span class="opt">(optional)</span>' +
+                  '<input class="big-input id-input" name="guest_name_' + i + '" form="book-form"></label>' +
+                  '<button type="button" class="link-button remove-guest-btn">Remove participant</button>';
+                guestRowsEl.appendChild(row);
+                row.querySelector(".remove-guest-btn").addEventListener("click", function() {
+                  guestRowsEl.removeChild(row);
+                  if (addGuestBtn) addGuestBtn.style.display = "";
+                  updatePartyWarning();
+                  refresh();
+                });
+                var guestEmailEl = row.querySelector('[name="guest_email_' + i + '"]');
+                guestEmailEl.addEventListener("input", function() { updatePartyWarning(); refresh(); });
+                guestEmailEl.addEventListener("change", refresh);
+                if (guestRowCount() >= MAX_GUESTS && addGuestBtn) addGuestBtn.style.display = "none";
+                updatePartyWarning();
+                refresh();
+              }
+              if (addGuestBtn) addGuestBtn.addEventListener("click", addGuestRow);
+
+              function currentRadio() {
+                for (var i = 0; i < radios.length; i++) { if (radios[i].checked) return radios[i]; }
+                return null;
+              }
+              var bookLabel = form.dataset.bookLabel || "Book";
+              function guestRowsValid() {
+                // 2026-07-09: if a required field is empty, the button
+                // should not be clickable -- either remove
+                // the empty participant first or provide an email at
+                // least. Every currently-present guest row's required
+                // email must look valid, or the Book button stays disabled
+                // until it's filled in or the row is removed.
+                if (!guestRowsEl) return true;
+                var inputs = guestRowsEl.querySelectorAll('input[name^="guest_email_"]');
+                for (var i = 0; i < inputs.length; i++) {
+                  if (inputs[i].value.indexOf("@") <= 0) return false;
+                }
+                return true;
+              }
+              function refresh() {
+                var r = currentRadio();
+                if (r && selText) selText.textContent = r.dataset.date;
+                if (r && submitBtn) submitBtn.textContent = r.dataset.full === "1" ? "Join waitlist" : bookLabel;
+                var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 && agreeEl.checked
+                  && guestRowsValid();
+                if (submitBtn) submitBtn.disabled = !ok;
+                updatePartyWarning();
+              }
+              for (var i = 0; i < radios.length; i++) { radios[i].addEventListener("change", refresh); }
+              [nameEl, emailEl, agreeEl].forEach(function(el) {
+                el.addEventListener("input", refresh);
+                el.addEventListener("change", refresh);
+              });
+              refresh();
+              // 2026-07-11: a real bug showed
+              // one date box highlighted/checked while "Selected
+              // date:" still read a different, earlier date -- some browsers restore a
+              // PREVIOUSLY-checked radio button on reload/back-forward
+              // navigation on their own, independent of this script and
+              // AFTER it already ran once -- silently, with no "change"
+              // event, so refresh()'s one call above (which matched the
+              // server's own default, occurrences[0]) never gets to react
+              // to the browser's later override. autocomplete="off" on the
+              // form (above) stops most browsers from doing this restore at
+              // all; "pageshow" (fires on every render including a
+              // back/forward-cache restore, unlike "load") is a second,
+              // defensive line of the same fix, re-running refresh() at
+              // that point to guarantee the visible highlight and the
+              // "Selected date" text can never disagree, on any browser.
+              window.addEventListener("pageshow", refresh);
+            })();
+            </script>"""
 
 
 # Moved to app/cancellation.py (2026-07-06) so `my-bt cancel` (scripts/my-bt)
@@ -854,6 +1059,8 @@ class App:
             return self.courses(method, environ)
         if path == "/schedule-exceptions":
             return self.schedule_exceptions(method, environ)
+        if path == "/csp-report":
+            return self.csp_report(method, environ)
         if m := re.fullmatch(r"/book/([a-z0-9-]+)", path):
             return self.book(method, m.group(1), environ)
         if m := re.fullmatch(r"/cancel/([A-Za-z0-9_-]+)", path):
@@ -1058,22 +1265,86 @@ class App:
         app.config.upcoming_date_overrides (dict-based, so
         app/site_render.py's static index_embedded.html rendering -- see
         that file's own docstring -- can share the exact same "what counts
-        as upcoming" definition instead of drifting from this endpoint)."""
+        as upcoming" definition instead of drifting from this endpoint).
+
+        2026-07-13: response shape changed from a bare JSON array to
+        {"items": [...], "custom_message": "..."} -- `custom_message` is
+        [site].custom_attention_message (app/config.py), the site-wide
+        operator notice shown in the same box, below any items here.
+        Included even when empty ("") so the client never has to guess
+        whether it's absent vs. blank."""
         if method != "GET":
             return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
         today = datetime.now(ZoneInfo(self.settings.timezone)).date().isoformat()
         items = upcoming_date_overrides(self.settings.courses, today)
-        return "200 OK", [("Content-Type", "application/json")], json.dumps(items)
+        payload = {"items": items, "custom_message": self.settings.custom_attention_message}
+        return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
+
+    # -- /csp-report -----------------------------------------------------------
+
+    def csp_report(self, method: str, environ):
+        """POST-only, public, no session/auth -- the browser's own CSP
+        violation-report target (see site/nginx-locations.conf.example's
+        `report-uri /csp-report;`, part of the same Content-Security-Policy
+        header everything else here is served under). No request BODY this
+        endpoint sends is ever trusted for anything beyond logging -- it's
+        the browser reporting on ITSELF, unauthenticated, so this can only
+        ever be used to make noise in the log, never to act on anything.
+
+        2026-07-13: added specifically so an attempt to embed this site via
+        `<iframe>` from anywhere OTHER than the one allow-listed origin in
+        `frame-ancestors` shows up somewhere -- before this, that kind of
+        attempt (or a genuine misconfiguration blocking a legitimate embed)
+        would silently vanish into the visitor's own browser console,
+        never reaching this server at all. Logs the report's own
+        `blocked-uri`/`violated-directive`/`document-uri` fields (whichever
+        of them the browser actually sent -- the exact shape varies a bit
+        browser to browser) at WARNING, same level every other
+        rate-limit/security-relevant event in this module already logs at,
+        so it shows up in `journalctl`/[logging].log_file alongside those
+        without a new log level to filter on. Malformed/unparseable bodies
+        (a stray non-browser POST, a botched report) are logged as-is
+        rather than raising -- this must never 500, since a browser sends
+        this fire-and-forget and doesn't do anything useful with the
+        response either way.
+
+        Always 204 No Content: there's nothing meaningful to return, and a
+        body would just be ignored by the browser's reporting machinery
+        anyway."""
+        if method != "POST":
+            return "405 Method Not Allowed", [("Content-Type", "text/plain")], "POST only"
+        try:
+            size = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        except ValueError:
+            size = 0
+        raw = environ["wsgi.input"].read(size).decode("utf-8", errors="replace") if size else ""
+        client_ip = _client_ip(environ)
+        try:
+            payload = json.loads(raw) if raw else {}
+            report = payload.get("csp-report", payload)
+            log.warning(
+                "CSP violation report from %s: blocked-uri=%r violated-directive=%r document-uri=%r",
+                client_ip, report.get("blocked-uri"), report.get("violated-directive"),
+                report.get("document-uri"),
+            )
+        except (ValueError, AttributeError):
+            log.warning("CSP violation report from %s: unparseable body: %r", client_ip, raw[:500])
+        return "204 No Content", [], ""
 
     # -- /book ---------------------------------------------------------------
 
-    def book(self, method: str, shortname: str, environ):
-        guard = self._maintenance_guard(environ)
-        if guard:
-            return guard
+    def _booking_page_context(self, shortname: str, environ):
+        """(course, occurrences, banner, logged_in_user) for
+        /book/<shortname> -- factored out of book() (2026-07-13) so its
+        own two POST branches (a normal booking submission, and the
+        inline login form's submission -- see _login_form_html()'s own
+        docstring) can both build the same page context to redisplay,
+        without keeping two copies that could drift. Returns None if
+        `shortname` doesn't match any configured course -- book() 404s
+        in that case, before either POST branch is ever reached."""
         course = self.settings.course(shortname)
         if course is None:
-            return "404 Not Found", [("Content-Type", "text/plain")], "unknown course"
+            return None
 
         # Computed once per request and threaded through every response
         # this method (and its helpers _book_page/_book_with_guests) can
@@ -1121,8 +1392,56 @@ class App:
                 if not self.store.has_active_registration(shortname, o.date.isoformat(), logged_in_user.user_id)
             ]
 
+        return course, occurrences, banner, logged_in_user
+
+    def book(self, method: str, shortname: str, environ):
+        guard = self._maintenance_guard(environ)
+        if guard:
+            return guard
+        context = self._booking_page_context(shortname, environ)
+        if context is None:
+            return "404 Not Found", [("Content-Type", "text/plain")], "unknown course"
+        course, occurrences, banner, logged_in_user = context
+        # Recomputed here rather than returned from _booking_page_context()
+        # -- that helper is also called from my()'s POST-failure path,
+        # which has no use for "now" at all; keeping it out of the shared
+        # return shape avoids a tuple element only one of its two callers
+        # needs. Negligible cost, and freshest-possible for the late-
+        # booking-rejection check just below.
+        now = datetime.now(timezone.utc)
+
         if method == "POST":
             form = self._read_form(environ)
+            # 2026-07-13, the operator: the inline Login form embedded on this
+            # page (see _login_form_html()/_book_page()'s anonymous
+            # branch) posts to THIS SAME URL, not /my -- its hidden
+            # login_submit marker tells it apart from an actual booking
+            # submission below, which has no such field. Shares
+            # _attempt_login() with my() (see that method's own
+            # docstring) rather than a second copy of the rate-limiting/
+            # verification logic. A failed attempt re-renders this page
+            # directly (no redirect -- it's already the right page); a
+            # successful one 302s back to it (forced_redirect only
+            # applies to an admin login, an edge case here but handled
+            # the same way regardless of which page the form lives on).
+            if form.get("login_submit") == "1":
+                email, password = form.get("email", "").strip(), form.get("password", "").strip()
+                login_error, login_lockout_seconds, sid, forced_redirect = self._attempt_login(
+                    email, password, environ
+                )
+                if sid is not None:
+                    return (
+                        "302 Found",
+                        [
+                            ("Location", forced_redirect or f"/book/{shortname}"),
+                            ("Set-Cookie", _session_cookie_header(sid)),
+                        ],
+                        "",
+                    )
+                return self._book_page(
+                    course, occurrences, banner=banner, logged_in_user=logged_in_user,
+                    login_error=login_error, login_lockout_seconds=login_lockout_seconds,
+                )
             if form.get("agree") != "on":
                 return self._book_page(
                     course, occurrences, error="Please acknowledge the participation terms.",
@@ -1459,23 +1778,38 @@ class App:
         return f" ({who} already {verb} booked for this session, so we kept their existing booking as-is.)"
 
     def _parse_guest_entries(self, form: dict, leader_email: str) -> tuple[list[tuple[str, str]], str | None]:
-        """Reads guest_email_0/guest_name_0 .. guest_email_{max_guests-1}/
-        guest_name_{max_guests-1} off a submitted booking form (see
-        _book_page()'s "+ Add participant" rows) -- name is optional per
-        guest, email is not (see _book_with_guests() for how a blank name
-        is resolved). Returns (entries, error): entries is a list of
-        (email, name) pairs in the order submitted; error is a guest-facing
-        message if validation failed (bad/duplicate email), in which case
-        entries should be ignored and the form re-shown with that error."""
+        """Reads every guest_email_<n>/guest_name_<n> pair actually present
+        on a submitted booking form (see _book_page()'s "+ Add participant"
+        rows) -- name is optional per guest, email is not (see
+        _book_with_guests() for how a blank name is resolved). Returns
+        (entries, error): entries is a list of (email, name) pairs in
+        ascending index order (creation order -- the form's JS only ever
+        assigns increasing indices); error is a guest-facing message if
+        validation failed (bad/duplicate email, too many guests), in which
+        case entries should be ignored and the form re-shown with that
+        error.
+
+        2026-07-14 (review finding B1): scans the form's ACTUAL field
+        names rather than the fixed range 0..max_guests-1 -- the form's
+        JS row counter never reuses a removed row's index, so a re-added
+        guest could legitimately arrive as e.g. guest_email_3 with
+        max_guests=3, which the old fixed-range scan silently dropped
+        from the party. max_guests is still enforced, on the COUNT of
+        guests submitted, as a visible error (a crafted POST still can't
+        get more than max_guests admitted -- just no longer via the index
+        namespace)."""
+        indices = sorted(
+            int(m.group(1)) for k in form if (m := _GUEST_EMAIL_FIELD_RE.match(k))
+        )
         entries: list[tuple[str, str]] = []
         seen = {leader_email.strip().lower()}
-        for i in range(self.settings.max_guests):
+        for i in indices:
             g_email = form.get(f"guest_email_{i}", "").strip()
             g_name = form.get(f"guest_name_{i}", "").strip()
             if not g_email:
                 continue
             if "@" not in g_email:
-                return [], f"Guest #{i + 1}'s email address doesn't look valid."
+                return [], f"Guest #{len(entries) + 1}'s email address doesn't look valid."
             key = g_email.lower()
             if key in seen:
                 return [], (
@@ -1484,6 +1818,11 @@ class App:
                 )
             seen.add(key)
             entries.append((g_email, g_name))
+            if len(entries) > self.settings.max_guests:
+                return [], (
+                    f"At most {self.settings.max_guests} guests can be added per booking -- "
+                    "please remove one and try again."
+                )
         return entries, None
 
     def _send_party_admin_email(self, users: list, course, occ_date: str, status: str) -> None:
@@ -1865,7 +2204,10 @@ class App:
             "if that's still reachable."
         )
 
-    def _book_page(self, course, occurrences, error: str | None = None, banner: str = "", logged_in_user=None):
+    def _book_page(
+        self, course, occurrences, error: str | None = None, banner: str = "", logged_in_user=None,
+        login_error: str | None = None, login_lockout_seconds: float = 0.0,
+    ):
         subtitle = _course_subtitle_html(course)
         # course.description is operator-authored (settings.toml, edited by
         # whoever runs this install), not guest-submitted -- unlike every
@@ -1877,10 +2219,6 @@ class App:
         # has full control of the server, so this isn't a new privilege
         # boundary, just a place raw HTML is intentionally allowed through.
         desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
-        # 2026-07-16: exceptional per-date time changes (Course.
-        # date_overrides) get a red ATTENTION banner right here, above the
-        # date picker -- see _course_date_overrides_html's own docstring.
-        overrides_html = _course_date_overrides_html(course, occurrences)
         # 2026-07-09: the date-picker above never mentioned bookings the
         # guest already had for other dates, e.g. 2 future confirmed
         # bookings -- now shown here too. Rules, in order: (1) only
@@ -1904,6 +2242,37 @@ class App:
                 ),
                 key=lambda r: r.occurrence_date,
             )
+
+        def _already_booked_badge_html(r) -> str:
+            # 2026-07-16, caught live: a date the guest is already booked/
+            # waitlisted for is filtered out of `occurrences` (see just
+            # above), so the bookable-date box's own .d-override-time span
+            # (added earlier this same day) never got a chance to render
+            # for it -- repeated here on the badge itself instead, same
+            # class/styling, so the reminder survives being already
+            # booked, not just being pickable.
+            override_time = (
+                course.time_range_label_for(r.occurrence_date) if course.override_for(r.occurrence_date) else None
+            )
+            return (
+                '<span class="date-btn date-badge"><span><span class="d-date">'
+                + esc(r.occurrence_date) + "</span>"
+                + (f'<span class="d-override-time">{esc(override_time)}</span>' if override_time else "")
+                + '<span class="ribbon">'
+                + ("On waitinglist" if r.status == STATUS_WAITLISTED else "Booked")
+                + "</span></span></span>"
+            )
+
+        # 2026-07-16: exceptional per-date time changes (Course.
+        # date_overrides) get a red ATTENTION banner right here, above the
+        # date picker -- see _course_date_overrides_html's own docstring.
+        # extra_dates keeps this banner visible for an override date the
+        # guest is ALREADY booked/waitlisted for too, even though that
+        # date's no longer part of `occurrences` itself.
+        overrides_html = _course_date_overrides_html(
+            course, occurrences, self.settings.custom_attention_message,
+            extra_dates=tuple(r.occurrence_date for r in already_booked),
+        )
         if not occurrences and not already_booked:
             body = subtitle + overrides_html + desc_html + "<p>No dates currently available, please check back next week.</p>"
         elif not occurrences:
@@ -1911,13 +2280,7 @@ class App:
             # bookings for this course -- show those (still useful
             # context), skip the rest of the form (name/email/agree/submit
             # would have nothing to submit against).
-            already_booked_html = "".join(
-                '<span class="date-btn date-badge"><span><span class="d-date">'
-                + esc(r.occurrence_date) + '</span><span class="ribbon">'
-                + ("On waitinglist" if r.status == STATUS_WAITLISTED else "Booked")
-                + "</span></span></span>"
-                for r in already_booked
-            )
+            already_booked_html = "".join(_already_booked_badge_html(r) for r in already_booked)
             body = (
                 subtitle + overrides_html + desc_html
                 + f'<label>Dates available<div class="dates" role="radiogroup" '
@@ -1943,6 +2306,23 @@ class App:
                     + (" checked" if o.date == occurrences[0].date else "")
                     + '><span><span class="d-date">' + esc(o.date.isoformat()) + "</span>"
                     + (f'<span class="d-spots">{esc(text)}</span>' if (text := self._spots_left_text(o)) else "")
+                    # 2026-07-13, the operator: the exceptional start time (see
+                    # _course_date_overrides_html()'s own ATTENTION banner
+                    # further up this page) was only ever mentioned in that
+                    # one banner -- easy to miss once you're focused on the
+                    # date-picker itself. Repeated here too, right in this
+                    # date's own box, bold + a signal color (amber/orange --
+                    # see .d-override-time in templates.py's <style> block,
+                    # with its own :checked variant so it stays legible
+                    # against the dark-green selected background too, not
+                    # just the plain white unselected one).
+                    + (
+                        f'<span class="d-override-time">{esc(override_time)}</span>'
+                        if (override_time := (
+                            course.time_range_label_for(o.date.isoformat())
+                            if course.override_for(o.date.isoformat()) else None
+                        )) else ""
+                    )
                     + "</span></label>",
                 )
                 for o in occurrences
@@ -1952,13 +2332,7 @@ class App:
             # sorting the combined (date, html) pairs by date keeps that
             # true regardless of which list either date came from.
             already_booked_items = [
-                (
-                    r.occurrence_date,
-                    '<span class="date-btn date-badge"><span><span class="d-date">'
-                    + esc(r.occurrence_date) + '</span><span class="ribbon">'
-                    + ("On waitinglist" if r.status == STATUS_WAITLISTED else "Booked")
-                    + "</span></span></span>",
-                )
+                (r.occurrence_date, _already_booked_badge_html(r))
                 for r in already_booked
             ]
             date_buttons = "".join(
@@ -1978,188 +2352,120 @@ class App:
             # already logged in with a password. See book()'s own comment
             # on why the server ALSO enforces this (readonly is client-side
             # only, not a security boundary).
+            # 2026-07-13, the operator (final shape, after a couple of false
+            # starts -- see git history/session notes if curious): the
+            # tabs are ONLY ever about identity capture -- Login vs typing
+            # Name+Email directly. Everything else (dates, guests, ack,
+            # the Book button) lives in ONE always-visible section below
+            # the tabs, identical for both paths -- "the dedicated booking
+            # form... for BOTH cases: LOGIN and SIGNUP". Logged in, there's
+            # nothing left to choose between, so no tabs at all -- just
+            # the readonly boxes, in their same original spot, exactly as
+            # before any of this tab work (unchanged branch).
             if logged_in_user is not None:
-                # 2026-07-09: the earlier prefilled+readonly
-                # fields were confusing when logged in and booking --
-                # hidden instead of shown prefilled. The session banner right
-                # above ("Logged in as ...") already tells them who they're
-                # booking as, so showing greyed-out name/email fields too
-                # was redundant AND read as "why can't I edit this?"
-                # confusion. Still submitted via hidden inputs (never
-                # `disabled` -- see the comment this replaces, same reason:
-                # a disabled input's value is never POSTed at all), and the
-                # server ALSO enforces this identity server-side (see
-                # book()'s own comment) -- hiding the fields client-side is
-                # a UX choice only, never the actual security boundary.
+                # 2026-07-13: visible+readonly (grey), not hidden -- see
+                # _login_form_html()'s own docstring: logging in right on
+                # this page should land on the SAME visible end state
+                # typing name+email directly produces. Logout stays in
+                # the top banner (_session_banner_html()), not repeated
+                # here.
                 identity_fields_html = (
-                    f'<input type="hidden" name="name" value="{esc(logged_in_user.name)}">'
-                    f'<input type="hidden" name="email" value="{esc(logged_in_user.email)}">'
+                    '<label>Your name'
+                    f'<input class="big-input id-input" id="book-name" name="name" '
+                    f'value="{esc(logged_in_user.name)}" readonly></label>'
+                    '<label>Your email'
+                    f'<input class="big-input id-input" id="book-email" name="email" type="email" '
+                    f'value="{esc(logged_in_user.email)}" readonly></label>'
                 )
-                first_time_hint = ""
+                identity_and_tabs_html = identity_fields_html
             else:
-                identity_fields_html = (
+                # Anonymous: the Sign-up tab is just this SAME Name/Email
+                # pair (no separate form, no separate button -- typing them
+                # here already IS the sign-up step, same as always) plus
+                # its hint -- `form="book-form"` (2026-07-13) associates
+                # these inputs with the booking <form> below even though
+                # they're not its DOM descendants (same technique already
+                # used elsewhere in this file for the Cancel/Reinstate
+                # dialogs' textarea) -- a <form> can't nest inside another
+                # <form>, and the Login tab right next to it needs its own.
+                signup_fields_html = (
                     '<label>Your name <span class="req">(required)</span>'
-                    '<input class="big-input id-input" name="name" required></label>'
+                    '<input class="big-input id-input" id="book-name" name="name" form="book-form" required></label>'
                     '<label>Your email <span class="req">(required)</span>'
-                    '<input class="big-input id-input" name="email" type="email" required></label>'
-                )
-                first_time_hint = (
+                    '<input class="big-input id-input" id="book-email" name="email" type="email" '
+                    'form="book-form" required></label>'
                     "<p class=\"hint\">First time booking with this email? We'll send a link to confirm your\n"
                     "                account and set a password.</p>"
                 )
+                # 2026-07-16, the operator: Login is the default tab on a fresh
+                # load. Still forced to Sign-up on a booking-form error
+                # (missing name/email, slot no longer available, ...) --
+                # that error's own fields live in the Sign-up panel, so
+                # defaulting to Login there would hide exactly what the
+                # guest needs to see/fix. A login_error always wins
+                # (forces Login), same as before.
+                if login_error:
+                    active_tab = "login"
+                elif error:
+                    active_tab = "signup"
+                else:
+                    active_tab = "login"
+                identity_and_tabs_html = self._login_signup_tabs_html(
+                    "book",
+                    self._login_form_html(login_error, login_lockout_seconds, action=f"/book/{course.shortname}"),
+                    signup_fields_html,
+                    active_tab=active_tab,
+                )
+                identity_fields_html = ""  # lives in the Sign-up tab-panel above instead
+            # 2026-07-13, the operator: keep the ORIGINAL element order -- course
+            # description, date selection, THEN the tabbed identity area,
+            # THEN guests, THEN ack, THEN the Book button. #book-form
+            # therefore only wraps the date-picker itself; everything
+            # after the identity area associates back to it via each
+            # field's own form="book-form" attribute (same technique as
+            # the Name/Email fields above, and already used elsewhere in
+            # this file for the Cancel/Reinstate dialogs) rather than
+            # literal nesting -- the tabs (a sibling of #book-form, not a
+            # descendant) sit physically between the two halves.
+            #
+            # target="_top" (2026-07-16): for an anonymous guest, this
+            # form's submission IS the sign-up step (creates the account +
+            # session, then books in the same request) -- same iframe/
+            # SameSite reasoning as _login_form_html()'s own docstring, so
+            # it needs the same break-out. Applied unconditionally,
+            # including for already-logged-in guests re-using this same
+            # form -- harmless there (no new session to lose), and keeps
+            # the rule simple: this form always targets the top frame.
             body = f"""
             {subtitle}
             {overrides_html}
             {desc_html}
             {note_html}
             {err_html}
-            <form method="post" class="card" id="book-form" autocomplete="off"
-              data-book-label="{esc(self.settings.book_button_label)}">
+            <form method="post" class="card" id="book-form" autocomplete="off" target="_top"
+              data-book-label="{esc(self.settings.book_button_label)}"
+              data-max-guests="{self.settings.max_guests}">
               <label>Dates available
                 <div class="dates" role="radiogroup" aria-label="Dates available">{date_buttons}</div>
               </label>
               <div class="selected-box">Selected date: <strong id="selected-date-text">{esc(occurrences[0].date.isoformat())}</strong></div>
-              {identity_fields_html}
-              {first_time_hint}
+            </form>
+            {identity_and_tabs_html}
+            <div class="card">
               <div class="guests-section">
                 <div id="guest-rows"></div>
                 <button type="button" id="add-guest-btn" class="link-button">+ Add participant</button>
                 <p id="party-warning" class="note" style="display:none"></p>
               </div>
-              <label><input type="checkbox" name="agree" required> I acknowledge the
+              <label><input type="checkbox" id="book-agree" name="agree" form="book-form" required> I acknowledge the
                 <a href="/terms.html" target="_blank">participation terms</a> (voluntary, at my own risk)
                 for myself and any guests I'm registering above
                 <span class="req">(required)</span>.</label>
               <div class="submit-row">
-                <button type="submit" id="book-submit">{esc(first_label)}</button>
+                <button type="submit" id="book-submit" form="book-form">{esc(first_label)}</button>
               </div>
-            </form>
-            <script>
-            (function() {{
-              // Progressive enhancement only: the button starts enabled and
-              // the required/pattern attributes above already block an
-              // invalid submit without any JS at all -- this just adds a
-              // nicer disabled state + live date/label switching on top for
-              // guests with JS enabled.
-              var form = document.getElementById("book-form");
-              var radios = form.querySelectorAll('input[name="occurrence_date"]');
-              var selText = document.getElementById("selected-date-text");
-              var submitBtn = document.getElementById("book-submit");
-              var nameEl = form.querySelector('[name="name"]');
-              var emailEl = form.querySelector('[name="email"]');
-              var agreeEl = form.querySelector('[name="agree"]');
-
-              // Guest rows ("+ Add participant", mirroring SimplyMeet.me's
-              // own UX) -- each row's fields are named guest_email_<n>/
-              // guest_name_<n> (never repeated -- see app/webapp.py::
-              // _parse_guest_entries(); form-encoded POST bodies here only
-              // ever keep the FIRST value of a repeated name, so distinct
-              // per-row names are required, not just a style choice).
-              var guestRowsEl = document.getElementById("guest-rows");
-              var addGuestBtn = document.getElementById("add-guest-btn");
-              var partyWarning = document.getElementById("party-warning");
-              var guestIndex = 0;
-              var MAX_GUESTS = {self.settings.max_guests};
-
-              function guestRowCount() {{ return guestRowsEl ? guestRowsEl.children.length : 0; }}
-
-              function updatePartyWarning() {{
-                var r = currentRadio();
-                if (!r || !partyWarning) return;
-                var spotsLeft = parseInt(r.dataset.spotsLeft, 10);
-                var partySize = 1 + guestRowCount();
-                if (r.dataset.full !== "1" && !isNaN(spotsLeft) && partySize > spotsLeft) {{
-                  var spotWord = spotsLeft === 1 ? "spot" : "spots";
-                  var peopleWord = partySize === 1 ? "person" : "people";
-                  partyWarning.textContent = "Only " + spotsLeft + " confirmed " + spotWord +
-                    " left for this session, but your party is " + partySize + " " + peopleWord +
-                    ". Submitting will place your whole group on the waitlist together -- " +
-                    "remove a guest above to get confirmed instantly instead.";
-                  partyWarning.style.display = "";
-                }} else {{
-                  partyWarning.style.display = "none";
-                }}
-              }}
-
-              function addGuestRow() {{
-                if (!guestRowsEl || guestRowCount() >= MAX_GUESTS) return;
-                var i = guestIndex++;
-                var row = document.createElement("div");
-                row.className = "guest-row";
-                row.innerHTML =
-                  '<label>Guest email <span class="req">(required)</span>' +
-                  '<input class="big-input id-input" name="guest_email_' + i + '" type="email" required></label>' +
-                  '<label>Guest name <span class="opt">(optional)</span>' +
-                  '<input class="big-input id-input" name="guest_name_' + i + '"></label>' +
-                  '<button type="button" class="link-button remove-guest-btn">Remove participant</button>';
-                guestRowsEl.appendChild(row);
-                row.querySelector(".remove-guest-btn").addEventListener("click", function() {{
-                  guestRowsEl.removeChild(row);
-                  if (addGuestBtn) addGuestBtn.style.display = "";
-                  updatePartyWarning();
-                  refresh();
-                }});
-                var guestEmailEl = row.querySelector('[name="guest_email_' + i + '"]');
-                guestEmailEl.addEventListener("input", function() {{ updatePartyWarning(); refresh(); }});
-                guestEmailEl.addEventListener("change", refresh);
-                if (guestRowCount() >= MAX_GUESTS && addGuestBtn) addGuestBtn.style.display = "none";
-                updatePartyWarning();
-                refresh();
-              }}
-              if (addGuestBtn) addGuestBtn.addEventListener("click", addGuestRow);
-
-              function currentRadio() {{
-                for (var i = 0; i < radios.length; i++) {{ if (radios[i].checked) return radios[i]; }}
-                return null;
-              }}
-              var bookLabel = form.dataset.bookLabel || "Book";
-              function guestRowsValid() {{
-                // 2026-07-09: if a required field is empty, the button
-                // should not be clickable -- either remove
-                // the empty participant first or provide an email at
-                // least. Every currently-present guest row's required
-                // email must look valid, or the Book button stays disabled
-                // until it's filled in or the row is removed.
-                if (!guestRowsEl) return true;
-                var inputs = guestRowsEl.querySelectorAll('input[name^="guest_email_"]');
-                for (var i = 0; i < inputs.length; i++) {{
-                  if (inputs[i].value.indexOf("@") <= 0) return false;
-                }}
-                return true;
-              }}
-              function refresh() {{
-                var r = currentRadio();
-                if (r && selText) selText.textContent = r.dataset.date;
-                if (r && submitBtn) submitBtn.textContent = r.dataset.full === "1" ? "Join waitlist" : bookLabel;
-                var ok = !!r && nameEl.value.trim() !== "" && emailEl.value.indexOf("@") > 0 && agreeEl.checked
-                  && guestRowsValid();
-                if (submitBtn) submitBtn.disabled = !ok;
-                updatePartyWarning();
-              }}
-              for (var i = 0; i < radios.length; i++) {{ radios[i].addEventListener("change", refresh); }}
-              [nameEl, emailEl, agreeEl].forEach(function(el) {{
-                el.addEventListener("input", refresh);
-                el.addEventListener("change", refresh);
-              }});
-              refresh();
-              // 2026-07-11: a real bug showed
-              // one date box highlighted/checked while "Selected
-              // date:" still read a different, earlier date -- some browsers restore a
-              // PREVIOUSLY-checked radio button on reload/back-forward
-              // navigation on their own, independent of this script and
-              // AFTER it already ran once -- silently, with no "change"
-              // event, so refresh()'s one call above (which matched the
-              // server's own default, occurrences[0]) never gets to react
-              // to the browser's later override. autocomplete="off" on the
-              // form (above) stops most browsers from doing this restore at
-              // all; "pageshow" (fires on every render including a
-              // back/forward-cache restore, unlike "load") is a second,
-              // defensive line of the same fix, re-running refresh() at
-              // that point to guarantee the visible highlight and the
-              // "Selected date" text can never disagree, on any browser.
-              window.addEventListener("pageshow", refresh);
-            }})();
-            </script>"""
+            </div>
+            {_BOOKING_FORM_SCRIPT}"""
         return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(course.title, body, banner=banner)
 
     # -- /cancel/<token> (guest, from email) ---------------------------------
@@ -2307,6 +2613,76 @@ class App:
         </form>"""
         )
         return "200 OK", [("Content-Type", "text/html")], page("Rebook booking", body, banner=banner)
+
+    def _attempt_login(self, email: str, password: str, environ) -> tuple[str | None, float, str | None, str | None]:
+        """(error, lockout_seconds, session_id, forced_redirect) for one
+        email+password attempt -- factored out of my() (2026-07-13) so
+        book()'s own POST branch for the inline login form embedded on
+        /book/<shortname> (see _login_form_html()'s docstring) can share
+        the exact same rate-limiting/verification logic rather than a
+        second, driftable copy of it. Neither caller is handed a
+        Set-Cookie header directly -- `session_id`, when set, still needs
+        turning into one via _session_cookie_header(); that's left to the
+        caller since the two callers build very different responses
+        around it (my() may 302 to /my or `next`; book() re-renders or
+        302s back to its own page).
+
+        `forced_redirect` is only ever set on a SUCCESSFUL admin login
+        (always "/admin", regardless of which page the form was
+        submitted from -- a distinct privilege space, not something a
+        booking page should ever try to render inline); a successful
+        GUEST login leaves it None, meaning the caller picks its own
+        target (my()'s `next`, or book()'s own URL)."""
+        now = time.time()
+        if email.lower() == "admin":
+            # 2026-07-06: "/my should accept email: admin and the admin
+            # password in order to login to /admin space" -- reuses the
+            # exact same rate-limiter KEY as admin_login() (per client
+            # IP, not per-email/per-string) so this can't be used to
+            # dodge that lockout by switching entry points, and so
+            # hammering "admin" here (from EITHER page this is now
+            # reachable from) can't lock the real admin out of /admin
+            # either -- one shared bucket either way in.
+            key = f"admin:{_client_ip(environ)}"
+            if not login_limiter.allow(key, now=now):
+                log.warning("rate limit blocked: admin login from %s (via /my)", _client_ip(environ))
+                return "Too many attempts -- try again later.", login_limiter.retry_after(key, now=now), None, None
+            elif verify_admin_password(password, self.settings.admin_password_hash):
+                # 2026-07-11: a SUCCESSFUL login used to still count
+                # against this same 5/hour budget (allow() is called
+                # unconditionally above, before the password is even
+                # checked) with nothing ever resetting it -- several
+                # perfectly legitimate logins within an hour (exactly
+                # what testing/normal use looks like) could exhaust it on
+                # its own, with no wrong password ever entered. Only a
+                # WRONG password should cost anything against this
+                # limiter; a right one clears the slate.
+                login_limiter.reset(key)
+                sid = _new_session({"kind": "admin"})
+                return None, 0.0, sid, "/admin"
+            else:
+                # Same generic wording as a guest mismatch below --
+                # never confirms that "admin" is treated specially.
+                return "Email and/or password did not match.", 0.0, None, None
+        key = f"guest:{email.lower()}"
+        if not login_limiter.allow(key, now=now):
+            # WARNING (not DEBUG): a real signal the watchdog counts (see
+            # app/watchdog.py) -- masked, never the raw email.
+            log.warning("rate limit blocked: guest login for %s", _masked(email))
+            return "Too many attempts -- try again later.", login_limiter.retry_after(key, now=now), None, None
+        user = self.store.find_user_by_email(email)
+        # user.password_hash is empty for a not-yet-confirmed account --
+        # bail out before verify_secret rather than feeding it an empty
+        # hash/salt.
+        if user and user.password_hash and verify_secret(password, user.password_hash, user.password_salt):
+            # See the admin branch's own 2026-07-11 comment above -- a
+            # successful login shouldn't cost anything against this
+            # budget, only a wrong password should.
+            login_limiter.reset(key)
+            sid = _new_session({"kind": "guest", "user_id": user.user_id})
+            self.store.touch_login(user.user_id)
+            return None, 0.0, sid, None
+        return "Email and/or password did not match.", 0.0, None, None
 
     # -- /my (guest self-service) --------------------------------------------
 
@@ -2531,70 +2907,23 @@ class App:
             # Carried along as a hidden field by _my_login_page()'s login
             # form -- see _safe_next_path()'s own docstring for why this is
             # re-validated here rather than trusted as-is (a POST body is
-            # just as hand-editable as a URL).
+            # just as hand-editable as a URL). Success-only: a FAILED
+            # attempt always redisplays THIS page (/my) -- see
+            # _login_form_html()'s own docstring for why errors never get
+            # routed elsewhere via `next` (2026-07-13, the operator).
             next_path = _safe_next_path(form.get("next", ""))
-            now = time.time()
-            if email.lower() == "admin":
-                # 2026-07-06: "/my should accept email: admin and the admin
-                # password in order to login to /admin space" -- reuses the
-                # exact same rate-limiter KEY as admin_login() (per client
-                # IP, not per-email/per-string) so this can't be used to
-                # dodge that lockout by switching entry points, and so
-                # hammering "admin" here can't lock the real admin out of
-                # /admin/login either -- one shared bucket either way in.
-                key = f"admin:{_client_ip(environ)}"
-                if not login_limiter.allow(key, now=now):
-                    error = "Too many attempts -- try again later."
-                    lockout_seconds = login_limiter.retry_after(key, now=now)
-                    log.warning("rate limit blocked: admin login from %s (via /my)", _client_ip(environ))
-                elif verify_admin_password(password, self.settings.admin_password_hash):
-                    # 2026-07-11: a SUCCESSFUL login used
-                    # to still count against this same 5/hour budget (allow()
-                    # is called unconditionally above, before the password
-                    # is even checked) with nothing ever resetting it --
-                    # several perfectly legitimate logins within an hour
-                    # (exactly what testing/normal use looks like) could
-                    # exhaust it on their own, with no wrong password ever
-                    # entered. Only a WRONG password should cost anything
-                    # against this limiter; a right one clears the slate.
-                    login_limiter.reset(key)
-                    sid = _new_session({"kind": "admin"})
-                    return "302 Found", [("Location", "/admin"), ("Set-Cookie", _session_cookie_header(sid))], ""
-                else:
-                    # Same generic wording as a guest mismatch below --
-                    # never confirms that "admin" is treated specially.
-                    error = "Email and/or password did not match."
-            else:
-                key = f"guest:{email.lower()}"
-                if not login_limiter.allow(key, now=now):
-                    error = "Too many attempts -- try again later."
-                    lockout_seconds = login_limiter.retry_after(key, now=now)
-                    # WARNING (not DEBUG): a real signal the watchdog counts
-                    # (see app/watchdog.py) -- masked, never the raw email.
-                    log.warning("rate limit blocked: guest login for %s", _masked(email))
-                else:
-                    user = self.store.find_user_by_email(email)
-                    # user.password_hash is empty for a not-yet-confirmed
-                    # account -- bail out before verify_secret rather than
-                    # feeding it an empty hash/salt.
-                    if user and user.password_hash and verify_secret(password, user.password_hash, user.password_salt):
-                        # See the admin branch's own 2026-07-11 comment above
-                        # -- a successful login shouldn't cost anything
-                        # against this budget, only a wrong password should.
-                        login_limiter.reset(key)
-                        sid = _new_session({"kind": "guest", "user_id": user.user_id})
-                        self.store.touch_login(user.user_id)
-                        # 2026-07-11: login link returns to
-                        # originating page -- lands back on /courses or
-                        # /book/<shortname> if that's where the guest
-                        # clicked Login from, /my otherwise (unchanged
-                        # default).
-                        return (
-                            "302 Found",
-                            [("Location", next_path or "/my"), ("Set-Cookie", _session_cookie_header(sid))],
-                            "",
-                        )
-                    error = "Email and/or password did not match."
+            error, lockout_seconds, sid, forced_redirect = self._attempt_login(email, password, environ)
+            if sid is not None:
+                # 2026-07-11: login link returns to originating page --
+                # lands back on /courses or /book/<shortname> if that's
+                # where the guest clicked Login from, /my otherwise
+                # (unchanged default); forced_redirect (admin only) wins
+                # regardless -- see _attempt_login()'s own docstring.
+                return (
+                    "302 Found",
+                    [("Location", forced_redirect or next_path or "/my"), ("Set-Cookie", _session_cookie_header(sid))],
+                    "",
+                )
         else:
             next_path = _safe_next_path(parse_qs(environ.get("QUERY_STRING", "")).get("next", [""])[0])
         return self._my_login_page(login_error=error, login_lockout_seconds=lockout_seconds, next_path=next_path)
@@ -2647,6 +2976,123 @@ class App:
             active_tab="signup",
         )
 
+    def _login_form_html(
+        self, error: str | None = None, lockout_seconds: float = 0.0, next_path: str = "", action: str = "/my",
+        reset_hint_html: str = _DEFAULT_LOGIN_RESET_HINT,
+    ) -> str:
+        """The Login half of /my's tabbed login/signup box, factored out
+        (2026-07-13) as its own portable, parameterized component --
+        embedded wherever a Login option is needed: /my's own login tab
+        (_my_login_page(), via this same function, action="/my" default)
+        and the anonymous branch of _book_page() (a returning guest can
+        log in right there instead of scrolling up to the top-bar's Login
+        link and losing their place -- the operator's own request; embedded with
+        action=f"/book/{{shortname}}"). Deliberately just the Login form,
+        not the Sign-up tab too -- on /book/<shortname>, typing name+email
+        directly already IS the sign-up path (creates the account, emails
+        a confirm link, all in the same booking submission), so a second,
+        separate Sign-up form there would be redundant.
+
+        `action` is the one thing that genuinely differs per embedding --
+        each caller's own page handles its OWN POSTs and re-renders
+        itself on failure (2026-07-13, the operator: "a failed login must show
+        in the login component on the same page from where you hit the
+        login button" -- not routed elsewhere via `next`; `next` is only
+        ever a SUCCESS redirect, see my()/book()'s own POST handling and
+        _attempt_login()'s docstring). The error box (if any) sits right
+        at the top of this fragment, not threaded in from the caller's
+        own layout -- so whichever page re-renders this after a failed
+        attempt shows the error in the same place either way. The hidden
+        login_submit marker lets a page whose POST handler also does
+        other things (book()'s booking submission, on this same page)
+        tell a login attempt apart from its own form.
+
+        `reset_hint_html` (2026-07-13, the operator) is this form's own bottom
+        subtext -- a parameter rather than hardcoded, same reasoning as
+        `action`, even though both current callers pass the same default
+        today (_DEFAULT_LOGIN_RESET_HINT).
+
+        target="_top" (2026-07-16): both /my and /book/<shortname> can be
+        loaded inside an <iframe> embed on another site (see
+        site/index.html.example's own top-of-file comment). The session
+        cookie this form's POST sets is SameSite=Lax -- fine for a direct,
+        top-level visit, but silently dropped by the browser if the POST
+        happens from inside a cross-site iframe (a sub-frame request never
+        gets the Lax top-level-navigation exception), so a correct login
+        would appear to just bounce back to the anonymous tab with no
+        error at all. target="_top" makes the browser navigate the WHOLE
+        tab instead of just the iframe, so by the time the POST/redirect/
+        Set-Cookie happen, it's an ordinary same-site top-level request --
+        no cookie-attribute relaxation (SameSite stays Lax) and no new
+        CSRF exposure. Applied unconditionally (not just when actually
+        embedded) -- viewed standalone, target="_top" on a page that IS
+        already the top frame is a no-op, same normal same-tab behavior."""
+        err_html = f'<p class="err">{esc(error)}</p>' if error else ""
+        # 2026-07-11: on /my, a successful login returns to the
+        # originating page -- carried through as a hidden field; see
+        # _safe_next_path()'s own docstring for why this is re-validated
+        # server-side rather than trusted just because it round-tripped
+        # through this form. Not used at all when embedded on /book/
+        # <shortname> itself -- that POST target already IS the page to
+        # land back on, nothing to redirect to.
+        next_field = f'<input type="hidden" name="next" value="{esc(next_path)}">' if next_path else ""
+        body = f"""{err_html}<form method="post" action="{esc(action)}" class="card" target="_top">
+          <input type="hidden" name="login_submit" value="1">
+          {next_field}
+          <label>Email <input class="big-input id-input" name="email" type="text" required></label>
+          <label>Password <input class="big-input id-input" name="password" type="password" required></label>
+          <div class="submit-row"><button type="submit" id="my-login-btn"{
+              f' data-lockout-btn data-lockout-seconds="{int(lockout_seconds)}"' if lockout_seconds else ""
+            }>Login</button></div>
+        </form>
+        {reset_hint_html}"""
+        if lockout_seconds:
+            body += _LOCKOUT_COUNTDOWN_SCRIPT
+        return body
+
+    def _login_signup_tabs_html(
+        self, id_prefix: str, login_body: str, signup_body: str, active_tab: str = "login",
+    ) -> str:
+        """The CSS-only Login/Sign-up tab-switcher shell (radio buttons +
+        sibling selectors, no JS) -- factored out (2026-07-13) from /my's
+        own tabbed box so /book/<shortname>'s anonymous identity block can
+        embed the exact SAME component (the operator: "merge the 4 boxes on the
+        course booking into the SAME tabbed sign-up/login component as
+        visible under /my", replacing what used to be a hand-rolled
+        "Already have an account?" heading + stacked cards + always-
+        visible Your name/Your email fields).
+
+        `login_body`/`signup_body` are opaque HTML the caller builds
+        itself -- deliberately not reconstructed here, since what belongs
+        in the Sign-up panel genuinely differs per page: /my's own is a
+        small self-contained form with its own submit button (posts to
+        /my/signup); /book's is the ENTIRE existing booking form (dates,
+        guests, agree, submit) wrapped as-is -- same Name/Email fields as
+        always, not a second, duplicate set, since typing them there
+        already IS the sign-up step (see _login_form_html()'s docstring;
+        both Sign-up paths do the same underlying thing -- create/confirm
+        the account and email a link -- /book's just also confirms the
+        booking in that same step).
+
+        `id_prefix` keeps each embedding's radio/panel IDs (and the
+        matching CSS rules in templates.py) namespaced -- "my" here,
+        "book" for /book/<shortname> -- even though only one is ever
+        rendered per response, so the two usages aren't tied together by
+        a literal, easy-to-miss ID coincidence."""
+        login_checked = "checked" if active_tab == "login" else ""
+        signup_checked = "checked" if active_tab == "signup" else ""
+        return f"""
+        <div class="tabs">
+          <input type="radio" id="{id_prefix}-tab-login" name="{id_prefix}-tab" class="tab-radio" {login_checked}>
+          <input type="radio" id="{id_prefix}-tab-signup" name="{id_prefix}-tab" class="tab-radio" {signup_checked}>
+          <div class="tab-labels">
+            <label for="{id_prefix}-tab-login" class="tab-label">Login</label>
+            <label for="{id_prefix}-tab-signup" class="tab-label">Sign up</label>
+          </div>
+          <div class="tab-panel" id="{id_prefix}-panel-login">{login_body}</div>
+          <div class="tab-panel" id="{id_prefix}-panel-signup">{signup_body}</div>
+        </div>"""
+
     def _my_login_page(
         self,
         *,
@@ -2676,28 +3122,7 @@ class App:
         2026-07-14: switched to the same boxed
         `.session-banner` style via _homepage_only_banner_html() (see that
         method's own docstring), not a bare <p> link, for visual consistency."""
-        login_checked = "checked" if active_tab == "login" else ""
-        signup_checked = "checked" if active_tab == "signup" else ""
-
-        login_err_html = f'<p class="err">{esc(login_error)}</p>' if login_error else ""
-        login_label = "Login"
-        # 2026-07-11: login link returns to originating page --
-        # carried through as a hidden field so App.my()'s POST handler can
-        # redirect back to it on success; see _safe_next_path()'s own
-        # docstring for why this is re-validated server-side rather than
-        # trusted just because it round-tripped through this form.
-        next_field = f'<input type="hidden" name="next" value="{esc(next_path)}">' if next_path else ""
-        login_body = f"""{login_err_html}<form method="post" action="/my" class="card">
-          {next_field}
-          <label>Email <input class="big-input id-input" name="email" type="text" required></label>
-          <label>Password <input class="big-input id-input" name="password" type="password" required></label>
-          <div class="submit-row"><button type="submit" id="my-login-btn"{
-              f' data-lockout-btn data-lockout-seconds="{int(login_lockout_seconds)}"' if login_lockout_seconds else ""
-            }>{esc(login_label)}</button></div>
-        </form>
-        <p><a href="/my/reset">Forgot your password, or still need to confirm your account?</a></p>"""
-        if login_lockout_seconds:
-            login_body += _LOCKOUT_COUNTDOWN_SCRIPT
+        login_body = self._login_form_html(login_error, login_lockout_seconds, next_path)
 
         if signup_success:
             # Boxed the same as the form it replaces (2026-07-06 fix: a
@@ -2712,7 +3137,13 @@ class App:
             # book()'s own "First time booking with this email?" hint --
             # rather than dangling below the closed form (2026-07-06 fix,
             # same complaint as the success message above).
-            signup_body = f"""{signup_err_html}<form method="post" action="/my/signup" class="card">
+            # target="_top" (2026-07-16): same iframe/SameSite reasoning
+            # as _login_form_html()'s own docstring -- this form doesn't
+            # set a session cookie itself (just creates the account and
+            # emails a confirm link), but breaking out here too keeps the
+            # whole Login/Sign-up box consistently top-level regardless of
+            # embedding.
+            signup_body = f"""{signup_err_html}<form method="post" action="/my/signup" class="card" target="_top">
               <label>Name <input class="big-input id-input" name="name" type="text" required></label>
               <label>Email <input class="big-input id-input" name="email" type="email" required></label>
               <p class="hint">We'll email you a link to set your password.</p>
@@ -2723,17 +3154,7 @@ class App:
             if signup_lockout_seconds:
                 signup_body += _LOCKOUT_COUNTDOWN_SCRIPT
 
-        body = f"""
-        <div class="tabs">
-          <input type="radio" id="my-tab-login" name="my-tab" class="tab-radio" {login_checked}>
-          <input type="radio" id="my-tab-signup" name="my-tab" class="tab-radio" {signup_checked}>
-          <div class="tab-labels">
-            <label for="my-tab-login" class="tab-label">Login</label>
-            <label for="my-tab-signup" class="tab-label">Sign up</label>
-          </div>
-          <div class="tab-panel" id="my-panel-login">{login_body}</div>
-          <div class="tab-panel" id="my-panel-signup">{signup_body}</div>
-        </div>"""
+        body = self._login_signup_tabs_html("my", login_body, signup_body, active_tab)
         return "200 OK", [("Content-Type", "text/html")], page(
             "My bookings", body, banner=self._homepage_only_banner_html()
         )
@@ -3156,7 +3577,16 @@ class App:
         case the account was erased out from under a still-live session.
         An "admin" session has no associated user record at all -- there
         is exactly one admin login, gated by settings.toml's
-        admin_password_hash, not a per-person account."""
+        admin_password_hash, not a per-person account.
+
+        2026-07-13: added `name` (the guest's account name, "" for an
+        admin session -- there's no per-person name for that single
+        shared login) and top-level `session_timeout_seconds`, so a
+        caller can show WHO exactly is logged in (not just their email)
+        and how long they have left with no further activity -- see
+        app.cli_checks.active_sessions_rows/format_active_sessions_overview,
+        which both `my-bt status` and `my-bt setup`'s active-session
+        gate/warning render from this same payload."""
         if method != "GET":
             return "405 Method Not Allowed", [("Content-Type", "text/plain")], "GET only"
         if environ.get("HTTP_X_FORWARDED_FOR"):
@@ -3175,12 +3605,15 @@ class App:
             if kind == "guest":
                 user = self.store.find_user_by_id(data.get("user_id", ""))
                 who = user.email if user else f"(erased) user_id={data.get('user_id')}"
+                name = user.name if user else ""
             else:
                 who = "admin"
+                name = ""
             last_seen = data.get("last_seen")
             sessions_out.append({
                 "kind": kind,
                 "who": who,
+                "name": name,
                 "connected_since": datetime.fromtimestamp(
                     data["expires"] - SESSION_TTL_SECONDS, tz=timezone.utc
                 ).isoformat(),
@@ -3194,6 +3627,14 @@ class App:
             "version": PACKAGE_VERSION,
             "maintenance": {"enabled": state.enabled, "message": state.message, "set_at": state.set_at},
             "sessions": sessions_out,
+            # Fixed for every session (see SESSION_TTL_SECONDS above) --
+            # exposed here so a caller can show "how long with no new
+            # activity before this disappears" per session without
+            # hardcoding a second copy of the constant (my-bt status,
+            # my-bt setup's active-session gate/warning, and the RPM's
+            # %pre gate -- which just reuses `my-bt status`'s own
+            # rendering -- all show it).
+            "session_timeout_seconds": SESSION_TTL_SECONDS,
         }
         return "200 OK", [("Content-Type", "application/json")], json.dumps(payload)
 

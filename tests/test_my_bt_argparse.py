@@ -58,6 +58,14 @@ class BareCommandHelpParserTest(unittest.TestCase):
         self.assertTrue(hasattr(args, "func"))
         self.assertEqual(args.func, my_bt_mod.cmd_admin_health)
 
+    def test_csp_violations_leaf_command_sets_func(self):
+        # 2026-07-13: full-detail CSP-violation view, added alongside
+        # cli_checks.check_csp_violations/find_csp_violations.
+        parser = my_bt_mod.build_parser()
+        args = parser.parse_args(["admin", "csp-violations"])
+        self.assertTrue(hasattr(args, "func"))
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_csp_violations)
+
     def test_resync_calendar_leaf_command_sets_func(self):
         # 2026-07-09: existing (future)
         # calendar invites are also updated -- see
@@ -413,6 +421,26 @@ class BareCommandMainBehaviorTest(unittest.TestCase):
             sys.argv = old_argv
         self.assertEqual(ctx.exception.code, 1)
         self.assertIn("error:", err.getvalue())
+
+
+class NoStaleRemovedCommandReferencesTest(unittest.TestCase):
+    """2026-07-14 (repo-wide review, finding G2): `my-bt list --all`'s help
+    text and cmd_list's docstring still told operators to run `my-bt admin
+    dearchive` -- a command deliberately REMOVED (2026-07-14) as a GDPR
+    violation. Directing users to it was doubly wrong. This locks in that
+    no user-facing help/docstring in scripts/my-bt ever points at it
+    again (historical comments explaining the removal itself are fine --
+    only text an operator is shown, or a function's own usage docstring,
+    is checked here)."""
+
+    def test_no_help_text_or_docstring_references_dearchive(self):
+        parser = my_bt_mod.build_parser()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(["list", "--help"])
+        self.assertNotIn("dearchive", out.getvalue())
+        self.assertNotIn("dearchive", my_bt_mod.cmd_list.__doc__ or "")
 
 
 if __name__ == "__main__":

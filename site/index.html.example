@@ -14,6 +14,16 @@
      inside a small embedded iframe. Viewed standalone, it behaves like a
      normal same-tab link -- no downside either way.
 
+     2026-07-16: EVERY link on this page that points at the booking tool
+     itself (course links, the footer's Terms/Privacy/Impressum, and the
+     schedule-exceptions script's "details" links) carries target="_top"
+     for the same reason, not just Login -- the session cookie any of
+     these pages might set (login, sign-up-and-book) is SameSite=Lax,
+     which a cross-site <iframe> sub-frame request never gets to send/
+     receive properly; breaking out to the top frame makes the request an
+     ordinary same-site one instead. Keep this on any new internal link
+     added here.
+
      2026-07-09: a logged-in guest visiting the homepage should see the
      same banner as the dynamic pages, not a plain "Login" button. The
      <script> at the bottom of <body> opportunistically upgrades this on
@@ -49,7 +59,14 @@
               text-decoration: none; color: #222; }
  .login-btn:hover { background: #f4f7f4; }
  .attention { background: #fdecea; border: 1px solid #f5c2c0; border-radius: 8px;
-              padding: 0.8em 1.2em; margin: 0.6em 0; color: #a61b1b; }
+              padding: 0.8em 1.2em; margin: 0.6em 0; color: #a61b1b;
+              font-family: sans-serif; font-size: 1rem; }
+ /* 2026-07-13: explicit here (not just relying on inheriting it from
+    `body` above) so this box's font can never silently drift from the
+    dynamic app pages' own ATTENTION box (app/webapp.py::attention_html())
+    even if `body`'s own font-family rule above is ever changed -- see
+    site/index.html's own (real, Word-exported) copy of this same comment
+    for the actual incident this fixes. */
  .attention a { color: #a61b1b; }
 </style>
 </head>
@@ -71,14 +88,14 @@
 
 <h2>Upcoming sessions</h2>
 <ul>
-  <li><a href="/book/example-monday-class">Example Class -- Monday 18:00: book your place here.</a></li>
-  <li><a href="/book/example-thursday-class">Example Class (Advanced) -- Thursday 19:00: book your place here.</a></li>
+  <li><a href="/book/example-monday-class" target="_top">Example Class -- Monday 18:00: book your place here.</a></li>
+  <li><a href="/book/example-thursday-class" target="_top">Example Class (Advanced) -- Thursday 19:00: book your place here.</a></li>
 </ul>
 
 <footer>
-<a href="/terms.html">Terms</a> &nbsp;|&nbsp;
-<a href="/privacy.html">Privacy policy</a> &nbsp;|&nbsp;
-<a href="/impressum.html">Impressum / Legal notice</a>
+<a href="/terms.html" target="_top">Terms</a> &nbsp;|&nbsp;
+<a href="/privacy.html" target="_top">Privacy policy</a> &nbsp;|&nbsp;
+<a href="/impressum.html" target="_top">Impressum / Legal notice</a>
 </footer>
 
 <script>
@@ -123,7 +140,7 @@
         var msg = it.message ? ' -- ' + it.message : '';
         return '<div class="attention"><b>⚠ ATTENTION:</b> ' + it.course_title +
           ' on ' + it.date + ' starts at ' + it.time_label + ' instead' + msg +
-          ' -- <a href="/book/' + it.course_shortname + '">details</a></div>';
+          ' -- <a href="/book/' + it.course_shortname + '" target="_top">details</a></div>';
       }).join('');
     })
     .catch(function () { /* leave the page exactly as-is */ });

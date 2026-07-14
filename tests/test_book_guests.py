@@ -175,6 +175,55 @@ class PartyValidationTest(GuestBookingTestBase):
         guest = self.store.find_user_by_email("guest@example.org")
         self.assertEqual(guest.name, "Real Name")
 
+    def test_guest_row_indices_beyond_max_guests_are_still_honored(self):
+        # 2026-07-14 regression (review finding B1): the form's JS assigns
+        # row indices from a counter that never reuses a removed row's
+        # index -- "add, remove, re-add" can legitimately submit e.g.
+        # guest_email_3 even though max_guests is 3. The old fixed-range
+        # scan (0..max_guests-1) silently DROPPED that guest from the
+        # party; the booking succeeded without them and nobody was told.
+        form = {
+            "occurrence_date": self.occ_date,
+            "name": "Leader", "email": "leader@example.org", "agree": "on",
+            # index 3 only -- exactly what add-3-remove-all-add-1 produces
+            "guest_email_3": "late-add@example.org", "guest_name_3": "Late Add",
+        }
+        status, _headers, _body = self._post(form)
+        self.assertIn("200", status)
+        self.assertIsNotNone(self.store.find_user_by_email("late-add@example.org"))
+        self.assertEqual(len(self.store.all_registrations()), 2)  # leader + the guest
+
+    def test_noncontiguous_guest_indices_all_admitted_in_index_order(self):
+        # Same B1 scenario with a surviving earlier row: indices 0 and 4.
+        form = {
+            "occurrence_date": self.occ_date,
+            "name": "Leader", "email": "leader@example.org", "agree": "on",
+            "guest_email_0": "first@example.org", "guest_name_0": "First",
+            "guest_email_4": "second@example.org", "guest_name_4": "Second",
+        }
+        status, _headers, _body = self._post(form)
+        self.assertIn("200", status)
+        regs = self.store.all_registrations()
+        self.assertEqual(len(regs), 3)  # leader + both guests
+        self.assertIsNotNone(self.store.find_user_by_email("first@example.org"))
+        self.assertIsNotNone(self.store.find_user_by_email("second@example.org"))
+
+    def test_more_than_max_guests_rejected_loudly_not_silently_trimmed(self):
+        # The max_guests ceiling moved from the index namespace to the
+        # COUNT of guests submitted (see _parse_guest_entries) -- a
+        # crafted POST with more than max_guests (default 3) guests must
+        # get a visible error, and nothing may be booked at all.
+        form = {
+            "occurrence_date": self.occ_date,
+            "name": "Leader", "email": "leader@example.org", "agree": "on",
+        }
+        for i in range(4):
+            form[f"guest_email_{i}"] = f"g{i}@example.org"
+            form[f"guest_name_{i}"] = f"G{i}"
+        status, _headers, body = self._post(form)
+        self.assertIn("At most 3 guests", body)
+        self.assertEqual(self.store.all_registrations(), [])
+
 
 class PartyDoubleBookingTest(GuestBookingTestBase):
     """2026-07-10: double booking was found to be possible; the leader-vs-

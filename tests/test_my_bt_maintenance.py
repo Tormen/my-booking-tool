@@ -5,8 +5,10 @@ target. scripts/my-bt has no .py extension and lives outside `app/`, so
 unittest can't import it directly -- same importlib.machinery.SourceFileLoader
 workaround tests/test_my_bt_argparse.py already established (see that
 file's own docstring)."""
+import contextlib
 import importlib.machinery
 import importlib.util
+import io
 import tempfile
 import types
 import unittest
@@ -41,18 +43,27 @@ class CmdMaintenanceTargetsTest(unittest.TestCase):
             settings=str(self.settings_path), data_dir=str(self.data_dir),
         )
 
+    def _cmd_maintenance(self, *args_calls: types.SimpleNamespace) -> None:
+        # cmd_maintenance prints its own "[ok]/[skip] banner ..." and
+        # "maintenance mode: ON/off ..." lines straight to real stdout --
+        # useful at the terminal, just noise inside the test runner's own
+        # output. Swallow it here, same as the other scripts/my-bt CLI
+        # tests already do (see test_my_bt_show_cancel.py).
+        with contextlib.redirect_stdout(io.StringIO()):
+            for args in args_calls:
+                my_bt_mod.cmd_maintenance(args)
+
     def test_on_banners_index_embedded_html_alongside_index_html(self):
         (self.static_dir / "index.html").write_text("<html><body>hello</body></html>")
         (self.static_dir / "index_embedded.html").write_text("<html><body>hello embedded</body></html>")
-        my_bt_mod.cmd_maintenance(self._args("on", message="back Monday"))
+        self._cmd_maintenance(self._args("on", message="back Monday"))
         self.assertIn("MAINTENANCE-BANNER:START", (self.static_dir / "index.html").read_text())
         self.assertIn("MAINTENANCE-BANNER:START", (self.static_dir / "index_embedded.html").read_text())
 
     def test_off_removes_it_from_both(self):
         (self.static_dir / "index.html").write_text("<html><body>hello</body></html>")
         (self.static_dir / "index_embedded.html").write_text("<html><body>hello embedded</body></html>")
-        my_bt_mod.cmd_maintenance(self._args("on", message="back Monday"))
-        my_bt_mod.cmd_maintenance(self._args("off"))
+        self._cmd_maintenance(self._args("on", message="back Monday"), self._args("off"))
         self.assertNotIn("MAINTENANCE-BANNER", (self.static_dir / "index.html").read_text())
         self.assertNotIn("MAINTENANCE-BANNER", (self.static_dir / "index_embedded.html").read_text())
 
@@ -62,7 +73,7 @@ class CmdMaintenanceTargetsTest(unittest.TestCase):
         # a missing target, same as it already does for index.html before
         # it's ever been deployed.
         (self.static_dir / "index.html").write_text("<html><body>hello</body></html>")
-        my_bt_mod.cmd_maintenance(self._args("on", message="back Monday"))
+        self._cmd_maintenance(self._args("on", message="back Monday"))
         self.assertIn("MAINTENANCE-BANNER:START", (self.static_dir / "index.html").read_text())
         self.assertFalse((self.static_dir / "index_embedded.html").exists())
 

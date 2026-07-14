@@ -12,7 +12,9 @@ and unlike `scripts/my-bt` it does have a .py extension but lives outside
 `app/`) -- import it via importlib from its file path, the same
 workaround its own hyphenated filename would need anywhere.
 """
+import contextlib
 import importlib.util
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -68,15 +70,23 @@ class ResolveRealOrExampleTest(unittest.TestCase):
         self.assertEqual(real.read_text(), "the operator's real, customized wording")
 
 
+_SAMPLE_INDEX_HTML = """<html><body>
+<div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+<div id="schedule-exceptions"></div>
+<ul><li><a href="/book/trier">Book your place here.</a></li></ul>
+<script>(function () { fetch('/my/session', { credentials: 'same-origin' }); })();</script>
+<script>(function () { fetch('/schedule-exceptions', { credentials: 'same-origin' }); })();</script>
+</body></html>
+"""
+
+
 class RenderTest(unittest.TestCase):
-    """render() (2026-07-16: extended to also render index_embedded.html,
-    a second generated page alongside privacy.html) end-to-end, against a
-    real REPO_ROOT-relative settings.toml + template pair -- covers the
-    "falls back to .example when nothing real exists" path that's this
-    project's own actual state when checked out fresh (this checkout has
-    no real settings.toml/site/index_embedded.html.tmpl of its own in the
-    test environment, so this exercises the SAME fallback a fresh clone of
-    the public template repo would hit)."""
+    """render() (reworked 2026-07-13: index_embedded.html is now DERIVED
+    from site/index.html itself, not rendered from its own separate
+    .tmpl) end-to-end, against a real REPO_ROOT-relative settings.toml +
+    index.html pair -- covers the "falls back to .example when nothing
+    real exists" path that's this project's own actual state when checked
+    out fresh."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -91,17 +101,15 @@ class RenderTest(unittest.TestCase):
             'shortname = "trier"\ntitle = "Yoga"\nlocation = "Trier"\nweekday = "sat"\n'
             'start_time = "10:45"\nduration_minutes = 120\ncapacity = 10\n'
             "[[course.date_override]]\n"
-            'date = "2026-07-18"\nstart_time = "09:45"\nmessage = "Back at 13h."\n',
+            'date = "2099-01-01"\nstart_time = "09:45"\nmessage = "Back at 13h."\n',
             encoding="utf-8",
         )
         (self.dir / "site" / "privacy.html.tmpl").write_text(
             "kept for ${retention_months} months", encoding="utf-8",
         )
-        (self.dir / "site" / "index_embedded.html.tmpl").write_text(
-            "<html><body>${schedule_exceptions_html}</body></html>", encoding="utf-8",
-        )
+        (self.dir / "site" / "index.html").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
 
-    def test_renders_both_pages_from_real_templates(self):
+    def test_renders_privacy_html_and_derives_index_embedded_html(self):
         with patch.object(render_site_script, "REPO_ROOT", self.dir):
             written, values = render_site_script.render(self.settings_path)
         self.assertIn("site/privacy.html", written)
@@ -112,16 +120,30 @@ class RenderTest(unittest.TestCase):
         embedded_out = (self.dir / "site" / "index_embedded.html").read_text()
         self.assertIn("ATTENTION", embedded_out)
         self.assertIn("Back at 13h.", embedded_out)
+        self.assertNotIn("<script>", embedded_out)
 
-    def test_falls_back_to_example_index_embedded_template(self):
-        (self.dir / "site" / "index_embedded.html.tmpl").unlink()
-        (self.dir / "site" / "index_embedded.html.tmpl.example").write_text(
-            "<html><body>generic ${schedule_exceptions_html}</body></html>", encoding="utf-8",
-        )
+    def test_falls_back_to_example_index_html(self):
+        (self.dir / "site" / "index.html").unlink()
+        (self.dir / "site" / "index.html.example").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
         with patch.object(render_site_script, "REPO_ROOT", self.dir):
             written, _values = render_site_script.render(self.settings_path)
         self.assertIn("site/index_embedded.html", written)
-        self.assertIn("generic", (self.dir / "site" / "index_embedded.html").read_text())
+        self.assertIn("ATTENTION", (self.dir / "site" / "index_embedded.html").read_text())
+
+    def test_derivation_error_is_a_warning_not_a_fatal_build_failure(self):
+        # A customized real index.html missing something this derivation
+        # depends on must never break scripts/build-rpm.sh outright.
+        broken = _SAMPLE_INDEX_HTML.replace('href="/my"', 'href="/my-account"')
+        (self.dir / "site" / "index.html").write_text(broken, encoding="utf-8")
+        err = io.StringIO()
+        with patch.object(render_site_script, "REPO_ROOT", self.dir), contextlib.redirect_stderr(err):
+            written, _values = render_site_script.render(self.settings_path)
+        self.assertIn("site/privacy.html", written)
+        self.assertNotIn("site/index_embedded.html", written)
+        # The warning itself is real and expected (this is the whole point
+        # of the test) -- just keep it out of the test runner's own stderr,
+        # same as every other CLI-output test in this suite.
+        self.assertIn("could not derive site/index_embedded.html", err.getvalue())
 
 
 if __name__ == "__main__":

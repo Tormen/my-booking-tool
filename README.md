@@ -524,9 +524,14 @@ my-bt admin site-maintenance off                    # reopen bookings, remove th
 my-bt admin site-maintenance status                 # report current state, touches nothing
 my-bt admin git-snapshot [--dry-run]     # commit data-dir changes now (same as the hourly timer)
 my-bt admin watchdog-check               # run the "strange usage patterns" sweep now (same as the periodic timer)
+my-bt admin csp-violations                # full detail on browser-reported CSP violations (see Watchdog below)
 my-bt admin setup                        # guided post-install steps -- see below
 my-bt admin setup --interactive          # ...or -i: be walked through them
 my-bt admin health                       # full install-health diagnostic -- see below
+my-bt admin health report [--last 2h] [--since TS] [--till TS]  # aggregate raw logs for a window
+my-bt admin health errors [--last 2h] [--since TS] [--till TS]  # ...filtered to actual problems
+                                          # (same two, also reachable as `admin log-report`/`log-errors`;
+                                          # default window: since nginx's own last restart -- see Watchdog below)
 my-bt admin logout guest@example.com     # force-log-out one attendee (every device)
 my-bt admin logout --all                 # force-log-out EVERYONE, guest and admin alike
 
@@ -698,10 +703,11 @@ something seems off, or after any install/reinstall (this is what plain
 - If `[site].static_site_dir` is set: whether the live `privacy.html` at
   that path actually matches what current `settings.toml` values would
   render (see "Static-site pages" below) -- catches a `retention_months`
-  edit that hasn't been pushed out to the live page yet -- and, if you've
-  opted into `index_embedded.html` (see "Static-site pages" below), whether
-  IT matches what current `settings.toml` course `date_override` entries
-  would render -- and whether any
+  edit that hasn't been pushed out to the live page yet -- and, if
+  `[site].index_embedded_enabled` is on (see "Static-site pages" below),
+  whether the deployed `index_embedded.html` matches what the LIVE
+  `index.html` + current `settings.toml` would currently derive -- and
+  whether any
   live `site/*.html` page still contains a leftover `REPLACE-ME` or
   `${...}` placeholder (i.e. the generic template was published without
   being customized).
@@ -728,6 +734,13 @@ something seems off, or after any install/reinstall (this is what plain
 - Whether any occurrence failed to resync on the last calendar-invite
   resync attempt (persistent CalDAV conflict) -- a marker-file check, no
   network call, see "Per-occurrence resync failures" below.
+- Browser-reported CSP violations (`[logging].log_file`, if configured --
+  see "Watchdog" above), and, separately, whether every inline `<script>`
+  hash this app can currently produce is actually allow-listed in the
+  live nginx CSP header right now (`app.cli_checks.expected_csp_hashes()`/
+  `check_csp_hashes_deployed()`, computed from source -- catches a
+  forgotten hash update BEFORE a browser has to report the violation
+  itself; see "Static-site pages" -> "CSP hash automation" below).
 
 Each line is `[OK]`/`[WARN]`/`[FAIL]` with a one-line fix where relevant;
 **exits non-zero if anything is `[WARN]` or `[FAIL]`** (2026-07-10 --
@@ -1173,8 +1186,10 @@ same as the nightly timer.
 -- 0, a blank string, or leaving it commented out (the default) disables
 the WARNING only. When set, `my-bt admin gdpr accounts --purge` sends a
 guest ONE warning email this many days before their account would reach
-`retention_months` of inactivity (last login, falling back to
-account-creation date if they've never logged in again since booking).
+`retention_months` of inactivity (latest of last login, account
+creation, or the most recent booking they made -- a regular who books
+week by week without ever logging into `/my` is active, not dormant; see
+`app/retention.py::account_activity_date`).
 Separately, and regardless of whether that warning is enabled: the same
 `--purge` run also actually ERASES (archives with a hashed email, same
 mechanism as `/my`'s own self-erasure and `my-bt admin gdpr erase`) every
@@ -1320,6 +1335,47 @@ looking broken) to load the login page inside a small embedded iframe.
 Viewed standalone (not embedded), `target="_top"` behaves like a normal
 same-tab link -- no downside either way.
 
+**Every link needs `target="_top"`, not just Login (2026-07-16):** a real
+embed (`booking.example.org/book/<shortname>` inside an `<iframe>` on
+ayuryoga-trier.de) surfaced that Login wasn't the only thing that broke
+inside a cross-site iframe -- ANY request that sets this app's session
+cookie does. The cookie is `SameSite=Lax` (`app/webapp.py::
+_session_cookie_header()`); a browser only attaches/keeps a `SameSite=Lax`
+cookie across a cross-site *sub-frame* request if it's a top-level
+navigation, which nothing happening inside an `<iframe>` ever is. So a
+correct login (or a new sign-up-and-book) submitted from inside the embed
+would succeed server-side, then the very next page load would silently
+come back anonymous again -- no error, just as if nothing had happened,
+since the browser never sent the cookie back. Two fixes, no cookie
+attribute changes and no new CSRF exposure (see below for why that
+matters):
+
+- `site/index.html`'s course links, footer (Terms/Privacy/Impressum), and
+  the schedule-exceptions script's "details" links now all carry
+  `target="_top"` too, same as Login already did -- apply this to any new
+  link you add to your own real `index.html`.
+- The dynamic pages' own session-creating forms -- `/my`'s Login and
+  Sign-up tabs, and `/book/<shortname>`'s inline Login tab and its
+  anonymous sign-up-and-book submission -- now unconditionally target
+  `_top` too (`app/webapp.py::_login_form_html()`/`_book_page()`'s own
+  `#book-form`). Unconditional, not just when actually embedded: viewed
+  directly (not in an iframe), `target="_top"` on a page that's already
+  the top frame is a no-op, so there's no behavior difference for a normal
+  direct visit.
+
+Why not just relax the cookie to `SameSite=None` instead? Once a form
+targets `_top`, the browser treats the whole exchange (POST, redirect,
+Set-Cookie) as an ordinary top-level, same-site request by the time the
+cookie matters -- so `SameSite=Lax` keeps working exactly as before, with
+no CSRF trade-off. `SameSite=None` would have needed a CSRF token added
+everywhere (this app has none today -- `SameSite=Lax` IS its only CSRF
+defense), and even then isn't reliably enough on its own in 2026: Chrome
+now has third-party cookies mostly opt-in-disabled by default, Safari
+blocks them outright regardless of `SameSite`, and only `Partitioned`
+(CHIPS) cookies are exempt from Chrome's blocking -- but Safari doesn't
+support that attribute at all. Breaking out to the top frame sidesteps
+all of that browser-policy churn entirely.
+
 **Session-aware upgrade (2026-07-09):** the requirement was that if you
 are already logged in, https://booking.example.org should show the same banner
 instead of a 'Login' button.
@@ -1438,53 +1494,184 @@ means "12px from the box's right edge" (which tracks the box's own
   (`app/webapp.py`) -- keep the two in sync by hand.
 
 **`index_embedded.html` -- a no-JavaScript variant for `<iframe>` embedding
-(2026-07-16):** `site/index.html`'s two `<script>` blocks (the Login/Logout
-swap and the schedule-exceptions banner, both above) make same-origin
-`fetch()` calls that, from *inside* a third-party `<iframe>` embed on
-another site, can look like tracking behavior to privacy-conscious browsers
-and extensions -- one real report: a visitor got a security warning opening
-a page that embeds `booking.example.org` in an `<iframe>`, and the embedded content
-failed to render at all. `index_embedded.html` has **no `<script>` tags
-whatsoever**, so there's nothing for a script/tracker blocker, or a stale
-Content-Security-Policy `script-src` hash, to ever catch. Two direct
-consequences:
+(2026-07-16, mechanism reworked the same day):** `site/index.html`'s two
+`<script>` blocks (the Login/Logout swap and the schedule-exceptions
+banner, both above) make same-origin `fetch()` calls that, from *inside* a
+third-party `<iframe>` embed on another site, can look like tracking
+behavior to privacy-conscious browsers and extensions and can also run into
+third-party-cookie partitioning, so the session-aware Login swap in
+particular may just silently not work there. (Note: if your embed shows up
+completely blank/refused rather than degraded, check your CSP's
+`frame-ancestors` directive first -- a same-origin-only `frame-ancestors`
+blocks the browser from rendering the frame at all, before any script ever
+runs, and no static-page variant can work around that; see
+`site/nginx-locations.conf.example`'s own `frame-ancestors` comment.)
+`index_embedded.html` has **no `<script>` tags whatsoever**, so none of
+that ever applies to it:
 - The Login button is always plain, static "Login" -- never session-aware
   (no swap to "My bookings"/"Log out"; that swap needs a live `fetch()`,
-  which wouldn't reliably work from inside a third-party iframe anyway, see
+  which doesn't reliably work from inside a third-party iframe anyway, see
   above).
-- The schedule-exceptions banner is baked in **at generation time** from
+- The schedule-exceptions banner is baked in **at derivation time** from
   whatever upcoming `[[course.date_override]]` entries `settings.toml` has,
   not fetched live in the visitor's browser.
-- Every link meant to be clicked from inside the embedding iframe (Login,
-  every course's booking link, and the footer's legal-page links) uses
-  `target="_blank" rel="noopener noreferrer"` -- opens in a new tab rather
-  than trying to load inside the small embedded iframe (the booking flow
-  and `/my` genuinely need JavaScript to work, which is exactly the kind of
-  script execution that should happen in a normal top-level tab, not inside
-  the constrained/blocked iframe context) -- `rel="noopener noreferrer"` is
-  the plain-HTML defense against the new tab getting a `window.opener`
-  handle back to the embedding page.
+- Every link to one of this app's own routes (Login/`/my`, every course's
+  `/book/<shortname>` link, and the footer's `/terms.html`/`/privacy.html`/
+  `/impressum.html` links) gets its `target`/`rel` rewritten per
+  `[site].index_embedded_new_tab_links` (see below) -- any OTHER link
+  (a `mailto:`, an external site, custom markup) is left exactly as
+  `index.html` has it.
 
-**Optional, and generated like `privacy.html` above, not hand-authored like
-`index.html`:** this page doesn't exist at all until you copy
-`site/index_embedded.html.tmpl.example` to `site/index_embedded.html.tmpl`
-(untracked, same convention as `privacy.html.tmpl`) and fill in your own
-title/description/course list. Once that real `.tmpl` exists:
-- `scripts/render-site.py`/`scripts/build-rpm.sh` render this checkout's own
-  `site/index_embedded.html` (the `%doc` reference copy) the same way they
-  already do for `privacy.html`.
-- `my-bt admin health`/`admin setup -i` compare the LIVE deployed copy in
-  `[site].static_site_dir` against what current `settings.toml` would
-  render right now, and `setup -i` offers to (re)generate it -- this is
-  what catches "you added/removed a `date_override` but never regenerated
-  this page," since it can't fetch that live the way `index.html` does.
-  If the real `.tmpl` doesn't exist yet, this whole check is silent (`[]`,
-  not a warning) -- most deployments don't embed their site via `<iframe>`
-  elsewhere, so its absence is never itself a problem to report.
-- `my-bt admin site-maintenance on/off` patches the maintenance banner into
-  this file too, exactly like `index.html` (see "Maintenance mode" below) --
-  `setup -i`'s own regeneration re-applies an active banner rather than
-  silently dropping it, if maintenance happens to be on when you regenerate.
+**Optional, and DERIVED straight from `index.html` itself -- no separate
+template file to maintain:** unlike `privacy.html` (rendered from a
+hand-maintained `privacy.html.tmpl`), `index_embedded.html` doesn't have
+its own source file at all. It's produced by
+`app.site_render.derive_index_embedded_html()`, which takes `index.html`'s
+own real markup and: strips every `<script>...</script>` block, retargets
+the known-route links described above, and splices the current
+schedule-exceptions banner in over the `<div id="schedule-exceptions">`
+marker. Because there's no second file, `index.html`'s own wording can
+never drift out of sync with the embedded variant the way a parallel
+template could.
+
+Two settings, both under `[site]`, control this entirely (see
+`settings.toml.example`):
+- **`index_embedded_enabled`** (default `false`): whether this mechanism is
+  active at all. Off by default -- most deployments don't embed their site
+  via `<iframe>` elsewhere, so nothing changes for them.
+- **`index_embedded_new_tab_links`** (default `true`): `true` retargets
+  every known-route link to `target="_blank" rel="noopener noreferrer"`
+  (opens in a new tab -- the booking flow and `/my` genuinely need
+  JavaScript, which should run in an ordinary top-level tab, not inside the
+  embedding iframe; `rel="noopener noreferrer"` is the plain-HTML defense
+  against the new tab getting a `window.opener` handle back to the
+  embedding page). `false` uses `target="_top"` instead (breaks out of the
+  iframe in the *same* tab -- the same convention `index.html`'s own Login
+  link already uses).
+
+A third, independent setting also feeds into the same schedule-exceptions
+banner (both the live `index.html` and the derived `index_embedded.html`),
+not gated on `index_embedded_enabled` at all:
+- **`custom_attention_message`** (default `""`), also under `[site]`: an
+  operator-authored message shown in the same red ATTENTION box as any
+  auto-generated `[[course.date_override]]` line, below it, separated by an
+  `<hr>` when both are present (shown alone, no `<hr>`, if there are no
+  upcoming overrides). Understands raw HTML formatting tags -- not
+  escaped, same trust boundary as `Course.description`. Example: `"On
+  vacation from 2026-08-01 til 2026-08-15, courses resume afterwards at
+  their usual schedule."` The per-course `/book/<shortname>` page shows
+  this too (same box as its own override line), but never the bold
+  weekday-first bullet-list styling described below -- that's specific to
+  the site-wide banner, since which weekday a course falls on is already
+  obvious from context on its own booking page.
+
+When `index_embedded_enabled` is on, `my-bt admin setup --interactive`:
+- Derives what `index_embedded.html` should currently look like from the
+  **LIVE, currently-deployed** `index.html` at `[site].static_site_dir` --
+  not this checkout's own copy, since the live file is the authoritative
+  source for whatever's actually being embedded right now. This step runs
+  *after* `index.html`'s own copy/vimdiff reconciliation (see "Deployed vs.
+  checkout drift" below), so any `index.html` drift is resolved first.
+- If nothing's deployed yet, offers to write the freshly-derived page
+  straight to `[site].static_site_dir`.
+- If something's already deployed and it doesn't match what would
+  currently derive, offers a vimdiff against the fresh version -- same
+  reconcile-by-hand pattern already used for `index.html`/`terms.html`/
+  `impressum.html`, never a blind overwrite.
+- Fails loudly (a clear `[fail]` line, not a silent bad page) if the live
+  `index.html` is missing something this derivation depends on -- no
+  schedule-exceptions marker, no `/my` or `/book/` link to retarget, or
+  neither of the two `<script>` blocks this app itself ships -- since any
+  of those suggest `index.html` was restructured in a way the derivation
+  no longer understands.
+
+`my-bt admin health`/`admin setup -i` also compare the deployed
+`index_embedded.html` against what would currently derive and warn on
+drift (a no-op, not a warning, while `index_embedded_enabled` is off).
+`my-bt admin site-maintenance on/off` patches the maintenance banner into
+this file too, exactly like `index.html` (see "Maintenance mode" below).
+
+**CSP `frame-ancestors` + violation reporting (2026-07-13):** embedding a
+site via `<iframe>` only works at all if the embedded site's own CSP
+`frame-ancestors` directive allows the embedding origin -- a same-origin-only
+`frame-ancestors 'self'` (the shipped default in
+`site/nginx-locations.conf.example`) blocks the browser from rendering the
+frame *at all*, before any script or static-page variant ever gets a
+chance to run. If you use `index_embedded.html` to embed your site
+elsewhere, add that origin to `frame-ancestors` too (see the `.example`
+file's own comment) -- keep it a narrow allow-list, not wide open, since
+`frame-ancestors` is real clickjacking protection for `/my`/`/admin`/
+`/book/<slug>`'s own state-changing actions. The same header's
+`report-uri /csp-report` has the browser POST a violation report (logged
+at WARNING by `app/webapp.py::csp_report`) any time any CSP directive is
+violated -- including an embed attempt from anywhere OTHER than what
+`frame-ancestors` allows, so that shows up in your logs instead of
+silently vanishing into the visitor's own browser console.
+
+**CSP hash automation (2026-07-13, self-heal added 2026-07-16):** every
+inline `<script>` block's CSP `script-src` hash going stale after a
+hand-edit (silent -- the browser just refuses to run it, console-only
+warning, no server-side error at all) has hit production five separate
+times now -- see `site/nginx-locations.conf.example`'s own dated incident
+notes. Three parts, none of which requires ever computing a hash by hand:
+
+- **Live server, reactive + proactive detection** (`my-bt admin health`/
+  `admin setup`): `app.cli_checks.expected_csp_hashes()` computes, straight
+  from source, the hash every inline script *should* currently have -- the
+  8 static, non-interpolated Python module constants in `app/webapp.py`/
+  `app/templates.py` (always checked), plus (only if
+  `[site].static_site_dir` is configured) the two `<script>` blocks in the
+  LIVE, currently-deployed `index.html` at that path.
+  `check_csp_hashes_deployed()` compares that against what's actually
+  allow-listed in the live nginx CSP header (`nginx -T`, same
+  `base_url`-hostname matching every other live-nginx check here uses) and
+  reports any mismatch with the exact `'sha256-...'` value to add --
+  proactive, unlike the reactive `csp_report`-based check above (Watchdog
+  section), which can only ever fire after a real browser has already hit
+  the stale hash.
+- **Live server, self-heal** (`my-bt admin setup --interactive` only --
+  `admin health`/plain `setup` stay read-only, detection above): if a hash
+  is missing, offers to add it directly. Prompt-gated (never silent),
+  additive-only (`app.cli_checks.csp_script_src_patch()` -- same "ADD,
+  never replace" rollback-safety rule as every hand-authored hash update in
+  this file's own history, nothing else on the CSP line or elsewhere in the
+  file is touched), and verified with a real `nginx -t` pass/fail check
+  before the edit is ever kept -- reverts to the original file content
+  immediately if that fails, so this can never leave a broken CSP header
+  (which would break every inline script on the site at once, not just
+  one) on a live server. Folds into the same single end-of-section
+  "reload nginx now?" prompt every other nginx change in that walkthrough
+  already uses, rather than asking to reload twice.
+- **RPM build, static** (`tests/test_cli_checks.py::
+  TrackedNginxExampleFileTest`): two tests, neither requiring a live
+  server. `test_example_file_has_every_static_script_hash_current` checks
+  the 8 static Python-constant hashes against the tracked
+  `site/nginx-locations.conf.example` reference file -- deliberately NOT
+  `index.html.example`'s own two script hashes, since
+  `nginx-locations.conf.example` is the real, anonymized production config
+  for booking.example.org, while `index.html.example` is a generic placeholder for a
+  brand-new deployment; their script bodies (and hashes) are expected to
+  differ. `test_real_index_html_script_hashes_are_all_in_the_example_conf`
+  (2026-07-16) instead checks the REAL, gitignored `site/index.html` (not
+  `.example`) against that same reference file -- skips (rather than
+  fails) if that real file isn't present in the checkout, so it only ever
+  runs, and only ever protects against drift, on a machine (yours) where it
+  lives alongside the checkout. This closed a real gap: a `target="_top"`
+  edit to the schedule-exceptions script's generated link shipped in an RPM
+  and was only caught by `my-bt admin health` against the live server
+  afterward, since the first test above deliberately never looks at
+  `index.html`'s own scripts at all. `packaging/my-booking-tool.spec`'s
+  `%check` already runs `python3 -m unittest discover` on every RPM build,
+  so either test failing there means `scripts/build-rpm.sh` refuses to
+  produce a package with a forgotten hash update, with no new build-time
+  scripting at all.
+
+`app.site_render.extract_script_bodies()` is the one shared, comment-safe
+`<script>` extraction helper both of the above (and
+`derive_index_embedded_html()`, above) rely on -- strips HTML comments
+before matching, so a literal "`<script>`" mentioned in developer prose
+inside a comment can never be mistaken for a real opening tag (a real bug,
+twice, before this was shared in one place).
 
 **Language:** the `.example` templates are English-only. Whether to
 support more languages (and which ones) is entirely your call, based on
@@ -2031,7 +2218,7 @@ attacker in real time, and fail2ban (recommended, configured outside this
 repo) already bans a single abusive IP outright. The watchdog only notices
 the aggregate pattern afterwards, as a heads-up.
 
-Four independent signals, each optional:
+Five independent signals, each optional:
 
 - **nginx request bursts**: one IP making at least `nginx_request_threshold`
   requests, or with a 4xx/5xx share of at least `nginx_error_rate_threshold`
@@ -2045,6 +2232,20 @@ Four independent signals, each optional:
 - **Rate-limiter blocks**: at least `rate_limit_block_threshold`
   login/reset rejections (any key combined) logged by the app within the
   window.
+- **CSP violations** (2026-07-13): at least `csp_violation_threshold`
+  browser-reported Content-Security-Policy violations (`app/webapp.py::
+  csp_report`, see "Static-site pages" -> CSP above) within the window,
+  across every distinct violation combined -- most often a stale
+  script-src hash after an inline `<script>` edit, occasionally a genuine
+  embed/injection attempt from outside the allow-listed `frame-ancestors`
+  origin. Unlike the other four signals, this one is ALSO always surfaced
+  (un-thresholded) by `my-bt health`/`admin setup`, and its full,
+  ungrouped detail is available any time via `my-bt admin
+  csp-violations` -- so you don't have to wait for (or rely solely on) a
+  threshold-gated email to notice a stale hash; see
+  `app.cli_checks.find_csp_violations`/`check_csp_violations`, the one
+  shared place this parsing lives (the watchdog's own check calls that
+  same function rather than keeping a second copy).
 - **sshd failures**: at least `sshd_failure_threshold` failed-password
   attempts (any source, sitewide) within the window, read via `journalctl
   -u sshd` -- deliberately cruder than fail2ban's own per-IP ban
@@ -2091,6 +2292,46 @@ a default ACL so it survives nginx's own log rotation. `acl` (for
 if you opt into nginx-burst checking, so `setup -i` just tells you to
 `sudo dnf install acl` first if it's missing, rather than making every
 install pull it in.
+
+**On-demand forensic aggregation (`my-bt admin health report`/`errors`,
+2026-07-13):** for investigating "anything strange happening with
+booking.example.org" (the operator's own phrasing) beyond what the periodic watchdog
+sweep or a single `my-bt admin health` snapshot covers. Both collect the
+SAME set of sources for a time window and print them, source-labeled:
+nginx's own global access/error logs (outside any vhost -- covers every
+site on this box, not just this one), THIS vhost's own access/error logs
+(matching `[site].base_url`, same live `nginx -T` derivation the
+watchdog's own nginx-log config-drift check already uses -- no new
+settings.toml path to configure or keep in sync by hand), the app's own
+`[logging].log_file`, sshd (`journalctl -u sshd`), and the
+`my-booking.service`/`my-booking-watchdog.service` journals.
+
+- `my-bt admin health report` -- every matching line, verbatim, exactly
+  as it appears in its source (raw material for a human to read, not a
+  merged single timeline across sources).
+- `my-bt admin health errors` -- the same sources/window, filtered down
+  to actual problems: access logs to 4xx/5xx status, the app log to
+  WARNING-or-above (this naturally includes CSP violations and
+  rate-limiter rejections, both already logged at WARNING -- see
+  "CSP violations" above), sshd to failed-password attempts, the service
+  journals to WARNING-or-above, PLUS a grouped/counted CSP-violation
+  summary appended at the end (the same data `my-bt admin
+  csp-violations` shows in full). This combines the same curated
+  detectors `my-bt health`/the watchdog already have with a raw
+  severity-based pass, so a kind of problem no existing detector knows
+  about yet still shows up too.
+
+Both are also reachable as flat top-level commands, `my-bt admin
+log-report`/`my-bt admin log-errors` -- exactly the same commands, just
+without having to remember they live under `health`.
+
+**Time window:** `--last DURATION` (e.g. `2h`, `90m`, `1h30m`, `45s`,
+`1d`), or `--since`/`--till` (ISO-8601 timestamps; either or both --  an
+omitted `--till` defaults to now, an omitted `--since` alongside a
+`--till` defaults to 24h before it). With none of the three given, both
+default to the window **since nginx's own last restart** (via
+`systemctl show nginx.service --property=ActiveEnterTimestamp`), falling
+back to the last 24h if that can't be determined.
 
 ## Late-booking quorum (`min_notice_hours` / `min_required_participants`)
 

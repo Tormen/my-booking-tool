@@ -9,6 +9,7 @@ See tests/test_storage.py::AtomicWriteDirFsyncIntegrationTest for the
 CSV-specific integration point (a real _LockedCsv write calling this)."""
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -74,6 +75,7 @@ class FsyncDirTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.dir_path = Path(self._tmp.name)
 
+    @unittest.skipUnless(sys.platform == "linux", "/proc/self/fd is Linux-only (see class docstring)")
     def test_fsyncs_the_directory_fd_specifically(self):
         # Resolve the fd back to a path via /proc/self/fd WHILE it's
         # still open (inside the spy, before fsync_dir's own finally:

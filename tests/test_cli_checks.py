@@ -149,6 +149,101 @@ class CheckRpmnewTest(unittest.TestCase):
         self.assertEqual(levels, ["warn", "ok"])
 
 
+def _sessions_payload(*sessions, timeout=14400):
+    return {"sessions": list(sessions), "session_timeout_seconds": timeout}
+
+
+class FormatSessionTimeoutTest(unittest.TestCase):
+    def test_none_is_unknown(self):
+        self.assertEqual(cli_checks.format_session_timeout(None), "?")
+
+    def test_zero_is_unknown(self):
+        self.assertEqual(cli_checks.format_session_timeout(0), "?")
+
+    def test_exact_hours(self):
+        self.assertEqual(cli_checks.format_session_timeout(4 * 3600), "4h")
+
+    def test_hours_and_minutes(self):
+        self.assertEqual(cli_checks.format_session_timeout(3600 + 30 * 60), "1h30m")
+
+
+class ActiveSessionsRowsTest(unittest.TestCase):
+    def test_guest_row_shows_name_and_email(self):
+        payload = _sessions_payload({
+            "kind": "guest", "who": "ines@example.org", "name": "Guest One",
+            "connected_since": "2026-07-13T06:49:00+00:00", "last_seen": "2026-07-13T07:37:00+00:00",
+            "last_page": "/my",
+        })
+        rows = cli_checks.active_sessions_rows(payload)
+        self.assertEqual(rows[0]["name"], "Guest One")
+        self.assertEqual(rows[0]["email"], "ines@example.org")
+        self.assertEqual(rows[0]["last page"], "/my")
+        self.assertEqual(rows[0]["timeout (no activity)"], "4h")
+
+    def test_admin_row_has_no_email(self):
+        payload = _sessions_payload({"kind": "admin", "who": "admin", "name": ""})
+        rows = cli_checks.active_sessions_rows(payload)
+        self.assertEqual(rows[0]["name"], "admin")
+        self.assertEqual(rows[0]["email"], "-")
+
+    def test_guest_with_no_name_on_file_shows_placeholder(self):
+        payload = _sessions_payload({"kind": "guest", "who": "x@example.org", "name": ""})
+        rows = cli_checks.active_sessions_rows(payload)
+        self.assertEqual(rows[0]["name"], "(no name on file)")
+
+    def test_never_navigated_again_shows_none_yet(self):
+        payload = _sessions_payload({
+            "kind": "guest", "who": "x@example.org", "name": "X",
+            "connected_since": "2026-07-13T06:49:00+00:00", "last_seen": None,
+        })
+        rows = cli_checks.active_sessions_rows(payload)
+        self.assertEqual(rows[0]["last activity"], "(none yet)")
+
+    def test_empty_sessions_is_empty_rows(self):
+        self.assertEqual(cli_checks.active_sessions_rows(_sessions_payload()), [])
+
+
+class FormatActiveSessionsOverviewTest(unittest.TestCase):
+    def test_no_sessions(self):
+        self.assertEqual(cli_checks.format_active_sessions_overview(_sessions_payload()), "(no active sessions)")
+
+    def test_includes_table_and_logout_hint(self):
+        payload = _sessions_payload({
+            "kind": "guest", "who": "ines@example.org", "name": "Guest One",
+            "connected_since": "2026-07-13T06:49:00+00:00", "last_seen": "2026-07-13T07:37:00+00:00",
+        })
+        out = cli_checks.format_active_sessions_overview(payload)
+        self.assertIn("Guest One", out)
+        self.assertIn("ines@example.org", out)
+        self.assertIn("my-bt admin logout EMAIL", out)
+        self.assertIn("my-bt admin logout --all", out)
+
+
+class CheckActiveSessionsTest(unittest.TestCase):
+    def test_unreachable_service_is_ok_no_findings(self):
+        with patch("app.cli_checks.fetch_active_sessions", return_value=(None, "Connection refused")):
+            self.assertEqual(cli_checks.check_active_sessions(), [])
+
+    def test_no_sessions_is_no_findings(self):
+        with patch("app.cli_checks.fetch_active_sessions", return_value=(_sessions_payload(), None)):
+            self.assertEqual(cli_checks.check_active_sessions(), [])
+
+    def test_active_sessions_is_a_warn_with_a_compact_summary(self):
+        payload = _sessions_payload(
+            {"kind": "guest", "who": "ines@example.org", "name": "Ines"},
+            {"kind": "admin", "who": "admin", "name": ""},
+        )
+        with patch("app.cli_checks.fetch_active_sessions", return_value=(payload, None)):
+            checks = cli_checks.check_active_sessions()
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(label, "active sessions")
+        self.assertEqual(level, "warn")
+        self.assertIn("2 active session(s)", detail)
+        self.assertIn("ines@example.org", detail)
+        self.assertIn("my-bt admin logout", detail)
+
+
 class CheckGroupMembershipTest(unittest.TestCase):
     def test_root_is_always_ok(self):
         with patch.dict("os.environ", {"SUDO_USER": "root"}, clear=False), \
@@ -465,6 +560,8 @@ class CheckNginxLocationsTest(unittest.TestCase):
             location /host-cancel-occurrence/ { proxy_pass http://127.0.0.1:8811; }
             location /my { proxy_pass http://127.0.0.1:8811; }
             location /admin { proxy_pass http://127.0.0.1:8811; }
+            location /schedule-exceptions { proxy_pass http://127.0.0.1:8811; }
+            location /csp-report { proxy_pass http://127.0.0.1:8811; }
         }
         """
         with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
@@ -612,20 +709,145 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
                 )
 
     def test_example_file_has_no_leftover_replace_me_in_the_csp_hash_count(self):
-        # Not a full CSP-hash regeneration check (that needs a live app
-        # instance rendering every page) -- just the specific drift this
-        # file's own comment block warns about: the prose says how many
-        # inline <script> blocks/hashes exist, and that number must match
-        # how many 'sha256-...' entries actually appear in script-src, or
-        # the comment itself is already lying the moment it's read.
+        # A cheap drift check this file's own comment block warns about:
+        # the prose says how many inline <script> blocks/hashes exist, and
+        # that number must match how many 'sha256-...' entries actually
+        # appear in script-src, or the comment itself is already lying the
+        # moment it's read. See test_example_file_has_every_static_script_
+        # hash_current below for the real, content-aware check (2026-07-13
+        # -- this one alone wouldn't have caught either real staleness
+        # incident, since the COUNT can still be right while one of the
+        # hashes itself is wrong).
         example = Path(__file__).resolve().parent.parent / "site" / "nginx-locations.conf.example"
         text = example.read_text(encoding="utf-8")
         hash_count = len(re.findall(r"'sha256-[A-Za-z0-9+/=]+'", text))
         digit_words = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "FIVE",
-                       6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN"}
+                       6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN",
+                       11: "ELEVEN", 12: "TWELVE", 13: "THIRTEEN", 14: "FOURTEEN",
+                       15: "FIFTEEN"}
         expected_word = digit_words.get(hash_count)
         self.assertIsNotNone(expected_word, f"unexpected hash count {hash_count} -- extend digit_words")
         self.assertIn(f"{expected_word} distinct inline <script> block", text)
+
+    def test_example_file_has_every_static_script_hash_current(self):
+        """The "rpm build" half of the CSP-hash automation the operator asked for
+        (app.cli_checks.expected_csp_hashes()/check_csp_hashes_deployed()
+        is the "live server" half, checked via `my-bt admin health`).
+        packaging/my-booking-tool.spec's %check already runs
+        `python3 -m unittest discover` on every RPM build -- so this test
+        failing there means the build itself refuses to package a
+        forgotten hash update, with zero new build-time scripting needed.
+
+        Only checks the 8 static, non-interpolated Python module-constant
+        script hashes here -- NOT index.html's own two scripts, which are
+        legitimately deployment-specific (this repo's site/index.html.example
+        is a generic placeholder, not the operator's real production content, so
+        its own script hashes are expected to differ from what's allow-
+        listed in this real, anonymized reference conf -- see this file's
+        own top-of-file comment).
+
+        Would have caught 2 of the 4 real incidents documented in this
+        file's own CSP comment above (the booking-form MAX_GUESTS
+        interpolation bug and the sortable/filterable-table script going
+        stale since 2026-07-08 or earlier) the moment either shipped,
+        instead of only after a live browser reported the violation."""
+        example = Path(__file__).resolve().parent.parent / "site" / "nginx-locations.conf.example"
+        text = example.read_text(encoding="utf-8")
+        deployed_hashes = set(re.findall(r"'(sha256-[A-Za-z0-9+/=]+)'", text))
+        expected = cli_checks.expected_csp_hashes({})  # no static_site_dir -- static constants only
+        missing = {label: h for label, h in expected.items() if h not in deployed_hashes}
+        self.assertEqual(
+            missing, {},
+            f"stale/missing CSP hash(es) in site/nginx-locations.conf.example: {missing} -- "
+            '"ADD, never replace" -- add the new hash(es), keep the old ones for rollback safety.',
+        )
+
+    def test_real_and_example_nginx_conf_have_the_same_csp_hash_set(self):
+        """Regression test for the drift the operator hit 2026-07-13: a CSP hash
+        was added to site/nginx-locations.conf.example but, at first, not
+        to the real, gitignored site/nginx-locations.conf sitting right
+        next to it in the same checkout (see feedback_always_update_real_
+        nginx_conf memory) -- caught only because `my-bt admin setup -i`
+        was re-run against the live server, not by anything in this test
+        suite. The two files' own CSP script-src hash SETS should always
+        be identical, even though the rest of each file legitimately
+        differs (real domain values like frame-ancestors 'self'
+        https://ayuryoga-trier.de vs the .example's generic placeholder;
+        see TrackedNginxExampleFileTest's own docstring for why the real
+        file is never otherwise touched by this suite).
+
+        The real file won't exist at all in a fresh checkout, CI, or the
+        RPM build environment (it's deliberately gitignored -- see
+        the maintainer's local notes and this class's own docstring) -- this test
+        no-ops (skips) rather than failing when it's absent, so it only
+        ever actually runs, and only ever protects against drift, on a
+        machine (the operator's own) where the real file lives alongside the
+        checkout -- which is exactly where this kind of drift can happen
+        unnoticed."""
+        base = Path(__file__).resolve().parent.parent / "site"
+        real_path = base / "nginx-locations.conf"
+        if not real_path.exists():
+            self.skipTest("site/nginx-locations.conf (real, gitignored) not present in this checkout")
+        example_path = base / "nginx-locations.conf.example"
+        real_hashes = set(re.findall(r"'(sha256-[A-Za-z0-9+/=]+)'", real_path.read_text(encoding="utf-8")))
+        example_hashes = set(
+            re.findall(r"'(sha256-[A-Za-z0-9+/=]+)'", example_path.read_text(encoding="utf-8"))
+        )
+        self.assertEqual(
+            real_hashes, example_hashes,
+            "site/nginx-locations.conf and .example have DIFFERENT CSP script-src hash sets -- "
+            f"only in real: {real_hashes - example_hashes or 'none'}; "
+            f"only in .example: {example_hashes - real_hashes or 'none'}. "
+            "An edit (add a hash, keep the old ones) was made to one but not the other.",
+        )
+
+    def test_real_index_html_script_hashes_are_all_in_the_example_conf(self):
+        """Closes the gap that let the 2026-07-16 schedule-exceptions
+        target="_top" edit ship without its new CSP hash: the existing
+        test_example_file_has_every_static_script_hash_current() only
+        checks the 8 static Python module-constant scripts, deliberately
+        skipping index.html's own two -- because site/index.html.example
+        is a generic placeholder, not the operator's real content (see that
+        test's own docstring). But site/nginx-locations.conf.example is
+        NOT a generic placeholder -- its top-of-file comment says so
+        explicitly: it's the real, production config, anonymized. So it's
+        supposed to always carry the REAL site/index.html's actual current
+        script hashes too, and nothing in the test suite checked that
+        until now.
+
+        This gap meant a real script-body edit (target="_top" added to
+        the schedule-exceptions script's generated "details" link) shipped
+        in the RPM and was only caught by `my-bt admin health` against the
+        LIVE server, after install -- one warning line instead of a failed
+        `python3 -m unittest` at build time. Same "skip if the real file
+        isn't in this checkout" pattern as
+        test_real_and_example_nginx_conf_have_the_same_csp_hash_set right
+        above -- this only ever runs, and only ever protects against this
+        exact class of drift, on a machine (the operator's own) where the real,
+        gitignored site/index.html lives alongside the checkout."""
+        base = Path(__file__).resolve().parent.parent / "site"
+        real_index_path = base / "index.html"
+        if not real_index_path.exists():
+            self.skipTest("site/index.html (real, gitignored) not present in this checkout")
+        example_conf_path = base / "nginx-locations.conf.example"
+        conf_hashes = set(
+            re.findall(r"'(sha256-[A-Za-z0-9+/=]+)'", example_conf_path.read_text(encoding="utf-8"))
+        )
+        index_text = real_index_path.read_text(encoding="utf-8")
+        bodies = site_render.extract_script_bodies(index_text)
+        missing = {}
+        for i, body in enumerate(bodies, start=1):
+            import base64
+            import hashlib
+            h = "sha256-" + base64.b64encode(hashlib.sha256(body.encode("utf-8")).digest()).decode()
+            if h not in conf_hashes:
+                missing[f"index.html script #{i}"] = h
+        self.assertEqual(
+            missing, {},
+            f"stale/missing CSP hash(es) in site/nginx-locations.conf.example for the real, "
+            f"gitignored site/index.html's own <script> block(s): {missing} -- "
+            '"ADD, never replace" -- add the new hash(es), keep the old ones for rollback safety.',
+        )
 
 
 class CheckNginxConfDeployedTest(unittest.TestCase):
@@ -1305,69 +1527,94 @@ class CheckStaticSiteDriftTest(unittest.TestCase):
         self.assertIn("doesn't match", checks[0][2])
 
 
+_SAMPLE_INDEX_HTML = """<html><body>
+<div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+<div id="schedule-exceptions"></div>
+<ul><li><a href="/book/sat-trier">Book your place here.</a></li></ul>
+<script>(function () { fetch('/my/session', { credentials: 'same-origin' }); })();</script>
+<script>(function () { fetch('/schedule-exceptions', { credentials: 'same-origin' }); })();</script>
+</body></html>
+"""
+
+
 class CheckIndexEmbeddedDriftTest(unittest.TestCase):
-    """check_index_embedded_drift (2026-07-16) -- mirrors
-    CheckStaticSiteDriftTest above, plus the "optional -- absent .tmpl is
-    silent, not a warning" behavior that's unique to this one."""
+    """check_index_embedded_drift (reworked 2026-07-13): no more separate
+    .tmpl file -- DERIVES what index_embedded.html should look like
+    straight from the LIVE deployed index.html + current settings.toml,
+    gated entirely on [site].index_embedded_enabled (default off)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
-        self.tmpl_path = self.dir / "index_embedded.html.tmpl"
-        self.tmpl_path.write_text(
-            "<html><body>${schedule_exceptions_html}</body></html>", encoding="utf-8",
-        )
         self.static_dir = self.dir / "live"
         self.static_dir.mkdir()
 
-    def _raw(self, static_site_dir=None, timezone="UTC", course=None) -> dict:
-        raw = {"site": {"timezone": timezone}}
+    def _raw(self, static_site_dir=None, enabled=True, timezone="UTC", course=None) -> dict:
+        site = {"timezone": timezone, "index_embedded_enabled": enabled}
         if static_site_dir:
-            raw["site"]["static_site_dir"] = static_site_dir
+            site["static_site_dir"] = static_site_dir
+        raw = {"site": site}
         if course:
             raw["course"] = [course]
         return raw
 
-    def test_static_site_dir_not_configured_is_a_noop(self):
-        checks = cli_checks.check_index_embedded_drift(self._raw(), self.tmpl_path)
+    def test_disabled_is_a_silent_noop_not_a_warning(self):
+        # Off by default -- most deployments don't embed their site via
+        # <iframe> elsewhere, so being off is never itself a problem.
+        (self.static_dir / "index.html").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir), enabled=False))
         self.assertEqual(checks, [])
 
-    def test_template_missing_is_a_silent_noop_not_a_warning(self):
-        # Optional feature (unlike privacy.html.tmpl): absence just means
-        # "not opted into", never something to report.
-        missing_tmpl = self.dir / "does-not-exist.html.tmpl"
-        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), missing_tmpl)
+    def test_static_site_dir_not_configured_is_a_noop(self):
+        checks = cli_checks.check_index_embedded_drift(self._raw())
         self.assertEqual(checks, [])
+
+    def test_index_html_not_deployed_warns(self):
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)))
+        self.assertEqual(checks[0][1], "warn")
+        self.assertIn("isn't deployed yet", checks[0][2])
 
     def test_not_deployed_yet_warns(self):
-        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), self.tmpl_path)
+        (self.static_dir / "index.html").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)))
         self.assertEqual(checks[0][1], "warn")
         self.assertIn("not deployed yet", checks[0][2])
 
     def test_matching_deployed_page_is_ok(self):
-        site_render.write_index_embedded_html(self.tmpl_path, (), "2026-07-10", self.static_dir / "index_embedded.html")
-        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), self.tmpl_path)
+        (self.static_dir / "index.html").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
+        derived = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
+        (self.static_dir / "index_embedded.html").write_text(derived, encoding="utf-8")
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)))
         self.assertEqual(checks[0][1], "ok")
 
     def test_new_course_date_override_makes_deployed_page_stale(self):
-        course = {"shortname": "trier", "title": "Yoga", "location": "Trier", "weekday": "sat",
-                  "start_time": "10:45", "duration_minutes": 120, "capacity": 10}
-        # Deployed with NO overrides; settings.toml has since gained one.
-        site_render.write_index_embedded_html(self.tmpl_path, (), "2026-07-10", self.static_dir / "index_embedded.html")
-        course["date_override"] = [{"date": "2026-07-18", "start_time": "09:45"}]
-        checks = cli_checks.check_index_embedded_drift(
-            self._raw(str(self.static_dir), course=course), self.tmpl_path
-        )
+        (self.static_dir / "index.html").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
+        # Deployed with NO overrides; settings.toml has since gained one --
+        # far-future date so this is "upcoming" regardless of real today().
+        derived = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
+        (self.static_dir / "index_embedded.html").write_text(derived, encoding="utf-8")
+        course = {"shortname": "sat-trier", "title": "Yoga", "location": "Trier", "weekday": "sat",
+                  "start_time": "10:45", "duration_minutes": 120, "capacity": 10,
+                  "date_override": [{"date": "2099-01-01", "start_time": "09:45"}]}
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir), course=course))
         self.assertEqual(checks[0][1], "warn")
         self.assertIn("doesn't match", checks[0][2])
 
     def test_active_maintenance_banner_is_not_reported_as_drift(self):
+        (self.static_dir / "index.html").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
+        derived = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
         out_path = self.static_dir / "index_embedded.html"
-        site_render.write_index_embedded_html(self.tmpl_path, (), "2026-07-10", out_path)
+        out_path.write_text(derived, encoding="utf-8")
         maintenance.apply_banner_to_file(out_path, True, "admin@example.org", "back Monday")
-        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)), self.tmpl_path)
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)))
         self.assertEqual(checks[0][1], "ok")
+
+    def test_derivation_error_on_live_index_html_is_reported_as_fail(self):
+        broken_html = _SAMPLE_INDEX_HTML.replace('href="/my"', 'href="/my-account"')
+        (self.static_dir / "index.html").write_text(broken_html, encoding="utf-8")
+        checks = cli_checks.check_index_embedded_drift(self._raw(str(self.static_dir)))
+        self.assertEqual(checks[0][1], "fail")
 
 
 class CheckStaticSiteComplianceTest(unittest.TestCase):
@@ -1918,6 +2165,711 @@ class CheckCalendarInviteResyncSkipsTest(unittest.TestCase):
         self.assertIn("2 occurrence(s)", detail)
         self.assertIn("yoga-class-1 on 2026-07-10", detail)
         self.assertIn("resync-calendar", detail)
+
+
+def _app_log_line(ts: str, msg: str) -> str:
+    """One line of [logging].log_file, matching
+    app/logutil.py::configure_logging's own formatter --
+    "%(asctime)s %(levelname)s %(message)s"."""
+    return f"{ts},000 WARNING {msg}\n"
+
+
+def _csp_line(ts: str, ip: str = "1.2.3.4", blocked: str = "eval",
+              directive: str = "script-src", doc: str = "https://booking.example.org/book/trier-sat-yoga") -> str:
+    return _app_log_line(
+        ts,
+        "CSP violation report from %s: blocked-uri=%r violated-directive=%r document-uri=%r"
+        % (ip, blocked, directive, doc),
+    )
+
+
+def _csp_unparseable_line(ts: str, ip: str = "5.6.7.8") -> str:
+    return _app_log_line(ts, "CSP violation report from %s: unparseable body: %r" % (ip, "garbage"))
+
+
+class FindCspViolationsTest(unittest.TestCase):
+    """app.cli_checks.find_csp_violations -- the one place that parses CSP
+    violation reports out of [logging].log_file, shared by
+    check_csp_violations() below (my-bt health/setup), `my-bt admin
+    csp-violations`, and app.watchdog.check_csp_violations (threshold-
+    gated alert)."""
+
+    def _now(self):
+        from datetime import datetime, timezone
+        return datetime(2026, 7, 13, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_no_matching_lines_is_empty(self):
+        lines = [_app_log_line("2026-07-13 11:55:00", "some unrelated line")]
+        self.assertEqual(cli_checks.find_csp_violations(lines, 15, now=self._now()), [])
+
+    def test_single_violation_is_counted_once(self):
+        lines = [_csp_line("2026-07-13 11:55:00")]
+        violations = cli_checks.find_csp_violations(lines, 15, now=self._now())
+        self.assertEqual(len(violations), 1)
+        count, detail = violations[0]
+        self.assertEqual(count, 1)
+        self.assertIn("blocked-uri='eval'", detail)
+        self.assertIn("violated-directive='script-src'", detail)
+        self.assertIn("document-uri='https://booking.example.org/book/trier-sat-yoga'", detail)
+
+    def test_identical_violations_are_deduped_and_counted(self):
+        lines = [_csp_line("2026-07-13 11:55:00"), _csp_line("2026-07-13 11:56:00"),
+                  _csp_line("2026-07-13 11:57:00")]
+        violations = cli_checks.find_csp_violations(lines, 15, now=self._now())
+        self.assertEqual(violations, [(3, violations[0][1])])
+
+    def test_different_violations_are_kept_separate_sorted_by_count(self):
+        lines = (
+            [_csp_line("2026-07-13 11:55:00", doc="https://booking.example.org/book/trier-sat-yoga")] * 1
+            + [_csp_line("2026-07-13 11:56:00", doc="https://booking.example.org/")] * 3
+        )
+        # (the list * 1/* 3 above just repeats the SAME string object, which
+        # find_csp_violations still has to count individually since it
+        # iterates lines, not identity-checks them)
+        violations = cli_checks.find_csp_violations(lines, 15, now=self._now())
+        self.assertEqual(len(violations), 2)
+        self.assertEqual(violations[0][0], 3)  # most frequent first
+        self.assertEqual(violations[1][0], 1)
+
+    def test_outside_window_is_excluded(self):
+        lines = [_csp_line("2026-07-13 11:00:00")]  # 60 min before now
+        self.assertEqual(cli_checks.find_csp_violations(lines, 15, now=self._now()), [])
+
+    def test_unparseable_line_timestamp_excludes_it(self):
+        lines = ["garbled line with no timestamp: " + _csp_line("2026-07-13 11:55:00")]
+        self.assertEqual(cli_checks.find_csp_violations(lines, 15, now=self._now()), [])
+
+    def test_malformed_report_body_gets_its_own_bucket(self):
+        lines = [_csp_unparseable_line("2026-07-13 11:55:00")]
+        violations = cli_checks.find_csp_violations(lines, 15, now=self._now())
+        self.assertEqual(len(violations), 1)
+        count, detail = violations[0]
+        self.assertEqual(count, 1)
+        self.assertIn("unparseable report body", detail)
+
+
+class CheckCspViolationsTest(unittest.TestCase):
+    """cli_checks.check_csp_violations() -- the real-file wrapper `my-bt
+    health`/`admin setup` call. Always surfaces ANY violation found
+    (never threshold-gated -- that's app.watchdog's own job)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.log_path = Path(self._tmp.name) / "my-booking.log"
+
+    def _now(self):
+        from datetime import datetime, timezone
+        return datetime(2026, 7, 13, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_no_log_file_configured_is_empty(self):
+        self.assertEqual(cli_checks.check_csp_violations({}), [])
+
+    def test_log_file_does_not_exist_is_empty(self):
+        raw = {"logging": {"log_file": str(self.log_path)}}
+        self.assertEqual(cli_checks.check_csp_violations(raw), [])
+
+    def test_no_violations_in_window_is_empty(self):
+        self.log_path.write_text(_app_log_line("2026-07-13 11:55:00", "nothing relevant"), encoding="utf-8")
+        raw = {"logging": {"log_file": str(self.log_path)}}
+        self.assertEqual(cli_checks.check_csp_violations(raw, now=self._now()), [])
+
+    def test_violations_found_is_a_single_warn_check_with_summary(self):
+        self.log_path.write_text(
+            _csp_line("2026-07-13 11:55:00") + _csp_line("2026-07-13 11:56:00"), encoding="utf-8",
+        )
+        raw = {"logging": {"log_file": str(self.log_path)}}
+        checks = cli_checks.check_csp_violations(raw, now=self._now())
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(label, "CSP violations")
+        self.assertEqual(level, "warn")
+        self.assertIn("2 CSP violation report(s)", detail)
+        self.assertIn("2x blocked-uri=", detail)
+        self.assertIn("my-bt admin csp-violations", detail)
+
+    def test_more_than_five_distinct_groups_are_capped_with_a_plus_more_note(self):
+        lines = "".join(
+            _csp_line("2026-07-13 11:55:00", doc=f"https://booking.example.org/book/course-{i}") for i in range(7)
+        )
+        self.log_path.write_text(lines, encoding="utf-8")
+        raw = {"logging": {"log_file": str(self.log_path)}}
+        checks = cli_checks.check_csp_violations(raw, now=self._now())
+        self.assertIn("+2 more distinct", checks[0][2])
+
+    def test_custom_window_minutes_is_respected(self):
+        self.log_path.write_text(_csp_line("2026-07-13 11:30:00"), encoding="utf-8")  # 30 min before now
+        raw = {"logging": {"log_file": str(self.log_path)}, "watchdog": {"window_minutes": 45}}
+        checks = cli_checks.check_csp_violations(raw, now=self._now())
+        self.assertEqual(len(checks), 1)
+        raw["watchdog"]["window_minutes"] = 15
+        self.assertEqual(cli_checks.check_csp_violations(raw, now=self._now()), [])
+
+
+class ExpectedCspHashesTest(unittest.TestCase):
+    """expected_csp_hashes() -- the proactive half of the CSP-hash
+    automation (contrast check_csp_violations() above, which is purely
+    reactive). Computes every inline <script> hash this app can currently
+    produce straight from source, without ever rendering a real page --
+    safe only because every one of these constants is deliberately
+    non-interpolated (see each one's own history in
+    site/nginx-locations.conf.example's CSP comment)."""
+
+    _STATIC_LABELS = {
+        "templates._SUBMIT_FEEDBACK_SCRIPT",
+        "webapp._RESEND_COOLDOWN_SCRIPT",
+        "webapp._RESEND_INLINE_COOLDOWN_SCRIPT",
+        "webapp._LOCKOUT_COUNTDOWN_SCRIPT",
+        "webapp._DIALOG_WIRING_SCRIPT",
+        "webapp._CANCEL_ENTIRE_SESSION_SCRIPT",
+        "webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT",
+        "webapp._BOOKING_FORM_SCRIPT",
+    }
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def test_no_static_site_dir_returns_only_the_eight_static_constants(self):
+        hashes = cli_checks.expected_csp_hashes({})
+        self.assertEqual(set(hashes), self._STATIC_LABELS)
+        for h in hashes.values():
+            self.assertTrue(h.startswith("sha256-"))
+
+    def test_every_static_hash_matches_hashing_the_constant_directly(self):
+        from app import templates, webapp
+        hashes = cli_checks.expected_csp_hashes({})
+        pairs = {
+            "templates._SUBMIT_FEEDBACK_SCRIPT": templates._SUBMIT_FEEDBACK_SCRIPT,
+            "webapp._BOOKING_FORM_SCRIPT": webapp._BOOKING_FORM_SCRIPT,
+        }
+        for label, constant in pairs.items():
+            body = site_render.extract_script_bodies(constant)[0]
+            expected = "sha256-" + __import__("base64").b64encode(
+                __import__("hashlib").sha256(body.encode("utf-8")).digest()
+            ).decode()
+            self.assertEqual(hashes[label], expected)
+
+    def test_static_site_dir_configured_but_no_index_html_still_just_eight(self):
+        raw = {"site": {"static_site_dir": str(self.dir)}}
+        hashes = cli_checks.expected_csp_hashes(raw)
+        self.assertEqual(set(hashes), self._STATIC_LABELS)
+
+    def test_static_site_dir_with_index_html_adds_its_script_hashes(self):
+        index_html = (
+            "<html><body>"
+            "<script>console.log('one');</script>"
+            "<div id=\"schedule-exceptions\"></div>"
+            "<script>console.log('two');</script>"
+            "</body></html>"
+        )
+        (self.dir / "index.html").write_text(index_html, encoding="utf-8")
+        raw = {"site": {"static_site_dir": str(self.dir)}}
+        hashes = cli_checks.expected_csp_hashes(raw)
+        self.assertEqual(set(hashes), self._STATIC_LABELS | {"index.html script #1", "index.html script #2"})
+        import base64
+        import hashlib
+        expected_one = "sha256-" + base64.b64encode(hashlib.sha256(b"console.log('one');").digest()).decode()
+        self.assertEqual(hashes["index.html script #1"], expected_one)
+
+    def test_html_comment_mentioning_script_does_not_create_a_phantom_entry(self):
+        # Real incident this guards against -- see extract_script_bodies()'s
+        # own docstring: a stray "<script>" in developer prose inside an
+        # HTML comment must never be mistaken for a real opening tag.
+        index_html = (
+            "<!-- the real <script> further down does the thing -->"
+            "<script>console.log('real');</script>"
+        )
+        (self.dir / "index.html").write_text(index_html, encoding="utf-8")
+        raw = {"site": {"static_site_dir": str(self.dir)}}
+        hashes = cli_checks.expected_csp_hashes(raw)
+        self.assertEqual(set(hashes) - self._STATIC_LABELS, {"index.html script #1"})
+
+
+class NginxCspScriptHashesTest(unittest.TestCase):
+    """_nginx_csp_script_hashes() -- parses the live, deployed
+    Content-Security-Policy header's script-src 'sha256-...' entries out of
+    the ONE server block matching [site].base_url's hostname."""
+
+    def _raw(self, base_url="https://booking.example.org"):
+        return {"site": {"base_url": base_url}}
+
+    def test_nginx_unavailable_returns_none(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            self.assertIsNone(cli_checks._nginx_csp_script_hashes(self._raw()))
+
+    def test_no_matching_server_block_returns_none(self):
+        merged = "server {\n    server_name other.org;\n}\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            self.assertIsNone(cli_checks._nginx_csp_script_hashes(self._raw()))
+
+    def test_no_csp_header_returns_none(self):
+        merged = "server {\n    server_name booking.example.org;\n}\n"
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            self.assertIsNone(cli_checks._nginx_csp_script_hashes(self._raw()))
+
+    def test_extracts_every_hash_in_the_matching_blocks_header(self):
+        merged = (
+            "server {\n"
+            "    server_name booking.example.org;\n"
+            '    add_header Content-Security-Policy "default-src \'self\'; '
+            "script-src 'self' 'sha256-AAA=' 'sha256-BBB='; "
+            'style-src \'self\';" always;\n'
+            "}\n"
+        )
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            result = cli_checks._nginx_csp_script_hashes(self._raw())
+        self.assertEqual(result, {"sha256-AAA=", "sha256-BBB="})
+
+
+class CheckCspHashesDeployedTest(unittest.TestCase):
+    """check_csp_hashes_deployed() -- compares expected_csp_hashes()
+    (computed from source) against the live nginx CSP header's actual
+    hash set, proactively catching a forgotten hash update."""
+
+    def _raw(self, base_url="https://booking.example.org"):
+        return {"site": {"base_url": base_url}}
+
+    def _merged_with_hashes(self, hashes):
+        hash_tokens = " ".join(f"'{h}'" for h in hashes)
+        return (
+            "server {\n"
+            "    server_name booking.example.org;\n"
+            '    add_header Content-Security-Policy "default-src \'self\'; '
+            f"script-src 'self' {hash_tokens}; "
+            'style-src \'self\';" always;\n'
+            "}\n"
+        )
+
+    def test_nginx_unavailable_is_a_no_op(self):
+        with patch("app.cli_checks.shutil.which", return_value=None):
+            self.assertEqual(cli_checks.check_csp_hashes_deployed(self._raw()), [])
+
+    def test_all_expected_hashes_present_reports_ok(self):
+        expected = cli_checks.expected_csp_hashes(self._raw())
+        merged = self._merged_with_hashes(expected.values())
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            checks = cli_checks.check_csp_hashes_deployed(self._raw())
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(label, "CSP script hashes deployed")
+        self.assertEqual(level, "ok")
+        self.assertIn(f"all {len(expected)}", detail)
+
+    def test_one_missing_hash_reports_warn_with_label_and_hash(self):
+        expected = cli_checks.expected_csp_hashes(self._raw())
+        labels = list(expected)
+        dropped_label = labels[0]
+        remaining = {label: h for label, h in expected.items() if label != dropped_label}
+        merged = self._merged_with_hashes(remaining.values())
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": merged})()):
+            checks = cli_checks.check_csp_hashes_deployed(self._raw())
+        self.assertEqual(len(checks), 1)
+        label, level, detail = checks[0]
+        self.assertEqual(level, "warn")
+        self.assertIn(dropped_label, detail)
+        self.assertIn(expected[dropped_label], detail)
+
+
+class CspScriptSrcPatchTest(unittest.TestCase):
+    """csp_script_src_patch() -- the self-heal half (2026-07-16, the operator:
+    "can we automate and fix this ... maybe can self-heal?"). Pure string
+    transform: no file I/O, no subprocess -- app/cli_setup.py::
+    interactive_setup() is the only place that reads/writes the real file
+    and runs (and checks the actual pass/fail of) `nginx -t`."""
+
+    _CONF = (
+        'add_header Content-Security-Policy "default-src \'self\'; '
+        "script-src 'self' 'sha256-AAAA=' 'sha256-BBBB='; "
+        'style-src \'self\' \'unsafe-inline\'; frame-ancestors \'self\';" always;'
+    )
+
+    def test_appends_new_hash_after_script_src(self):
+        out = cli_checks.csp_script_src_patch(self._CONF, ["sha256-NEW="])
+        self.assertIn("script-src 'sha256-NEW=' 'self' 'sha256-AAAA=' 'sha256-BBBB='", out)
+
+    def test_keeps_every_existing_hash_and_directive(self):
+        out = cli_checks.csp_script_src_patch(self._CONF, ["sha256-NEW="])
+        self.assertIn("'sha256-AAAA='", out)
+        self.assertIn("'sha256-BBBB='", out)
+        self.assertIn("style-src 'self' 'unsafe-inline'", out)
+        self.assertIn("frame-ancestors 'self'", out)
+
+    def test_appends_multiple_hashes(self):
+        out = cli_checks.csp_script_src_patch(self._CONF, ["sha256-NEW1=", "sha256-NEW2="])
+        self.assertIn("script-src 'sha256-NEW1=' 'sha256-NEW2=' 'self'", out)
+
+    def test_empty_list_is_a_no_op(self):
+        self.assertEqual(cli_checks.csp_script_src_patch(self._CONF, []), self._CONF)
+
+    def test_no_csp_header_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            cli_checks.csp_script_src_patch("server { listen 443; }", ["sha256-NEW="])
+
+    def test_no_script_src_directive_raises_value_error(self):
+        conf = 'add_header Content-Security-Policy "default-src \'self\';" always;'
+        with self.assertRaises(ValueError):
+            cli_checks.csp_script_src_patch(conf, ["sha256-NEW="])
+
+    def test_only_touches_the_one_csp_line_in_a_larger_file(self):
+        conf = f"server {{\n    server_name booking.example.org;\n    {self._CONF}\n    other_directive on;\n}}\n"
+        out = cli_checks.csp_script_src_patch(conf, ["sha256-NEW="])
+        self.assertIn("server_name booking.example.org;", out)
+        self.assertIn("other_directive on;", out)
+        self.assertIn("'sha256-NEW='", out)
+
+
+class ParseLastDurationTest(unittest.TestCase):
+    def test_hours_only(self):
+        from datetime import timedelta
+        self.assertEqual(cli_checks.parse_last_duration("2h"), timedelta(hours=2))
+
+    def test_minutes_only(self):
+        from datetime import timedelta
+        self.assertEqual(cli_checks.parse_last_duration("90m"), timedelta(minutes=90))
+
+    def test_combined_hours_and_minutes(self):
+        from datetime import timedelta
+        self.assertEqual(cli_checks.parse_last_duration("1h30m"), timedelta(hours=1, minutes=30))
+
+    def test_days_hours_minutes_seconds(self):
+        from datetime import timedelta
+        self.assertEqual(
+            cli_checks.parse_last_duration("1d2h3m4s"),
+            timedelta(days=1, hours=2, minutes=3, seconds=4),
+        )
+
+    def test_empty_string_raises(self):
+        with self.assertRaises(ValueError):
+            cli_checks.parse_last_duration("")
+
+    def test_garbage_raises(self):
+        with self.assertRaises(ValueError):
+            cli_checks.parse_last_duration("banana")
+
+    def test_wrong_order_raises(self):
+        # must be d/h/m/s in that order, not e.g. "30m1h"
+        with self.assertRaises(ValueError):
+            cli_checks.parse_last_duration("30m1h")
+
+
+class ResolveReportWindowTest(unittest.TestCase):
+    def _now(self):
+        from datetime import datetime, timezone
+        return datetime(2026, 7, 13, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_last_takes_precedence(self):
+        from datetime import timedelta
+        start, end, description = cli_checks.resolve_report_window(last="2h", now=self._now())
+        self.assertEqual(end, self._now())
+        self.assertEqual(start, self._now() - timedelta(hours=2))
+        self.assertIn("last 2h", description)
+
+    def test_since_and_till_both_given(self):
+        start, end, description = cli_checks.resolve_report_window(
+            since="2026-07-13T09:00:00", till="2026-07-13T10:00:00", now=self._now(),
+        )
+        from datetime import datetime, timezone
+        self.assertEqual(start, datetime(2026, 7, 13, 9, 0, 0, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 7, 13, 10, 0, 0, tzinfo=timezone.utc))
+
+    def test_since_only_defaults_till_to_now(self):
+        start, end, _ = cli_checks.resolve_report_window(since="2026-07-13T09:00:00", now=self._now())
+        self.assertEqual(end, self._now())
+
+    def test_till_only_defaults_since_to_24h_before(self):
+        from datetime import timedelta
+        start, end, _ = cli_checks.resolve_report_window(till="2026-07-13T10:00:00", now=self._now())
+        self.assertEqual(end - start, timedelta(hours=24))
+
+    def test_none_given_falls_back_to_nginx_last_restart(self):
+        from datetime import datetime, timezone
+        restart = datetime(2026, 7, 13, 8, 0, 0, tzinfo=timezone.utc)
+        with patch("app.cli_checks.nginx_last_restart_at", return_value=restart):
+            start, end, description = cli_checks.resolve_report_window(now=self._now())
+        self.assertEqual(start, restart)
+        self.assertEqual(end, self._now())
+        self.assertIn("nginx's last restart", description)
+
+    def test_none_given_and_restart_unknown_falls_back_to_24h(self):
+        from datetime import timedelta
+        with patch("app.cli_checks.nginx_last_restart_at", return_value=None):
+            start, end, description = cli_checks.resolve_report_window(now=self._now())
+        self.assertEqual(end - start, timedelta(hours=24))
+        self.assertIn("could not be determined", description)
+
+
+class NginxGlobalAndErrorLogDerivationTest(unittest.TestCase):
+    """_nginx_error_log_for_host/_nginx_global_access_log/
+    _nginx_global_error_log -- mirror NginxAccessLogForHostTest's own
+    patterns exactly, for the three siblings added alongside `my-bt admin
+    health report`/`errors`."""
+
+    def _raw(self, base_url="https://example.org"):
+        return {"site": {"base_url": base_url}}
+
+    def _patched(self, merged):
+        return (
+            patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"),
+            patch("app.cli_checks.subprocess.run",
+                  return_value=type("R", (), {"returncode": 0, "stdout": merged})()),
+        )
+
+    def test_error_log_for_host_finds_vhost_specific(self):
+        merged = """
+        server {
+            server_name example.org;
+            access_log /var/log/nginx/example.access.log;
+            error_log  /var/log/nginx/example.error.log;
+        }
+        """
+        p1, p2 = self._patched(merged)
+        with p1, p2:
+            log = cli_checks._nginx_error_log_for_host(self._raw())
+        self.assertEqual(log, "/var/log/nginx/example.error.log")
+
+    def test_error_log_for_host_falls_back_to_http_level(self):
+        merged = """
+        error_log /var/log/nginx/error.log;
+        server {
+            server_name example.org;
+        }
+        """
+        p1, p2 = self._patched(merged)
+        with p1, p2:
+            log = cli_checks._nginx_error_log_for_host(self._raw())
+        self.assertEqual(log, "/var/log/nginx/error.log")
+
+    def test_global_access_log_ignores_vhost_specific_override(self):
+        merged = """
+        access_log /var/log/nginx/access.log;
+        server {
+            server_name example.org;
+            access_log /var/log/nginx/example.access.log;
+        }
+        """
+        p1, p2 = self._patched(merged)
+        with p1, p2:
+            log = cli_checks._nginx_global_access_log(self._raw())
+        self.assertEqual(log, "/var/log/nginx/access.log")
+
+    def test_global_access_log_none_when_only_vhost_level_set(self):
+        merged = """
+        server {
+            server_name example.org;
+            access_log /var/log/nginx/example.access.log;
+        }
+        """
+        p1, p2 = self._patched(merged)
+        with p1, p2:
+            log = cli_checks._nginx_global_access_log(self._raw())
+        self.assertIsNone(log)
+
+    def test_global_error_log_found_at_http_level(self):
+        merged = """
+        error_log /var/log/nginx/error.log;
+        server {
+            server_name example.org;
+        }
+        """
+        p1, p2 = self._patched(merged)
+        with p1, p2:
+            log = cli_checks._nginx_global_error_log(self._raw())
+        self.assertEqual(log, "/var/log/nginx/error.log")
+
+
+class HealthReportLogSourcesTest(unittest.TestCase):
+    def test_returns_five_labeled_sources_in_order(self):
+        raw = {"logging": {"log_file": "/var/lib/my-booking/my-booking.log"}}
+        with patch("app.cli_checks._nginx_global_access_log", return_value="/var/log/nginx/access.log"), \
+             patch("app.cli_checks._nginx_global_error_log", return_value="/var/log/nginx/error.log"), \
+             patch("app.cli_checks._nginx_access_log_for_host", return_value="/var/log/nginx/yoga.access.log"), \
+             patch("app.cli_checks._nginx_error_log_for_host", return_value="/var/log/nginx/yoga.error.log"):
+            sources = cli_checks.health_report_log_sources(raw)
+        self.assertEqual([label for label, _ in sources], [
+            "nginx global access log", "nginx global error log",
+            "nginx vhost access log", "nginx vhost error log", "app log",
+        ])
+        self.assertEqual(dict(sources)["app log"], "/var/lib/my-booking/my-booking.log")
+
+
+class NginxLastRestartAtTest(unittest.TestCase):
+    def test_returns_none_when_undetectable(self):
+        with patch("app.cli_checks._service_active_since", return_value=None):
+            self.assertIsNone(cli_checks.nginx_last_restart_at())
+
+    def test_converts_epoch_to_utc_datetime(self):
+        with patch("app.cli_checks._service_active_since", return_value=1752400000.0):
+            result = cli_checks.nginx_last_restart_at()
+        from datetime import datetime, timezone
+        self.assertEqual(result, datetime.fromtimestamp(1752400000.0, tz=timezone.utc))
+
+
+class LogLineTimestampParsersTest(unittest.TestCase):
+    def test_nginx_error_log_timestamp_parses_local_time(self):
+        line = "2026/07/13 12:00:00 [error] 123#0: something broke\n"
+        ts = cli_checks._nginx_error_log_timestamp(line)
+        self.assertIsNotNone(ts)
+
+    def test_nginx_error_log_timestamp_none_for_unrelated_line(self):
+        self.assertIsNone(cli_checks._nginx_error_log_timestamp("not a log line\n"))
+
+    def test_nginx_access_log_timestamp_parses_combined_format(self):
+        line = '1.2.3.4 - - [13/Jul/2026:12:00:00 +0000] "GET / HTTP/1.1" 200 100\n'
+        ts = cli_checks._nginx_access_log_timestamp(line)
+        from datetime import datetime, timezone
+        self.assertEqual(ts, datetime(2026, 7, 13, 12, 0, 0, tzinfo=timezone.utc))
+
+
+class FilterLinesByWindowTest(unittest.TestCase):
+    def test_keeps_only_lines_in_window(self):
+        from datetime import datetime, timezone
+        lines = [
+            _app_log_line("2026-07-13 11:00:00", "too early"),
+            _app_log_line("2026-07-13 11:30:00", "in window"),
+            _app_log_line("2026-07-13 12:30:00", "too late"),
+        ]
+        start = datetime(2026, 7, 13, 11, 15, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+        kept = cli_checks._filter_lines_by_window(lines, start, end, cli_checks.parse_app_log_timestamp)
+        self.assertEqual(len(kept), 1)
+        self.assertIn("in window", kept[0])
+
+    def test_unparseable_timestamp_excluded(self):
+        from datetime import datetime, timezone
+        lines = ["not a timestamped line\n"]
+        start = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        end = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        self.assertEqual(
+            cli_checks._filter_lines_by_window(lines, start, end, cli_checks.parse_app_log_timestamp), [],
+        )
+
+
+class GroupCspViolationLinesTest(unittest.TestCase):
+    def test_groups_and_counts_with_no_time_filtering(self):
+        lines = [_csp_line("2026-07-13 11:55:00"), _csp_line("2026-07-13 11:56:00")]
+        violations = cli_checks.group_csp_violation_lines(lines)
+        self.assertEqual(violations, [(2, violations[0][1])])
+        self.assertIn("blocked-uri='eval'", violations[0][1])
+
+
+class BuildHealthReportTest(unittest.TestCase):
+    """cli_checks.build_health_report -- the pure assembly function behind
+    `my-bt admin health report`/`errors`; real file/journalctl I/O is the
+    CALLER's job (scripts/my-bt), so this only ever gets already-decided
+    paths and already-gathered sshd/service lines."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+
+    def _now(self):
+        from datetime import datetime, timezone
+        return datetime(2026, 7, 13, 12, 0, 0, tzinfo=timezone.utc)
+
+    def _window(self):
+        from datetime import datetime, timezone
+        return datetime(2026, 7, 13, 11, 0, 0, tzinfo=timezone.utc), self._now()
+
+    def test_missing_sources_are_labeled_not_configured(self):
+        start, end = self._window()
+        with patch("app.cli_checks.health_report_log_sources", return_value=[("app log", None)]):
+            text = cli_checks.build_health_report({}, start, end, "test window")
+        self.assertIn("app log (not configured / not detected)", text)
+
+    def test_report_mode_includes_every_matching_line(self):
+        app_log = self.dir / "app.log"
+        app_log.write_text(
+            _app_log_line("2026-07-13 11:30:00", "just some info line") +
+            _app_log_line("2026-07-13 10:00:00", "outside the window"),
+            encoding="utf-8",
+        )
+        start, end = self._window()
+        with patch("app.cli_checks.health_report_log_sources", return_value=[("app log", str(app_log))]):
+            text = cli_checks.build_health_report({}, start, end, "test window", errors_only=False)
+        self.assertIn("just some info line", text)
+        self.assertNotIn("outside the window", text)
+
+    def test_errors_mode_filters_app_log_to_warning_and_above(self):
+        app_log = self.dir / "app.log"
+        app_log.write_text(
+            _app_log_line("2026-07-13 11:30:00", "harmless info, not shown in errors mode")
+            .replace("WARNING", "INFO")
+            + _app_log_line("2026-07-13 11:31:00", "a real problem"),
+            encoding="utf-8",
+        )
+        start, end = self._window()
+        with patch("app.cli_checks.health_report_log_sources", return_value=[("app log", str(app_log))]):
+            text = cli_checks.build_health_report({}, start, end, "test window", errors_only=True)
+        self.assertNotIn("harmless info", text)
+        self.assertIn("a real problem", text)
+
+    def test_errors_mode_filters_access_log_to_4xx_5xx(self):
+        access_log = self.dir / "access.log"
+        access_log.write_text(
+            '1.2.3.4 - - [13/Jul/2026:11:30:00 +0000] "GET / HTTP/1.1" 200 100\n'
+            '5.6.7.8 - - [13/Jul/2026:11:31:00 +0000] "GET /nope HTTP/1.1" 404 0\n',
+            encoding="utf-8",
+        )
+        start, end = self._window()
+        with patch("app.cli_checks.health_report_log_sources",
+                   return_value=[("nginx vhost access log", str(access_log))]):
+            text = cli_checks.build_health_report({}, start, end, "test window", errors_only=True)
+        self.assertNotIn("GET / HTTP", text)
+        self.assertIn("GET /nope HTTP", text)
+
+    def test_errors_mode_appends_grouped_csp_summary(self):
+        app_log = self.dir / "app.log"
+        app_log.write_text(_csp_line("2026-07-13 11:30:00") + _csp_line("2026-07-13 11:31:00"),
+                            encoding="utf-8")
+        start, end = self._window()
+        with patch("app.cli_checks.health_report_log_sources", return_value=[("app log", str(app_log))]):
+            text = cli_checks.build_health_report({}, start, end, "test window", errors_only=True)
+        self.assertIn("CSP violations, grouped", text)
+        self.assertIn("2x blocked-uri=", text)
+
+    def test_errors_mode_groups_csp_violations_from_the_journal_too(self):
+        # 2026-07-13, real gap hit live: without [logging].log_file
+        # configured, health_report_log_sources()'s "app log" entry is
+        # None, so app_log_window is always empty -- but the app's own
+        # WARNING lines (including CSP violation reports) still reach
+        # `journalctl -u my-booking.service` via the service's own stdout.
+        # The grouped CSP summary must still appear when the violation is
+        # ONLY visible there, not just when [logging].log_file happens to
+        # be configured too.
+        start, end = self._window()
+        service_lines = [
+            _csp_line("2026-07-13 11:30:00"), _csp_line("2026-07-13 11:31:00"),
+        ]
+        with patch("app.cli_checks.health_report_log_sources", return_value=[("app log", None)]):
+            text = cli_checks.build_health_report(
+                {}, start, end, "test window", app_service_lines=service_lines, errors_only=True,
+            )
+        self.assertIn("CSP violations, grouped", text)
+        self.assertIn("2x blocked-uri=", text)
+
+    def test_sshd_and_service_lines_are_included_when_given(self):
+        start, end = self._window()
+        with patch("app.cli_checks.health_report_log_sources", return_value=[]):
+            text = cli_checks.build_health_report(
+                {}, start, end, "test window",
+                sshd_lines=["sshd[1]: Failed password for root\n"],
+                app_service_lines=["my-booking.service: started\n"],
+            )
+        self.assertIn("Failed password for root", text)
+        self.assertIn("my-booking.service: started", text)
 
 
 if __name__ == "__main__":

@@ -2,12 +2,41 @@
 timezone    = "Europe/Berlin"
 admin_email = "admin@example.org"
 base_url    = "https://example.org"
+#
 # Where the LIVE static site (site/*.html from this repo, copied over by
 # hand -- see README.md "Static-site pages") actually lives, so `my-bt
 # status` can detect a stale privacy.html (retention numbers out of sync
 # with this file) and `my-bt setup -i` can regenerate it directly there.
 # Comment out / remove to skip that check entirely.
 static_site_dir = "/var/www/example.org"
+#
+# Optional: whether `my-bt setup -i` derives a no-JavaScript
+# index_embedded.html straight from the LIVE index.html above (see
+# README.md "Static-site pages") plus this settings.toml, and offers to
+# deploy it alongside index.html at static_site_dir. Off by default --
+# most deployments don't embed their site via <iframe> elsewhere. Comment
+# out / remove (or set to false) to skip this entirely.
+index_embedded_enabled = false
+#
+# Only relevant when index_embedded_enabled = true above. true (default):
+# every outbound link on the derived page (Login, course booking links,
+# footer legal links) opens in a NEW tab (target="_blank"
+# rel="noopener noreferrer") -- the booking flow and /my genuinely need
+# JavaScript, which should run in a normal top-level tab, not inside the
+# embedding iframe. false: same tab, target="_top" (the same convention
+# index.html's own Login link already uses).
+index_embedded_new_tab_links = true
+#
+# Optional: an operator-authored message shown in the same red ATTENTION
+# box as any auto-generated [[course.date_override]] line (on index.html,
+# index_embedded.html, and each affected course's /book/<shortname> page),
+# below any auto-generated line, separated by a horizontal rule when both
+# are present (shown alone if there are no upcoming overrides). Understands
+# raw HTML formatting tags -- not escaped, same trust boundary as a
+# course's description. Empty (default): nothing shown unless there's an
+# actual upcoming date override.
+# custom_attention_message = "On vacation from 2026-08-01 til 2026-08-15, courses resume afterwards at their usual schedule."
+#
 # Optional: a directory of custom email templates to use instead of
 # this repo's own built-in ones. Every guest-facing email (booking
 # confirmed/waitlisted, canceled, reinstated, promoted-from-waitlist,
@@ -110,8 +139,8 @@ show_spots_left = true
 # submitting the form actually does.
 book_button_label = "Book"
 # Max number of "+ Add participant" guest rows the booking form offers (and
-# the most guest_email_N/guest_name_N fields a submitted form's own POST
-# will ever be scanned for -- see app/webapp.py's MAX_GUESTS docstring).
+# the most guests a submitted form's own POST will ever get admitted --
+# see app/webapp.py's _parse_guest_entries).
 max_guests = 3
 # Displayed-only offset for A/B-testing whether perceived scarcity changes
 # booking behaviour. Positive = show fewer spots than really available
@@ -148,8 +177,8 @@ canceled_retention_months = 6
 erasure_pepper_file = "/etc/my-booking/secrets/erasure_pepper"
 # Optional: a dormant-account warning (one email, not a series of
 # nudges) sent this many days BEFORE an account would reach
-# retention_months above of inactivity (User.last_login_at, falling back
-# to created_at if it has never logged in again since booking). 0 (the
+# retention_months above of inactivity (latest of last login, account
+# creation, or last booking made -- see app/retention.py). 0 (the
 # default), a blank string, or leaving this commented out all disable the
 # warning entirely -- no automated account deletion happens either way;
 # this only controls the WARNING email, see app.retention's own docstring.
@@ -196,6 +225,15 @@ rate_limit_block_threshold = 5
 # fail2ban's own per-IP ban threshold; an early heads-up, not a
 # substitute for it.
 sshd_failure_threshold = 5
+# Alert if the app's own log shows at least this many CSP violation
+# reports (browser-reported Content-Security-Policy violations -- most
+# often a stale script-src hash after an inline <script> edit, see
+# site/nginx-locations.conf.example's own CSP comment) within the window,
+# across every distinct violation combined. `my-bt health`/`admin setup`
+# always surface ANY CSP violation regardless of this threshold -- this
+# only gates the watchdog's own emailed alert. Full detail any time:
+# `my-bt admin csp-violations`.
+csp_violation_threshold = 3
 
 # REPLACE-ME: the [[course]] blocks below are placeholder examples so this
 # file parses and `my-bt`/the app run out of the box -- replace shortname/

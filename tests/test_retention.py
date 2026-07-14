@@ -232,6 +232,20 @@ class SendAccountDeletionWarningsTest(unittest.TestCase):
         _to, _subject, _body, bcc_addrs = self.sent_emails[0]
         self.assertEqual(bcc_addrs, ("watcher@example.org",))
 
+    def test_recent_booking_prevents_a_warning(self):
+        # 2026-07-14 (review finding B2): created_at alone would put this
+        # account 10 days from deletion (inside the 30-day warning
+        # window), but a recent booking resets the dormancy clock -- no
+        # warning email for an actively-booking guest.
+        user = self._make_user("regular@example.org", last_login_at="", created_at="2026-01-11T00:00:00+00:00")
+        self.store.import_historical_registration(
+            "reg-recent", "yoga", "2027-12-01", user.user_id, "confirmed",
+            registered_at="2027-11-24T10:00:00+00:00",
+        )
+        warned = send_account_deletion_warnings(self.store, self.settings, today=self.today)
+        self.assertEqual(warned, 0)
+        self.assertEqual(self.sent_emails, [])
+
     def test_no_activity_signal_at_all_is_skipped_not_erroring(self):
         # Defensive edge case -- created_at is always set in practice
         # (Store.upsert_user_for_booking always stamps it), but this
@@ -269,6 +283,27 @@ class AccountDeletionDateTest(unittest.TestCase):
     def test_none_when_no_activity_signal_at_all(self):
         user = self._make_user("c@example.org", last_login_at="", created_at="")
         self.assertIsNone(account_deletion_date(user, self.settings))
+
+    def test_recent_booking_counts_as_activity(self):
+        # 2026-07-14 regression (review finding B2): a booking made
+        # through the form is activity too -- without this, a regular who
+        # books weekly but never logs into /my projects from created_at
+        # alone and gets erased while actively attending.
+        user = self._make_user("d@example.org", last_login_at="", created_at="2024-01-11T00:00:00+00:00")
+        self.assertEqual(
+            account_deletion_date(user, self.settings, latest_registration_at="2026-01-11T00:00:00+00:00"),
+            date(2028, 1, 11),
+        )
+
+    def test_latest_of_all_three_signals_wins(self):
+        # A booking OLDER than the last login must not shorten the clock.
+        user = self._make_user(
+            "e@example.org", last_login_at="2026-06-01T00:00:00+00:00", created_at="2024-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(
+            account_deletion_date(user, self.settings, latest_registration_at="2025-01-01T00:00:00+00:00"),
+            date(2028, 6, 1),
+        )
 
 
 class RegistrationPurgeDateTest(unittest.TestCase):
@@ -381,6 +416,37 @@ class PurgeDormantAccountsTest(unittest.TestCase):
         self.assertEqual(purged, 2)
         self.assertEqual(len(self.store.read_users(scope="live")), 1)
 
+    def test_actively_booking_guest_is_never_erased_even_without_logins(self):
+        # 2026-07-14 regression (review finding B2): a regular who books
+        # week by week through the booking form never touches /my at all
+        # (a confirmed email books instantly, no login), so last_login_at
+        # stays blank forever. Their bookings must reset the dormancy
+        # clock -- the old login-only rule erased an actively-attending
+        # guest 24 months after account creation and force-canceled their
+        # future confirmed bookings.
+        settings = make_settings(retention_months=24)
+        user = self._make_user("regular@example.org", last_login_at="", created_at="2020-01-01T00:00:00+00:00")
+        self.store.import_historical_registration(
+            "reg-recent", "yoga", "2027-12-01", user.user_id, "confirmed",
+            registered_at="2027-11-24T10:00:00+00:00",
+        )
+        purged = purge_dormant_accounts(self.store, settings, today=self.today)
+        self.assertEqual(purged, 0)
+        self.assertEqual(len(self.store.read_users(scope="live")), 1)
+
+    def test_old_bookings_alone_do_not_save_a_genuinely_dormant_account(self):
+        # The counterpart guarantee: booking-as-activity must not weaken
+        # the purge -- an account whose LAST booking is itself past the
+        # retention window is still erased.
+        settings = make_settings(retention_months=24)
+        user = self._make_user("gone@example.org", last_login_at="", created_at="2020-01-01T00:00:00+00:00")
+        self.store.import_historical_registration(
+            "reg-old", "yoga", "2020-06-01", user.user_id, "confirmed",
+            registered_at="2020-05-25T10:00:00+00:00",
+        )
+        purged = purge_dormant_accounts(self.store, settings, today=self.today)
+        self.assertEqual(purged, 1)
+
 
 class PurgeCountsByMonthTest(unittest.TestCase):
     """registration_purge_counts_by_month() / account_deletion_counts_by_month()
@@ -405,9 +471,15 @@ class PurgeCountsByMonthTest(unittest.TestCase):
             r = self.store.find_by_id(r.registration_id)
         return r
 
-    def _make_user(self, email: str, last_login_at: str = ""):
+    def _make_user(self, email: str, last_login_at: str = "", created_at: str = ""):
+        # created_at blanked by default, same as every other class here:
+        # upsert stamps it with the REAL current time, which (being later
+        # than these fixtures' fake logins) would win under
+        # account_activity_date()'s latest-signal-wins rule -- an
+        # inversion (created after last login) that can't happen in
+        # production.
         user = self.store.upsert_user_for_booking(email, "Guest")
-        _set_user_row(self.store, user.user_id, last_login_at=last_login_at)
+        _set_user_row(self.store, user.user_id, last_login_at=last_login_at, created_at=created_at)
         return user
 
     def test_registration_counts_grouped_by_purge_month(self):

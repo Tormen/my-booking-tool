@@ -243,6 +243,20 @@ def attention_html(message_html_inner: str) -> str:
     )
 
 
+def join_attention_sections(*parts: str) -> str:
+    """Joins non-empty ATTENTION-box sections with a `<hr>` between them --
+    2026-07-13, added alongside [site].custom_attention_message
+    (app/config.py): the ONE red box can now show up to two kinds of
+    notice at once (the automatic per-course/site-wide schedule-exception
+    text, plus an optional operator-authored site-wide message), and they
+    need a visible separator when both are present, but no stray `<hr>`
+    when only one is. Every caller still passes the combined result
+    through attention_html() above for the actual box/prefix -- this only
+    joins the pieces that go inside it. "" (renders nothing) when every
+    part passed in is empty."""
+    return "<hr>".join(p for p in parts if p)
+
+
 def html_email_body(inner_html: str) -> str:
     """Minimal, portable HTML shell (2026-07-09) every HTML email in this
     app is wrapped in -- no external stylesheet/JS, just a plain

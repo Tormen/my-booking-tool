@@ -236,8 +236,9 @@ class Settings:
     # warning email goes out -- reusing retention_months as the actual
     # dormancy threshold (it already defines the retention duration)
     # rather than adding a second duration setting.
-    # "Inactivity" is User.last_login_at, falling back to created_at for an
-    # account that has never logged in again since booking.
+    # "Activity" is the latest of User.last_login_at, created_at, and the
+    # most recent booking made (2026-07-14, review finding B2: booking
+    # counts as activity too -- see app/retention.py::account_activity_date).
     account_deletion_warning_days: int = 0
 
     # Optional (2026-07-09): a directory of custom email templates,
@@ -312,10 +313,11 @@ class Settings:
     book_button_label: str = "Book"
 
     # Hard ceiling on how many "+ Add participant" guest rows the booking
-    # form offers, and how many guest_email_N/guest_name_N fields book()
-    # will ever look for on a submitted form -- see app/webapp.py's
-    # MAX_GUESTS docstring. 2026-07-09: made configurable, defaulting to
-    # 3 (was a fixed constant of 9 before).
+    # form offers, and how many guests book() will ever admit per booking
+    # (enforced on the count of guest_email_N fields submitted, not their
+    # index values -- see app/webapp.py's _parse_guest_entries).
+    # 2026-07-09: made configurable, defaulting to 3 (was a fixed
+    # constant of 9 before).
     max_guests: int = 3
 
     # A booking made under a not-yet-confirmed email (see
@@ -338,6 +340,41 @@ class Settings:
     # -- no rebuild/reinstall needed just to pick up a config-only change.
     # None (the default) means this check/action is skipped entirely.
     static_site_dir: str | None = None
+
+    # Optional: whether `my-bt setup -i` derives a no-JavaScript
+    # index_embedded.html straight from the LIVE, currently deployed
+    # index.html (see app/site_render.py::derive_index_embedded_html) plus
+    # this settings.toml, and offers to deploy it alongside index.html at
+    # static_site_dir -- see README.md "Static-site pages". False (the
+    # default) means this whole mechanism is off: most deployments don't
+    # embed their site via <iframe> elsewhere, so nothing changes for them.
+    index_embedded_enabled: bool = False
+    # Only read when index_embedded_enabled is True above. True (the
+    # default): every outbound link the derivation retargets (Login,
+    # course booking links, footer legal links) opens in a NEW tab
+    # (target="_blank" rel="noopener noreferrer") -- the booking flow and
+    # /my genuinely need JavaScript, which should run in an ordinary
+    # top-level tab, not inside whatever iframe this page happens to be
+    # embedded in. False: same tab, target="_top" (breaks out of the
+    # iframe, same convention index.html's own Login link already uses).
+    index_embedded_new_tab_links: bool = True
+
+    # Optional: operator-authored HTML shown in the same red ATTENTION box
+    # as the automatic per-course schedule-exception banner (index.html,
+    # index_embedded.html, and every /book/<shortname> page) -- BELOW any
+    # such exceptions, separated by a <hr> when both are present, or on
+    # its own (no <hr>) when there are no exceptions right now. Not
+    # per-course: it's site-wide, so it always shows everywhere the
+    # exceptions banner can appear, regardless of which course's page
+    # you're on. Raw HTML, NOT escaped -- same operator-is-already-
+    # trusted boundary as Course.description and a date-override's own
+    # `message` (see attention_html()'s own docstring) -- so formatting
+    # tags work, e.g.:
+    #   custom_attention_message = "On vacation from <b>2026-08-01</b> to
+    #   <b>2026-08-15</b> -- courses resume afterwards at their usual
+    #   schedule."
+    # "" (the default) means nothing extra is shown.
+    custom_attention_message: str = ""
 
     # Optional: a hostname (typically your own dynamic-DNS name, e.g.
     # "ssh.example.net") whose CURRENT resolved IP is allowed to keep using
@@ -412,6 +449,17 @@ class Settings:
     # cruder, sitewide signal than fail2ban's own per-IP ban threshold --
     # this is an early heads-up, not a substitute for it.
     watchdog_sshd_failure_threshold: int = 5
+    # Alert if the app's own log shows at least this many CSP violation
+    # reports (app/webapp.py::csp_report -- browser-reported
+    # Content-Security-Policy violations, e.g. a stale script-src hash
+    # after an inline <script> edit, or an embed attempt from outside the
+    # allow-listed frame-ancestors origin) within the window, across every
+    # distinct violation combined. `my-bt health`/`admin setup` surface
+    # ANY CSP violation unconditionally (see app.cli_checks.
+    # check_csp_violations) -- this threshold only gates the WATCHDOG's
+    # own emailed alert, so a single stray/one-off report doesn't page you
+    # at 3am.
+    watchdog_csp_violation_threshold: int = 3
 
     def course(self, shortname: str) -> Course | None:
         for c in self.courses:
@@ -530,12 +578,21 @@ def upcoming_date_overrides(courses, today: str) -> list[dict]:
     JSON endpoint (2026-07-16). Factored out here so that live endpoint AND
     app/site_render.py's static index_embedded.html rendering share one
     definition of "upcoming" and can never drift apart on it -- each item:
-    {course_shortname, course_title, date, time_label, message}."""
+    {course_shortname, course_title, date, weekday, time_label, message}.
+
+    2026-07-13: added `weekday` (course.weekday_label(), e.g. "Saturday")
+    -- the site-wide banner (index.html/index_embedded.html, which lists
+    exceptions across every course at once) leads with the weekday so
+    it's clear at a glance which recurring session is affected, without
+    needing to parse `date` -- unlike the per-course banner on that
+    course's own /book/<shortname> page, where the weekday is already
+    obvious from context."""
     items = [
         {
             "course_shortname": course.shortname,
             "course_title": course.title,
             "date": override.date,
+            "weekday": course.weekday_label(),
             "time_label": course.time_range_label_for(override.date),
             "message": override.message,
         }
@@ -568,6 +625,9 @@ def load_settings(toml_path: str | Path) -> Settings:
         admin_email=site["admin_email"],
         base_url=site["base_url"].rstrip("/"),
         static_site_dir=(site.get("static_site_dir") or None),
+        index_embedded_enabled=bool(site.get("index_embedded_enabled", False)),
+        index_embedded_new_tab_links=bool(site.get("index_embedded_new_tab_links", True)),
+        custom_attention_message=site.get("custom_attention_message", ""),
         email_templates_folder=site.get("email_templates_folder", ""),
         maintenance_bypass_hostname=(site.get("maintenance_bypass_hostname") or None),
         maintenance_bypass_ip_log=(site.get("maintenance_bypass_ip_log") or None),
@@ -615,4 +675,5 @@ def load_settings(toml_path: str | Path) -> Settings:
         watchdog_pending_signup_threshold=int(watchdog.get("pending_signup_threshold", 10)),
         watchdog_rate_limit_block_threshold=int(watchdog.get("rate_limit_block_threshold", 5)),
         watchdog_sshd_failure_threshold=int(watchdog.get("sshd_failure_threshold", 5)),
+        watchdog_csp_violation_threshold=int(watchdog.get("csp_violation_threshold", 3)),
     )

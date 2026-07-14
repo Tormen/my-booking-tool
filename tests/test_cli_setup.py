@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import cli_setup, maintenance, site_render
+from app import cli_checks, cli_setup, maintenance, site_render
 
 # 2026-07-16, real failure on the RPM build host (vps-b59d01b3's own
 # %check, i.e. the actual production machine): interactive_setup()'s
@@ -40,16 +40,37 @@ from app import cli_setup, maintenance, site_render
 # duration of those tests (mock.patch stacks: an inner patch's stop()
 # restores whatever was active before it started, i.e. this default) and
 # reverts back to it afterward.
+# 2026-07-13: same real-live-service problem as above, twice more --
+# interactive_setup() now ALSO does an unconditional check_active_sessions
+# call right at its very top (the new upfront hard-refusal gate, mirroring
+# the RPM's own %pre gate -- see interactive_setup's own docstring), and
+# build_report() (which both print_report() and interactive_setup()'s own
+# closing tally call) now includes cli_checks.check_active_sessions() as
+# one more check group. Both are REAL HTTP GETs against
+# http://127.0.0.1:8811/internal/status by default, unconditionally, on
+# every single call -- not just the one settings-freshness-gated call site
+# the comment above was originally about. Patched hermetically here too,
+# for the same reason: on a host where my-booking.service is actually
+# running, every one of the ~50+ tests below that don't care about
+# sessions would otherwise depend on real, live production session state.
+# The handful of tests that DO want an interesting session scenario
+# (InteractiveSetupActiveSessionGateTest, InteractiveSetupRestartSessionGuardTest)
+# apply their own nested patch, same stacking behavior as above.
 _module_patches: list = []
 
 
 def setUpModule():
-    p = patch(
-        "app.cli_checks.check_settings_fresh",
-        return_value=[("my-booking.service freshness", "ok", "settings.toml unchanged since last (re)start")],
-    )
-    p.start()
-    _module_patches.append(p)
+    patches = [
+        patch(
+            "app.cli_checks.check_settings_fresh",
+            return_value=[("my-booking.service freshness", "ok", "settings.toml unchanged since last (re)start")],
+        ),
+        patch("app.cli_checks.fetch_active_sessions", return_value=(None, None)),
+        patch("app.cli_checks.check_active_sessions", return_value=[]),
+    ]
+    for p in patches:
+        p.start()
+        _module_patches.append(p)
 
 
 def tearDownModule():
@@ -130,11 +151,11 @@ class PrintReportTest(unittest.TestCase):
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
-    def test_prints_all_thirteen_numbered_steps(self):
+    def test_prints_all_fifteen_numbered_steps(self):
         lines: list[str] = []
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         text = "\n".join(lines)
-        for n in range(1, 14):
+        for n in range(1, 16):
             self.assertIn(f"{n}.", text)
 
     def test_caldav_not_configured_shows_skip(self):
@@ -187,6 +208,56 @@ class PrintReportTest(unittest.TestCase):
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         self.assertTrue(any("SKIP" in ln and "log_file" in ln for ln in lines))
 
+    def test_csp_violations_not_configured_shows_skip(self):
+        lines: list[str] = []
+        cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        text = "\n".join(lines)
+        self.assertIn("CSP violations reported by browsers", text)
+        self.assertIn("[SKIP] [logging].log_file not configured -- not checked", text)
+
+    def test_csp_violations_configured_and_clean_shows_ok(self):
+        raw = _raw(logging={"log_file": str(self.home / "my-booking.log")})
+        with patch("app.cli_checks.check_csp_violations", return_value=[]):
+            lines: list[str] = []
+            cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("OK" in ln and "none in the last" in ln for ln in lines))
+
+    def test_csp_violations_found_are_shown_and_counted(self):
+        raw = _raw(logging={"log_file": str(self.home / "my-booking.log")})
+        with patch("app.cli_checks.check_csp_violations", return_value=[(
+            "CSP violations", "warn", "3 CSP violation report(s) in the last 15 min: 3x blocked-uri='eval' ...",
+        )]):
+            lines: list[str] = []
+            fails, warns = cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("WARN" in ln and "CSP violations" in ln for ln in lines))
+        self.assertGreaterEqual(warns, 1)
+
+    def test_csp_hashes_not_detected_shows_skip(self):
+        with patch("app.cli_checks.check_csp_hashes_deployed", return_value=[]):
+            lines: list[str] = []
+            cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        text = "\n".join(lines)
+        self.assertIn("CSP script hashes deployed", text)
+        self.assertIn("[SKIP] nginx/the matching vhost/its CSP header not detected -- not checked", text)
+
+    def test_csp_hashes_all_present_shows_ok(self):
+        with patch("app.cli_checks.check_csp_hashes_deployed", return_value=[(
+            "CSP script hashes deployed", "ok", "all 10 expected inline <script> hash(es) present",
+        )]):
+            lines: list[str] = []
+            cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("OK" in ln and "CSP script hashes deployed" in ln for ln in lines))
+
+    def test_csp_hashes_missing_is_shown_and_counted(self):
+        with patch("app.cli_checks.check_csp_hashes_deployed", return_value=[(
+            "CSP script hashes deployed", "warn", "1 of 10 inline <script> hash(es) missing -- "
+            "webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT needs 'sha256-AAA=' added",
+        )]):
+            lines: list[str] = []
+            fails, warns = cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertTrue(any("WARN" in ln and "CSP script hashes deployed" in ln for ln in lines))
+        self.assertGreaterEqual(warns, 1)
+
     def test_static_site_dir_group_selinux_findings_are_shown(self):
         with patch("app.cli_checks.check_path_group_and_selinux", return_value=[
             ("static_site_dir group", "warn", "wrong group -- sudo chgrp -R my-booking X"),
@@ -203,6 +274,42 @@ class PrintReportTest(unittest.TestCase):
             lines: list[str] = []
             fails, warns = cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         self.assertTrue(any("WARN" in ln and "data dir SELinux context" in ln for ln in lines))
+        self.assertGreaterEqual(warns, 1)
+
+    def test_no_active_sessions_shows_nothing_extra(self):
+        with patch("app.cli_checks.fetch_active_sessions", return_value=({"sessions": []}, None)):
+            lines: list[str] = []
+            cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        self.assertFalse(any("active session" in ln for ln in lines))
+
+    def test_active_sessions_warn_and_full_overview_are_shown_and_counted(self):
+        # 2026-07-13: plain `my-bt setup` (no -i, never touches the live
+        # process for anything else) now also surfaces this -- a WARN
+        # line for the tally/exit-code, plus the full name/email/session
+        # start/last activity/timeout breakdown right underneath it.
+        payload = {
+            "sessions": [{
+                "kind": "guest", "who": "ines@example.org", "name": "Guest One",
+                "connected_since": "2026-07-13T06:49:00+00:00", "last_seen": "2026-07-13T07:37:00+00:00",
+            }],
+            "session_timeout_seconds": 14400,
+        }
+        # setUpModule's own hermetic default patches check_active_sessions
+        # wholesale (to keep the ~50 unrelated tests in this module from
+        # hitting a real live service) -- override BOTH it and the lower-
+        # level fetch_active_sessions it and print_report() each call, so
+        # this one test sees the interesting scenario end to end.
+        with patch("app.cli_checks.fetch_active_sessions", return_value=(payload, None)), \
+             patch("app.cli_checks.check_active_sessions", return_value=[(
+                 "active sessions", "warn", "1 active session(s) right now (ines@example.org)",
+             )]):
+            lines: list[str] = []
+            fails, warns = cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        text = "\n".join(lines)
+        self.assertTrue(any("WARN" in ln and "active sessions" in ln for ln in lines))
+        self.assertIn("Guest One", text)
+        self.assertIn("ines@example.org", text)
+        self.assertIn("my-bt admin logout", text)
         self.assertGreaterEqual(warns, 1)
 
     def test_returned_counts_match_the_printed_report(self):
@@ -529,6 +636,18 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
             _raw(), self.settings_path, str(self.home),
             prompt=prompt, run=calls.append, is_root=lambda: True,
             print_fn=lambda *_: None,
+            # This class's setUp() deliberately makes check_settings_fresh
+            # report "aren't live yet" (the restart-prompt scenario), which
+            # means interactive_setup() actually reaches the
+            # check_active_sessions() call below it -- left at its real
+            # default, that's a live HTTP GET to
+            # 127.0.0.1:8811/internal/status, so on a host where
+            # my-booking.service is genuinely running (e.g. the RPM
+            # build/install host's own %check) this test's outcome depended
+            # on real, live production session state instead of the fixed
+            # scenario it's meant to test. Inject a fake with zero sessions
+            # so the restart prompt is reached deterministically.
+            check_active_sessions=lambda: (0, None),
         )
         self.assertEqual(len(prompt.asked_matching("usermod")), 1)
         self.assertEqual(len(prompt.asked_matching("Enable+start")), 1)
@@ -551,6 +670,7 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
             _raw(), self.settings_path, str(self.home),
             prompt=prompt, run=calls.append, is_root=lambda: True,
             print_fn=lambda *_: None,
+            check_active_sessions=lambda: (0, None),  # see note above
         )
         self.assertEqual(calls, [])
 
@@ -633,6 +753,73 @@ class InteractiveSetupPathGroupSelinuxTest(unittest.TestCase):
             self._run(prompt, calls, is_root=lambda: True)
         self.assertEqual(prompt.asked_matching("chgrp"), [])
         self.assertEqual(calls, [])
+
+
+def _sessions_payload(*sessions, timeout=14400):
+    return {"sessions": list(sessions), "session_timeout_seconds": timeout}
+
+
+class InteractiveSetupActiveSessionGateTest(unittest.TestCase):
+    """2026-07-13: interactive_setup() now refuses the WHOLE walkthrough
+    outright while anyone's actively logged in, mirroring the RPM's own
+    %pre gate before an upgrade (packaging/my-booking-tool.spec) -- unlike
+    the older, narrower step-6 "Restart my-booking.service now?" guard
+    (InteractiveSetupRestartSessionGuardTest below, unaffected by this),
+    this fires unconditionally, before step 1 even prints, regardless of
+    whether settings.toml is stale."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+
+    def test_active_sessions_refuses_before_any_step_and_asks_nothing(self):
+        payload = _sessions_payload({
+            "kind": "guest", "who": "ines@example.org", "name": "Guest One",
+            "connected_since": "2026-07-13T06:49:00+00:00", "last_seen": "2026-07-13T07:37:00+00:00",
+        })
+        prompt = FakePrompts({}, default=True)
+        printed: list[str] = []
+        with patch("app.cli_checks.fetch_active_sessions", return_value=(payload, None)):
+            fails, warns = cli_setup.interactive_setup(
+                _raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=printed.append,
+            )
+        self.assertEqual(prompt.asked, [])
+        self.assertEqual((fails, warns), (1, 0))
+        text = "\n".join(printed)
+        self.assertIn("1 active session(s)", text)
+        self.assertIn("Guest One", text)
+        self.assertIn("ines@example.org", text)
+        self.assertIn("my-bt admin logout", text)
+        self.assertNotIn("-- 1. Secrets --", text)
+
+    def test_no_sessions_proceeds_normally(self):
+        with patch("app.cli_checks.fetch_active_sessions", return_value=(_sessions_payload(), None)):
+            prompt = FakePrompts({})
+            printed: list[str] = []
+            cli_setup.interactive_setup(
+                _raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=printed.append,
+            )
+        self.assertIn("-- 1. Secrets --", "\n".join(printed))
+
+    def test_unreachable_service_fails_open_same_as_the_rpm_gate(self):
+        with patch("app.cli_checks.fetch_active_sessions", return_value=(None, "Connection refused")):
+            prompt = FakePrompts({})
+            printed: list[str] = []
+            cli_setup.interactive_setup(
+                _raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=printed.append,
+            )
+        self.assertIn("-- 1. Secrets --", "\n".join(printed))
 
 
 class InteractiveSetupRestartSessionGuardTest(unittest.TestCase):
@@ -910,12 +1097,21 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         self.assertFalse((nginx_root / "privacy.html").exists())
 
 
+_SAMPLE_INDEX_HTML = """<html><body>
+<div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
+<div id="schedule-exceptions"></div>
+<ul><li><a href="/book/sat-trier">Book your place here.</a></li></ul>
+<script>(function () { fetch('/my/session', { credentials: 'same-origin' }); })();</script>
+<script>(function () { fetch('/schedule-exceptions', { credentials: 'same-origin' }); })();</script>
+</body></html>
+"""
+
+
 class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
-    """index_embedded.html (2026-07-16) -- optional twin of privacy.html's
-    own regen offer (InteractiveSetupStaticSiteTest above): only ever
-    offered once site/index_embedded.html.tmpl (the real, hand-customized
-    template) actually exists in `home` -- see
-    site/index_embedded.html.tmpl.example's own docstring."""
+    """index_embedded.html (reworked 2026-07-13): no more separate .tmpl
+    file -- DERIVED fresh from the LIVE, just-reconciled index.html at
+    static_site_dir, gated entirely on [site].index_embedded_enabled.
+    Same copy-if-missing/vimdiff-if-different UX as index.html itself."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -931,26 +1127,36 @@ class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
         doc_site_patcher.start()
         self.addCleanup(doc_site_patcher.stop)
 
-    def _write_embedded_tmpl(self):
-        (self.home / "site" / "index_embedded.html.tmpl").write_text(
-            "<html><body>${schedule_exceptions_html}</body></html>"
-        )
+    def _deploy_index_html(self, text=_SAMPLE_INDEX_HTML):
+        (self.static_dir / "index.html").write_text(text, encoding="utf-8")
 
-    def test_no_real_template_is_never_prompted(self):
-        # The .example alone (no real .tmpl) isn't enough to opt in.
+    def test_disabled_is_never_prompted(self):
+        self._deploy_index_html()
         raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
-        prompt = FakePrompts({})
+        prompt = FakePrompts({}, default=True)
         cli_setup.interactive_setup(
             raw, self.settings_path, str(self.home),
             prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
             print_fn=lambda *_: None,
         )
         self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
+        self.assertFalse((self.static_dir / site_render.EMBEDDED_OUTPUT_NAME).exists())
 
-    def test_accepting_regenerates_the_live_page(self):
-        self._write_embedded_tmpl()
-        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
-        prompt = FakePrompts({"Re)generate": True})
+    def test_no_live_index_html_yet_is_skipped_not_an_error(self):
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True}, course=[])
+        prompt = FakePrompts({}, default=True)
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
+        self.assertFalse((self.static_dir / site_render.EMBEDDED_OUTPUT_NAME).exists())
+
+    def test_accepting_copies_the_derived_page(self):
+        self._deploy_index_html()
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True}, course=[])
+        prompt = FakePrompts({"Derive and copy": True})
         cli_setup.interactive_setup(
             raw, self.settings_path, str(self.home),
             prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
@@ -959,11 +1165,33 @@ class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
         out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
         self.assertTrue(out.exists())
         self.assertIn("MANAGED BY my-bt", out.read_text())
+        self.assertNotIn("<script>", out.read_text())
+
+    def test_custom_attention_message_from_raw_settings_is_derived_in(self):
+        # 2026-07-13: [site].custom_attention_message must be read from raw
+        # settings and threaded into the derivation, same as
+        # index_embedded_new_tab_links already is.
+        self._deploy_index_html()
+        raw = _raw(
+            site={
+                "static_site_dir": str(self.static_dir), "index_embedded_enabled": True,
+                "custom_attention_message": "On vacation from 2026-08-01.",
+            },
+            course=[],
+        )
+        prompt = FakePrompts({"Derive and copy": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        self.assertIn("On vacation from 2026-08-01.", out.read_text())
 
     def test_declining_leaves_it_unwritten(self):
-        self._write_embedded_tmpl()
-        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
-        prompt = FakePrompts({"Re)generate": False})
+        self._deploy_index_html()
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True}, course=[])
+        prompt = FakePrompts({"Derive and copy": False})
         cli_setup.interactive_setup(
             raw, self.settings_path, str(self.home),
             prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
@@ -972,16 +1200,16 @@ class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
         self.assertFalse((self.static_dir / site_render.EMBEDDED_OUTPUT_NAME).exists())
 
     def test_not_prompted_when_already_matching(self):
-        self._write_embedded_tmpl()
-        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[])
+        self._deploy_index_html()
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True}, course=[])
         out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
-        site_render.write_index_embedded_html(
-            self.home / "site" / "index_embedded.html.tmpl", (), "2026-07-10", out,
-        )
-        # default=True: would write again if (wrongly) asked+accepted -- also
-        # accepts the unrelated privacy.html regen prompt this fixture's own
-        # site/privacy.html.tmpl triggers, so this asserts specifically on
-        # "no index_embedded.html prompt", not the full (unrelated) call list.
+        derived = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
+        out.write_text(derived, encoding="utf-8")
+        # default=True: would write/vimdiff again if (wrongly) asked+accepted
+        # -- also accepts the unrelated privacy.html regen prompt this
+        # fixture's own site/privacy.html.tmpl triggers, so this asserts
+        # specifically on "no index_embedded.html prompt", not the full
+        # (unrelated) call list.
         prompt = FakePrompts({}, default=True)
         before = out.read_text()
         cli_setup.interactive_setup(
@@ -992,49 +1220,78 @@ class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
         self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
         self.assertEqual(out.read_text(), before)
 
-    def test_new_date_override_triggers_a_regen_offer(self):
-        self._write_embedded_tmpl()
+    def test_stale_deployed_page_offers_vimdiff_against_a_derived_tempfile(self):
+        self._deploy_index_html()
         course = {
-            "shortname": "trier", "title": "Yoga", "location": "Trier", "weekday": "sat",
+            "shortname": "sat-trier", "title": "Yoga", "location": "Trier", "weekday": "sat",
             "start_time": "10:45", "duration_minutes": 120, "capacity": 10,
-            "date_override": [{"date": "2026-07-18", "start_time": "09:45"}],
+            "date_override": [{"date": "2099-01-01", "start_time": "09:45"}],
         }
         out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
-        site_render.write_index_embedded_html(
-            self.home / "site" / "index_embedded.html.tmpl", (), "2026-07-10", out,
-        )  # deployed with NO overrides baked in yet
-        raw = _raw(site={"static_site_dir": str(self.static_dir)}, course=[course])
-        prompt = FakePrompts({"Re)generate": True})
+        # Deployed with NO overrides baked in yet -- stale relative to what
+        # would currently derive.
+        stale = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
+        out.write_text(stale, encoding="utf-8")
+        raw = _raw(
+            site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True},
+            course=[course],
+        )
+        # Read the tmp file's content from INSIDE the fake `run` call --
+        # interactive_setup deletes it right after run() returns (same
+        # cleanup a real, blocking `vimdiff` invocation would want once the
+        # user closes the editor), so it's gone by the time this method
+        # itself returns.
+        captured = {}
+
+        def fake_run(cmd):
+            captured["cmd"] = cmd
+            captured["tmp_content"] = Path(cmd[2]).read_text(encoding="utf-8")
+
+        prompt = FakePrompts({"vimdiff": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=fake_run, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        cmd = captured["cmd"]
+        self.assertEqual(cmd[0], "vimdiff")
+        self.assertEqual(cmd[1], str(out))
+        self.assertIn("ATTENTION", captured["tmp_content"])
+        # And the temp file is cleaned up afterward, not left behind.
+        self.assertFalse(Path(cmd[2]).exists())
+
+    def test_active_maintenance_banner_alone_never_triggers_a_vimdiff_offer(self):
+        # Deployed page matches what would derive EXCEPT for an active
+        # maintenance banner -- must never look like drift needing a merge
+        # (same reasoning as index.html's own maintenance-aware comparison).
+        self._deploy_index_html()
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True}, course=[])
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        derived = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
+        banner = maintenance.banner_html("admin@example.org", "back Monday")
+        out.write_text(maintenance.insert_banner(derived, banner), encoding="utf-8")
+        prompt = FakePrompts({}, default=True)
         cli_setup.interactive_setup(
             raw, self.settings_path, str(self.home),
             prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
             print_fn=lambda *_: None,
         )
-        self.assertIn("ATTENTION", out.read_text())
-
-    def test_regen_preserves_an_active_maintenance_banner(self):
-        self._write_embedded_tmpl()
-        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
-        # Deployed, stale (so a regen is actually offered), WITH an active
-        # maintenance banner already inserted -- the banner must survive
-        # the regen, not get silently dropped by a blind overwrite.
-        stale = site_render.render_index_embedded_html(
-            self.home / "site" / "index_embedded.html.tmpl", (), "2026-06-01",
-        )
-        banner = maintenance.banner_html("admin@example.org", "back Monday")
-        out.write_text(maintenance.insert_banner(stale, banner))
-        raw = _raw(site={"static_site_dir": str(self.static_dir), "admin_email": "admin@example.org"}, course=[])
-        data_dir = self.home / "data"
-        data_dir.mkdir()
-        maintenance.enable(data_dir, message="back Monday")
-        prompt = FakePrompts({"Re)generate": True})
-        cli_setup.interactive_setup(
-            raw, self.settings_path, str(self.home), data_dir=str(data_dir),
-            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
-            print_fn=lambda *_: None,
-        )
+        self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
         self.assertIn("MAINTENANCE-BANNER:START", out.read_text())
-        self.assertIn("back Monday", out.read_text())
+
+    def test_derivation_error_prints_fail_and_never_prompts(self):
+        broken_html = _SAMPLE_INDEX_HTML.replace('href="/my"', 'href="/my-account"')
+        self._deploy_index_html(broken_html)
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True}, course=[])
+        printed = []
+        prompt = FakePrompts({}, default=True)
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=printed.append,
+        )
+        self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
+        self.assertTrue(any("[fail] index_embedded.html" in line for line in printed))
 
 
 class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
@@ -1109,6 +1366,57 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
         # Never auto-written -- vimdiff is what would actually reconcile it.
         self.assertEqual(self.deployed.read_text(), "location /admin { } # deployed")
 
+    def test_accepting_vimdiff_then_reload_reloads_nginx(self):
+        # 2026-07-13, reordered: this used to be TWO separate reload
+        # prompts in one run (step 4's own, firing BEFORE this vimdiff
+        # ever ran, then a second one right after it) -- confusing, and
+        # still let a real run reload nginx with stale content before the
+        # merge below ever happened. Now there's exactly ONE reload
+        # prompt for the whole nginx section, asked at the very end,
+        # after this vimdiff (and any rename) has already had its chance
+        # to change what's on disk -- see nginx_content_changed's own
+        # comment in app/cli_setup.py.
+        self.deployed.write_text("location /admin { } # deployed")
+        (self.home / "site" / "nginx-locations.conf").write_text("location /admin { } # checkout")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"vimdiff": True, "pick up these changes": True})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertTrue(any(c[:2] == ["nginx", "-t"] for c in calls))
+        self.assertTrue(any(c[:2] == ["systemctl", "reload"] for c in calls))
+
+    def test_declining_reload_after_vimdiff_runs_nothing_further(self):
+        self.deployed.write_text("location /admin { } # deployed")
+        (self.home / "site" / "nginx-locations.conf").write_text("location /admin { } # checkout")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"vimdiff": True, "pick up these changes": False})
+        calls: list[list[str]] = []
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=calls.append, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertFalse(any(c[:2] == ["systemctl", "reload"] for c in calls))
+
+    def test_only_one_reload_prompt_is_ever_asked_after_a_vimdiff_merge(self):
+        # The real bug this reordering fixes: there must be exactly ONE
+        # "reload nginx" question in a run that included a vimdiff merge,
+        # not step 4's own plus a second one right after the merge.
+        self.deployed.write_text("location /admin { } # deployed")
+        (self.home / "site" / "nginx-locations.conf").write_text("location /admin { } # checkout")
+        raw = _raw(site={"nginx_conf_path": str(self.deployed)})
+        prompt = FakePrompts({"vimdiff": True, "pick up these changes": True})
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(len(prompt.asked_matching("reload nginx")), 1)
+
     def test_declining_vimdiff_leaves_both_files_alone(self):
         self.deployed.write_text("deployed version")
         (self.home / "site" / "nginx-locations.conf").write_text("checkout version")
@@ -1144,13 +1452,16 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
         nothing was at nginx_conf_path yet, but nginx -T said the vhost was
         still live from elsewhere. The package installer (or
         my-bt setup -i) needed to fix this -- vimdiff to reconcile content
-        first, then a root-gated rename into place, then offer to reload."""
+        first, then a root-gated rename into place, then offer to reload --
+        2026-07-13, reordered: that final reload is now the ONE shared
+        end-of-section prompt, asked once after both the vimdiff merge and
+        the rename have already happened, not a separate prompt per step."""
         old = self.home / "old-etc" / "booking.example.org.conf"
         old.parent.mkdir()
         old.write_text("location /admin { } # old, missing /reinstate")
         (self.home / "site" / "nginx-locations.conf").write_text("location /admin { } # checkout, complete")
         raw = _raw(site={"nginx_conf_path": str(self.deployed)})
-        prompt = FakePrompts({"vimdiff": True, "Rename": True, "pick it up": True})
+        prompt = FakePrompts({"vimdiff": True, "Rename": True, "pick up these changes": True})
         calls: list[list[str]] = []
         with patch("app.cli_checks._live_nginx_conf_file_for_host", return_value=old):
             cli_setup.interactive_setup(
@@ -1258,6 +1569,135 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
                 print_fn=lambda *_: None,
             )
         self.assertEqual(prompt.asked_matching("Rename"), [])
+
+
+class InteractiveSetupCspSelfHealTest(unittest.TestCase):
+    """CSP hash self-heal (2026-07-16, the operator: "can we automate and fix
+    this within the build or setup ... maybe can self-heal?" -- after
+    `my-bt admin setup -i` had only ever warned about a missing hash,
+    never fixed it). The deployed file on disk and the mocked `nginx -T`
+    dump are kept byte-identical in every test here (same convention as
+    tests/test_cli_checks.py::CheckCspHashesDeployedTest) -- the
+    interactive walkthrough reads/patches/writes the real file directly,
+    while check_csp_hashes_deployed()/expected_csp_hashes() go through the
+    mocked `nginx -T`/no static_site_dir, so both need to agree on what's
+    "currently deployed" for these tests to mean anything. Always uses an
+    identical checkout-side site/nginx-locations.conf too, so the
+    unrelated vimdiff-reconciliation step (covered by
+    InteractiveSetupNginxConfDeployedTest above) never fires and adds a
+    confusing extra prompt to these tests."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name)
+        (self.home / "site").mkdir()
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        self.settings_path = str(self.home / "settings.toml")
+        Path(self.settings_path).write_text("x")
+        self.deployed = self.home / "deployed" / "nginx-locations.conf"
+        self.deployed.parent.mkdir()
+        self.expected = cli_checks.expected_csp_hashes({})
+
+    def _conf_text(self, hashes):
+        hash_tokens = " ".join(f"'{h}'" for h in hashes)
+        return (
+            "server {\n"
+            "    server_name booking.example.org;\n"
+            '    add_header Content-Security-Policy "default-src \'self\'; '
+            f"script-src 'self' {hash_tokens}; "
+            'style-src \'self\';" always;\n'
+            "}\n"
+        )
+
+    def _write(self, text):
+        self.deployed.write_text(text)
+        (self.home / "site" / "nginx-locations.conf").write_text(text)
+
+    def _raw(self):
+        return _raw(site={"nginx_conf_path": str(self.deployed), "base_url": "https://booking.example.org"})
+
+    def test_all_hashes_already_present_never_prompts(self):
+        text = self._conf_text(self.expected.values())
+        self._write(text)
+        prompt = FakePrompts({}, default=True)
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": text})()):
+            cli_setup.interactive_setup(
+                self._raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(prompt.asked_matching("add the missing hash"), [])
+
+    def test_declining_leaves_the_file_untouched(self):
+        text = self._conf_text([])
+        self._write(text)
+        prompt = FakePrompts({"add the missing hash": False}, default=True)
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": text})()):
+            cli_setup.interactive_setup(
+                self._raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lambda *_: None,
+            )
+        self.assertEqual(self.deployed.read_text(), text)
+
+    def test_accepting_adds_missing_hashes_when_nginx_test_passes(self):
+        text = self._conf_text([])
+        self._write(text)
+        prompt = FakePrompts({"add the missing hash": True}, default=False)
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": text})()):
+            cli_setup.interactive_setup(
+                self._raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lambda *_: None,
+                run_nginx_test=lambda: True,
+            )
+        patched = self.deployed.read_text()
+        for h in self.expected.values():
+            self.assertIn(f"'{h}'", patched)
+
+    def test_failing_nginx_test_reverts_the_file_and_never_marks_content_changed(self):
+        text = self._conf_text([])
+        self._write(text)
+        prompt = FakePrompts({"add the missing hash": True}, default=False)
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": text})()):
+            cli_setup.interactive_setup(
+                self._raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lambda *_: None,
+                run_nginx_test=lambda: False,
+            )
+        # Reverted -- never left the file in a half-patched/broken state.
+        self.assertEqual(self.deployed.read_text(), text)
+        # And the final reload prompt's wording never claims there's
+        # anything new to pick up, since the revert means nothing actually
+        # changed on disk after all.
+        reload_asks = prompt.asked_matching("systemctl reload nginx")
+        self.assertTrue(all("pick up these changes" not in m for m in reload_asks))
+
+    def test_missing_hash_added_calls_the_injected_nginx_test_runner(self):
+        text = self._conf_text([])
+        self._write(text)
+        prompt = FakePrompts({"add the missing hash": True}, default=False)
+        calls = []
+        with patch("app.cli_checks.shutil.which", return_value="/usr/sbin/nginx"), \
+             patch("app.cli_checks.subprocess.run",
+                   return_value=type("R", (), {"returncode": 0, "stdout": text})()):
+            cli_setup.interactive_setup(
+                self._raw(), self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+                print_fn=lambda *_: None,
+                run_nginx_test=lambda: (calls.append(1) or True),
+            )
+        self.assertEqual(len(calls), 1)
 
 
 class InteractiveSetupCaldavTest(unittest.TestCase):

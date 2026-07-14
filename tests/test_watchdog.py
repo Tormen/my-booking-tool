@@ -6,6 +6,7 @@ from unittest.mock import patch
 from app.storage import STATUS_PENDING_CONFIRMATION, Store
 from app.watchdog import (
     check_app_log_rate_limit_blocks,
+    check_csp_violations,
     check_nginx_bursts,
     check_now,
     check_pending_signup_burst,
@@ -97,6 +98,52 @@ class AppLogRateLimitBlocksTest(unittest.TestCase):
         self.assertEqual(check_app_log_rate_limit_blocks(lines, self.settings, now=NOW), [])
 
 
+class CheckCspViolationsTest(unittest.TestCase):
+    """app.watchdog.check_csp_violations -- threshold-gate + alert-string
+    wrapper around app.cli_checks.find_csp_violations() (see that
+    module's own tests for the parsing itself); this class only tests the
+    gating/wrapping this module adds on top."""
+
+    def setUp(self):
+        self.settings = make_settings(watchdog_csp_violation_threshold=3)
+
+    def _line(self, minute: int, doc: str = "https://booking.example.org/book/trier-sat-yoga") -> str:
+        return (
+            f"2026-07-05 14:{minute:02d}:00,123 WARNING CSP violation report from 1.2.3.4: "
+            f"blocked-uri='eval' violated-directive='script-src' document-uri={doc!r}"
+        )
+
+    def test_below_threshold_is_silent(self):
+        lines = [self._line(50), self._line(51)]
+        self.assertEqual(check_csp_violations(lines, self.settings, now=NOW), [])
+
+    def test_at_threshold_fires_with_grouped_detail(self):
+        lines = [self._line(50), self._line(51), self._line(52)]
+        alerts = check_csp_violations(lines, self.settings, now=NOW)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("3 CSP violation report(s)", alerts[0])
+        self.assertIn("3x", alerts[0])
+        self.assertIn("blocked-uri='eval'", alerts[0])
+
+    def test_zero_threshold_disables_check(self):
+        settings = make_settings(watchdog_csp_violation_threshold=0)
+        lines = [self._line(m) for m in (50, 51, 52)]
+        self.assertEqual(check_csp_violations(lines, settings, now=NOW), [])
+
+    def test_lines_outside_window_do_not_count(self):
+        lines = [self._line(m) for m in (0, 1, 2)]  # > 15 min before NOW=15:00
+        self.assertEqual(check_csp_violations(lines, self.settings, now=NOW), [])
+
+    def test_different_violations_counted_toward_the_same_threshold_but_shown_separately(self):
+        lines = [self._line(50, doc="https://booking.example.org/"), self._line(51, doc="https://booking.example.org/"),
+                  self._line(52, doc="https://booking.example.org/courses")]
+        alerts = check_csp_violations(lines, self.settings, now=NOW)
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("3 CSP violation report(s)", alerts[0])
+        self.assertIn("2x", alerts[0])
+        self.assertIn("1x", alerts[0])
+
+
 class NginxBurstsTest(unittest.TestCase):
     def setUp(self):
         self.settings = make_settings(
@@ -183,7 +230,7 @@ class SshdFailuresTest(unittest.TestCase):
 
 
 class RunWatchdogTest(unittest.TestCase):
-    """Integration across all four checks plus the single combined email."""
+    """Integration across all five checks plus the single combined email."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -194,6 +241,7 @@ class RunWatchdogTest(unittest.TestCase):
             watchdog_rate_limit_block_threshold=100,
             watchdog_nginx_access_log=None,
             watchdog_sshd_failure_threshold=100,
+            watchdog_csp_violation_threshold=100,
         )
 
     def test_clean_run_sends_no_email(self):
@@ -208,6 +256,7 @@ class RunWatchdogTest(unittest.TestCase):
             watchdog_rate_limit_block_threshold=1,
             watchdog_nginx_access_log=None,
             watchdog_sshd_failure_threshold=100,
+            watchdog_csp_violation_threshold=100,
         )
         line = "2026-07-05 14:59:00,000 WARNING rate limit blocked: admin login from 203.0.113.5"
         with patch("app.watchdog.send_mail") as mock_send:
@@ -218,6 +267,29 @@ class RunWatchdogTest(unittest.TestCase):
         self.assertEqual(to_addr, settings.admin_email)
         self.assertIn("watchdog", subject.lower())
         self.assertIn("rate-limiter rejections", body)
+
+    def test_csp_violation_burst_fires_through_run_watchdog(self):
+        # 2026-07-13: run_watchdog() must call check_csp_violations() on
+        # the SAME app_log_lines already passed in for the rate-limit
+        # check above -- not a separate log read.
+        settings = make_settings(
+            watchdog_pending_signup_threshold=100,
+            watchdog_rate_limit_block_threshold=100,
+            watchdog_nginx_access_log=None,
+            watchdog_sshd_failure_threshold=100,
+            watchdog_csp_violation_threshold=2,
+        )
+        lines = [
+            "2026-07-05 14:58:00,000 WARNING CSP violation report from 1.2.3.4: "
+            "blocked-uri='eval' violated-directive='script-src' document-uri='https://booking.example.org/'",
+            "2026-07-05 14:59:00,000 WARNING CSP violation report from 1.2.3.4: "
+            "blocked-uri='eval' violated-directive='script-src' document-uri='https://booking.example.org/'",
+        ]
+        with patch("app.watchdog.send_mail") as mock_send:
+            alerts = run_watchdog(self.store, settings, app_log_lines=lines, now=NOW)
+        self.assertEqual(len(alerts), 1)
+        mock_send.assert_called_once()
+        self.assertIn("CSP violation report(s)", alerts[0])
 
     def test_disabled_watchdog_never_checks_anything(self):
         settings = make_settings(watchdog_enabled=False, watchdog_pending_signup_threshold=1)

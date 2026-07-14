@@ -46,8 +46,15 @@ server {
 
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    # X-Frame-Options deliberately NOT set here -- it can only ever say
+    # "same-origin only" or "deny", with no way to allow one specific OTHER
+    # site to frame this one (ALLOW-FROM is deprecated/unsupported in every
+    # current browser). If you never embed this site via <iframe>
+    # elsewhere, the CSP frame-ancestors 'self' below already gives you the
+    # exact same same-origin-only protection. If you DO embed it elsewhere
+    # (see index_embedded.html in README.md "Static-site pages"), add that
+    # site's origin to frame-ancestors below instead -- REPLACE-ME.
 
     # HARDENING: Content-Security-Policy, ENFORCED (not report-only).
     # Built from an actual audit of every page this app serves (index,
@@ -56,15 +63,15 @@ server {
     #     external scripts/images/frames) - everything is same-origin, so
     #     default-src 'self' is safe as the baseline for everything not
     #     called out below.
-    #   - NINE distinct inline <script> blocks exist site-wide as of this
-    #     app version: index.html's (same-origin fetch() to /my/session
-    #     only), the booking-form validation script shared by all
-    #     /book/<slug> pages, the sortable/filterable-table script shared
-    #     by /my and /admin's own tables, the confirm-dialog wiring script
-    #     shared by /my (Cancel/Reinstate buttons) and /admin (Cancel/
-    #     Reinstate buttons), the submit-feedback script appended to EVERY
-    #     page by app/templates.py::page() (2026-07-11 -- disables every
-    #     button and shows "Please wait..." the instant any form is
+    #   - FIFTEEN distinct inline <script> blocks exist site-wide as of this
+    #     app version: index.html's login-button script (same-origin
+    #     fetch() to /my/session only), the booking-form validation script
+    #     shared by all /book/<slug> pages, the sortable/filterable-table
+    #     script shared by /my and /admin's own tables, the confirm-dialog
+    #     wiring script shared by /my (Cancel/Reinstate buttons) and /admin
+    #     (Cancel/Reinstate buttons), the submit-feedback script appended
+    #     to EVERY page by app/templates.py::page() (2026-07-11 -- disables
+    #     every button and shows "Please wait..." the instant any form is
     #     submitted, so a slow POST doesn't look like nothing happened and
     #     can't be double-submitted from the UI), three more
     #     (2026-07-07, fixing a real CSP violation on /my's
@@ -75,25 +82,95 @@ server {
     #     button id/label/seconds interpolated directly into the script
     #     text, so every render hashed differently and never matched any
     #     fixed allow-list; they're now stable, data-*-attribute-driven
-    #     scripts like the others, one hash apiece -- and one more
+    #     scripts like the others, one hash apiece -- one more
     #     (2026-07-13): /admin's "cancel entire session" checkbox wiring
     #     script (auto-checks every sibling row sharing an occurrence,
     #     greys out their Cancel buttons -- see
-    #     app/webapp.py::_CANCEL_ENTIRE_SESSION_SCRIPT). All nine are
-    #     allow-listed by exact SHA-256 hash below instead of
-    #     'unsafe-inline', so any future/injected inline script that isn't
-    #     byte-identical to these nine is blocked outright. These nine
-    #     hashes match the app as shipped in this repo right now -- if you
-    #     ever hand-edit any of app's inline scripts, regenerate the hashes
-    #     or those pages' scripts will silently stop working (this bit a
-    #     real deployment once -- both /my's and /admin's confirm-dialogs
-    #     went dead with no visible error except a browser-console CSP
-    #     violation).
+    #     app/webapp.py::_CANCEL_ENTIRE_SESSION_SCRIPT) -- and one more
+    #     (2026-07-16, alongside [[course.date_override]]): index.html's
+    #     second script, which fetches /schedule-exceptions and splices in
+    #     the ATTENTION banner for any upcoming date override -- and one
+    #     more (2026-07-13): the booking-form validation script above used
+    #     to interpolate [site].max_guests directly into `var MAX_GUESTS =
+    #     {max_guests};`, so its hash changed with that one setting and
+    #     could never be reliably allow-listed (same class of bug as the
+    #     three lockout-countdown scripts above) -- fixed the same way,
+    #     via a `data-max-guests` attribute on the form read with
+    #     `parseInt(form.dataset.maxGuests, 10)` instead, so the script's
+    #     body (and hash) is now the same regardless of max_guests -- and
+    #     one more (2026-07-13, same day): the schedule-exceptions script
+    #     above was rewritten a SECOND time (combined every exception into
+    #     one box, bulleted, weekday-first, plus a new
+    #     custom_attention_message), and its hash again went stale the
+    #     moment it shipped -- confirmed live via
+    #     `my-bt admin csp-violations` (blocked-uri='inline',
+    #     violated-directive='script-src-elem') -- and one more
+    #     (2026-07-13, same day again): the FIRST run of the new
+    #     app.cli_checks.expected_csp_hashes()/check_csp_hashes_deployed()
+    #     automation (built specifically to catch this class of bug going
+    #     forward -- see below) immediately found that the sortable/
+    #     filterable-table script's own hash had ALSO been stale since
+    #     2026-07-08 or earlier -- confirmed via a real rendered /admin
+    #     page's own script hash not matching anything allow-listed here.
+    #     Nobody had noticed because sort/filter is a nice-to-have, not a
+    #     blocking control, so it silently did nothing on /my and /admin
+    #     for an unknown stretch of time. All thirteen are allow-listed
+    #     by exact SHA-256 hash below instead of 'unsafe-inline', so any
+    #     future/injected inline script that isn't byte-identical to these
+    #     thirteen is blocked outright. These thirteen hashes match the app
+    #     as shipped in this repo right now -- if you ever hand-edit any of
+    #     app's inline scripts, regenerate the hashes (or run
+    #     `my-bt admin health`/`admin setup`, which now checks this
+    #     automatically) or those pages' scripts will silently stop working
+    #     (this bit a real deployment FOUR times now -- both /my's and
+    #     /admin's confirm-dialogs went dead once, the schedule-exceptions
+    #     banner never rendered on two separate occasions, and the sortable/
+    #     filterable-table script went dead for an unknown stretch of time,
+    #     each time with no visible error except a browser-console CSP
+    #     violation -- see the CSP-hash automation work in
+    #     app/cli_checks.py/app/site_render.py meant to catch this class of
+    #     bug automatically going forward).
+    #   - 2026-07-13 (same day, yet again): the booking-form script's hash
+    #     changed once more -- the Login/Sign-up tabs embedded directly on
+    #     /book/<slug> (see app/webapp.py::_login_signup_tabs_html()) meant
+    #     the Name/Email fields, the guest rows, and the ack checkbox all
+    #     moved outside #book-form's own <form>...</form> tags (associated
+    #     back to it via each field's own form="book-form" attribute
+    #     instead, since a <form> can't nest inside another <form> and the
+    #     Login tab needs its own) -- so the script's lookups switched from
+    #     form.querySelector(...) to document.getElementById(...) for
+    #     those fields. New hash ADDED via app.cli_checks.
+    #     expected_csp_hashes() at the time -- old one kept per this
+    #     comment's own "ADD, never replace" rule (rollback safety), which
+    #     is why FOURTEEN hashes are allow-listed below for THIRTEEN
+    #     distinct scripts currently in use -- one of them (this one) has
+    #     two entries, old and new.
+    #   - 2026-07-16: the schedule-exceptions script's "details" link got
+    #     target="_top" added (iframe/SameSite break-out fix -- see
+    #     app/webapp.py::_login_form_html()'s own docstring for the fuller
+    #     reasoning) -- body changed, so its hash did too. New hash ADDED
+    #     via app.cli_checks.expected_csp_hashes() at the time (old one
+    #     kept, same rollback-safety rule). This one was only caught by
+    #     `my-bt admin health` on the LIVE server, after shipping -- the
+    #     existing build-time test (test_example_file_has_every_static_
+    #     script_hash_current) deliberately skips index.html's own scripts,
+    #     since site/index.html.example is a generic placeholder, not real
+    #     content. Added TrackedNginxExampleFileTest::
+    #     test_real_index_html_script_hashes_are_all_in_the_example_conf
+    #     the same day (skips if the real, gitignored site/index.html isn't
+    #     present in the checkout) so this specific gap -- a real script
+    #     body changing without its hash landing here -- fails at
+    #     `python3 -m unittest` time going forward, same as
+    #     check_csp_hashes_deployed() already does for the live server. Now
+    #     FIFTEEN hashes total for THIRTEEN distinct scripts (two of them --
+    #     the booking-form script and this one -- have two entries apiece).
     #   - 2026-07-08: the sortable/filterable-table script's hash changed
     #     again (still the same one shared by /my and /admin) -- added the
     #     data-default-sort="asc"|"desc" on-load behavior (default sort is
     #     now by Date, so the sort arrow is visible on load). Body
-    #     changed, so the hash did too; regenerated and swapped in below.
+    #     changed, so the hash did too -- regenerated at the time, but (see
+    #     the 2026-07-13 note above) NOT actually kept in sync with later
+    #     edits until the automation caught it.
     #   - style-src needs 'unsafe-inline': index.html's script injects new
     #     elements with inline style="..." at runtime (innerHTML), which a
     #     hash/nonce can't cover since the content doesn't exist until the
@@ -103,7 +180,21 @@ server {
     #   - object-src/base-uri/form-action locked to 'none'/'self' as standard
     #     defense-in-depth; nothing in this app needs plugins, a <base> tag,
     #     or cross-origin form submission.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U=' 'sha256-4fhOi4IWLR6Of8C4WDGKPRRA/13iDwHcdyYyfYhM4gk='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none';" always;
+    #   - frame-ancestors 'self' blocks EVERY other site from embedding this
+    #     one via <iframe> -- real clickjacking protection for /my, /admin,
+    #     /book/<slug>'s own state-changing actions, so don't just drop this
+    #     to make an embed "work": if you deliberately embed this site
+    #     elsewhere (see index_embedded.html in README.md "Static-site
+    #     pages"), REPLACE-ME by adding that ONE trusted origin here
+    #     instead, e.g. `frame-ancestors 'self' https://example.org;` --
+    #     keep it a narrow allow-list, not wide open.
+    #   - report-uri: the browser POSTs a JSON violation report to
+    #     /csp-report (app/webapp.py::csp_report, logged at WARNING) any
+    #     time ANY directive above is violated -- lets you see an attempted
+    #     embed from anywhere OTHER than what frame-ancestors allows,
+    #     instead of it silently vanishing into the visitor's own browser
+    #     console.
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U=' 'sha256-4fhOi4IWLR6Of8C4WDGKPRRA/13iDwHcdyYyfYhM4gk=' 'sha256-Nojvq9TThxA2tKREcDyA328Xu3hauXMOQeg3fAoSJhU=' 'sha256-ZZwnrKhKA0ZRtYiEbx4DVIEwKvKJmKGVCb3651zfzWU=' 'sha256-OzxBwiOrVtkkygYzETVZ0IeW1pv4XAQX4IYQ0lhnni8=' 'sha256-d1Afot0vOVf6GWkmy0u8ygfsTmI7G55s8KhyTs1yUck=' 'sha256-utC/goPBYUr8M36sSuJkWW4tqsGZHtL1jgaOoCMTtzc=' 'sha256-K2hZWmwaQRVjZW8AubUIKZFvh7dRx3tweo3EJLOUHJI='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; report-uri /csp-report;" always;
 
     # HARDENING: modern security headers, same low-risk defense-in-depth as
     # the four above. This app never needs camera/mic/geolocation/payment
@@ -144,6 +235,40 @@ server {
     }
 
     location /book/ {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    # index.html's own <script> fetches this (public, read-only JSON --
+    # see app/webapp.py::schedule_exceptions) to render the
+    # schedule-exceptions ATTENTION banner client-side. Real bug hit in
+    # production 2026-07-13: this location block didn't exist at all, so
+    # nginx fell through to trying to serve /schedule-exceptions as a
+    # static file under `root` and 404'd -- the banner could never work
+    # regardless of anything on the app side. Same hardening as every
+    # other proxied location here, nothing weaker.
+    location /schedule-exceptions {
+        proxy_pass http://127.0.0.1:8811;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+    }
+
+    # The browser's own CSP violation-report target (see this server
+    # block's report-uri directive above and app/webapp.py::csp_report) --
+    # POST-only, unauthenticated by design (it's the browser reporting on
+    # itself). Same hardening as every other proxied location here: a
+    # malicious flood of fake reports is still rate-limited/connection-
+    # capped like anything else.
+    location /csp-report {
         proxy_pass http://127.0.0.1:8811;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

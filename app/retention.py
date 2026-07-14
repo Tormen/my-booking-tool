@@ -23,8 +23,9 @@ row, same as any other).
 
 2026-07-09: send_account_deletion_warnings() below (run from the same
 nightly timer, right after run_purge() in main()) emails a dormant account
-ONE warning as it approaches `retention_months` of inactivity (User.
-last_login_at, falling back to created_at) -- see that function's own
+ONE warning as it approaches `retention_months` of inactivity (their last login,
+account creation, or -- 2026-07-14, review finding B2 -- the most recent
+booking they made; see account_activity_date()) -- see that function's own
 docstring for the full story.
 
 2026-07-14, closing the gap flagged above: this must apply regardless of
@@ -105,25 +106,67 @@ def registration_purge_date(reg: Registration, settings: Settings) -> date:
     return expiry
 
 
-def account_deletion_date(user: User, settings: Settings) -> date | None:
+def latest_registration_dates(store: Store) -> dict[str, str]:
+    """{user_id: most recent registered_at ISO string} across every
+    registration row (live + archived, any status) -- the "they booked
+    something" half of account_activity_date() below. Computed once per
+    run by each caller (one CSV read), then passed per-user, rather than
+    re-scanning registrations.csv once per account."""
+    latest: dict[str, str] = {}
+    for r in store.read_registrations(scope="all"):
+        uid, registered = r.get("user_id", ""), r.get("registered_at", "")
+        if uid and registered and registered > latest.get(uid, ""):
+            latest[uid] = registered
+    return latest
+
+
+def account_activity_date(user: User, latest_registration_at: str = "") -> date | None:
+    """The date of this account's most recent real activity: the LATEST of
+    last_login_at, created_at, and the most recent booking they made
+    (`latest_registration_at`, from latest_registration_dates() above).
+
+    2026-07-14 (repo-wide review, finding B2): bookings didn't count as
+    activity before -- only logins did. But a regular who books week by
+    week through the booking form never touches /my at all (a confirmed
+    email books instantly, no login -- see app/webapp.py::book), so
+    last_login_at stays blank forever: after retention_months from
+    created_at, purge_dormant_accounts() erased an ACTIVELY-BOOKING guest
+    and force-canceled their future confirmed bookings. Making a booking
+    is unambiguous activity, so it now resets the dormancy clock exactly
+    like a login does.
+
+    None if there's no timestamp at all to project from (shouldn't happen
+    in practice -- created_at is always set -- but a listing/purge job
+    should skip rather than crash on a corrupted/hand-edited row)."""
+    candidates = []
+    for iso in (user.last_login_at, user.created_at, latest_registration_at):
+        if not iso:
+            continue
+        try:
+            candidates.append(datetime.fromisoformat(iso).date())
+        except ValueError:
+            continue
+    return max(candidates) if candidates else None
+
+
+def account_deletion_date(
+    user: User, settings: Settings, latest_registration_at: str = "",
+) -> date | None:
     """The date `user`'s account reaches `retention_months` of inactivity,
-    projected forward from their last real activity -- User.last_login_at,
-    falling back to created_at if they've never logged back in since (see
-    send_account_deletion_warnings()'s own docstring, "Inactive... Last
-    login should count"). None if there's no activity timestamp at all to
-    project from (shouldn't happen in practice -- created_at is always set
-    -- but a listing/purge job should skip rather than crash on a
-    corrupted/hand-edited row).
+    projected forward from their last real activity -- see
+    account_activity_date() above for what counts as activity (last
+    login, account creation, or -- 2026-07-14, review finding B2 -- the
+    most recent booking they made). None if there's no activity
+    timestamp at all to project from.
 
     Shared by send_account_deletion_warnings() (the courtesy notice),
     purge_dormant_accounts() (the actual enforcement), and `my-bt admin
     gdpr accounts`'s listing, so all three always agree on exactly the
     same date for the same account -- no drift between "you were warned
     this would happen on X" and "it actually happened on Y"."""
-    reference_iso = user.last_login_at or user.created_at
-    if not reference_iso:
+    reference_date = account_activity_date(user, latest_registration_at)
+    if reference_date is None:
         return None
-    reference_date = datetime.fromisoformat(reference_iso).date()
     return _months_from(reference_date, settings.retention_months)
 
 
@@ -213,18 +256,21 @@ def send_account_deletion_warnings(
     today = today or datetime.now(timezone.utc).date()
     site = urlparse(settings.base_url).hostname or settings.base_url
     my_url = f"{settings.base_url}/my"
+    latest_reg = latest_registration_dates(store)
     warned = 0
     for row in store.read_users(scope="live"):
         user = User(**row)
         if user.deletion_warning_sent_at:
             continue
-        deletion_date = account_deletion_date(user, settings)
+        deletion_date = account_deletion_date(user, settings, latest_reg.get(user.user_id, ""))
         if deletion_date is None:
             continue
         days_left = (deletion_date - today).days
         if days_left < 0 or days_left > settings.account_deletion_warning_days:
             continue
-        reference_date = datetime.fromisoformat(user.last_login_at or user.created_at).date()
+        # Same reference the deletion date itself was projected from --
+        # logins AND bookings both count (see account_activity_date).
+        reference_date = account_activity_date(user, latest_reg.get(user.user_id, ""))
         send_mail(
             settings, user.email, f"Your {site} account will be deleted soon",
             f"Dear {user.name},\n\n"
@@ -270,10 +316,11 @@ def purge_dormant_accounts(
 
     Returns how many accounts were erased."""
     today = today or datetime.now(timezone.utc).date()
+    latest_reg = latest_registration_dates(store)
     purged = 0
     for row in store.read_users(scope="live"):
         user = User(**row)
-        deadline = account_deletion_date(user, settings)
+        deadline = account_deletion_date(user, settings, latest_reg.get(user.user_id, ""))
         if deadline is None or deadline > today:
             continue
         if erase_user_by_email(store, settings, user.email, today=today, caldav=caldav):
@@ -305,9 +352,10 @@ def account_deletion_counts_by_month(store: Store, settings: Settings) -> dict[s
     activity timestamp to project from (see that function's own
     docstring for why that's possible in principle)."""
     counts: dict[str, int] = {}
+    latest_reg = latest_registration_dates(store)
     for row in store.read_users(scope="live"):
         user = User(**row)
-        deadline = account_deletion_date(user, settings)
+        deadline = account_deletion_date(user, settings, latest_reg.get(user.user_id, ""))
         if deadline is None:
             continue
         month = deadline.strftime("%Y-%m")

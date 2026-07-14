@@ -168,6 +168,49 @@ capacity = 10
         )
 
 
+class LoadSettingsIndexEmbeddedTest(LoadSettingsCourseOrderTest):
+    """[site].index_embedded_enabled / index_embedded_new_tab_links
+    (2026-07-13) -- off/on-by-default when the keys are simply omitted
+    (the common case: most deployments never touch either). Subclasses
+    LoadSettingsCourseOrderTest purely to reuse its setUp() (secret files)
+    -- same established pattern LoadSettingsDateOverrideTest below already
+    uses."""
+
+    def _write_with_site_extra(self, extra_site_lines: str) -> Path:
+        toml_path = self.dir / "settings.toml"
+        header = MINIMAL_HEADER.format(
+            caldav_password_file=self.caldav_password_file,
+            smtp_password_file=self.smtp_password_file,
+            admin_password_hash_file=self.admin_password_hash_file,
+            erasure_pepper_file=self.erasure_pepper_file,
+        )
+        header = header.replace(
+            'base_url = "https://example.org"',
+            'base_url = "https://example.org"\n' + extra_site_lines,
+        )
+        toml_path.write_text(header)
+        return toml_path
+
+    def test_defaults_when_keys_omitted(self):
+        toml_path = self._write_with_site_extra("")
+        settings = load_settings(toml_path)
+        self.assertFalse(settings.index_embedded_enabled)
+        self.assertTrue(settings.index_embedded_new_tab_links)
+
+    def test_enabled_true_is_parsed(self):
+        toml_path = self._write_with_site_extra("index_embedded_enabled = true\n")
+        settings = load_settings(toml_path)
+        self.assertTrue(settings.index_embedded_enabled)
+
+    def test_new_tab_links_false_is_parsed(self):
+        toml_path = self._write_with_site_extra(
+            "index_embedded_enabled = true\nindex_embedded_new_tab_links = false\n"
+        )
+        settings = load_settings(toml_path)
+        self.assertTrue(settings.index_embedded_enabled)
+        self.assertFalse(settings.index_embedded_new_tab_links)
+
+
 class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
     """2026-07-07: the reminders (list) became a setting, defaulting
     to NO reminders (trainer's own CalDAV event) / invites to course

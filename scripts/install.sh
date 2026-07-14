@@ -57,6 +57,19 @@ else
   echo "  vimdiff /opt/my-booking/site/privacy.html.tmpl $HERE/site/privacy.html.tmpl"
 fi
 
+# Email templates: the built-in fallback directory app/email_templates.py
+# reads (/opt/my-booking/email_templates) when [site].email_templates_folder
+# isn't set. 2026-07-14 (review finding G1): this script never installed
+# them at all -- the RPM always did -- so EVERY email send on an
+# install.sh-installed system raised FileNotFoundError. Copy-if-missing
+# per file, mirroring the RPM's %config(noreplace) treatment: a template
+# you've customized in place is never overwritten.
+install -d -m 755 /opt/my-booking/email_templates
+for tmpl in "$HERE"/email_templates/*.txt "$HERE"/email_templates/*.html; do
+  dest="/opt/my-booking/email_templates/$(basename "$tmpl")"
+  [ -f "$dest" ] || install -m 644 "$tmpl" "$dest"
+done
+
 install -d -m 750 -o my-booking -g my-booking /var/lib/my-booking
 install -d -m 700 -o my-booking -g my-booking /etc/my-booking/secrets
 # Always the tracked, generic settings.toml.example -- see the matching

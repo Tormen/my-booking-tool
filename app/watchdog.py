@@ -16,7 +16,7 @@ exist:
     the watchdog's sshd/nginx checks are deliberately cruder and sitewide,
     an early "something's going on" signal rather than a ban mechanism.
 
-Four independent signals, each optional (a None/0 threshold or missing
+Five independent signals, each optional (a None/0 threshold or missing
 log path skips that check silently):
 
   - nginx access log: one IP making an unusually large number of requests,
@@ -28,6 +28,16 @@ log path skips that check silently):
   - the app's own log: a burst of rate-limiter rejections (login/reset),
     across all keys combined -- see the log.warning() calls in
     app/webapp.py at each login_limiter.allow() rejection.
+  - the app's own log, again (2026-07-13): CSP violation reports (see
+    app/webapp.py::csp_report) -- most often a stale CSP script-src hash
+    after an inline <script> edit, occasionally a genuine embed/injection
+    attempt from outside the allow-listed frame-ancestors origin. The
+    actual log-parsing lives in app.cli_checks.find_csp_violations() (also
+    used, unconditionally/un-thresholded, by `my-bt health`/`admin setup`
+    and `my-bt admin csp-violations`) -- check_csp_violations() below is
+    just this module's threshold-gate + alert-string wrapper around that
+    same shared function, so the operator no longer has to click through every
+    page by hand after a script edit to notice a stale hash.
   - storage.py: a burst of brand-new pending_confirmation registrations
     (see STATUS_PENDING_CONFIRMATION) -- the shape a capacity-grab attempt
     against the account-confirmation flow would take, since a real
@@ -50,6 +60,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
+from . import cli_checks
 from .config import Settings
 from .emailer import send_mail
 from .storage import STATUS_PENDING_CONFIRMATION, Store
@@ -74,12 +85,6 @@ _MAX_NGINX_SAMPLES_PER_IP = 20
 # indirection that lets it confirm ban status without elevated privileges.
 _FAIL2BAN_BANNED_IPS_FILE = "/var/lib/my-booking/fail2ban-banned-ips.txt"
 
-# Matches the leading "%(asctime)s %(levelname)s ..." (or, in DEBUG mode,
-# "%(asctime)s %(levelname)s %(name)s: ...") produced by
-# app/logutil.py::configure_logging -- asctime's default format is
-# "YYYY-MM-DD HH:MM:SS,mmm".
-_APP_LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}")
-
 # nginx's default combined log format:
 # '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent ...'
 _NGINX_LINE_RE = re.compile(
@@ -88,16 +93,6 @@ _NGINX_LINE_RE = re.compile(
 
 # e.g. "05/Jul/2026:14:32:10 +0200"
 _NGINX_TIME_FMT = "%d/%b/%Y:%H:%M:%S %z"
-
-
-def _parse_app_log_timestamp(line: str) -> datetime | None:
-    m = _APP_LOG_TIMESTAMP_RE.match(line)
-    if not m:
-        return None
-    try:
-        return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
 
 
 def _parse_nginx_timestamp(raw: str) -> datetime | None:
@@ -159,7 +154,7 @@ def check_app_log_rate_limit_blocks(
     for line in lines:
         if "rate limit blocked:" not in line:
             continue
-        ts = _parse_app_log_timestamp(line)
+        ts = cli_checks.parse_app_log_timestamp(line)
         if ts is not None and ts >= since:
             count += 1
     if count >= settings.watchdog_rate_limit_block_threshold:
@@ -247,6 +242,34 @@ def check_sshd_failures(lines: Iterable[str], settings: Settings) -> list[str]:
     return []
 
 
+def check_csp_violations(
+    lines: Iterable[str], settings: Settings, now: datetime | None = None
+) -> list[str]:
+    """CSP violation reports (app/webapp.py::csp_report) within the
+    window, sitewide -- most often a stale CSP script-src hash after an
+    inline <script> edit (see the real incidents in
+    site/nginx-locations.conf.example's own CSP comment), occasionally a
+    genuine embed/injection attempt from outside the allow-listed
+    frame-ancestors origin. Parsing itself lives in
+    app.cli_checks.find_csp_violations() -- this is just the
+    threshold-gate + alert-string wrapper around that SAME shared
+    function, not a second copy of the log-parsing (see `my-bt health`'s
+    app.cli_checks.check_csp_violations(), which surfaces the identical
+    grouped data unconditionally, and `my-bt admin csp-violations` for
+    the full, ungrouped detail)."""
+    if settings.watchdog_csp_violation_threshold <= 0:
+        return []
+    violations = cli_checks.find_csp_violations(lines, settings.watchdog_window_minutes, now=now)
+    total = sum(n for n, _ in violations)
+    if total < settings.watchdog_csp_violation_threshold:
+        return []
+    detail = "\n".join(f"  - {n}x {d}" for n, d in violations)
+    return [
+        f"{total} CSP violation report(s) in the last {settings.watchdog_window_minutes} min "
+        f"(threshold {settings.watchdog_csp_violation_threshold}), grouped:\n{detail}"
+    ]
+
+
 def run_watchdog(
     store: Store,
     settings: Settings,
@@ -266,6 +289,7 @@ def run_watchdog(
     alerts: list[str] = []
     alerts += check_pending_signup_burst(store, settings, now=now)
     alerts += check_app_log_rate_limit_blocks(app_log_lines, settings, now=now)
+    alerts += check_csp_violations(app_log_lines, settings, now=now)
     alerts += check_nginx_bursts(nginx_log_lines, settings, now=now, banned_ips=banned_ips)
     alerts += check_sshd_failures(sshd_log_lines, settings)
     if alerts:

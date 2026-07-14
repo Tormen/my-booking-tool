@@ -198,24 +198,6 @@ install -m 644 site/nginx-locations.conf.example %{buildroot}/opt/my-booking/sit
 # the one place.
 install -m 644 nginx/my-booking.conf %{buildroot}/opt/my-booking/site/my-booking.conf.example
 
-# index_embedded.html.tmpl (2026-07-16) -- an OPTIONAL twin of
-# privacy.html.tmpl above: a no-JavaScript variant of the homepage, meant
-# for embedding this site via <iframe> on another site (see
-# site/index_embedded.html.tmpl.example's own docstring). Unlike
-# privacy.html.tmpl/nginx-locations.conf above, this is NOT forced into
-# existence by scripts/build-rpm.sh's materialize-from-.example step, and
-# deliberately not packaged here as a real %config(noreplace) file either
-# -- most deployments don't need an iframe-embeddable variant at all, and
-# packaging a generic, auto-materialized real copy for every install would
-# make every fresh install look "opted in" to app/cli_checks.py::
-# check_index_embedded_drift, nagging operators who never asked for this.
-# Only the tracked .example starting point is shipped here; a deployment
-# that DOES want this feature places its own real
-# /opt/my-booking/site/index_embedded.html.tmpl directly (`my-bt setup -i`
-# picks it up regardless of whether rpm itself put it there -- see
-# README.md "Static-site pages").
-install -m 644 site/index_embedded.html.tmpl.example %{buildroot}/opt/my-booking/site/index_embedded.html.tmpl.example
-
 install -d %{buildroot}%{_sharedstatedir}/my-booking
 
 install -d %{buildroot}%{_docdir}/%{name}
@@ -228,12 +210,16 @@ install -m 644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 # the site/*.html below (real if you have them, else the generic
 # .example placeholders -- see scripts/build-rpm.sh) get shipped.
 #
-# site/index_embedded.html (2026-07-16) is included here unconditionally --
-# unlike its own .tmpl above, the RENDERED output always exists by the time
-# %install runs regardless of whether a real .tmpl was ever created:
-# scripts/render-site.py falls back to index_embedded.html.tmpl.example the
-# same way it already does for privacy.html.tmpl, so this is exactly as
-# safe as the other reference copies on this line.
+# site/index_embedded.html is included here unconditionally -- it's
+# DERIVED straight from site/index.html itself (real or .example, same
+# resolve_real_or_example() fallback scripts/render-site.py already uses
+# for privacy.html.tmpl -- see app.site_render.derive_index_embedded_html's
+# own docstring), so the rendered output always exists by the time
+# %install runs, exactly as safe as the other reference copies on this
+# line. Whether a deployment actually USES this page at all is a runtime
+# choice (see [site].index_embedded_enabled in settings.toml.example) --
+# packaging the %doc reference copy unconditionally doesn't opt anyone
+# into anything.
 install -d %{buildroot}%{_docdir}/%{name}/site
 install -m 644 site/index.html site/privacy.html site/terms.html site/impressum.html site/index_embedded.html %{buildroot}%{_docdir}/%{name}/site/
 
@@ -254,13 +240,25 @@ getent passwd my-booking >/dev/null || \
 # isn't running at all, or the OLD my-bt predates that line's exact
 # wording (nothing to grep -> $sessions empty), this fails OPEN -- only
 # an actual reported count > 0 blocks the transaction.
+#
+# 2026-07-13: capture `my-bt status`'s full output ONCE (rather than
+# throwing it away and just hand-writing a 3-line message on refusal) --
+# it already has the exact same "logged-in users" overview (name/email/
+# session start/last activity/timeout, see app.cli_checks.
+# active_sessions_rows) `my-bt setup`'s own active-session gate/warning
+# shows, so reusing it verbatim here means this message can never drift
+# out of sync with that one -- one rendering, not two.
 if [ "$1" -ge 2 ] 2>/dev/null && [ -x /usr/local/bin/my-bt ]; then
-  sessions=$(/usr/local/bin/my-bt status 2>/dev/null \
+  status_output=$(/usr/local/bin/my-bt status 2>/dev/null)
+  sessions=$(echo "$status_output" \
     | sed -n 's/^active sessions[[:space:]]*: *\([0-9][0-9]*\).*/\1/p')
   if [ -n "$sessions" ] && [ "$sessions" -gt 0 ] 2>/dev/null; then
-    echo "my-booking-tool: refusing to upgrade -- $sessions active" >&2
-    echo "session(s) right now. Wait for them to log out/expire" >&2
-    echo "(see \`my-bt status\`), or re-run once nobody's logged in." >&2
+    echo "my-booking-tool: refusing to upgrade -- $sessions active session(s) right now:" >&2
+    echo "" >&2
+    echo "$status_output" | sed -n '/^logged-in users:/,$p' >&2
+    echo "" >&2
+    echo "Wait for them to log out/expire, or force-clear them yourself with the" >&2
+    echo "command above, then re-run this upgrade." >&2
     exit 1
   fi
 fi
@@ -402,7 +400,6 @@ exit 0
 %config(noreplace) /opt/my-booking/site/nginx-locations.conf
 /opt/my-booking/site/nginx-locations.conf.example
 /opt/my-booking/site/my-booking.conf.example
-/opt/my-booking/site/index_embedded.html.tmpl.example
 %config(noreplace) /etc/my-booking/settings.toml
 /etc/my-booking/settings.toml.example
 %dir %attr(700,my-booking,my-booking) /etc/my-booking/secrets

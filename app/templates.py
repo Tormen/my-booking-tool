@@ -75,8 +75,10 @@ def page(title: str, body: str, banner: str = "") -> str:
     and the "+ Add participant" link below) -- previously neither class had ANY CSS at
     all, so a guest row was just three bare, unboxed form fields blending
     into the main "Your email" field above and the "+ Add participant"
-    link below. .guests-section now gets a top border + padding to set
-    the whole guest block apart from the main guest's own fields;
+    link below. .guests-section now gets a bottom border + padding
+    (2026-07-14: was a TOP border, flipped so the "+ Add participant"
+    link sits ABOVE the separator line, with the acknowledge checkbox
+    and Book button below it) to set the whole guest block apart;
     .guest-row boxes each individual guest's email+name+"Remove
     participant" together like a mini-card, so it reads as one group.
     See app/webapp.py's _book_page() guest-rows script, which is where
@@ -160,8 +162,10 @@ label{{display:block;margin-top:.6em}}
 .date-btn > span{{padding:.5em .8em;border:1px solid #ccc;border-radius:6px;cursor:pointer;text-align:center;line-height:1.3}}
 .date-btn .d-date{{font-style:italic}}
 .date-btn .d-spots{{color:#666;margin-top:.1em;font-style:italic}}
+.date-btn .d-override-time{{color:#b45f06;font-weight:bold;margin-top:.1em}}
 .date-btn input:checked + span{{background:#196B24;color:#fff;border-color:#196B24}}
 .date-btn input:checked + span .d-spots{{color:#dff0e2}}
+.date-btn input:checked + span .d-override-time{{color:#ffd54f}}
 .date-btn input:focus-visible + span{{outline:2px solid #196B24;outline-offset:1px}}
 .date-badge>span{{cursor:default;background:#f2f2f2;color:#888;position:relative;overflow:hidden}}
 .date-badge .ribbon{{position:absolute;top:.6em;right:-3.2em;width:11em;transform:rotate(45deg);
@@ -171,7 +175,7 @@ label{{display:block;margin-top:.6em}}
 .description{{background:#fdf8ef;border:1px solid #eee0c0;border-radius:8px;padding:1em 1.2em;margin:.8em 0}}
 .description ul,.description ol{{margin:.4em 0;padding-left:1.4em}}
 .description p:first-child{{margin-top:0}} .description p:last-child{{margin-bottom:0}}
-.guests-section{{margin-top:1.2em;padding-top:1em;border-top:1px solid #ddd}}
+.guests-section{{margin-bottom:1.2em;padding-bottom:1em;border-bottom:1px solid #ddd}}
 .guest-row{{border:1px solid #ddd;border-radius:8px;padding:.8em 1em .6em;margin-bottom:.8em}}
 .guest-row label{{margin-top:.4em}} .guest-row label:first-child{{margin-top:0}}
 .guest-row .remove-guest-btn{{display:inline-block;margin-top:.6em}}
@@ -192,10 +196,19 @@ th{{user-select:none;white-space:nowrap}}
 .tab-panel{{display:none;padding-top:.2em}}
 #my-tab-login:checked ~ #my-panel-login{{display:block}}
 #my-tab-signup:checked ~ #my-panel-signup{{display:block}}
+/* 2026-07-13: same Login/Sign-up tab-switcher, embedded a second time on
+   /book/<shortname> (see App._login_signup_tabs_html()'s own docstring)
+   -- "book" gets its own ID-namespaced pair of rules rather than sharing
+   /my's literal IDs, even though only one of the two is ever rendered
+   in a given response. */
+#book-tab-login:checked ~ #book-panel-login{{display:block}}
+#book-tab-signup:checked ~ #book-panel-signup{{display:block}}
 .tab-labels{{display:flex;border-bottom:1px solid #ddd;margin-top:.6em}}
 .tab-label{{padding:.5em 1.2em;cursor:pointer;color:#555;border-bottom:2px solid transparent;margin-bottom:-1px}}
 #my-tab-login:checked ~ .tab-labels label[for="my-tab-login"],
-#my-tab-signup:checked ~ .tab-labels label[for="my-tab-signup"]{{color:#196B24;border-bottom-color:#196B24;font-weight:bold}}
+#my-tab-signup:checked ~ .tab-labels label[for="my-tab-signup"],
+#book-tab-login:checked ~ .tab-labels label[for="book-tab-login"],
+#book-tab-signup:checked ~ .tab-labels label[for="book-tab-signup"]{{color:#196B24;border-bottom-color:#196B24;font-weight:bold}}
 </style></head><body>
 {banner}
 <h1>{esc(title)}</h1>

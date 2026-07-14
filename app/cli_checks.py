@@ -15,18 +15,31 @@ the maintainer's local notes).
 """
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import urlparse
 
 from . import config, maintenance, site_render
 from .caldav_client import CalDAVClient, HttpTransport
 
 Check = tuple[str, str, str]  # (label, "ok"|"warn"|"fail", detail)
+
+# Same env-var-with-localhost-default convention as scripts/my-bt's own
+# DEFAULT_INTERNAL_URL and app.cli_setup's own _DEFAULT_INTERNAL_URL --
+# this is an internal, always-loopback listener, not something
+# deployments realistically reconfigure per-command.
+_DEFAULT_INTERNAL_URL = os.environ.get("MY_BOOKING_INTERNAL_URL", "http://127.0.0.1:8811")
 
 
 def summarize_problems(checks: list[Check]) -> list[str]:
@@ -574,6 +587,18 @@ def check_selinux() -> list[Check]:
 _REQUIRED_NGINX_LOCATIONS = (
     "/courses", "/book/", "/cancel/", "/reinstate/", "/host-cancel/", "/host-reinstate/",
     "/host-cancel-occurrence/", "/my", "/admin",
+    # 2026-07-13: added after a real production gap -- this location block
+    # didn't exist at all, so GET /schedule-exceptions (index.html's own
+    # <script> fetches this to render the ATTENTION banner -- see
+    # app/webapp.py::schedule_exceptions) fell through to nginx trying to
+    # serve it as a static file and 404ing, and nothing here caught it.
+    "/schedule-exceptions",
+    # 2026-07-13: the browser's own CSP violation-report target (see
+    # site/nginx-locations.conf.example's report-uri directive and
+    # app/webapp.py::csp_report) -- added alongside the frame-ancestors
+    # fix for the same real production incident, so a report POST has
+    # somewhere to land instead of also 404ing at the nginx level.
+    "/csp-report",
 )
 
 
@@ -894,6 +919,61 @@ def _nginx_access_log_for_host(raw: dict) -> str | None:
     return None
 
 
+_ERROR_LOG_RE = re.compile(r"^[ \t]*error_log[ \t]+([^\s;]+)(?:[ \t]+[^\s;]+)*[ \t]*;", re.MULTILINE)
+# Mirrors _ACCESS_LOG_RE above exactly (same real 2026-07-10 bug/fix this
+# comment there explains applies here too -- confined to [ \t] and `;`
+# excluded from every captured/skipped token).
+
+
+def _nginx_error_log_for_host(raw: dict) -> str | None:
+    """Live `error_log` path for the vhost matching `[site].base_url`'s
+    hostname -- mirrors _nginx_access_log_for_host() exactly, for
+    error_log instead of access_log. Added 2026-07-13 for `my-bt admin
+    health report`/`errors` (see health_report_log_sources() below);
+    nginx's error_log has no "off" spelling (unlike access_log), so
+    that's not excluded here."""
+    merged = _live_nginx_config(raw)
+    if merged is None:
+        return None
+    block = _matching_server_block(raw, merged)
+    for text in filter(None, (block, _strip_server_blocks(merged))):
+        m = _ERROR_LOG_RE.search(text)
+        if m and not m.group(1).startswith("syslog:"):
+            return m.group(1)
+    return None
+
+
+def _nginx_global_access_log(raw: dict) -> str | None:
+    """nginx's own http-level `access_log` -- the one OUTSIDE any
+    `server {}` block, covering every vhost on this box, not just the one
+    matching `[site].base_url` (that's `_nginx_access_log_for_host()`
+    above). Distinct on purpose: a problem can show up in nginx's global
+    log (or another vhost's traffic on the same box) that would never
+    appear in the booking.example.org-specific one, and `my-bt admin health
+    report`/`errors` (the operator's own explicit ask: "this includes nginx
+    global logs, nginx yoga logs, my-bt logs and anything else...") wants
+    both, not just the vhost-specific one the watchdog's burst check
+    already covers."""
+    merged = _live_nginx_config(raw)
+    if merged is None:
+        return None
+    m = _ACCESS_LOG_RE.search(_strip_server_blocks(merged))
+    if m and m.group(1) not in ("off",) and not m.group(1).startswith("syslog:"):
+        return m.group(1)
+    return None
+
+
+def _nginx_global_error_log(raw: dict) -> str | None:
+    """Mirrors _nginx_global_access_log() above, for error_log."""
+    merged = _live_nginx_config(raw)
+    if merged is None:
+        return None
+    m = _ERROR_LOG_RE.search(_strip_server_blocks(merged))
+    if m and not m.group(1).startswith("syslog:"):
+        return m.group(1)
+    return None
+
+
 def _looks_like_combined_log_format(path_str: str) -> bool | None:
     """Spot-checks the first non-empty line of an access log against
     app.watchdog's own combined-format parser -- surfaced only as a soft
@@ -1097,6 +1177,112 @@ def check_rpmnew(paths: list[str]) -> list[Check]:
     return checks
 
 
+def fetch_active_sessions(internal_url: str = _DEFAULT_INTERNAL_URL) -> tuple[dict | None, str | None]:
+    """GETs {internal_url}/internal/status (see app/webapp.py::
+    internal_status) directly and returns the RAW payload -- not just a
+    session count (see check_active_sessions() below for that) -- so a
+    caller can show WHO is logged in, since when, and how long they have
+    left with no further activity, not just how many. Returns (payload,
+    error): exactly one set, same fail-open contract used everywhere
+    session-awareness matters in this project (the RPM's own %pre gate,
+    app.cli_setup._default_check_active_sessions) -- an unreachable
+    service means nothing is running to protect, not a reason to
+    refuse."""
+    url = internal_url.rstrip("/") + "/internal/status"
+    try:
+        with urllib.request.urlopen(url, timeout=3) as resp:  # noqa: S310 - fixed http://127.0.0.1 URL
+            return json.loads(resp.read().decode("utf-8")), None
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return None, str(exc)
+
+
+def format_session_timeout(seconds: int | None) -> str:
+    """Human label for SESSION_TTL_SECONDS (app/webapp.py) -- e.g. "4h" or
+    "1h30m" -- the fixed inactivity window after which a session with no
+    new activity is gone. Same value for every session (it isn't tracked
+    per-session), shown per-row anyway to match how the overview table
+    below was asked for."""
+    if not seconds:
+        return "?"
+    hours, rem = divmod(int(seconds), 3600)
+    minutes = rem // 60
+    return f"{hours}h{minutes:02d}m" if minutes else f"{hours}h"
+
+
+def _fmt_session_ts(iso: str | None) -> str:
+    if not iso:
+        return "(none yet)"
+    try:
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return iso
+
+
+def active_sessions_rows(payload: dict) -> list[dict]:
+    """Shapes /internal/status's raw "sessions" list into the one row
+    shape every active-sessions view in this project shows -- `my-bt
+    status`'s "logged-in users" table (which also keeps its own existing
+    "last page" column, still built here so it can't drift either),
+    `my-bt setup`'s active-session gate/warning, and (indirectly) the
+    RPM's own %pre gate, which just shells out to `my-bt status` and
+    reuses its rendering verbatim. One definition, not three
+    independently drifting copies."""
+    timeout_label = format_session_timeout(payload.get("session_timeout_seconds"))
+    rows = []
+    for s in payload.get("sessions", []):
+        is_admin = s.get("kind") == "admin"
+        rows.append({
+            "name": "admin" if is_admin else (s.get("name") or "(no name on file)"),
+            "email": "-" if is_admin else s.get("who", ""),
+            "session start": _fmt_session_ts(s.get("connected_since")),
+            "last page": s.get("last_page") or "(none yet)",
+            "last activity": _fmt_session_ts(s.get("last_seen")),
+            "timeout (no activity)": timeout_label,
+        })
+    return rows
+
+
+def format_active_sessions_overview(payload: dict) -> str:
+    """The full printable block for "who's logged in right now" -- an
+    aligned table (name/email/session start/last activity/timeout) plus
+    the exact command to force-end one or every session. Shown by `my-bt
+    setup -i`'s upfront hard-refusal gate and plain `my-bt setup`'s own
+    warning section (app/cli_setup.py) -- same wording either way."""
+    rows = active_sessions_rows(payload)
+    if not rows:
+        return "(no active sessions)"
+    cols = list(rows[0].keys())
+    widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) for c in cols}
+    header = "  ".join(c.ljust(widths[c]) for c in cols)
+    lines = [header, "-" * len(header)]
+    lines.extend("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols) for r in rows)
+    lines.append("")
+    lines.append("Force-end a session with `my-bt admin logout EMAIL`, or every session with")
+    lines.append("`my-bt admin logout --all`.")
+    return "\n".join(lines)
+
+
+def check_active_sessions(internal_url: str = _DEFAULT_INTERNAL_URL) -> list[Check]:
+    """[] when nobody's logged in (or the service is unreachable --
+    fail-open, nothing to report) -- else a single ("active sessions",
+    "warn", ...) entry with a compact one-line summary. Part of
+    build_report() (see below) so plain `my-bt setup`'s report -- which
+    otherwise never touches the live process at all -- surfaces this the
+    same way `my-bt status` already does; `print_report()` additionally
+    prints the FULL overview (format_active_sessions_overview) right
+    after, since a single line can't show who/since-when/timeout."""
+    payload, _err = fetch_active_sessions(internal_url)
+    sessions = payload.get("sessions") if payload else None
+    if not sessions:
+        return []
+    who = ", ".join(s.get("who", "?") for s in sessions)
+    return [(
+        "active sessions", "warn",
+        f"{len(sessions)} active session(s) right now ({who}) -- see `my-bt status`, "
+        "or `my-bt admin logout EMAIL`/`--all` to force-end one or all",
+    )]
+
+
 def check_group_membership() -> list[Check]:
     import getpass
     import grp
@@ -1222,54 +1408,71 @@ def check_static_site_drift(raw: dict, template_path: str | Path) -> list[Check]
     )]
 
 
-def check_index_embedded_drift(raw: dict, template_path: str | Path) -> list[Check]:
+def check_index_embedded_drift(raw: dict) -> list[Check]:
     """Mirrors check_static_site_drift above, for the second generated
     page: index_embedded.html, a no-JavaScript variant of the homepage
     meant for embedding this site via `<iframe>` on another site (see
-    site/index_embedded.html.tmpl.example's own docstring). Compares the
-    LIVE deployed copy against what the CURRENT settings.toml --
-    specifically, any upcoming [[course.date_override]] entries -- would
-    actually render right now: this page can't fetch that live via
-    JavaScript the way site/index.html's own small script does (that's the
-    whole point of it -- no scripts at all), so staying in sync depends
-    entirely on regenerating it whenever the schedule changes.
+    app/site_render.py::derive_index_embedded_html's own docstring). Unlike
+    privacy.html, there's no separate hand-maintained template for this
+    page -- it's DERIVED straight from the LIVE, currently-deployed
+    index.html (not this checkout's own copy: the live file is the
+    authoritative source for whatever's actually being embedded right now)
+    plus whatever upcoming [[course.date_override]] entries settings.toml
+    currently has. Compares that derived text against the LIVE deployed
+    index_embedded.html itself: this page can't fetch date_override changes
+    live via JavaScript the way site/index.html's own small script does
+    (that's the whole point of it -- no scripts at all), so staying in sync
+    depends entirely on regenerating it whenever index.html or the schedule
+    changes.
 
-    UNLIKE check_static_site_drift, this is a no-op (empty list) if the
-    real site/index_embedded.html.tmpl doesn't exist in this checkout at
-    all -- this page is optional (most deployments don't embed their site
-    via iframe elsewhere), so its absence isn't itself something to report,
-    unlike privacy.html.tmpl, which every install needs real legal text
-    for.
+    A no-op (empty list) unless [site].index_embedded_enabled is true --
+    this whole mechanism is opt-in (most deployments don't embed their site
+    via iframe elsewhere), so its being off isn't itself something to
+    report, unlike privacy.html.tmpl, which every install needs real legal
+    text for.
 
     Compares with the maintenance banner stripped from both sides (same
     `_diffable_static_page_text` helper check_static_pages_deployed()
     already uses for index.html) -- `my-bt admin site-maintenance on/off`
     inserts/removes that banner directly in the deployed file (see
     app/maintenance.py, scripts/my-bt::cmd_maintenance), so an active
-    maintenance window must never look like settings.toml drift here."""
-    static_site_dir = raw.get("site", {}).get("static_site_dir")
+    maintenance window must never look like drift here."""
+    site = raw.get("site", {})
+    if not site.get("index_embedded_enabled"):
+        return []
+    static_site_dir = site.get("static_site_dir")
     if not static_site_dir:
         return []
-    template_path = Path(template_path)
-    if not template_path.exists():
-        return []  # optional page, not opted into -- nothing to check
+
+    index_path = Path(static_site_dir) / "index.html"
+    if not index_path.exists():
+        return [("index_embedded.html", "warn",
+                  f"index_embedded_enabled is true, but {index_path} isn't deployed yet -- "
+                  "nothing to derive index_embedded.html from")]
 
     courses = config.courses_from_raw(raw)
     today = config.today_in_raw_timezone(raw)
-    expected = site_render.render_index_embedded_html(template_path, courses, today)
+    base_url = (site.get("base_url") or "").rstrip("/")
+    new_tab_links = bool(site.get("index_embedded_new_tab_links", True))
+    index_html_text = index_path.read_text(encoding="utf-8", errors="replace")
+    try:
+        expected = site_render.derive_index_embedded_html(
+            index_html_text, courses, today, base_url, new_tab_links,
+        )
+    except site_render.IndexEmbeddedDerivationError as exc:
+        return [("index_embedded.html", "fail", str(exc))]
 
     deployed_path = Path(static_site_dir) / site_render.EMBEDDED_OUTPUT_NAME
     if not deployed_path.exists():
-        return [(f"static site ({deployed_path})", "warn",
-                  "index_embedded.html.tmpl found but not deployed yet -- "
-                  "run `my-bt setup -i` to generate and deploy it")]
+        return [(f"index_embedded.html ({deployed_path})", "warn",
+                  "not deployed yet -- run `my-bt setup -i` to derive and deploy it")]
     actual = deployed_path.read_text(encoding="utf-8", errors="replace")
     if _diffable_static_page_text(actual) == _diffable_static_page_text(expected):
-        return [(f"static site ({deployed_path})", "ok", "matches current settings.toml")]
+        return [(f"index_embedded.html ({deployed_path})", "ok", "matches current index.html + settings.toml")]
     return [(
-        f"static site ({deployed_path})", "warn",
-        "doesn't match current settings.toml (course date_override entries changed "
-        "since it was last generated) -- run `my-bt setup -i` to regenerate",
+        f"index_embedded.html ({deployed_path})", "warn",
+        "doesn't match what index.html + settings.toml would currently derive -- "
+        "run `my-bt setup -i` to regenerate",
     )]
 
 
@@ -1386,3 +1589,595 @@ def check_static_site_compliance(raw: dict) -> list[Check]:
         else:
             checks.append((f"static site content ({p})", "ok", "no leftover placeholder markers"))
     return checks
+
+
+# -- CSP violation scanning (2026-07-13) --------------------------------------
+#
+# the operator had been manually clicking through every page after any inline-
+# <script> edit to catch a stale CSP script-src hash (see the real
+# incidents documented in site/nginx-locations.conf.example's own CSP
+# comment -- this bit the schedule-exceptions banner and the booking-form's
+# MAX_GUESTS validation, each silently, with no error but a browser-console
+# CSP violation). The browser already reports every violation to
+# app/webapp.py::csp_report (logged at WARNING, [logging].log_file), so
+# this scans THAT instead of requiring a manual page-by-page click-through.
+#
+# `find_csp_violations()` is the one place that knows how to parse those
+# log lines -- `check_csp_violations()` below (used by `my-bt health`/
+# `admin setup`) and app/watchdog.py's own threshold-gated alert both call
+# it directly rather than keeping separate copies of this parsing.
+
+_APP_LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3}")
+
+_CSP_VIOLATION_RE = re.compile(
+    r"CSP violation report from \S+: blocked-uri=(?P<blocked>.*?) "
+    r"violated-directive=(?P<directive>.*?) document-uri=(?P<doc>.*)$"
+)
+_CSP_UNPARSEABLE_RE = re.compile(r"CSP violation report from \S+: unparseable body:")
+
+
+def parse_app_log_timestamp(line: str) -> datetime | None:
+    """Parses the leading "%(asctime)s %(levelname)s ..." timestamp
+    app/logutil.py::configure_logging's formatter puts on every line of
+    [logging].log_file (asctime's default format is "YYYY-MM-DD
+    HH:MM:SS,mmm") -- `None` if `line` doesn't start with one (e.g. a
+    continuation line of a multi-line traceback). Shared by
+    find_csp_violations() below and app/watchdog.py's own app-log checks
+    (check_app_log_rate_limit_blocks) -- one place that knows this format,
+    not a second copy per module."""
+    m = _APP_LOG_TIMESTAMP_RE.match(line)
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def find_csp_violations(
+    lines: Iterable[str], window_minutes: int, now: datetime | None = None,
+) -> list[tuple[int, str]]:
+    """Scans already-read [logging].log_file lines for CSP violation
+    reports (app/webapp.py::csp_report, logged at WARNING) within the last
+    `window_minutes`, groups identical (violated-directive, blocked-uri,
+    document-uri) combinations together, and returns (count, detail) pairs
+    sorted by count descending -- most frequent first, so a single stale
+    script hash (which fires on EVERY load of the affected page) doesn't
+    bury a rarer, different violation under a wall of near-identical
+    lines. A malformed/unparseable report body (see csp_report's own
+    except clause) is grouped into its own single "(unparseable report
+    body)" bucket rather than being dropped silently.
+
+    Pure -- no file I/O here, so this is unit-testable without a real log
+    file. Lines whose own leading timestamp can't be parsed are excluded
+    (same fail-closed convention app/watchdog.py's log-based checks
+    already use), not counted as "in window" by default.
+
+    check_csp_violations() below is the real-file wrapper `my-bt health`/
+    `setup` use; `my-bt admin csp-violations` shows this same data in
+    full; app/watchdog.py's own check_csp_violations() calls this
+    directly too, threshold-gated, rather than re-parsing the log itself.
+    build_health_report() (below) also reuses group_csp_violation_lines(),
+    the actual grouping logic, on a set of lines ALREADY windowed by
+    `my-bt admin health errors`, rather than re-applying a second time
+    window on top of that one."""
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(minutes=window_minutes)
+    windowed = (line for line in lines if (ts := parse_app_log_timestamp(line)) is not None and ts >= since)
+    return group_csp_violation_lines(windowed)
+
+
+def group_csp_violation_lines(lines: Iterable[str]) -> list[tuple[int, str]]:
+    """The grouping half of find_csp_violations() above, with no time
+    filtering at all -- for callers (build_health_report()'s `errors`
+    mode) that have already restricted `lines` to the window they care
+    about and don't want a SECOND, redundant timestamp check applied on
+    top of that."""
+    counts: dict[str, int] = {}
+    for line in lines:
+        if "CSP violation report from" not in line:
+            continue
+        m = _CSP_VIOLATION_RE.search(line)
+        if m:
+            key = (
+                f"blocked-uri={m.group('blocked')} violated-directive={m.group('directive')} "
+                f"document-uri={m.group('doc').rstrip()}"
+            )
+        elif _CSP_UNPARSEABLE_RE.search(line):
+            key = "(unparseable report body -- possibly not a real browser CSP report)"
+        else:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+    return sorted(((n, detail) for detail, n in counts.items()), key=lambda t: -t[0])
+
+
+def check_csp_violations(raw: dict, now: datetime | None = None) -> list[Check]:
+    """[] if [logging].log_file isn't configured, doesn't exist, or has no
+    CSP violation reports within [watchdog].window_minutes -- else a
+    single ("CSP violations", "warn", ...) Check summarizing the grouped
+    counts (see find_csp_violations()), so `my-bt health`/`admin setup`
+    surface a stale script-src hash or a rogue embed attempt without
+    the operator having to click through every page by hand. Full, ungrouped
+    detail: `my-bt admin csp-violations`. Always shown when found --
+    NOT threshold-gated the way app/watchdog.py's own alert is, since this
+    is diagnostic information, not an alerting decision.
+
+    KNOWN GAP (confirmed live, 2026-07-13): this only ever reads the FILE
+    at [logging].log_file -- with that unconfigured, a systemd service's
+    own stdout (where every log.warning() call, including a CSP violation
+    report, still goes by default) is only visible via `journalctl -u
+    my-booking.service`, which this function does NOT read. `my-bt admin
+    health`/`admin setup`/`admin csp-violations` will all silently show
+    nothing in that case, even though the violation IS visible via `my-bt
+    admin health errors` (build_health_report() below explicitly gathers
+    that journal too, and groups CSP violations found in it). The real
+    fix is configuring [logging].log_file (also required for the
+    watchdog's own threshold-gated alert) -- not worth duplicating
+    journalctl-reading into every one of these check functions just to
+    paper over not having it configured."""
+    log_path_str = raw.get("logging", {}).get("log_file")
+    if not log_path_str:
+        return []
+    window_minutes = int(raw.get("watchdog", {}).get("window_minutes", 15))
+    try:
+        with open(log_path_str, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return []
+    violations = find_csp_violations(lines, window_minutes, now=now)
+    if not violations:
+        return []
+    total = sum(n for n, _ in violations)
+    shown = violations[:5]
+    summary = "; ".join(f"{n}x {detail}" for n, detail in shown)
+    if len(violations) > len(shown):
+        summary += f" (+{len(violations) - len(shown)} more distinct)"
+    return [(
+        "CSP violations", "warn",
+        f"{total} CSP violation report(s) in the last {window_minutes} min: {summary} -- "
+        "see `my-bt admin csp-violations` for full detail",
+    )]
+
+
+# -- CSP hash automation (2026-07-13) ------------------------------------------
+#
+# check_csp_violations() above catches a stale hash only AFTER a real browser
+# has hit it and reported back -- reactive, and only as good as
+# [logging].log_file/journal visibility. This section is the proactive half:
+# it knows, from the app's own source, every inline <script> body my-bt can
+# currently produce, computes what its CSP hash SHOULD be, and compares that
+# against what's actually allow-listed in the live, deployed nginx config --
+# so a forgotten hash update shows up in `my-bt admin health`/`admin setup`
+# BEFORE a single guest's browser ever has to report the violation. This is
+# the third time this exact class of bug has hit production (see
+# site/nginx-locations.conf's own dated incident notes: the schedule-
+# exceptions script's hash went stale twice, the booking-form script's once)
+# -- the operator asked for this to be automated rather than caught by hand a fourth
+# time.
+
+def expected_csp_hashes(raw: dict) -> dict[str, str]:
+    """Returns {label: 'sha256-...'} for every inline <script> body this app
+    can currently produce: the 8 static, non-interpolated Python module
+    constants (app/templates.py's _SUBMIT_FEEDBACK_SCRIPT, appended to every
+    page, plus app/webapp.py's 7 per-page scripts -- always present,
+    regardless of settings.toml), and -- only if `[site].static_site_dir` is
+    configured -- the two <script> blocks in the LIVE, currently-DEPLOYED
+    index.html at that path (not necessarily this checkout's own
+    site/index.html, which can legitimately differ mid-rollout).
+
+    Every one of these constants is deliberately written so its body never
+    changes between renders (no f-string interpolation of any per-request/
+    per-setting value -- see each constant's own history in
+    site/nginx-locations.conf.example's CSP comment for the real bugs hit
+    before that was true), so hashing the *source* constant directly, without
+    ever rendering a page, is safe and always reflects exactly what a real
+    render would have produced -- confirmed byte-for-byte for
+    _BOOKING_FORM_SCRIPT, the most recently extracted one, at the time it was
+    refactored out of _book_page()'s f-string."""
+    # Local import (not at module level): app/webapp.py has a very large,
+    # heavy import chain of its own (calendar_sync, caldav_client, cancel_flow,
+    # emailer, ...) that this module has no other reason to pull in just to
+    # check installation health -- lazy import keeps that cost (and any risk
+    # of an accidental future circular import) out of cli_checks.py's own
+    # module load.
+    from . import templates, webapp
+
+    def _hash(body: str) -> str:
+        digest = hashlib.sha256(body.encode("utf-8")).digest()
+        return "sha256-" + base64.b64encode(digest).decode()
+
+    def _body_of(script_tag_text: str) -> str:
+        # Reuses site_render's own comment-safe extraction rather than a
+        # fresh ad hoc regex -- see extract_script_bodies()'s own docstring
+        # for the real incident (a literal "<script>" mentioned in HTML-
+        # comment prose) that makes this worth sharing rather than
+        # reimplementing per caller.
+        bodies = site_render.extract_script_bodies(script_tag_text)
+        if len(bodies) != 1:
+            raise ValueError(
+                f"expected exactly one <script> block, found {len(bodies)} "
+                f"in: {script_tag_text[:80]!r}..."
+            )
+        return bodies[0]
+
+    hashes: dict[str, str] = {}
+    static_constants = (
+        ("templates._SUBMIT_FEEDBACK_SCRIPT", templates._SUBMIT_FEEDBACK_SCRIPT),
+        ("webapp._RESEND_COOLDOWN_SCRIPT", webapp._RESEND_COOLDOWN_SCRIPT),
+        ("webapp._RESEND_INLINE_COOLDOWN_SCRIPT", webapp._RESEND_INLINE_COOLDOWN_SCRIPT),
+        ("webapp._LOCKOUT_COUNTDOWN_SCRIPT", webapp._LOCKOUT_COUNTDOWN_SCRIPT),
+        ("webapp._DIALOG_WIRING_SCRIPT", webapp._DIALOG_WIRING_SCRIPT),
+        ("webapp._CANCEL_ENTIRE_SESSION_SCRIPT", webapp._CANCEL_ENTIRE_SESSION_SCRIPT),
+        ("webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT", webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT),
+        ("webapp._BOOKING_FORM_SCRIPT", webapp._BOOKING_FORM_SCRIPT),
+    )
+    for label, constant in static_constants:
+        hashes[label] = _hash(_body_of(constant))
+
+    static_site_dir = raw.get("site", {}).get("static_site_dir")
+    if static_site_dir:
+        index_path = Path(static_site_dir) / "index.html"
+        if index_path.exists():
+            text = index_path.read_text(encoding="utf-8", errors="replace")
+            for i, body in enumerate(site_render.extract_script_bodies(text), start=1):
+                hashes[f"index.html script #{i}"] = _hash(body)
+
+    return hashes
+
+
+_CSP_HEADER_RE = re.compile(
+    r'add_header\s+Content-Security-Policy\s+"([^"]*)"\s+always\s*;', re.IGNORECASE
+)
+_CSP_HASH_RE = re.compile(r"'(sha256-[A-Za-z0-9+/=]+)'")
+
+
+def _nginx_csp_script_hashes(raw: dict) -> set[str] | None:
+    """The exact set of 'sha256-...' script-src hashes currently present in
+    the LIVE nginx Content-Security-Policy header for [site].base_url's own
+    vhost, or None if nginx/the vhost/its CSP header can't be determined at
+    all (deliberately distinct from an empty set, which specifically means
+    the header WAS found but has zero hashes -- itself worth flagging by the
+    caller, not silently treated the same as "couldn't check")."""
+    merged = _live_nginx_config(raw)
+    if merged is None:
+        return None
+    block = _matching_server_block(raw, merged)
+    if block is None:
+        return None
+    header_match = _CSP_HEADER_RE.search(block)
+    if not header_match:
+        return None
+    return set(_CSP_HASH_RE.findall(header_match.group(1)))
+
+
+def check_csp_hashes_deployed(raw: dict) -> list[Check]:
+    """Compares expected_csp_hashes() (every inline <script> this app can
+    currently produce) against the live nginx CSP header's actual script-src
+    hash set -- catches a forgotten hash update BEFORE a browser has to
+    report the violation itself (contrast check_csp_violations() above,
+    which is purely reactive). A no-op (empty list) if nginx/the vhost/its
+    CSP header can't be determined at all -- same "can't check what isn't
+    reachable" convention as every other _live_nginx_config-based check in
+    this module (e.g. check_nginx_locations()); this is a defense-in-depth
+    extra, not a replacement for a human being able to read the header by
+    hand. "warn", not "fail": a missing hash breaks only that ONE script's
+    own behavior, not the whole site, same severity class as a missing
+    `location` block."""
+    deployed = _nginx_csp_script_hashes(raw)
+    if deployed is None:
+        return []
+    expected = expected_csp_hashes(raw)
+    missing = [(label, h) for label, h in expected.items() if h not in deployed]
+    if not missing:
+        return [(
+            "CSP script hashes deployed", "ok",
+            f"all {len(expected)} expected inline <script> hash(es) present in the live CSP header",
+        )]
+    detail = "; ".join(f"{label} needs {h!r} added" for label, h in missing)
+    return [(
+        "CSP script hashes deployed", "warn",
+        f"{len(missing)} of {len(expected)} inline <script> hash(es) missing from the live CSP "
+        f"header -- {detail} (see site/nginx-locations.conf's script-src -- "
+        '"ADD, never replace" -- an old hash is kept for rollback safety)',
+    )]
+
+
+def csp_script_src_patch(conf_text: str, hashes_to_add: list[str]) -> str:
+    """Self-heal for check_csp_hashes_deployed()'s own "warn" (2026-07-16,
+    the operator: "can we automate and fix this within the build or setup ... so
+    that setup does not break out with an error but maybe can self-heal?"
+    -- this used to be deliberately warn-only, since a bad CSP edit can
+    break every script on the site, not just one; see this function's own
+    caller in app/cli_setup.py::interactive_setup() for the nginx -t-
+    verified, rollback-on-failure orchestration that makes adding this
+    safe).
+
+    Pure string transform -- no file I/O, no subprocess, so it's trivially
+    unit-tested on its own. Returns `conf_text` with each hash in
+    `hashes_to_add` appended (space-separated, single-quoted) right after
+    the `script-src` token, additive only -- same "ADD, never replace"
+    rollback-safety rule documented throughout site/nginx-locations.conf's
+    own comments, nothing existing on that line or anywhere else in the
+    file is touched. Raises ValueError if no Content-Security-Policy
+    add_header line is found at all, or that line has no script-src
+    directive -- the caller should treat either as "can't safely patch
+    this file" and leave it untouched, not as "nothing to do" (contrast
+    the empty-`hashes_to_add` case, which is a legitimate no-op returning
+    `conf_text` unchanged)."""
+    if not hashes_to_add:
+        return conf_text
+    match = _CSP_HEADER_RE.search(conf_text)
+    if not match:
+        raise ValueError("no Content-Security-Policy add_header line found")
+    header_value = match.group(1)
+    script_src_match = re.search(r"script-src(?=\s)", header_value)
+    if not script_src_match:
+        raise ValueError("no script-src directive found in the CSP header")
+    insert_at = script_src_match.end()
+    addition = "".join(f" '{h}'" for h in hashes_to_add)
+    new_header_value = header_value[:insert_at] + addition + header_value[insert_at:]
+    return conf_text[:match.start(1)] + new_header_value + conf_text[match.end(1):]
+
+
+# -- Forensic log aggregation: `my-bt admin health report`/`errors` (2026-07-13) --
+#
+# the operator's own explicit ask: "my-bt health should also allow to collect
+# information from all possible places for a given period ... in order to
+# support investigating anything strange happening with booking.example.org", to
+# include "nginx global logs, nginx yoga logs, my-bt logs and anything
+# else relevant" -- proposed shape: `my-bt admin health report [--last Xh]
+# [--since TS] [--till TS]` (every matching line, source-labeled) and
+# `my-bt admin health errors [...]` (same window, filtered down to
+# actual problems -- both a curated pass reusing the SAME detectors
+# health/watchdog already have, e.g. find_csp_violations() above, AND a
+# raw severity-based pass, so a brand-new kind of problem those don't
+# already know about still shows up). Both default to "since nginx's own
+# last restart" when no time flag is given.
+#
+# Log PATHS are deliberately never a new settings.toml entry: every one of
+# them is derived live from `nginx -T` (see _nginx_global_access_log() et
+# al above, and _nginx_access_log_for_host()/_nginx_error_log_for_host()
+# already used by the watchdog config-drift check) or is simply
+# [logging].log_file, already configured -- one less hardcoded path to
+# keep in sync by hand (see the no-duplicated-hardcoded-paths lesson
+# elsewhere in this project).
+
+_DURATION_RE = re.compile(
+    r"^(?:(?P<days>\d+)d)?(?:(?P<hours>\d+)h)?(?:(?P<minutes>\d+)m)?(?:(?P<seconds>\d+)s)?$"
+)
+
+
+def parse_last_duration(text: str) -> timedelta:
+    """Parses a `--last` duration like "2h", "90m", "1h30m", "45s", "1d"
+    into a timedelta -- any combination of d/h/m/s components, each
+    optional, in that order. Raises ValueError on anything that doesn't
+    match (including an empty string) -- scripts/my-bt's argparse
+    `type=parse_last_duration` turns that into a normal "invalid value"
+    error for the user, not a traceback."""
+    text = text.strip()
+    m = _DURATION_RE.match(text)
+    if not m or not any(m.groups()):
+        raise ValueError(f"invalid duration {text!r} -- expected e.g. '2h', '90m', '1h30m', '45s', '1d'")
+    parts = {k: int(v) for k, v in m.groupdict(default="0").items()}
+    return timedelta(days=parts["days"], hours=parts["hours"], minutes=parts["minutes"], seconds=parts["seconds"])
+
+
+def _parse_iso_utc(text: str) -> datetime:
+    dt = datetime.fromisoformat(text)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def nginx_last_restart_at() -> datetime | None:
+    """When nginx.service last (re)started, or None if that can't be
+    determined (not a systemd host, nginx not installed, never started,
+    ...) -- the default start of `my-bt admin health report`/`errors`'s
+    window when no --last/--since/--till is given (the operator's own explicit
+    ask: "both without parameters showing you the report since the last
+    reboot of nginx"). Reuses _service_active_since(), the same
+    systemctl-show-then-`date -d` helper check_settings_fresh() already
+    relies on for my-booking.service, just pointed at nginx.service
+    instead -- one implementation, two callers."""
+    epoch = _service_active_since("nginx.service")
+    return datetime.fromtimestamp(epoch, tz=timezone.utc) if epoch is not None else None
+
+
+def resolve_report_window(
+    last: str | None = None, since: str | None = None, till: str | None = None,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime, str]:
+    """Resolves `my-bt admin health report`/`errors`'s --last/--since/
+    --till into a concrete (start, end, description) UTC window --
+    `description` is a short human string for the report's own header.
+
+    - --last (a duration, see parse_last_duration): `now` minus that,
+      through `now`.
+    - --since/--till (ISO-8601 timestamps; naive ones are treated as
+      UTC): either or both may be given. An omitted --till defaults to
+      `now`; an omitted --since (with --till given) defaults to 24h
+      before that --till.
+    - None of the three given: starts "since nginx's last restart" (see
+      nginx_last_restart_at()), through `now` -- falling back to 24h ago
+      if nginx's restart time can't be determined."""
+    now = now or datetime.now(timezone.utc)
+    if last:
+        start = now - parse_last_duration(last)
+        return start, now, f"last {last}"
+    if since or till:
+        end = _parse_iso_utc(till) if till else now
+        start = _parse_iso_utc(since) if since else end - timedelta(hours=24)
+        return start, end, f"{start.isoformat()} to {end.isoformat()}"
+    restart = nginx_last_restart_at()
+    if restart is not None:
+        return restart, now, f"since nginx's last restart ({restart.isoformat()})"
+    return now - timedelta(hours=24), now, "last 24h (nginx's restart time could not be determined)"
+
+
+def health_report_log_sources(raw: dict) -> list[tuple[str, str | None]]:
+    """Ordered (label, path) pairs for every FILE-based log source `my-bt
+    admin health report`/`errors` aggregates -- nginx's own global access/
+    error logs (outside any vhost -- covers every site on this box, not
+    just this one), THIS vhost's own access/error logs (matching
+    [site].base_url, same derivation the watchdog config-drift check
+    already uses), and the app's own [logging].log_file. A None path
+    means that source couldn't be determined right now (nginx unreachable,
+    vhost not found, log_file not configured, ...) -- callers skip it,
+    not an error. sshd/systemd-journal sources aren't file-based, so
+    they're gathered separately (see scripts/my-bt::cmd_admin_health_report/
+    cmd_admin_health_errors, which reach for journalctl directly, same as
+    app/watchdog.py's own _sshd_lines_since())."""
+    return [
+        ("nginx global access log", _nginx_global_access_log(raw)),
+        ("nginx global error log", _nginx_global_error_log(raw)),
+        ("nginx vhost access log", _nginx_access_log_for_host(raw)),
+        ("nginx vhost error log", _nginx_error_log_for_host(raw)),
+        ("app log", raw.get("logging", {}).get("log_file")),
+    ]
+
+
+_NGINX_ERROR_LOG_TS_RE = re.compile(r"^(\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2})")
+
+
+def _nginx_error_log_timestamp(line: str) -> datetime | None:
+    """nginx's own error_log timestamp format ("YYYY/MM/DD HH:MM:SS
+    [level] ..."), always in the SERVER's local timezone (unlike the
+    access log's $time_local, it carries no explicit UTC offset at all)
+    -- treated as this machine's own local time, correct as long as
+    `my-bt` runs on the same box as nginx (the only deployment shape this
+    project supports)."""
+    m = _NGINX_ERROR_LOG_TS_RE.match(line)
+    if not m:
+        return None
+    try:
+        naive = datetime.strptime(m.group(1), "%Y/%m/%d %H:%M:%S")
+    except ValueError:
+        return None
+    return naive.astimezone().astimezone(timezone.utc)
+
+
+def _nginx_access_log_timestamp(line: str) -> datetime | None:
+    from .watchdog import _NGINX_LINE_RE, _parse_nginx_timestamp
+    m = _NGINX_LINE_RE.match(line)
+    if not m:
+        return None
+    ts = _parse_nginx_timestamp(m.group("time"))
+    return ts.astimezone(timezone.utc) if ts else None
+
+
+def _filter_lines_by_window(lines: Iterable[str], start: datetime, end: datetime, parse_ts) -> list[str]:
+    """Keeps only lines whose own timestamp (via `parse_ts`, one of the
+    per-format parsers above) falls in [start, end] -- lines whose
+    timestamp can't be parsed at all are excluded, same fail-closed
+    convention app/watchdog.py's log-based checks already use."""
+    kept = []
+    for line in lines:
+        ts = parse_ts(line)
+        if ts is not None and start <= ts <= end:
+            kept.append(line)
+    return kept
+
+
+def _is_error_status_line(line: str) -> bool:
+    """access-log line worth showing in `errors` mode: HTTP status 4xx/5xx."""
+    from .watchdog import _NGINX_LINE_RE
+    m = _NGINX_LINE_RE.match(line)
+    return bool(m and m.group("status").startswith(("4", "5")))
+
+
+def _is_error_app_log_line(line: str) -> bool:
+    """[logging].log_file line worth showing in `errors` mode -- anything
+    at WARNING or above (app/logutil.py::configure_logging's own
+    formatter always includes the level name right after the timestamp).
+    This naturally includes CSP violations and rate-limiter rejections,
+    both already logged at WARNING -- see find_csp_violations() above,
+    used separately for the grouped/counted CSP summary appended to
+    `errors` mode's own output."""
+    return any(f" {level} " in line for level in ("WARNING", "ERROR", "CRITICAL"))
+
+
+def build_health_report(
+    raw: dict, start: datetime, end: datetime, description: str,
+    sshd_lines: Iterable[str] = (), app_service_lines: Iterable[str] = (),
+    errors_only: bool = False,
+) -> str:
+    """Assembles the full printable text for `my-bt admin health
+    report`/`errors` -- every configured log source (see
+    health_report_log_sources()), each filtered to [start, end] and
+    source-labeled, plus the sshd/my-booking-service journal lines the
+    caller already gathered (real I/O -- journalctl calls, scoped to this
+    exact window -- happens in scripts/my-bt, not here, so this stays a
+    pure, unit-testable function).
+
+    `errors_only=False` ("report"): every matching line, verbatim,
+    chronological order isn't enforced across sources (each source is
+    printed as its own labeled section) -- this is raw material for a
+    human to read, not a merged single timeline.
+
+    `errors_only=True` ("errors"): access logs filtered to 4xx/5xx status,
+    the app log filtered to WARNING-or-above, sshd/service journals kept
+    as-is (already curated at the source -- see check_sshd_failures()'s
+    same "Failed password" signal), PLUS a grouped/counted CSP-violation
+    summary (find_csp_violations()) appended at the end -- combining the
+    SAME curated detectors health/watchdog already have with a raw
+    severity-based pass, so a kind of problem no existing detector knows
+    about yet still shows up (the operator's own answer: "both")."""
+    sshd_lines = list(sshd_lines)
+    app_service_lines = list(app_service_lines)
+    sections: list[str] = [f"my-bt admin health {'errors' if errors_only else 'report'} -- {description}\n"]
+    app_log_window: list[str] = []
+    for label, path in health_report_log_sources(raw):
+        if not path:
+            sections.append(f"=== {label} (not configured / not detected) ===\n")
+            continue
+        lines = _read_log_lines(path)
+        if lines is None:
+            sections.append(f"=== {label} ({path}) -- could not be read ===\n")
+            continue
+        is_access = "access log" in label
+        parse_ts = _nginx_access_log_timestamp if is_access else _nginx_error_log_timestamp
+        if label == "app log":
+            parse_ts = parse_app_log_timestamp
+        windowed = _filter_lines_by_window(lines, start, end, parse_ts)
+        if label == "app log":
+            app_log_window = windowed
+        if errors_only:
+            if is_access:
+                windowed = [ln for ln in windowed if _is_error_status_line(ln)]
+            elif label == "app log":
+                windowed = [ln for ln in windowed if _is_error_app_log_line(ln)]
+            # nginx error logs are already nothing-but-problems by nginx's
+            # own design (error_log's configured level already excludes
+            # info/debug noise) -- kept as-is.
+        sections.append(f"=== {label} ({path}) -- {len(windowed)} line(s) ===\n" + "".join(windowed))
+    if sshd_lines:
+        sections.append(f"=== sshd (journalctl -u sshd) -- {len(sshd_lines)} line(s) ===\n"
+                         + "".join(sshd_lines))
+    if app_service_lines:
+        sections.append(
+            f"=== my-booking service/timers (journalctl) -- {len(app_service_lines)} line(s) ===\n"
+            + "".join(app_service_lines)
+        )
+    if errors_only:
+        # 2026-07-13, real gap hit in practice: without [logging].log_file
+        # configured, health_report_log_sources()'s "app log" entry is
+        # None -- app_log_window stays empty -- yet the app's own WARNING
+        # lines (including CSP violation reports) still reach the systemd
+        # journal via app_service_lines, since a systemd service's stdout
+        # goes to the journal by default regardless of whether a log FILE
+        # is also configured. Grouping only app_log_window meant this
+        # summary silently produced nothing on exactly that (common)
+        # setup, even though the raw violation was sitting right there in
+        # the my-booking service/timers section above. Group across BOTH
+        # sources -- whichever one(s) actually captured it.
+        violations = group_csp_violation_lines(app_log_window + app_service_lines)
+        if violations:
+            summary = "; ".join(f"{n}x {detail}" for n, detail in violations)
+            sections.append(f"=== CSP violations, grouped ===\n{summary}\n")
+    return "\n".join(sections)
+
+
+def _read_log_lines(path: str) -> list[str] | None:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.readlines()
+    except OSError:
+        return None

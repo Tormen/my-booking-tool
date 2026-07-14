@@ -154,8 +154,10 @@ def cmd_list(args) -> None:
     only. --all: every date, live + archived (any live user's pre-erasure
     archived history is merged in on the fly here -- see
     app.cli_list.merge_archived_for_display -- WITHOUT writing anything
-    to disk; use `my-bt admin dearchive` to actually persist a merge).
-    --past: same merge, occurrence_date strictly before today only.
+    to disk; this display-time merge is the ONLY merge that exists --
+    the old mutating persist-a-merge command was removed 2026-07-14 as
+    a GDPR violation). --past: same merge, occurrence_date strictly
+    before today only.
 
     2026-07-13: this is also what `my-bt history` used to be for (dropped
     -- folded in here instead): `list --all --email x@y.com` shows an
@@ -950,12 +952,15 @@ def cmd_admin_gdpr(args) -> None:
         f"({settings.canceled_retention_months} months after cancellation; "
         f"{settings.pending_confirmation_hours}h for an unconfirmed signup)"
     )
-    print(f"account retention: {settings.retention_months} months of inactivity (last login, or account creation if never logged back in)")
+    print(f"account retention: {settings.retention_months} months of inactivity (latest of last login, account creation, or last booking made)")
     bookings_due = sum(1 for r in store.all_registrations() if app_retention.should_purge(r, today, settings))
     print(f"{bookings_due} booking row(s) past their retention window (see `admin gdpr bookings`)")
+    latest_reg = app_retention.latest_registration_dates(store)
     accounts_due = sum(
         1 for row in store.read_users(scope="live")
-        if (d := app_retention.account_deletion_date(User(**row), settings)) is not None and d <= today
+        if (d := app_retention.account_deletion_date(
+            User(**row), settings, latest_reg.get(row["user_id"], "")
+        )) is not None and d <= today
     )
     print(f"{accounts_due} account(s) past their retention window (see `admin gdpr accounts`)")
 
@@ -1028,11 +1033,14 @@ def cmd_admin_gdpr_accounts(args) -> None:
         print(f"{warned} warning email(s) sent, {erased} dormant account(s) erased")
         return
     today = date.today()
+    latest_reg = app_retention.latest_registration_dates(store)
     rows = [
         {
             "user_id": row["user_id"], "email": row["email"], "name": row["name"],
             "last_login_at": row["last_login_at"] or "(never)",
-            "deletion_date": d.isoformat() if (d := app_retention.account_deletion_date(User(**row), settings)) else "(no activity signal)",
+            "deletion_date": d.isoformat() if (d := app_retention.account_deletion_date(
+                User(**row), settings, latest_reg.get(row["user_id"], "")
+            )) else "(no activity signal)",
             "past_due": "yes" if d is not None and d <= today else "no",
         }
         for row in store.read_users(scope="live")
@@ -1274,16 +1282,18 @@ def _print_live_status(payload: dict) -> None:
         return
     print()
     print("logged-in users:")
-    rows = [
-        {
-            "who": s["who"] + (" [admin]" if s["kind"] == "admin" else ""),
-            "connected since": _fmt_ts(s.get("connected_since")),
-            "last page": s.get("last_page") or "(none yet)",
-            "last seen": _fmt_ts(s.get("last_seen")),
-        }
-        for s in sessions
-    ]
+    # 2026-07-13: row-shaping (name/email/session start/last activity/
+    # timeout) moved into app.cli_checks.active_sessions_rows -- the same
+    # function `my-bt setup`'s active-session gate/warning uses, so this
+    # table and that one can never drift apart. Only the rendering
+    # (_print_rows, this file's own table/json/csv printer) stays here.
+    from app import cli_checks
+
+    rows = cli_checks.active_sessions_rows(payload)
     _print_rows(rows, "table")
+    print()
+    print("Force-end a session with `my-bt admin logout EMAIL`, or every session with")
+    print("`my-bt admin logout --all`.")
 
 
 # -- status / setup --------------------------------------------------------------
@@ -1342,6 +1352,156 @@ def cmd_admin_watchdog_check(args) -> None:
             print(f"- {a}")
     else:
         print("nothing unusual found")
+
+
+def cmd_admin_csp_violations(args) -> None:
+    """`my-bt admin csp-violations` -- full, ungrouped-beyond-5 detail on
+    every distinct CSP violation report browsers have sent within
+    [watchdog].window_minutes (see app/webapp.py::csp_report). Same
+    underlying data (and same app.cli_checks.find_csp_violations()
+    parsing) `my-bt health`/`admin setup` already summarize -- this just
+    shows every group, not only the top 5, since a real investigation
+    sometimes needs the long tail too.
+
+    2026-07-13: added alongside the watchdog's new CSP-violation check
+    (app.watchdog.check_csp_violations) so there's a way to see the FULL
+    detail on demand, not just wait for (or be silently under-informed by)
+    a threshold-gated email alert -- the operator's own explicit ask: "the
+    watchdog should use a my-bt health feature to reveal any issue".
+
+    Reads settings.toml via load_raw_toml() (like cli_checks.
+    check_csp_violations() itself), NOT load_settings() -- this only ever
+    needs [logging].log_file/[watchdog].window_minutes, so it shouldn't
+    also require every secret file (caldav/smtp/admin password hash) to
+    exist just to scan a log."""
+    from app import cli_checks
+
+    raw = app_config.load_raw_toml(args.settings) or {}
+    log_file = raw.get("logging", {}).get("log_file")
+    window_minutes = int(raw.get("watchdog", {}).get("window_minutes", 15))
+    if not log_file:
+        print("[logging].log_file is not configured -- nothing to scan")
+        return
+    try:
+        with open(log_file, encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError as exc:
+        print(f"could not read {log_file}: {exc}", file=sys.stderr)
+        sys.exit(1)
+    violations = cli_checks.find_csp_violations(lines, window_minutes)
+    if not violations:
+        print(f"no CSP violations in the last {window_minutes} min")
+        return
+    total = sum(n for n, _ in violations)
+    print(f"{total} CSP violation report(s) in the last {window_minutes} min, "
+          f"{len(violations)} distinct:")
+    for n, detail in violations:
+        print(f"  {n}x {detail}")
+
+
+def _journalctl_lines(unit: str, start: datetime, end: datetime) -> list[str]:
+    """journalctl -u <unit> lines within [start, end] (both converted to
+    this machine's own local time -- what journalctl's --since/--until
+    expect) -- the real-I/O gathering step for cmd_admin_health_report/
+    _errors below, same "real I/O lives in scripts/my-bt, not
+    app/cli_checks.py" split app.watchdog.check_now() already
+    established for the periodic sweep vs. its own pure check functions.
+    [] on any failure (not on a systemd host, unit doesn't exist, timeout,
+    ...) -- best-effort, same as every other live-system gathering step
+    here."""
+    import subprocess
+
+    since_local = start.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    until_local = end.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        proc = subprocess.run(
+            ["journalctl", "-u", unit, "--since", since_local, "--until", until_local, "-o", "cat"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line + "\n" for line in proc.stdout.splitlines()]
+
+
+def _resolve_health_report_window(args):
+    from app import cli_checks
+
+    try:
+        return cli_checks.resolve_report_window(args.last, args.since, args.till)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def cmd_admin_health_report(args) -> None:
+    """`my-bt admin health report` (same command, second name: `my-bt
+    admin log-report`) -- collects nginx's global access/error logs,
+    THIS vhost's own access/error logs, the app's own [logging].log_file,
+    sshd, and the my-booking service/watchdog-timer journals for a time
+    window, and prints every matching line, source-labeled -- raw
+    material for investigating "anything strange happening with
+    booking.example.org" (the operator's own explicit ask), without having to go hunt
+    through half a dozen different log files/journalctl invocations by
+    hand.
+
+    --last DURATION (e.g. 2h, 90m, 1h30m) / --since/--till (ISO-8601)
+    pick the window; with none of the three given, defaults to "since
+    nginx's own last restart" (see app.cli_checks.nginx_last_restart_at).
+    See `my-bt admin health errors` for the same sources filtered down to
+    actual problems instead of everything.
+
+    Log PATHS are never a settings.toml entry -- every nginx one is
+    derived live from `nginx -T` (see app.cli_checks.
+    health_report_log_sources), same as the watchdog's own nginx-log
+    config-drift check already does for the vhost-specific access log."""
+    from app import cli_checks
+
+    raw = app_config.load_raw_toml(args.settings) or {}
+    start, end, description = _resolve_health_report_window(args)
+    sshd_lines = _journalctl_lines("sshd", start, end)
+    service_lines = (
+        _journalctl_lines("my-booking.service", start, end)
+        + _journalctl_lines("my-booking-watchdog.service", start, end)
+    )
+    print(cli_checks.build_health_report(
+        raw, start, end, description,
+        sshd_lines=sshd_lines, app_service_lines=service_lines, errors_only=False,
+    ))
+
+
+def cmd_admin_health_errors(args) -> None:
+    """`my-bt admin health errors` (same command, second name: `my-bt
+    admin log-errors`) -- same sources/window as `my-bt admin health
+    report`, filtered down to actual problems: nginx access logs to
+    4xx/5xx status, the app log to WARNING-or-above (this naturally
+    includes CSP violations and rate-limiter rejections, both already
+    logged at WARNING), sshd to failed-password attempts, the
+    my-booking service/timer journals to WARNING-or-above -- PLUS a
+    grouped/counted CSP-violation summary appended at the end (same
+    app.cli_checks.find_csp_violations() data `my-bt admin csp-
+    violations` shows). Combines the SAME curated detectors `my-bt
+    health`/the watchdog already have with a raw severity-based pass, so
+    a kind of problem no existing detector knows about yet still shows up
+    (the operator's own answer, when asked whether "errors" should mean curated
+    signals or a raw grep: "both")."""
+    from app import cli_checks
+
+    raw = app_config.load_raw_toml(args.settings) or {}
+    start, end, description = _resolve_health_report_window(args)
+    sshd_lines = [ln for ln in _journalctl_lines("sshd", start, end) if "Failed password" in ln]
+    service_lines = [
+        ln for ln in (
+            _journalctl_lines("my-booking.service", start, end)
+            + _journalctl_lines("my-booking-watchdog.service", start, end)
+        )
+        if any(f" {level} " in ln for level in ("WARNING", "ERROR", "CRITICAL"))
+    ]
+    print(cli_checks.build_health_report(
+        raw, start, end, description,
+        sshd_lines=sshd_lines, app_service_lines=service_lines, errors_only=True,
+    ))
 
 
 def cmd_admin_health(args) -> None:
@@ -1434,6 +1594,52 @@ def cmd_admin_health(args) -> None:
             checks.append((f"log file ({log_file})", "ok", "configured and writable"))
         if lp.exists():
             checks.extend(cli_checks.check_path_group_and_selinux("log file", lp))
+
+    # -- CSP violations reported by browsers, if any (2026-07-13) ----------------
+    # See app.cli_checks.check_csp_violations's own docstring -- full,
+    # ungrouped detail: `my-bt admin csp-violations`.
+    if raw:
+        csp_checks = cli_checks.check_csp_violations(raw)
+        if csp_checks:
+            checks.extend(csp_checks)
+        elif raw.get("logging", {}).get("log_file"):
+            checks.append(("CSP violations reported by browsers", "ok",
+                            "none in the last [watchdog].window_minutes"))
+        else:
+            # 2026-07-13, real gap hit in practice: check_csp_violations()
+            # returns [] both when [logging].log_file isn't configured AND
+            # when it's configured but genuinely clean -- collapsing both
+            # into "nothing printed" meant a real production run of
+            # `my-bt admin health` showed zero visible mention of CSP at
+            # all, even though the violation was sitting in the journal the
+            # whole time (`my-bt admin health errors --last 1h`, which reads
+            # the journal too, DID show it). "ok" (not "warn"/"fail") since
+            # not configuring [logging].log_file is a legitimate, common
+            # setup, not a problem -- this file has no separate "skip"
+            # Check level (unlike cli_setup.print_report()'s free-text
+            # numbered-step SKIP), so "ok" plus an explanatory detail is the
+            # consistent way to say "deliberately not checked" here without
+            # it being repeated in the "Warnings/failures" summary below.
+            checks.append(("CSP violations reported by browsers", "ok",
+                            "[logging].log_file not configured -- not checked here "
+                            "(journal-only violations still show via "
+                            "`my-bt admin health errors`)"))
+
+    # -- CSP script hashes deployed, proactive (2026-07-13) ---------------------
+    # See app.cli_checks.check_csp_hashes_deployed's own docstring -- unlike
+    # the reactive check just above (which only ever fires AFTER a real
+    # browser has reported a violation), this compares every inline
+    # <script> hash the app can currently produce (from source) against
+    # what's actually allow-listed in the live nginx CSP header, so a
+    # forgotten hash update shows up here even if nobody's browser has hit
+    # it yet.
+    if raw:
+        hash_checks = cli_checks.check_csp_hashes_deployed(raw)
+        if hash_checks:
+            checks.extend(hash_checks)
+        else:
+            checks.append(("CSP script hashes deployed", "ok",
+                            "nginx/the matching vhost/its CSP header not detected -- not checked here"))
 
     # -- [site].static_site_dir, if configured: group + SELinux context ----------
     # (this directory is READ by nginx, a different unix user, not just
@@ -2078,7 +2284,7 @@ def build_parser() -> argparse.ArgumentParser:
     date_scope.add_argument(
         "--all", action="store_true",
         help="every date, live + archived -- a live user's pre-erasure archived history is merged in "
-             "on the fly (nothing is written to disk, see `my-bt admin dearchive` to persist that); "
+             "on the fly, display-only (nothing is ever written to disk); "
              "this is also what `my-bt history` used to be for (dropped 2026-07-13, folded in here: "
              "`list --all --email x@y.com` shows an attendee's full combined history)",
     )
@@ -2333,16 +2539,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = _add_subcommand(
         admin_sub, "watchdog-check",
-        "check nginx/app-log/signups/sshd for abuse patterns now (same as the periodic timer).",
+        "check nginx/app-log/CSP/signups/sshd for abuse patterns now (same as the periodic timer).",
         "Emails settings.admin_email ONE combined alert if anything fired -- not a dry run. "
-        "Four independent checks, each silently skipped if its own setting/threshold is unset: "
+        "Five independent checks, each silently skipped if its own setting/threshold is unset: "
         "(1) [watchdog].nginx_access_log -- one IP making too many requests, or too high a 4xx/5xx "
         "share, within window_minutes; cross-checked against fail2ban's own ban list. "
         "(2) [logging].log_file -- a burst of login/password-reset rate-limiter rejections. "
-        "(3) registrations.csv (via the data dir) -- a burst of brand-new pending-confirmation "
+        "(3) [logging].log_file, again -- a burst of browser-reported CSP violations (see "
+        "`my-bt admin csp-violations` for the same data, un-thresholded, any time). "
+        "(4) registrations.csv (via the data dir) -- a burst of brand-new pending-confirmation "
         "signups, the shape a capacity-grab attempt would take. "
-        "(4) sshd -- a burst of failed-password attempts, read via `journalctl -u sshd`. "
-        "See app/watchdog.py's own module docstring for the full detail on all four.",
+        "(5) sshd -- a burst of failed-password attempts, read via `journalctl -u sshd`. "
+        "See app/watchdog.py's own module docstring for the full detail on all five.",
     )
     sp.set_defaults(func=cmd_admin_watchdog_check)
 
@@ -2363,9 +2571,76 @@ def build_parser() -> argparse.ArgumentParser:
         "full install-health diagnostic: settings/secrets/systemd/SELinux/nginx/... "
         "(this is what `my-bt status -V` used to be).",
         "Slower than plain `my-bt status` -- this is for diagnosing an "
-        "install problem, not a quick liveness check.",
+        "install problem, not a quick liveness check. Two further, optional "
+        "modes -- `health report`/`health errors` -- aggregate raw logs for a "
+        "time window instead; see below (also reachable directly as "
+        "`admin log-report`/`admin log-errors`).",
     )
     sp.set_defaults(func=cmd_admin_health)
+    health_sub = sp.add_subparsers(dest="health_command")
+
+    def _add_time_window_args(leaf) -> None:
+        leaf.add_argument(
+            "--last", metavar="DURATION",
+            help="e.g. 2h, 90m, 1h30m, 45s, 1d -- window of this duration ending now",
+        )
+        leaf.add_argument(
+            "--since", metavar="TIMESTAMP",
+            help="ISO-8601, e.g. 2026-07-13T09:00:00 -- window start (naive = local time)",
+        )
+        leaf.add_argument(
+            "--till", metavar="TIMESTAMP",
+            help="ISO-8601 -- window end (default: now)",
+        )
+
+    _health_report_help = (
+        "collect nginx global+vhost access/error logs, the app log, sshd, and "
+        "my-booking service/timer journals for a time window -- everything "
+        "matching, verbatim, source-labeled."
+    )
+    _health_report_extra = (
+        "Defaults to the window since nginx's own last restart if none of "
+        "--last/--since/--till is given. See `admin health errors`/`admin "
+        "log-errors` for the same sources filtered to actual problems."
+    )
+    _health_errors_help = (
+        "same sources/window as `health report`, filtered to actual problems "
+        "(4xx/5xx, WARNING+, sshd failures) plus a grouped CSP-violation summary."
+    )
+    _health_errors_extra = _health_report_extra.replace("admin health errors", "admin health report")
+
+    hsp = _add_subcommand(health_sub, "report", _health_report_help, _health_report_extra)
+    _add_time_window_args(hsp)
+    hsp.set_defaults(func=cmd_admin_health_report)
+
+    hsp = _add_subcommand(health_sub, "errors", _health_errors_help, _health_errors_extra)
+    _add_time_window_args(hsp)
+    hsp.set_defaults(func=cmd_admin_health_errors)
+
+    # the operator's own preference (2026-07-13): reachable BOTH nested under
+    # `health` and as flat top-level admin commands, so there's no need to
+    # remember which one it lives under -- same dual-registration precedent
+    # as `admin logout`/`users logout` (exact same function, two names).
+    sp = _add_subcommand(admin_sub, "log-report", _health_report_help, _health_report_extra)
+    _add_time_window_args(sp)
+    sp.set_defaults(func=cmd_admin_health_report)
+
+    sp = _add_subcommand(admin_sub, "log-errors", _health_errors_help, _health_errors_extra)
+    _add_time_window_args(sp)
+    sp.set_defaults(func=cmd_admin_health_errors)
+
+    sp = _add_subcommand(
+        admin_sub, "csp-violations",
+        "full detail on CSP violations browsers have reported ([logging].log_file).",
+        "Same underlying data `my-bt health`/`admin setup` already summarize (grouped/counted, "
+        "top 5 only) -- this shows EVERY distinct group, not just the top 5, over "
+        "[watchdog].window_minutes. Each browser-reported violation is one line here: "
+        "blocked-uri/violated-directive/document-uri, or '(unparseable report body)' for a "
+        "malformed one -- enough detail to find and fix the stale script hash or rogue embed "
+        "attempt without digging through the raw log by hand. Empty output means either no "
+        "violations in the window, or [logging].log_file isn't configured.",
+    )
+    sp.set_defaults(func=cmd_admin_csp_violations)
 
     return p
 
