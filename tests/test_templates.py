@@ -128,20 +128,27 @@ class BigInputDisplayBlockTest(unittest.TestCase):
         self.assertIn("display:block", html.split(".big-input{", 1)[1].split("}", 1)[0])
 
 
-class DateBadgeSizingTest(unittest.TestCase):
-    """2026-07-14, from a live screenshot: a Booked badge WITHOUT an
-    override-time line (one text line) rendered shorter than its two-line
-    siblings and its own overflow:hidden clipped the diagonal ribbon
-    mid-word. The badge must stretch to its grid row (height:100%), keep
-    two-line proportions even in an all-badge row (min-height), and
-    center its content in the taller box."""
+class DateBoxSizingTest(unittest.TestCase):
+    """2026-07-14, from two live screenshots: date boxes with different
+    line counts (1-line Booked badge, 2-line date+spots, 3-line
+    date+spots+override-time) rendered at different heights in the same
+    row, and the short badge's own overflow:hidden clipped the diagonal
+    ribbon mid-word. EVERY box now stretches to its grid row's height
+    (shared .date-btn > span rule) with content vertically centered; the
+    badge additionally keeps a two-line min-height so an all-badge row
+    still gives the ribbon room."""
 
-    def test_badge_stretches_to_row_height_with_two_line_minimum(self):
+    def test_every_date_box_stretches_to_row_height(self):
+        html = page("Some title", "<p>body</p>")
+        rule = html.split(".date-btn > span{", 1)[1].split("}", 1)[0]
+        self.assertIn("height:100%", rule)
+        self.assertIn("box-sizing:border-box", rule)
+        self.assertIn("justify-content:center", rule)
+
+    def test_badge_keeps_a_two_line_minimum_for_its_ribbon(self):
         html = page("Some title", "<p>body</p>")
         rule = html.split(".date-badge>span{", 1)[1].split("}", 1)[0]
-        self.assertIn("height:100%", rule)
         self.assertIn("min-height:", rule)
-        self.assertIn("justify-content:center", rule)
 
 
 class GuestsSectionSeparatorTest(unittest.TestCase):

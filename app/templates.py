@@ -156,10 +156,21 @@ label{{display:block;margin-top:.6em}}
 .big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em;display:block}}
 .id-input{{max-width:50ch}}
 .dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5em;margin:.4em 0}}
-.date-btn{{position:relative;display:block}}
+/* margin-top:0 (2026-07-14): a bookable box is a <label>, and the generic
+   label{{margin-top:.6em}} rule above gave it a top margin INSIDE the grid
+   cell -- so it stretched to the row height MINUS that margin, rendering
+   ~10px shorter and lower than the <span>-based Booked badges in the same
+   row (measured live; the .dates grid's own gap handles spacing here). */
+.date-btn{{position:relative;display:block;margin-top:0}}
 .date-btn input{{position:absolute;opacity:0;width:1px;height:1px}}
 .date-btn span{{display:block}}
-.date-btn > span{{padding:.5em .8em;border:1px solid #ccc;border-radius:6px;cursor:pointer;text-align:center;line-height:1.3}}
+/* height:100% + flex centering (2026-07-14, from a live screenshot):
+   EVERY date box stretches to its grid row's height -- a row can mix
+   1-line (badge without override time), 2-line (date + spots), and
+   3-line (date + spots + override time) boxes, and unequal heights read
+   as broken. Content stays vertically centered in the stretched box. */
+.date-btn > span{{padding:.5em .8em;border:1px solid #ccc;border-radius:6px;cursor:pointer;text-align:center;line-height:1.3;
+  height:100%;box-sizing:border-box;display:flex;flex-direction:column;justify-content:center}}
 .date-btn .d-date{{font-style:italic}}
 .date-btn .d-spots{{color:#666;margin-top:.1em;font-style:italic}}
 .date-btn .d-override-time{{color:#b45f06;font-weight:bold;margin-top:.1em}}
@@ -167,17 +178,12 @@ label{{display:block;margin-top:.6em}}
 .date-btn input:checked + span .d-spots{{color:#dff0e2}}
 .date-btn input:checked + span .d-override-time{{color:#ffd54f}}
 .date-btn input:focus-visible + span{{outline:2px solid #196B24;outline-offset:1px}}
-/* 2026-07-14, from a live screenshot: a Booked badge WITHOUT an
-   override-time line is only one text line tall, so it rendered shorter
-   than its two-line siblings (bookable boxes always have date + spots)
-   and the diagonal ribbon got clipped mid-word by its own
-   overflow:hidden. height:100% stretches it to the grid row like any
-   other cell; min-height keeps two-line proportions even in a row of
-   nothing but single-line badges; flex centering keeps the date from
-   floating at the top of the now-taller box. */
-.date-badge>span{{cursor:default;background:#f2f2f2;color:#888;position:relative;overflow:hidden;
-  height:100%;min-height:3.6em;box-sizing:border-box;
-  display:flex;flex-direction:column;justify-content:center}}
+/* min-height (2026-07-14): keeps two-line proportions even in a row of
+   nothing but single-line badges, so the diagonal ribbon (clipped by
+   this rule's own overflow:hidden) always has room -- the stretch/flex
+   centering itself now lives on the shared .date-btn > span rule above,
+   since ALL boxes equalize to the row height, not just badges. */
+.date-badge>span{{cursor:default;background:#f2f2f2;color:#888;position:relative;overflow:hidden;min-height:3.6em}}
 .date-badge .ribbon{{position:absolute;top:.6em;right:-3.2em;width:11em;transform:rotate(45deg);
   background:#666;color:#fff;font-weight:bold;text-align:center;padding:.15em 0;
   box-shadow:0 1px 2px rgba(0,0,0,.25)}}

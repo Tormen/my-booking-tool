@@ -2418,19 +2418,29 @@ class App:
             # the readonly boxes, in their same original spot, exactly as
             # before any of this tab work (unchanged branch).
             if logged_in_user is not None:
-                # 2026-07-13: visible+readonly (grey), not hidden -- see
-                # _login_form_html()'s own docstring: logging in right on
-                # this page should land on the SAME visible end state
-                # typing name+email directly produces. Logout stays in
-                # the top banner (_session_banner_html()), not repeated
-                # here.
+                # 2026-07-14, the operator (third iteration of this exact spot):
+                # one compact "Booking as NAME (email)" line instead of
+                # two greyed-out form fields. History: 2026-07-09 hid the
+                # fields entirely; 2026-07-13 brought them back
+                # visible+readonly so logging in on this page lands on a
+                # VISIBLE end state; 2026-07-14 (from a live screenshot)
+                # judged the greyed fields "more confusing than hidden" --
+                # they read as form fields you inexplicably can't edit.
+                # The note keeps the identity visible (preserving the
+                # 2026-07-13 concern) without impersonating an editable
+                # form; Logout stays in the top banner.
+                #
+                # The two inputs stay in the DOM as type="hidden" ON
+                # PURPOSE: _BOOKING_FORM_SCRIPT looks both up by id and
+                # reads .value for its enable-the-Book-button check --
+                # keeping them means that script's bytes (and therefore
+                # its CSP hash) stay untouched. The server never trusts
+                # their values for a logged-in session anyway (see
+                # book()'s own identity override).
                 identity_fields_html = (
-                    '<label>Your name'
-                    f'<input class="big-input id-input" id="book-name" name="name" '
-                    f'value="{esc(logged_in_user.name)}" readonly></label>'
-                    '<label>Your email'
-                    f'<input class="big-input id-input" id="book-email" name="email" type="email" '
-                    f'value="{esc(logged_in_user.email)}" readonly></label>'
+                    f'<input type="hidden" id="book-name" name="name" value="{esc(logged_in_user.name)}">'
+                    f'<input type="hidden" id="book-email" name="email" value="{esc(logged_in_user.email)}">'
+                    f'<p>Booking as <b>{esc(logged_in_user.name)}</b> ({esc(logged_in_user.email)}).</p>'
                 )
                 identity_and_tabs_html = identity_fields_html
             else:

@@ -950,26 +950,25 @@ class SessionBannerTest(unittest.TestCase):
         rule = rule[: rule.index("}")]
         self.assertIn("font-style:normal", rule)
 
-    # -- 2026-07-09: booking-page name/email hidden (not just locked) when logged in --
+    # -- logged-in booking page: "Booking as ..." note + hidden identity fields --
 
-    def test_book_page_shows_readonly_name_email_fields_when_logged_in(self):
-        # 2026-07-13, the operator: reverted from the 2026-07-09 hidden-fields
-        # version back to visible+readonly (grey) -- now that a real
-        # Login form is embeddable right on this page (see
-        # _login_form_html()), a successful login should land on the SAME
-        # visible end state typing name+email directly produces, not an
-        # invisible one.
+    def test_book_page_shows_booking_as_note_with_hidden_fields_when_logged_in(self):
+        # 2026-07-14, the operator (third iteration -- see _book_page()'s own
+        # comment for the full history): the 2026-07-13 visible+readonly
+        # fields read as "form fields you inexplicably can't edit", so
+        # they're a single "Booking as NAME (email)" line now. The two
+        # inputs stay in the DOM as type="hidden" so
+        # _BOOKING_FORM_SCRIPT's by-id lookups (and its CSP hash) stay
+        # byte-identical.
         environ = self._login_environ("regular@example.org")
         _status, _headers, body = self.app.book("GET", "yoga-class-1", environ)
-        self.assertIn(
-            '<input class="big-input id-input" id="book-name" name="name" value="Regular" readonly>', body,
-        )
-        self.assertIn(
-            '<input class="big-input id-input" id="book-email" name="email" type="email" '
-            'value="regular@example.org" readonly>', body,
-        )
-        self.assertIn("Your name", body)
-        self.assertIn("Your email", body)
+        self.assertIn("Booking as <b>Regular</b> (regular@example.org).", body)
+        self.assertIn('<input type="hidden" id="book-name" name="name" value="Regular">', body)
+        self.assertIn('<input type="hidden" id="book-email" name="email" value="regular@example.org">', body)
+        # No visible/greyed identity form fields anymore...
+        self.assertNotIn("readonly>", body)
+        self.assertNotIn("Your name", body)
+        self.assertNotIn("Your email", body)
         # Irrelevant once already logged in with a password.
         self.assertNotIn("First time booking with this email?", body)
         # And the tabbed Login/Sign-up component itself should NOT show
@@ -995,9 +994,9 @@ class SessionBannerTest(unittest.TestCase):
         self.assertNotIn('name="email" type="email" value=', body)
         self.assertIn("First time booking with this email?", body)
 
-    def test_book_page_error_retry_keeps_fields_readonly_when_logged_in(self):
-        # These fields must stay readonly+prefilled (not reappear blank
-        # and editable) even on a re-render after a validation error --
+    def test_book_page_error_retry_keeps_booking_as_note_when_logged_in(self):
+        # The note + hidden fields must survive a re-render after a
+        # validation error (not reappear as blank, editable fields) --
         # not just the fresh GET.
         environ = self._login_environ("regular@example.org")
         form = {"occurrence_date": self._occ_date(), "name": "Regular", "email": "regular@example.org"}  # no agree
@@ -1005,13 +1004,9 @@ class SessionBannerTest(unittest.TestCase):
         post_environ = dict(environ, CONTENT_LENGTH=str(len(body_bytes)), **{"wsgi.input": io.BytesIO(body_bytes)})
         _status, _headers, body = self.app.book("POST", "yoga-class-1", post_environ)
         self.assertIn("acknowledge the participation terms", body)
-        self.assertIn(
-            '<input class="big-input id-input" id="book-name" name="name" value="Regular" readonly>', body,
-        )
-        self.assertIn(
-            '<input class="big-input id-input" id="book-email" name="email" type="email" '
-            'value="regular@example.org" readonly>', body,
-        )
+        self.assertIn("Booking as <b>Regular</b> (regular@example.org).", body)
+        self.assertIn('<input type="hidden" id="book-name" name="name" value="Regular">', body)
+        self.assertNotIn("readonly>", body)
 
     def test_logged_in_booking_ignores_submitted_email_and_uses_session_identity(self):
         # readonly is client-side only -- the server must not trust a
