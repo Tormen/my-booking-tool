@@ -167,7 +167,17 @@ label{{display:block;margin-top:.6em}}
 .date-btn input:checked + span .d-spots{{color:#dff0e2}}
 .date-btn input:checked + span .d-override-time{{color:#ffd54f}}
 .date-btn input:focus-visible + span{{outline:2px solid #196B24;outline-offset:1px}}
-.date-badge>span{{cursor:default;background:#f2f2f2;color:#888;position:relative;overflow:hidden}}
+/* 2026-07-14, from a live screenshot: a Booked badge WITHOUT an
+   override-time line is only one text line tall, so it rendered shorter
+   than its two-line siblings (bookable boxes always have date + spots)
+   and the diagonal ribbon got clipped mid-word by its own
+   overflow:hidden. height:100% stretches it to the grid row like any
+   other cell; min-height keeps two-line proportions even in a row of
+   nothing but single-line badges; flex centering keeps the date from
+   floating at the top of the now-taller box. */
+.date-badge>span{{cursor:default;background:#f2f2f2;color:#888;position:relative;overflow:hidden;
+  height:100%;min-height:3.6em;box-sizing:border-box;
+  display:flex;flex-direction:column;justify-content:center}}
 .date-badge .ribbon{{position:absolute;top:.6em;right:-3.2em;width:11em;transform:rotate(45deg);
   background:#666;color:#fff;font-weight:bold;text-align:center;padding:.15em 0;
   box-shadow:0 1px 2px rgba(0,0,0,.25)}}
