@@ -146,7 +146,7 @@ body{{font-family:sans-serif;max-width:1000px;margin:2em auto;padding:0 1em;colo
 .session-banner form{{display:inline}}
 a{{color:#196B24}} .err{{color:#b00020}} .note{{color:#555;font-style:italic}} .card{{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}}
 input,button,textarea{{font-size:1em;padding:.4em;margin:.2em 0}} button{{cursor:pointer}}
-input[readonly]{{background:#eee;color:#555;cursor:not-allowed}}
+input[readonly]{{background:#eee;color:#777;cursor:not-allowed}}
 label{{display:block;margin-top:.6em}}
 .subtitle{{color:#444;margin:-.4em 0 1em;font-size:1.2em;font-weight:500}}
 .req{{color:#b00020}}
