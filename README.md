@@ -654,15 +654,21 @@ fifth allow-listed inline-script hash.
 
 ### `my-bt status`
 
-A fast, live-only summary -- whether the process is actually up and
+A fast summary -- whether the process is actually up and
 answering requests right now (queried directly over HTTP on its own
 loopback port), whether maintenance mode is on (highlighted if so), and
 who's currently logged in (any unexpired session, with since-when-connected
-and their current/last-loaded page). This is deliberately NOT the deep
-install-health diagnostic anymore (2026-07-13 -- that content moved to
-`my-bt admin health`, see below): `status` stays fast and purely about "is
-it alive right now"; reach for `admin health` to actually diagnose an
-install problem.
+and their current/last-loaded page). 2026-07-14: followed by an
+"activity (last 24h)" block -- accounts logged in and bookings made
+(from the CSVs), nginx request/4xx-5xx counts (the vhost access log,
+same combined-format parsing the watchdog uses), and app WARNING+ line
+counts ([logging].log_file when configured, else the service journal --
+one source, never both, since the same events land in each).
+Deliberately COUNTS only, never log dumps, so `status` stays fast; its
+own output points at the deeper commands. This is NOT the deep
+install-health diagnostic (2026-07-13 -- that content moved to
+`my-bt admin health`, see below), and the actual log lines live in
+`my-bt admin log-errors --last 24h` / `admin log-report --last 24h`.
 
 ### `my-bt admin health`
 

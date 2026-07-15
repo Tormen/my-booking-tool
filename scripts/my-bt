@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 HOME = os.environ.get("MY_BOOKING_HOME", "/opt/my-booking")
@@ -1333,12 +1333,77 @@ def cmd_status(args) -> None:
     SELinux/nginx install-health report -- moved out into its own command,
     `my-bt admin health`, instead. Keeps `status` fast and purely about "is it alive
     right now"; `admin health` is for actually diagnosing an install
-    problem."""
+    problem.
+
+    2026-07-14: status should be a 360-degree summary, including what's
+    happening in the server's logs and log-related stats like sessions/
+    logins in the last 24h -- a compact "activity (last 24h)" block now
+    follows the live summary: accounts logged in + bookings made (from
+    the CSVs), nginx request/4xx-5xx counts (vhost access log, same
+    detection `admin health` uses), and app WARNING+ line counts (from
+    [logging].log_file when configured, else the service journal --
+    never both, the same events land in each). Deliberately COUNTS, not
+    log dumps -- `status` stays fast; its output points at `my-bt admin
+    health` / `admin log-errors --last 24h` for the actual lines (see
+    app.cli_checks.log_activity_stats)."""
     payload, error = _query_internal_status(args.internal_url)
     if error:
         print(f"live process: NOT RESPONDING -- {error}")
         sys.exit(1)
     _print_live_status(payload)
+    _print_activity_summary(args)
+
+
+def _print_activity_summary(args) -> None:
+    """The "activity (last 24h)" block under `my-bt status`'s live
+    summary -- see cmd_status's own docstring. Best-effort throughout:
+    a missing settings.toml/log file/store must degrade to "(not
+    available)" cells, never take down the liveness summary above it."""
+    from app import cli_checks
+
+    raw = app_config.load_raw_toml(args.settings) or {}
+    store = _store(args)
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=24)
+
+    logins = cli_checks.count_recent_logins(store, now=now)
+    bookings = cli_checks.count_recent_registrations(store, now=now)
+
+    nginx_path = raw.get("watchdog", {}).get("nginx_access_log") or cli_checks._nginx_access_log_for_host(raw)
+    nginx_lines = cli_checks._read_log_lines(nginx_path) if nginx_path else None
+
+    # ONE app-log source, not both: with [logging].log_file configured the
+    # service writes every record there AND to the journal -- counting
+    # both would double every warning.
+    log_file = raw.get("logging", {}).get("log_file")
+    app_lines = cli_checks._read_log_lines(log_file) if log_file else None
+    app_source = "app log"
+    if app_lines is None:
+        app_lines = [
+            ln for ln in _journalctl_lines("my-booking.service", since, now)
+            if any(f" {lvl} " in ln for lvl in ("WARNING", "ERROR", "CRITICAL"))
+        ]
+        app_source = "journal"
+
+    stats = cli_checks.log_activity_stats(nginx_lines, app_lines, now=now)
+    if stats["nginx_requests"] is None:
+        nginx_cell = "(not available -- no readable vhost access log)"
+    else:
+        nginx_cell = f"{stats['nginx_requests']} ({stats['nginx_errors']} with 4xx/5xx status)"
+    print()
+    print("activity (last 24h):")
+    _print_single_row_kv(
+        {
+            "accounts logged in": logins,
+            "bookings made": bookings,
+            "nginx requests": nginx_cell,
+            f"app warnings/errors ({app_source})": stats["app_warnings"],
+        },
+        "table",
+    )
+    print()
+    print("Full detail: `my-bt admin health` (install checks) -- `my-bt admin log-errors")
+    print("--last 24h` (the actual problem lines) or `admin log-report --last 24h` (everything).")
 
 
 def cmd_admin_watchdog_check(args) -> None:
@@ -2468,10 +2533,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = _add_subcommand(
         sub, "status",
-        "live server summary: up/running, maintenance mode, logged-in users "
-        "(see `my-bt admin health` for the full settings/secrets/systemd/SELinux/nginx report).",
-        "Fast and live-only -- queries the running process directly over its "
-        "own loopback listener, no deep install diagnostics.",
+        "live server summary: up/running, maintenance mode, logged-in users, plus a "
+        "24h activity block (logins, bookings, nginx traffic/errors, app warnings).",
+        "Fast -- queries the running process over its own loopback listener and "
+        "summarizes the last 24h of logs as COUNTS; see `my-bt admin health` for the "
+        "full install diagnostics and `my-bt admin log-errors --last 24h` for the "
+        "actual log lines.",
     )
     sp.add_argument(
         "--internal-url", default=DEFAULT_INTERNAL_URL,

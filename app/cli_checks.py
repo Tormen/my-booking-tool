@@ -2181,3 +2181,94 @@ def _read_log_lines(path: str) -> list[str] | None:
             return f.readlines()
     except OSError:
         return None
+
+
+# -- `my-bt status` 24h activity summary (2026-07-14) -------------------------
+#
+# "status should collect a 360-degree full status, including what's
+# happening in the logs, and some log-related stats: how many sessions /
+# logins in the last 24h" -- status stays FAST (summary counts, never log
+# dumps; the dumps are `my-bt admin health report`/`log-errors`, pointed
+# at from status's own output), reusing the same per-format timestamp
+# parsers the health report already has rather than a second copy.
+
+def count_recent_logins(store, now: datetime | None = None, hours: int = 24) -> int:
+    """Distinct live accounts whose last_login_at falls within the last
+    `hours`. last_login_at only ever stores each account's LATEST login
+    (Store.touch_login overwrites in place), so this counts accounts that
+    logged in, not individual login events -- the honest number this
+    storage model can give without a new audit log, and labeled
+    accordingly by `my-bt status` ("account(s) logged in")."""
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    n = 0
+    for row in store.read_users(scope="live"):
+        iso = row.get("last_login_at", "")
+        if not iso:
+            continue
+        try:
+            if datetime.fromisoformat(iso) >= since:
+                n += 1
+        except ValueError:
+            continue
+    return n
+
+
+def count_recent_registrations(store, now: datetime | None = None, hours: int = 24) -> int:
+    """Registrations created (any status -- confirmed, waitlisted, or
+    still pending confirmation) within the last `hours`, live rows only.
+    registered_at is stamped once at creation and only ever re-stamped by
+    an explicit rebook (see Store.add_registration_checking_capacity), so
+    this is a faithful "bookings made" count."""
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    n = 0
+    for row in store.read_registrations(scope="live"):
+        iso = row.get("registered_at", "")
+        if not iso:
+            continue
+        try:
+            if datetime.fromisoformat(iso) >= since:
+                n += 1
+        except ValueError:
+            continue
+    return n
+
+
+def log_activity_stats(
+    nginx_access_lines: list[str] | None,
+    app_log_lines: list[str],
+    now: datetime | None = None,
+    hours: int = 24,
+) -> dict:
+    """Summary counts over the last `hours` for `my-bt status`:
+
+    - nginx_requests / nginx_errors: total requests and their 4xx/5xx
+      subset from the vhost access log's own lines (same combined-format
+      parser the watchdog and `admin health errors` use). Both None when
+      `nginx_access_lines` is None -- "couldn't read the log" must render
+      as "(not available)", never as a false quiet 0.
+    - app_warnings: WARNING-or-above lines among `app_log_lines` --
+      whichever ONE source the caller picked ([logging].log_file when
+      configured, else the service journal; both would double-count the
+      same events, see cmd_status). File lines are windowed here via
+      their own timestamps; journal lines arrive pre-windowed by
+      journalctl --since and parse as in-window either way.
+
+    Pure -- callers do the file/journal I/O (same split as
+    build_health_report)."""
+    now = now or datetime.now(timezone.utc)
+    since = now - timedelta(hours=hours)
+    stats: dict = {"nginx_requests": None, "nginx_errors": None, "app_warnings": 0}
+    if nginx_access_lines is not None:
+        windowed = _filter_lines_by_window(nginx_access_lines, since, now, _nginx_access_log_timestamp)
+        stats["nginx_requests"] = len(windowed)
+        stats["nginx_errors"] = sum(1 for ln in windowed if _is_error_status_line(ln))
+    for line in app_log_lines:
+        ts = parse_app_log_timestamp(line)
+        if ts is not None and ts < since:
+            continue  # a FILE line older than the window; journal lines (no
+            # parseable file-format timestamp -> ts None) count as in-window
+        if _is_error_app_log_line(line):
+            stats["app_warnings"] += 1
+    return stats
