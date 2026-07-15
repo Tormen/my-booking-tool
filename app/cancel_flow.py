@@ -298,6 +298,17 @@ def cancel_occurrence(
     course = settings.course(course_shortname)
     live_regs = find_cancelable_registrations_for_occurrence(store, course_shortname, occurrence_date_str)
 
+    # 2026-07-14, verified live: canceling every registration alone did
+    # NOT block the date -- it reappeared on /book/<shortname> as bookable
+    # with full capacity (build_occurrences regenerates it from the
+    # weekly schedule, and deleting the calendar event also deletes the
+    # only "conflict" that could have hidden it). Mark the occurrence
+    # itself, unconditionally and first -- even a double-submit or an
+    # empty occurrence stays a real "this session is not happening"
+    # statement. Cleared only by a host reinstate on this occurrence
+    # (see Store.clear_occurrence_canceled).
+    store.mark_occurrence_canceled(course_shortname, occurrence_date_str, message=message)
+
     canceled: list[CanceledParticipant] = []
     for reg in live_regs:
         user = store.find_user_by_id(reg.user_id)

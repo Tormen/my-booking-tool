@@ -198,6 +198,15 @@ def run_purge(
     purged = len(all_regs) - len(keep)
     if purged:
         store.replace_all_registrations(keep)
+    # Canceled-occurrence markers ("cancel entire session", 2026-07-14 --
+    # see Store.mark_occurrence_canceled) hold no personal data, but a
+    # marker for a long-past date has zero effect (past dates are never
+    # offered anyway) -- tidy them on the same canceled_retention_months
+    # clock canceled registrations already use. Not counted in this
+    # function's returned registration-row total.
+    store.purge_canceled_occurrences_before(
+        _months_ago(today, settings.canceled_retention_months).isoformat()
+    )
     # WARNING, not INFO: runs once a night via the systemd timer, cheap and
     # low-volume, and this is the only confirmation it actually ran and
     # what it did -- worth surfacing in `journalctl -u

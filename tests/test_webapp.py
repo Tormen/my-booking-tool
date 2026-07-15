@@ -4834,6 +4834,55 @@ class BookingFlowTest(unittest.TestCase):
         self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
         self.assertEqual(self.sent_emails, [])
 
+    def test_host_cancel_occurrence_blocks_future_bookings_for_that_date(self):
+        # 2026-07-14, verified live on booking.example.org (repo-review follow-up):
+        # canceling every registration alone did NOT block the date -- it
+        # reappeared on /book/<shortname> as bookable with full capacity
+        # (build_occurrences regenerates it from the weekly schedule, and
+        # deleting the calendar event also removed the only conflict that
+        # could have hidden it), so a brand-new booking for the canceled
+        # session sailed straight through.
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _status, _headers, body = self._post(
+            self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": "sick"}
+        )
+        self.assertIn("New bookings for this date are blocked", body)
+        self.assertTrue(self.store.is_occurrence_canceled("yoga-class-1", self.occ_date))
+        # the date is no longer offered on the booking page...
+        _s, _h, get_body = self.app.book("GET", "yoga-class-1", {})
+        self.assertNotIn(f'value="{self.occ_date}"', get_body)
+        # ...and a direct/stale POST for it is rejected server-side, with
+        # no user or registration ever created.
+        _s, _h, post_body = self._post(self.app.book, ("yoga-class-1",), {
+            "occurrence_date": self.occ_date, "name": "New Guy",
+            "email": "newguy@example.org", "agree": "on",
+        })
+        self.assertIn("That slot is no longer available.", post_body)
+        self.assertIsNone(self.store.find_user_by_email("newguy@example.org"))
+
+    def test_host_reinstate_reopens_a_canceled_entire_session(self):
+        # The one deliberate way back: a HOST putting a participant back
+        # into the session is the host saying it IS happening -- the
+        # occurrence un-blocks and the date is offered again.
+        user, _sid = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
+        self.assertTrue(self.store.is_occurrence_canceled("yoga-class-1", self.occ_date))
+        self._post(self.app.host_reinstate, (reg.registration_id,), {"message": "back on"})
+        self.assertFalse(self.store.is_occurrence_canceled("yoga-class-1", self.occ_date))
+        _s, _h, get_body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn(f'value="{self.occ_date}"', get_body)
+
+    def test_host_cancel_occurrence_get_shows_already_blocked_note(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
+        _s, _h, body = self.app.host_cancel_occurrence("GET", "yoga-class-1", self.occ_date, {})
+        self.assertIn("nothing to cancel", body)
+        self.assertIn("already marked canceled", body)
+
     def test_host_cancel_occurrence_route_is_wired_up(self):
         self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")

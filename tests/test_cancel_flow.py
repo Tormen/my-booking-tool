@@ -136,6 +136,36 @@ class CancelOccurrenceTest(unittest.TestCase):
         for reg in self.store.read_registrations(scope="live"):
             self.assertEqual(reg["status"], STATUS_CANCELED_BY_HOST)
 
+    def test_marks_the_occurrence_itself_canceled(self):
+        # 2026-07-14, verified live: canceling every registration alone
+        # did NOT block the date -- it reappeared on the booking page as
+        # bookable with full capacity. cancel_occurrence must also mark
+        # the (course, date) itself (see Store.mark_occurrence_canceled;
+        # app/webapp.py::_booking_page_context filters on it).
+        self._book("confirmed@example.org", "Confirmed", status=STATUS_CONFIRMED)
+        cancel_occurrence(
+            self.store, self.settings, None, "yoga-class-1", "2026-08-01",
+            message="venue flooded", sync_fn=self._sync_fn(),
+        )
+        self.assertTrue(self.store.is_occurrence_canceled("yoga-class-1", "2026-08-01"))
+        self.assertFalse(self.store.is_occurrence_canceled("yoga-class-1", "2026-08-08"))
+        # marker rows carry no personal data -- just course/date/when/message
+        rows = self.store.read_registrations  # noqa: F841 -- readability anchor
+        import csv
+        with open(self.store.canceled_occurrences_path, newline="", encoding="utf-8") as f:
+            marker = next(iter(csv.DictReader(f)))
+        self.assertEqual(marker["course_shortname"], "yoga-class-1")
+        self.assertEqual(marker["occurrence_date"], "2026-08-01")
+        self.assertEqual(marker["message"], "venue flooded")
+        self.assertNotIn("@", str(marker))
+
+    def test_double_cancel_keeps_the_first_markers_timestamp(self):
+        self._book("confirmed@example.org", "Confirmed", status=STATUS_CONFIRMED)
+        cancel_occurrence(self.store, self.settings, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn())
+        first = self.store.canceled_occurrence_dates("yoga-class-1")
+        cancel_occurrence(self.store, self.settings, None, "yoga-class-1", "2026-08-01", sync_fn=self._sync_fn())
+        self.assertEqual(self.store.canceled_occurrence_dates("yoga-class-1"), first)
+
     def test_does_not_touch_a_different_occurrence_or_a_different_course(self):
         self._book("same-course-other-date@example.org", "Other", status=STATUS_CONFIRMED, occurrence_date="2026-08-08")
         other_course = make_course(shortname="other-course", title="Other", capacity=5)

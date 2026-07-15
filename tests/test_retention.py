@@ -134,6 +134,29 @@ def _set_user_row(store: Store, user_id: str, **fields) -> None:
         write(rows, "test setup")
 
 
+class CanceledOccurrenceMarkerPurgeTest(unittest.TestCase):
+    """run_purge() also tidies canceled-occurrence markers ("cancel entire
+    session", 2026-07-14 -- see Store.mark_occurrence_canceled): a marker
+    for a long-past date has zero effect (past dates are never offered),
+    so it's dropped on the same canceled_retention_months clock canceled
+    registrations already use. A marker for a FUTURE (or recent-past)
+    date must survive -- it's what's actively blocking new bookings."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings(retention_months=24, canceled_retention_months=6)
+        self.today = date(2028, 1, 1)
+
+    def test_stale_marker_purged_active_marker_kept(self):
+        self.store.mark_occurrence_canceled("c", "2027-01-01")  # 12 months past -- stale
+        self.store.mark_occurrence_canceled("c", "2028-02-01")  # future -- actively blocking
+        run_purge(self.store, self.settings, today=self.today)
+        self.assertFalse(self.store.is_occurrence_canceled("c", "2027-01-01"))
+        self.assertTrue(self.store.is_occurrence_canceled("c", "2028-02-01"))
+
+
 class SendAccountDeletionWarningsTest(unittest.TestCase):
     """2026-07-09: the scheduler that deletes accounts should
     detect imminent accounts that would need to be deleted and then send

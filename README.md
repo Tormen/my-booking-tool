@@ -605,6 +605,15 @@ one course actually has a booking there. Every participant is emailed --
 since this is always host-initiated, each one also gets a short apology
 ("this is the exception, not the rule") plus a link to book the course's
 next occurrence, to keep them engaged despite the cancellation.
+Canceling an entire session also BLOCKS new bookings for that date
+(2026-07-14, verified live: without this, the date reappeared on the
+booking page as bookable with full capacity the moment its calendar
+event was deleted) -- the date simply stops being offered, same "no slot
+shown = no session" behavior as a calendar conflict, and a direct/stale
+POST for it is rejected server-side too. The block is lifted the moment
+YOU rebook any participant on it (from `/admin`, or your cancellation
+email's own rebook link) -- putting someone back in is you saying the
+session is happening after all.
 
 **Undoing a cancellation:** both the attendee's own `/my` page and the web
 admin's `/admin` overview show a "Rebook" button (2026-07-10; relabeled

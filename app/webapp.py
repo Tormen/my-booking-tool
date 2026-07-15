@@ -1405,6 +1405,20 @@ class App:
             course, self.settings, now, capacity_lookup, self._conflict_checker(exclude_own=True)
         )
 
+        # 2026-07-14, verified live (repo-review follow-up): a host's
+        # "cancel entire session" (cancel_flow.cancel_occurrence) must
+        # also block NEW bookings for that date -- without this filter
+        # the date reappeared as bookable with full capacity the moment
+        # its calendar event was deleted. One filter here covers both the
+        # rendered date picker AND the POST path's own occurrence lookup
+        # (book() only ever accepts a date from this same list), so a
+        # crafted/stale POST gets the normal "no longer available" error.
+        # "No slot shown = no session", same philosophy as calendar
+        # conflicts (see app/slots.py's module docstring).
+        canceled_dates = self.store.canceled_occurrence_dates(shortname)
+        if canceled_dates:
+            occurrences = [o for o in occurrences if o.date.isoformat() not in canceled_dates]
+
         # 2026-07-11: a real case showed a guest already `confirmed`
         # for a date while /book/<shortname> still offered that
         # exact date as a pickable option -- fixed so a date the guest is
@@ -4669,6 +4683,12 @@ class App:
         if course and date.fromisoformat(reg.occurrence_date) >= self._today():
             updated = self.store.reinstate(registration_id, course.capacity)
             if updated is not None:
+                # A host putting someone back into this session is the
+                # host saying it IS happening -- un-block new bookings if
+                # the whole occurrence had been canceled (no-op for the
+                # common single-row-cancel case). See
+                # Store.clear_occurrence_canceled (2026-07-14).
+                self.store.clear_occurrence_canceled(reg.course_shortname, reg.occurrence_date)
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
                 user = self.store.find_user_by_id(reg.user_id)
                 self._send_reinstatement_emails(
@@ -4806,6 +4826,9 @@ class App:
             message = sanitize_csv_field(form.get("message", "").strip())
             updated = self.store.reinstate(registration_id, course.capacity)
             if updated is not None:
+                # Same as admin_reinstate (2026-07-14): a host reinstate
+                # un-blocks a canceled-entirely occurrence.
+                self.store.clear_occurrence_canceled(reg.course_shortname, reg.occurrence_date)
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
                 self._send_reinstatement_emails(
                     course, reg.occurrence_date, user,
@@ -4868,6 +4891,11 @@ class App:
                 "Not found", "<p>This link is invalid (course no longer configured).</p>", banner=banner
             )
         participants = find_cancelable_registrations_for_occurrence(self.store, course_shortname, occurrence_date_str)
+        already_canceled_note = (
+            f"<p>This session is already marked canceled -- new bookings for "
+            f"{esc(occurrence_date_str)} are blocked.</p>"
+            if self.store.is_occurrence_canceled(course_shortname, occurrence_date_str) else ""
+        )
         if method == "POST":
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
@@ -4875,7 +4903,10 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Canceled",
                 f"<p>{len(result.canceled)} registration(s) for <b>{esc(course.title)}</b> "
-                f"on {esc(occurrence_date_str)} canceled, every participant notified.</p>",
+                f"on {esc(occurrence_date_str)} canceled, every participant notified.</p>"
+                f"<p>New bookings for this date are blocked -- the booking page no longer "
+                f"offers it. Rebooking any participant (from /admin, or your cancellation "
+                f"email's own link) reopens it.</p>",
                 banner=banner,
             )
         recap = _course_recap_html(course, occurrence_date_str)
@@ -4883,7 +4914,7 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Cancel entire session",
                 f"<p>Nobody is currently booked for <b>{esc(course.title)}</b> on "
-                f"{esc(occurrence_date_str)} -- nothing to cancel.</p>" + recap
+                f"{esc(occurrence_date_str)} -- nothing to cancel.</p>" + already_canceled_note + recap
                 + '<p><a href="/" class="link-button">Back to home</a></p>',
                 banner=banner,
             )
