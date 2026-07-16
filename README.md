@@ -621,14 +621,32 @@ admin health`): your `booking_calendar` must be listed in
 `[calendar].conflict_calendars`, or the blocker would never be seen by
 the conflict check.
 
-Note on what counts as a conflict: only **timed** events overlapping the
-course hours hide a date. **All-day** entries (birthdays, notes,
-"office closed" markers) are ignored by default -- set
+Note on what counts as a conflict: any event overlapping the course
+hours hides a date -- timed or all-day (an all-day vacation entry
+blocks without needing start/end times; disable that via
 `[calendar].conflict_calendar_all_day_events_also_block_the_course =
-true` if an all-day event should also block that day's courses. The
-tool's own synced course event never blocks its own course (it's
-recognized by its UID and excluded), so a date with sign-ups stays
-bookable for further participants.
+false`). Two calendar-side escape hatches exist for the exceptional
+all-day event that should NOT block, both controllable from any
+calendar client, no server access needed:
+
+- **Title marker** (`[calendar].all_day_non_blocking_title_marker`,
+  disabled by default with `""`): an all-day event whose title contains
+  the marker, case-insensitively -- e.g. "Conference Day #course-ok" --
+  is ignored by the conflict check.
+- **"Show as: Free"** (`[calendar].all_day_free_events_do_not_block`,
+  on by default): an all-day event marked Free (RFC 5545
+  `TRANSP:TRANSPARENT`) is ignored -- that flag literally means "does
+  not reserve the time". CAUTION: many calendar apps (Apple Calendar,
+  Google, Open-Xchange) create all-day events as Free **by default**,
+  so an all-day event meant to block may need flipping to "Busy" by
+  hand -- which is also why the title marker exists as the explicit,
+  no-surprises alternative.
+
+Timed events never get these escape hatches -- they always block, Free
+or not, so "no slot shown = no session" stays predictable. The tool's
+own synced course event never blocks its own course (it's recognized by
+its UID and excluded), so a date with sign-ups stays bookable for
+further participants.
 
 **Undoing a cancellation:** both the attendee's own `/my` page and the web
 admin's `/admin` overview show a "Rebook" button (2026-07-10; relabeled

@@ -89,10 +89,22 @@ booking_calendar      = "Bookings"
 # see README.md) actually hides the canceled date from the booking
 # page. `my-bt admin health` warns if it's missing.
 conflict_calendars    = ["Calendar", "Bookings"]
-# All-day events (birthdays, notes) in the conflict calendars do NOT hide
-# course dates by default -- only timed events overlapping the course
-# hours do. Set to true if an all-day entry should also block that day.
-#conflict_calendar_all_day_events_also_block_the_course = false
+# All-day events in the conflict calendars DO hide course dates by
+# default, same as timed events overlapping the course hours. Set to
+# false if all-day entries (birthdays, notes) should never block.
+#conflict_calendar_all_day_events_also_block_the_course = true
+# Escape hatch for the exceptional all-day event that should NOT block:
+# an all-day event whose title contains this marker (case-insensitive)
+# is ignored by the conflict check, e.g. "#course-ok" or "#free" -- so
+# "Conference Day #course-ok" leaves that day's courses bookable. "" (the
+# default) disables the marker feature.
+#all_day_non_blocking_title_marker = "#course-ok"
+# Second escape hatch, on by default: an all-day event marked "show as
+# Free" in the calendar app does not block. CAUTION: many calendar apps
+# create all-day events as Free BY DEFAULT -- an all-day event meant to
+# block may need to be set to "Busy" by hand. Timed events always block,
+# Free or not.
+#all_day_free_events_do_not_block = true
 # Calendar-invite reminders (minutes before start). Optional -- omit either
 # line to get its default. trainer_reminder_minutes defaults to [] (no
 # reminder at all) for the operator's own synced calendar event;

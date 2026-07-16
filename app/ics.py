@@ -173,6 +173,34 @@ def _parse_dt(value: str) -> datetime:
     return datetime.strptime(value, "%Y%m%d")
 
 
+_SUMMARY_RE = re.compile(r"^SUMMARY(?:;[^:]*)?:(.+)$", re.MULTILINE)
+_TRANSP_TRANSPARENT_RE = re.compile(r"^TRANSP(?:;[^:]*)?:\s*TRANSPARENT\s*$", re.MULTILINE)
+
+
+def _unfold(ics_text: str) -> str:
+    """Undo RFC 5545 line folding (CRLF + one whitespace continues the
+    previous line; tolerate bare LF too). Needed before matching a
+    substring like a title marker -- a long SUMMARY can be folded right
+    through the middle of the marker."""
+    return ics_text.replace("\r\n ", "").replace("\r\n\t", "").replace("\n ", "").replace("\n\t", "")
+
+
+def parse_summary(ics_text: str) -> str:
+    """The VEVENT's SUMMARY (title) with folding undone, or "". Left
+    ics-escaped (\\, stays \\,) -- fine for the marker matching this
+    feeds (see webapp.py::_conflict_checker), whose markers are plain
+    words that never contain escapable characters."""
+    m = _SUMMARY_RE.search(_unfold(ics_text))
+    return m.group(1).strip() if m else ""
+
+
+def is_transparent(ics_text: str) -> bool:
+    """True if the VEVENT is marked "show as Free" (RFC 5545
+    TRANSP:TRANSPARENT) -- i.e. it declares itself as not reserving the
+    time. Absent TRANSP means OPAQUE (busy), the spec's default."""
+    return bool(_TRANSP_TRANSPARENT_RE.search(ics_text))
+
+
 def is_all_day(ics_text: str) -> bool:
     """True if the VEVENT is an all-day event: a date-only DTSTART
     (RFC 5545 `DTSTART;VALUE=DATE:YYYYMMDD` -- no time-of-day, so also no

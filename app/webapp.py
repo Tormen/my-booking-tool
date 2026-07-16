@@ -1009,17 +1009,32 @@ class App:
                 for uid, event_ics, _etag in self.caldav.query_events(href, start, end):
                     if exclude_own and calendar_sync.is_own_event(uid, self.settings):
                         continue
-                    # All-day entries (birthdays, "office closed" notes)
-                    # don't block course hours unless explicitly enabled
-                    # -- see the setting's comment in app/config.py.
-                    if (
-                        ics.is_all_day(event_ics)
-                        and not self.settings.conflict_calendar_all_day_events_also_block_the_course
-                    ):
+                    if ics.is_all_day(event_ics) and not self._all_day_event_blocks(event_ics):
                         continue
                     return True
             return False
         return check
+
+    def _all_day_event_blocks(self, event_ics: str) -> bool:
+        """Whether an ALL-DAY conflict-calendar event hides course dates.
+        Three [calendar] settings, all decidable from the calendar app
+        alone (the point: cancellation/blocking state lives ONLY in the
+        calendar -- see README "Canceling"): all-day events block when
+        conflict_calendar_all_day_events_also_block_the_course is on
+        (the default), EXCEPT one whose title contains
+        all_day_non_blocking_title_marker (case-insensitive; "" disables
+        the marker) or one marked "show as Free" while
+        all_day_free_events_do_not_block is on. Timed events never get
+        these escape hatches -- they always block."""
+        s = self.settings
+        if not s.conflict_calendar_all_day_events_also_block_the_course:
+            return False
+        marker = s.all_day_non_blocking_title_marker
+        if marker and marker.lower() in ics.parse_summary(event_ics).lower():
+            return False
+        if s.all_day_free_events_do_not_block and ics.is_transparent(event_ics):
+            return False
+        return True
 
     def _sync(self, course_shortname: str, occurrence_date: date) -> None:
         course = self.settings.course(course_shortname)

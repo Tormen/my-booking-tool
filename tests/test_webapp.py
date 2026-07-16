@@ -77,9 +77,11 @@ def _report_with_stored_events(ics_texts: list) -> str:
 </D:multistatus>"""
 
 
-def _report_with_all_day_event(uid: str) -> str:
+def _report_with_all_day_event(uid: str, summary: str = "All-day thing", transparent: bool = False) -> str:
     # RFC 5545 all-day event: date-only DTSTART/DTEND (VALUE=DATE), the
-    # shape a birthday/"office closed" calendar entry has.
+    # shape a birthday/"office closed" calendar entry has. transparent=True
+    # adds TRANSP:TRANSPARENT ("show as Free" in calendar apps).
+    transp_line = "TRANSP:TRANSPARENT\n" if transparent else ""
     return f"""<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
   <D:response>
@@ -91,8 +93,8 @@ BEGIN:VEVENT
 UID:{uid}
 DTSTART;VALUE=DATE:20260708
 DTEND;VALUE=DATE:20260709
-SUMMARY:All-day thing
-END:VEVENT
+SUMMARY:{summary}
+{transp_line}END:VEVENT
 END:VCALENDAR
 </C:calendar-data>
     </D:prop></D:propstat>
@@ -201,35 +203,76 @@ class ConflictCheckerTest(unittest.TestCase):
         end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
         self.assertFalse(check(start, end))
 
-    def test_all_day_events_do_not_block_by_default(self):
-        # Birthdays/"office closed" notes are all-day entries; by default
-        # only a TIMED event overlapping the course hours hides a date --
-        # see [calendar].conflict_calendar_all_day_events_also_block_the_course.
-        self.transport.report_responses["YogaBookings"] = Response(
-            207, {}, _report_with_all_day_event("birthday@x")
-        )
-        check = self.app._conflict_checker(exclude_own=True)
-        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
-        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        self.assertFalse(check(start, end))
-
-    def test_all_day_events_block_when_setting_enabled(self):
+    def _check_with(self, report_xml: str, **settings_overrides):
+        """Fresh App with an all-day (or any) event stored in the second
+        conflict calendar; returns the conflict verdict for the standard
+        course window."""
         settings = make_settings(
-            conflict_calendars=("Calendar", "Yoga-Bookings"),
-            conflict_calendar_all_day_events_also_block_the_course=True,
+            conflict_calendars=("Calendar", "Yoga-Bookings"), **settings_overrides
         )
         app = App(settings, self.store)
         app.caldav = CalDAVClient(
             settings.caldav_url, settings.caldav_username, settings.caldav_password,
             transport=self.transport,
         )
-        self.transport.report_responses["YogaBookings"] = Response(
-            207, {}, _report_with_all_day_event("office-closed@x")
-        )
+        self.transport.report_responses["YogaBookings"] = Response(207, {}, report_xml)
         check = app._conflict_checker(exclude_own=True)
         start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
         end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        self.assertTrue(check(start, end))
+        return check(start, end)
+
+    # All-day conflict behavior (2026-07-16, operator's call): all-day
+    # events BLOCK by default, with two individually-toggleable
+    # calendar-side escape hatches -- a title marker and "show as Free".
+    # See webapp._all_day_event_blocks / config.py's setting comments.
+
+    def test_all_day_events_block_by_default(self):
+        self.assertTrue(self._check_with(_report_with_all_day_event("vacation@x")))
+
+    def test_all_day_events_never_block_when_main_setting_off(self):
+        self.assertFalse(self._check_with(
+            _report_with_all_day_event("birthday@x"),
+            conflict_calendar_all_day_events_also_block_the_course=False,
+        ))
+
+    def test_all_day_title_marker_unblocks_case_insensitively(self):
+        self.assertFalse(self._check_with(
+            _report_with_all_day_event("conf@x", summary="Conference Day #YOGA-OK"),
+            all_day_non_blocking_title_marker="#yoga-ok",
+        ))
+
+    def test_all_day_without_the_marker_still_blocks(self):
+        self.assertTrue(self._check_with(
+            _report_with_all_day_event("vacation@x", summary="Vacation"),
+            all_day_non_blocking_title_marker="#yoga-ok",
+        ))
+
+    def test_empty_marker_setting_disables_the_marker_feature(self):
+        # Default marker is "" -- a title that happens to contain some
+        # would-be marker text must not unblock anything.
+        self.assertTrue(self._check_with(
+            _report_with_all_day_event("conf@x", summary="Conference Day #yoga-ok"),
+        ))
+
+    def test_all_day_marked_free_does_not_block_by_default(self):
+        self.assertFalse(self._check_with(
+            _report_with_all_day_event("note@x", transparent=True),
+        ))
+
+    def test_all_day_marked_free_blocks_when_free_flag_setting_off(self):
+        self.assertTrue(self._check_with(
+            _report_with_all_day_event("note@x", transparent=True),
+            all_day_free_events_do_not_block=False,
+        ))
+
+    def test_timed_event_marked_free_still_blocks(self):
+        # The escape hatches are for ALL-DAY events only -- a timed event
+        # overlapping the course hours always blocks, Free or not, so
+        # "no slot shown = no session" stays predictable.
+        timed_free = _report_with_event("busy@x").replace(
+            "SUMMARY:Test", "SUMMARY:Test\nTRANSP:TRANSPARENT"
+        )
+        self.assertTrue(self._check_with(timed_free, all_day_free_events_do_not_block=True))
 
     def test_calendar_href_is_cached_not_refetched_per_check(self):
         check = self.app._conflict_checker(exclude_own=True)

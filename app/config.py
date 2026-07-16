@@ -264,13 +264,31 @@ class Settings:
     guest_calendar_reminder_minutes: tuple[int, ...] = (60,)
 
     # 2026-07-16: whether an ALL-DAY event (DTSTART;VALUE=DATE, no time of
-    # day) in a conflict calendar hides that day's course dates. Off by
-    # default: all-day entries are typically notes/birthdays/"office
-    # closed" markers, not "I am genuinely unavailable at course hours" --
-    # a real absence (vacation, or a cancel-entire-session CANCELED
-    # blocker) is a timed event overlapping the course hours. See
-    # app/webapp.py::_conflict_checker.
-    conflict_calendar_all_day_events_also_block_the_course: bool = False
+    # day) in a conflict calendar hides that day's course dates. On by
+    # default (the operator's explicit call, same day the setting was
+    # born with default false): an all-day vacation entry should block
+    # without needing a start/end time. The two settings below are the
+    # calendar-side escape hatches for the exceptional all-day event
+    # that should NOT block. See app/webapp.py::_conflict_checker.
+    conflict_calendar_all_day_events_also_block_the_course: bool = True
+
+    # Escape hatch 1: an all-day event whose TITLE contains this marker
+    # (case-insensitive) does not block course dates -- lets the operator
+    # whitelist one specific all-day event from any calendar client, no
+    # server access needed. "" (the default) disables the marker feature
+    # entirely.
+    all_day_non_blocking_title_marker: str = ""
+
+    # Escape hatch 2: an all-day event marked "show as Free" in the
+    # calendar app (RFC 5545 TRANSP:TRANSPARENT) does not block course
+    # dates -- that flag literally means "does not reserve the time".
+    # On by default. CAUTION, and why this can't be the only mechanism:
+    # many clients (Apple Calendar, Google, Open-Xchange) create all-day
+    # events as Free BY DEFAULT, so an all-day event the operator wants
+    # to block with may need to be flipped to "Busy" by hand. Timed
+    # events are deliberately not affected -- they always block, Free or
+    # not, since "no slot shown = no session" must stay predictable.
+    all_day_free_events_do_not_block: bool = True
 
     # Optional: also write logs to this file (in addition to stdout/journal
     # -- see app/logutil.py). None (the default, and what a settings.toml
@@ -646,8 +664,10 @@ def load_settings(toml_path: str | Path) -> Settings:
         booking_calendar=cal["booking_calendar"],
         conflict_calendars=tuple(cal.get("conflict_calendars", [])),
         conflict_calendar_all_day_events_also_block_the_course=bool(
-            cal.get("conflict_calendar_all_day_events_also_block_the_course", False)
+            cal.get("conflict_calendar_all_day_events_also_block_the_course", True)
         ),
+        all_day_non_blocking_title_marker=str(cal.get("all_day_non_blocking_title_marker", "")),
+        all_day_free_events_do_not_block=bool(cal.get("all_day_free_events_do_not_block", True)),
         trainer_calendar_reminder_minutes=tuple(int(m) for m in cal.get("trainer_reminder_minutes", [])),
         guest_calendar_reminder_minutes=tuple(int(m) for m in cal.get("guest_reminder_minutes", [60])),
         smtp_host=smtp["host"],
