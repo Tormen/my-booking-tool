@@ -290,9 +290,15 @@ class Settings:
     # not, since "no slot shown = no session" must stay predictable.
     all_day_free_events_do_not_block: bool = True
 
-    # Optional: also write logs to this file (in addition to stdout/journal
-    # -- see app/logutil.py). None (the default, and what a settings.toml
-    # without a [logging] section gets) means stdout/journal only.
+    # Also write logs to this file (in addition to stdout/journal -- see
+    # app/logutil.py, size-capped rotation). ON by default (2026-07-16,
+    # operator's call): the watchdog's rate-limit-block alerting and the
+    # CSP-violation checks in `my-bt admin health`/`setup` read ONLY this
+    # file and are silently blind without it. A settings.toml withOUT the
+    # key gets DEFAULT_LOG_FILE (applied by load_settings via
+    # log_file_from_raw -- the dataclass default here stays None so
+    # directly-constructed test Settings never touch the filesystem);
+    # log_file = "" in settings.toml explicitly disables file logging.
     log_file: str | None = None
 
     # Optional, comma-separated (2026-07-09): BCC these addresses on
@@ -507,15 +513,39 @@ def load_raw_toml(toml_path: str | Path) -> dict | None:
         return tomllib.load(f)
 
 
+# The default [logging].log_file -- inside the app's own data dir, so the
+# service user can always write it. See log_file_from_raw() for the
+# absent-vs-"" semantics and Settings.log_file's comment for why file
+# logging is on by default.
+DEFAULT_LOG_FILE = "/var/lib/my-booking/my-booking.log"
+
+
+def log_file_from_raw(raw: dict | None) -> str | None:
+    """The effective [logging].log_file for a raw-parsed settings.toml:
+    key absent -> DEFAULT_LOG_FILE (file logging is ON by default),
+    log_file = "" -> None (explicitly disabled), else the configured
+    path. THE one place this rule lives -- load_settings, peek_log_file,
+    and every raw-toml reader (`my-bt status`/`admin health`/`admin
+    csp-violations`, cli_checks, cli_setup) resolve through it, so "which
+    log file is in effect" can't drift between the running service and
+    the tooling that reads its log back."""
+    logging_cfg = (raw or {}).get("logging", {})
+    if "log_file" not in logging_cfg:
+        return DEFAULT_LOG_FILE
+    return logging_cfg.get("log_file") or None
+
+
 def peek_log_file(toml_path: str | Path) -> str | None:
-    """Read just settings.toml's [logging].log_file, without requiring the
-    secret files load_settings() needs -- used by `my-bt -L/--log`, since
-    several my-bt subcommands (list/users/show/stats) never call
-    load_settings() at all, and shouldn't have to just to find a log path."""
+    """The effective log_file (see log_file_from_raw) without requiring
+    the secret files load_settings() needs -- used by `my-bt -L/--log`,
+    since several my-bt subcommands (list/users/show/stats) never call
+    load_settings() at all, and shouldn't have to just to find a log
+    path. No settings.toml at all -> None (a bare dev checkout shouldn't
+    start writing to /var/lib just for running a CLI command)."""
     raw = load_raw_toml(toml_path)
     if raw is None:
         return None
-    return raw.get("logging", {}).get("log_file") or None
+    return log_file_from_raw(raw)
 
 
 def _read_secret(path_str: str) -> str:
@@ -642,7 +672,6 @@ def load_settings(toml_path: str | Path) -> Settings:
     admin = raw["admin"]
     defaults = raw.get("defaults", {})
     privacy = raw.get("privacy", {})
-    logging_cfg = raw.get("logging", {})
     watchdog = raw.get("watchdog", {})
 
     courses = courses_from_raw(raw)
@@ -698,7 +727,7 @@ def load_settings(toml_path: str | Path) -> Settings:
             privacy.get("how_many_days_before_account_deletion_send_warning_mail", 0) or 0
         ),
         courses=courses,
-        log_file=(logging_cfg.get("log_file") or None),
+        log_file=log_file_from_raw(raw),
         watchdog_enabled=bool(watchdog.get("enabled", True)),
         watchdog_window_minutes=int(watchdog.get("window_minutes", 15)),
         watchdog_nginx_access_log=(watchdog.get("nginx_access_log") or None),

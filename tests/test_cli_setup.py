@@ -199,21 +199,43 @@ class PrintReportTest(unittest.TestCase):
         cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
         self.assertTrue(any("SKIP" in ln and "static_site_dir" in ln for ln in lines))
 
-    def test_log_file_not_configured_shows_skip(self):
+    def test_log_file_disabled_shows_skip(self):
         # 2026-07-16: [logging].log_file's group/SELinux check (new)
         # -- unlike the other data paths, print_report had no section
         # for log_file at all before this; must degrade to a plain SKIP
-        # line, not silently vanish, when it isn't configured.
+        # line, not silently vanish. Same day, file logging became ON by
+        # default, so "off" is now spelled log_file = "" explicitly (an
+        # absent key means config.DEFAULT_LOG_FILE).
         lines: list[str] = []
-        cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
-        self.assertTrue(any("SKIP" in ln and "log_file" in ln for ln in lines))
+        cli_setup.print_report(
+            _raw(logging={"log_file": ""}), self.settings_path, str(self.home),
+            print_fn=lines.append,
+        )
+        self.assertTrue(any("SKIP" in ln and "log" in ln for ln in lines))
 
-    def test_csp_violations_not_configured_shows_skip(self):
+    def test_absent_log_file_key_checks_the_default_path(self):
+        # File logging is on by default -- with no [logging] section at
+        # all, the group/SELinux audit must run against
+        # config.DEFAULT_LOG_FILE instead of skipping (patched into this
+        # test's tmpdir so a real /var/lib/my-booking can't leak in).
+        log_path = self.home / "default.log"
+        log_path.write_text("", encoding="utf-8")
+        with patch("app.config.DEFAULT_LOG_FILE", str(log_path)), \
+             patch.object(cli_setup.cli_checks, "check_path_group_and_selinux",
+                          return_value=[]) as mock_check:
+            cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lambda _: None)
+        checked = [c.args for c in mock_check.call_args_list if c.args and c.args[0] == "log file"]
+        self.assertEqual(checked, [("log file", str(log_path))])
+
+    def test_csp_violations_disabled_shows_skip(self):
         lines: list[str] = []
-        cli_setup.print_report(_raw(), self.settings_path, str(self.home), print_fn=lines.append)
+        cli_setup.print_report(
+            _raw(logging={"log_file": ""}), self.settings_path, str(self.home),
+            print_fn=lines.append,
+        )
         text = "\n".join(lines)
         self.assertIn("CSP violations reported by browsers", text)
-        self.assertIn("[SKIP] [logging].log_file not configured -- not checked", text)
+        self.assertIn('[SKIP] file logging disabled (log_file = "") -- not checked', text)
 
     def test_csp_violations_configured_and_clean_shows_ok(self):
         raw = _raw(logging={"log_file": str(self.home / "my-booking.log")})

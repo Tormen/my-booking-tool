@@ -206,14 +206,17 @@ erasure_pepper_file = "/etc/my-booking/secrets/erasure_pepper"
 # how_many_days_before_account_deletion_send_warning_mail = 30
 
 [logging]
-# Optional. If set, the web service, the retention job, and `my-bt -L`/
-# `--log` all append their logs to this one file, in addition to
-# stdout/journal -- handy as a single place to `tail -f` or attach when
-# reporting a problem (see README.md "Logs & debugging"). Uncomment to
-# enable; leave commented out (the default) for stdout/journal only.
-# Must be writable by the my-booking user/group -- the default path below
-# is inside /var/lib/my-booking, which the RPM already creates with the
-# right ownership, so no extra setup is needed if you use it as-is.
+# ON by default: the web service, the retention job, and `my-bt -L`/
+# `--log` all append their logs to this one file (size-capped rotation,
+# ~2 MB x 4 files), in addition to stdout/journal -- a single place to
+# `tail -f`, and REQUIRED by the watchdog's rate-limit-block alerting
+# and the CSP-violation checks in `my-bt admin health`/`setup`, which
+# read only this file (see README.md "Logs & debugging"). Leaving the
+# key commented out uses the default path below; set log_file = "" to
+# explicitly disable file logging (stdout/journal only).
+# Must be writable by the my-booking user/group -- the default path is
+# inside /var/lib/my-booking, which the RPM already creates with the
+# right ownership, so no extra setup is needed.
 # log_file = "/var/lib/my-booking/my-booking.log"
 
 [watchdog]

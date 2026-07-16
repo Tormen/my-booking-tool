@@ -1372,10 +1372,10 @@ def _print_activity_summary(args) -> None:
     nginx_path = raw.get("watchdog", {}).get("nginx_access_log") or cli_checks._nginx_access_log_for_host(raw)
     nginx_lines = cli_checks._read_log_lines(nginx_path) if nginx_path else None
 
-    # ONE app-log source, not both: with [logging].log_file configured the
+    # ONE app-log source, not both: with [logging].log_file in effect the
     # service writes every record there AND to the journal -- counting
     # both would double every warning.
-    log_file = raw.get("logging", {}).get("log_file")
+    log_file = app_config.log_file_from_raw(raw)
     app_lines = cli_checks._read_log_lines(log_file) if log_file else None
     app_source = "app log"
     if app_lines is None:
@@ -1454,14 +1454,19 @@ def cmd_admin_csp_violations(args) -> None:
     from app import cli_checks
 
     raw = app_config.load_raw_toml(args.settings) or {}
-    log_file = raw.get("logging", {}).get("log_file")
+    log_file = app_config.log_file_from_raw(raw)
     window_minutes = int(raw.get("watchdog", {}).get("window_minutes", 15))
     if not log_file:
-        print("[logging].log_file is not configured -- nothing to scan")
+        print('[logging].log_file is disabled (log_file = "") -- nothing to scan')
         return
     try:
         with open(log_file, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
+    except FileNotFoundError:
+        # Normal on a fresh install before the service's first start --
+        # the (since 2026-07-16, default-on) log file is created lazily.
+        print(f"log file {log_file} does not exist yet -- nothing to scan")
+        return
     except OSError as exc:
         print(f"could not read {log_file}: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -1679,7 +1684,7 @@ def cmd_admin_health(args) -> None:
         csp_checks = cli_checks.check_csp_violations(raw)
         if csp_checks:
             checks.extend(csp_checks)
-        elif raw.get("logging", {}).get("log_file"):
+        elif app_config.log_file_from_raw(raw):
             checks.append(("CSP violations reported by browsers", "ok",
                             "none in the last [watchdog].window_minutes"))
         else:
@@ -1698,7 +1703,7 @@ def cmd_admin_health(args) -> None:
             # consistent way to say "deliberately not checked" here without
             # it being repeated in the "Warnings/failures" summary below.
             checks.append(("CSP violations reported by browsers", "ok",
-                            "[logging].log_file not configured -- not checked here "
+                            'file logging disabled (log_file = "") -- not checked here '
                             "(journal-only violations still show via "
                             "`my-bt admin health errors`)"))
 

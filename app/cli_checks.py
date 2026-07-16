@@ -1731,7 +1731,7 @@ def check_csp_violations(raw: dict, now: datetime | None = None) -> list[Check]:
     watchdog's own threshold-gated alert) -- not worth duplicating
     journalctl-reading into every one of these check functions just to
     paper over not having it configured."""
-    log_path_str = raw.get("logging", {}).get("log_file")
+    log_path_str = config.log_file_from_raw(raw)
     if not log_path_str:
         return []
     window_minutes = int(raw.get("watchdog", {}).get("window_minutes", 15))
@@ -2046,7 +2046,7 @@ def health_report_log_sources(raw: dict) -> list[tuple[str, str | None]]:
         ("nginx global error log", _nginx_global_error_log(raw)),
         ("nginx vhost access log", _nginx_access_log_for_host(raw)),
         ("nginx vhost error log", _nginx_error_log_for_host(raw)),
-        ("app log", raw.get("logging", {}).get("log_file")),
+        ("app log", config.log_file_from_raw(raw)),
     ]
 
 

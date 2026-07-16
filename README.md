@@ -541,8 +541,8 @@ my-bt -D admin gdpr erase guest@example.com   # -D/--debug: full traceback on
                                             # just for this one command)
 my-bt -L status                            # -L/--log: also append this
                                             # run's output to settings.toml's
-                                            # [logging].log_file (configure
-                                            # that first, see below)
+                                            # [logging].log_file (on by
+                                            # default, see below)
 ```
 
 There's no more `my-bt test` -- the unit test suite instead runs
@@ -782,7 +782,7 @@ something seems off, or after any install/reinstall (this is what plain
 - Whether any occurrence failed to resync on the last calendar-invite
   resync attempt (persistent CalDAV conflict) -- a marker-file check, no
   network call, see "Per-occurrence resync failures" below.
-- Browser-reported CSP violations (`[logging].log_file`, if configured --
+- Browser-reported CSP violations (`[logging].log_file`, on by default --
   see "Watchdog" above), and, separately, whether every inline `<script>`
   hash this app can currently produce is actually allow-listed in the
   live nginx CSP header right now (`app.cli_checks.expected_csp_hashes()`/
@@ -1124,19 +1124,23 @@ sudo systemctl restart my-booking.service
 
 Or for a one-off `my-bt` command: `MY_BOOKING_DEBUG=1 my-bt <command>`.
 
-**A single log file** (in addition to journald), if you'd rather `tail -f`
-or attach one file than juggle `journalctl` across two units: set
-`[logging].log_file` in `settings.toml` (commented out by default; see the
-example there) to a path writable by the `my-booking` user -- the default
-suggestion, `/var/lib/my-booking/my-booking.log`, is inside a directory the
-RPM already creates with the right ownership, so no extra setup needed if
-you use it as-is. Once set, the web service and the retention job append
-there automatically (no restart-time flag needed, just restart the
-service/timer so it picks up the new setting). For `my-bt`, add `-L`/
-`--log` to any command to append that run's *entire* output (not just log
-records -- the actual table/JSON output too) to the same file, with a
-timestamped `=== my-bt ... ===` line marking where each run starts, so a
-file with several runs in it stays easy to read.
+**A single log file** (in addition to journald), **on by default**: with
+`[logging].log_file` absent from `settings.toml`, the web service and the
+retention job write to `/var/lib/my-booking/my-booking.log` -- a
+directory the RPM already creates with the right ownership, so no setup
+needed. Set the key to a different path to move it, or to `""` to
+explicitly disable file logging (stdout/journal only). It's on by
+default because two features read *only* this file and are silently
+blind without it: the watchdog's rate-limit-block alerting and the
+CSP-violation checks in `my-bt admin health`/`setup`/`csp-violations`
+(`my-bt status`'s 24h activity block degrades to the journal, the only
+one that does). The file is size-capped with rotation (~2 MB x 4 files,
+about 8 MB total ceiling) -- no logrotate config needed, it can't grow
+unbounded. For `my-bt`, add `-L`/`--log` to any command to append that
+run's *entire* output (not just log records -- the actual table/JSON
+output too) to the same file, with a timestamped `=== my-bt ... ===`
+line marking where each run starts, so a file with several runs in it
+stays easy to read.
 
 **First thing to try if something's wrong:** `my-bt admin health` (see
 above) -- it checks most of what actually goes wrong in practice (a

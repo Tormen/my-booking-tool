@@ -14,6 +14,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MY_BT_PATH = str(Path(__file__).resolve().parent.parent / "scripts" / "my-bt")
 _loader = importlib.machinery.SourceFileLoader("my_bt_csp_violations_test_mod", MY_BT_PATH)
@@ -31,8 +32,10 @@ class CmdAdminCspViolationsTest(unittest.TestCase):
         self.settings_path = self.home / "settings.toml"
 
     def _write_settings(self, log_file: str | None) -> None:
+        # None = no [logging] section at all (the on-by-default case,
+        # since 2026-07-16); "" = explicitly disabled file logging.
         lines = ["[site]", 'admin_email = "admin@example.org"', ""]
-        if log_file:
+        if log_file is not None:
             lines += ["[logging]", f'log_file = "{log_file}"', ""]
         self.settings_path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -43,10 +46,22 @@ class CmdAdminCspViolationsTest(unittest.TestCase):
             my_bt_mod.cmd_admin_csp_violations(args)
         return out.getvalue()
 
-    def test_no_log_file_configured(self):
-        self._write_settings(log_file=None)
+    def test_log_file_explicitly_disabled(self):
+        self._write_settings(log_file="")
         text = self._run()
-        self.assertIn("not configured", text)
+        self.assertIn("disabled", text)
+
+    def test_default_log_file_not_existing_yet_is_graceful(self):
+        # No [logging] section -> config.DEFAULT_LOG_FILE applies (file
+        # logging is on by default since 2026-07-16); before the service
+        # ever started, that file doesn't exist -- must say so and exit
+        # cleanly, not error out. DEFAULT_LOG_FILE is patched to a path
+        # inside this test's tmpdir so the test can't be poisoned by a
+        # real /var/lib/my-booking on the machine running the suite.
+        self._write_settings(log_file=None)
+        with mock.patch("app.config.DEFAULT_LOG_FILE", str(self.home / "never-created.log")):
+            text = self._run()
+        self.assertIn("does not exist yet", text)
 
     def test_log_file_configured_but_no_violations(self):
         self._write_settings(log_file=str(self.log_path))

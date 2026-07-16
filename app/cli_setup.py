@@ -22,7 +22,7 @@ import urllib.request
 from pathlib import Path
 from typing import Callable
 
-from . import cli_checks, maintenance, security as app_security, site_render
+from . import cli_checks, config, maintenance, security as app_security, site_render
 from .atomic_io import atomic_write_text
 
 # Same env-var-with-localhost-default convention as scripts/my-bt's own
@@ -214,14 +214,15 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "data_dir_group_selinux": cli_checks.check_path_group_and_selinux("data dir", data_dir),
         "log_file_group_selinux": (
             cli_checks.check_path_group_and_selinux("log file", log_file_path)
-            # 2026-07-16: read straight out of the already-parsed `raw`
-            # dict, NOT config.peek_log_file(settings_path) -- that
-            # re-reads settings_path off disk, which several tests here
-            # point at a fake/incomplete path since build_report never
-            # used to touch settings.toml itself beyond the `raw` it was
-            # handed. Same value peek_log_file would return either way
-            # (raw["logging"]["log_file"]).
-            if (log_file_path := raw.get("logging", {}).get("log_file")) else []
+            # 2026-07-16: resolved from the already-parsed `raw` dict, NOT
+            # config.peek_log_file(settings_path) -- that re-reads
+            # settings_path off disk, which several tests here point at a
+            # fake/incomplete path since build_report never used to touch
+            # settings.toml itself beyond the `raw` it was handed. Same
+            # value peek_log_file would return either way; None only when
+            # log_file = "" explicitly disables file logging (absent key
+            # = config.DEFAULT_LOG_FILE, since 2026-07-16 same day).
+            if (log_file_path := config.log_file_from_raw(raw)) else []
         ),
         "static_site_dir_group_selinux": (
             cli_checks.check_path_group_and_selinux("static_site_dir", static_site_dir)
@@ -366,7 +367,7 @@ def print_report(
     if report["log_file_group_selinux"]:
         show(report["log_file_group_selinux"])
     else:
-        print_fn("   [SKIP] [logging].log_file not configured, or doesn't exist yet -- not checked")
+        print_fn('   [SKIP] file logging disabled (log_file = ""), or the file doesn\'t exist yet -- not checked')
 
     print_fn("\n12. Maintenance mode (`my-bt admin site-maintenance on/off/status`):")
     show(report["maintenance"])
@@ -382,10 +383,10 @@ def print_report(
     print_fn("\n14. CSP violations reported by browsers ([logging].log_file, if configured):")
     if report["csp_violations"]:
         show(report["csp_violations"])
-    elif raw.get("logging", {}).get("log_file"):
+    elif config.log_file_from_raw(raw):
         print_fn("   [OK  ] none in the last [watchdog].window_minutes")
     else:
-        print_fn("   [SKIP] [logging].log_file not configured -- not checked")
+        print_fn('   [SKIP] file logging disabled (log_file = "") -- not checked')
 
     # 2026-07-13: the PROACTIVE half of the CSP-hash automation (contrast
     # step 14 above, which is purely reactive -- it can only ever surface a
@@ -1178,7 +1179,7 @@ def interactive_setup(
     # that would just fail as a non-root my-booking-group member.
     print_fn("\n-- 11d. Data path group/SELinux audit --")
     audit_paths = [("data dir", Path(data_dir))]
-    log_file_configured = raw.get("logging", {}).get("log_file")
+    log_file_configured = config.log_file_from_raw(raw)
     if log_file_configured and Path(log_file_configured).exists():
         audit_paths.append(("log file", Path(log_file_configured)))
     static_site_dir = raw.get("site", {}).get("static_site_dir")

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app import config as app_config
 from app.config import CourseDateOverride, load_settings
 
 from .helpers import make_course
@@ -130,6 +131,23 @@ capacity = 10
             'conflict_calendars = ["Bookings"]\n' + extra_calendar_lines,
         ))
         return toml_path
+
+    def test_log_file_defaults_on_when_key_absent(self):
+        # 2026-07-16 (operator's call): file logging is ON by default --
+        # the watchdog's rate-limit-block alerting and the CSP-violation
+        # health checks read only this file and are blind without it.
+        settings = load_settings(self._write(self._course_block("c1")))
+        self.assertEqual(settings.log_file, app_config.DEFAULT_LOG_FILE)
+
+    def test_log_file_empty_string_disables_file_logging(self):
+        toml_path = self._write(self._course_block("c1"))
+        toml_path.write_text(toml_path.read_text() + '\n[logging]\nlog_file = ""\n')
+        self.assertIsNone(load_settings(toml_path).log_file)
+
+    def test_log_file_explicit_path_wins(self):
+        toml_path = self._write(self._course_block("c1"))
+        toml_path.write_text(toml_path.read_text() + '\n[logging]\nlog_file = "/tmp/custom.log"\n')
+        self.assertEqual(load_settings(toml_path).log_file, "/tmp/custom.log")
 
     def test_all_day_conflict_settings_defaults(self):
         # 2026-07-16 (operator's call, same day the setting was born with

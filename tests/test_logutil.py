@@ -11,10 +11,13 @@ configure_logging() now forces UTC via Formatter.converter, independent
 of whatever the OS clock is set to.
 """
 import logging
+import logging.handlers
+import os
+import tempfile
 import time
 import unittest
 
-from app.logutil import configure_logging
+from app.logutil import LOG_FILE_BACKUP_COUNT, LOG_FILE_MAX_BYTES, configure_logging
 
 
 class ConfigureLoggingUtcTest(unittest.TestCase):
@@ -37,3 +40,24 @@ class ConfigureLoggingUtcTest(unittest.TestCase):
                 "time.localtime -- see app/watchdog.py::_parse_app_log_timestamp, "
                 "which assumes this format is already UTC",
             )
+
+    def test_log_file_handler_is_size_capped_rotating(self):
+        # 2026-07-16: file logging became ON by default (see
+        # config.DEFAULT_LOG_FILE), which makes unbounded growth a real
+        # risk -- no logrotate config ships with this project, so the
+        # handler itself must rotate. A plain FileHandler here would
+        # silently reintroduce the forever-growing file.
+        with tempfile.TemporaryDirectory() as tmp:
+            configure_logging(log_file=os.path.join(tmp, "app.log"))
+            file_handlers = [
+                h for h in logging.getLogger().handlers
+                if isinstance(h, logging.FileHandler)
+            ]
+            self.assertEqual(len(file_handlers), 1)
+            h = file_handlers[0]
+            self.assertIsInstance(h, logging.handlers.RotatingFileHandler)
+            self.assertEqual(h.maxBytes, LOG_FILE_MAX_BYTES)
+            self.assertEqual(h.backupCount, LOG_FILE_BACKUP_COUNT)
+            # TemporaryDirectory cleanup on Windows-ish filesystems (and
+            # tidiness anywhere) needs the handle released first.
+            h.close()
