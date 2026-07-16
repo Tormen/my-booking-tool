@@ -115,6 +115,7 @@ from zoneinfo import ZoneInfo
 
 from . import calendar_sync
 from . import cli_list
+from . import ics
 from . import maintenance
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import (
@@ -1005,8 +1006,16 @@ class App:
             # the booking calendar itself).
             for calendar_name in self.settings.conflict_calendars:
                 href = self._href(calendar_name)
-                for uid, _ics, _etag in self.caldav.query_events(href, start, end):
+                for uid, event_ics, _etag in self.caldav.query_events(href, start, end):
                     if exclude_own and calendar_sync.is_own_event(uid, self.settings):
+                        continue
+                    # All-day entries (birthdays, "office closed" notes)
+                    # don't block course hours unless explicitly enabled
+                    # -- see the setting's comment in app/config.py.
+                    if (
+                        ics.is_all_day(event_ics)
+                        and not self.settings.conflict_calendar_all_day_events_also_block_the_course
+                    ):
                         continue
                     return True
             return False
@@ -1044,6 +1053,13 @@ class App:
         return cancel_occurrence(
             self.store, self.settings, self.caldav, course_shortname, occurrence_date_str, message=message,
             sync_fn=lambda sn, occ_str: self._sync(sn, date.fromisoformat(occ_str)),
+            # Same cached-href reasoning as sync_fn -- see
+            # calendar_sync.create_cancellation_blocker (2026-07-14) for
+            # what this event does and why it's created fail-closed FIRST.
+            blocker_fn=lambda sn, occ_str, msg: calendar_sync.create_cancellation_blocker(
+                self.caldav, self._href(self.settings.booking_calendar), self.settings,
+                self.settings.course(sn), date.fromisoformat(occ_str), message=msg,
+            ),
         )
 
     # -- routing -----------------------------------------------------------
@@ -1405,19 +1421,15 @@ class App:
             course, self.settings, now, capacity_lookup, self._conflict_checker(exclude_own=True)
         )
 
-        # 2026-07-14, verified live (repo-review follow-up): a host's
-        # "cancel entire session" (cancel_flow.cancel_occurrence) must
-        # also block NEW bookings for that date -- without this filter
-        # the date reappeared as bookable with full capacity the moment
-        # its calendar event was deleted. One filter here covers both the
-        # rendered date picker AND the POST path's own occurrence lookup
-        # (book() only ever accepts a date from this same list), so a
-        # crafted/stale POST gets the normal "no longer available" error.
-        # "No slot shown = no session", same philosophy as calendar
-        # conflicts (see app/slots.py's module docstring).
-        canceled_dates = self.store.canceled_occurrence_dates(shortname)
-        if canceled_dates:
-            occurrences = [o for o in occurrences if o.date.isoformat() not in canceled_dates]
+        # NOTE on canceled-entirely sessions (2026-07-14, verified live):
+        # nothing extra to filter here -- "cancel entire session" PUTs a
+        # blocker event on the booking calendar (see calendar_sync.
+        # create_cancellation_blocker), and the conflict check inside
+        # build_occurrences() above already hides any date overlapping a
+        # non-own event. That covers the rendered picker AND the POST
+        # path's own lookup (book() only accepts dates from this list),
+        # so a stale/crafted POST gets the normal "no longer available"
+        # error. Deleting the blocker in the calendar reopens the date.
 
         # 2026-07-11: a real case showed a guest already `confirmed`
         # for a date while /book/<shortname> still offered that
@@ -4684,11 +4696,22 @@ class App:
             updated = self.store.reinstate(registration_id, course.capacity)
             if updated is not None:
                 # A host putting someone back into this session is the
-                # host saying it IS happening -- un-block new bookings if
-                # the whole occurrence had been canceled (no-op for the
-                # common single-row-cancel case). See
-                # Store.clear_occurrence_canceled (2026-07-14).
-                self.store.clear_occurrence_canceled(reg.course_shortname, reg.occurrence_date)
+                # host saying it IS happening -- remove any "CANCELED:"
+                # blocker event so the date is offered again (no-op for
+                # the common single-row-cancel case, where none exists;
+                # see calendar_sync.delete_cancellation_blocker,
+                # 2026-07-14). Best-effort: the reinstate itself (and its
+                # sync, next line) must not fail over the blocker cleanup
+                # -- the host can always delete the event by hand.
+                try:
+                    calendar_sync.delete_cancellation_blocker(
+                        self.caldav, self._href(self.settings.booking_calendar), self.settings,
+                        reg.course_shortname, date.fromisoformat(reg.occurrence_date),
+                    )
+                except CalDAVError:
+                    log.warning("could not remove the cancellation blocker for %s on %s -- "
+                                "delete the CANCELED event from the calendar by hand",
+                                reg.course_shortname, reg.occurrence_date)
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
                 user = self.store.find_user_by_id(reg.user_id)
                 self._send_reinstatement_emails(
@@ -4827,8 +4850,16 @@ class App:
             updated = self.store.reinstate(registration_id, course.capacity)
             if updated is not None:
                 # Same as admin_reinstate (2026-07-14): a host reinstate
-                # un-blocks a canceled-entirely occurrence.
-                self.store.clear_occurrence_canceled(reg.course_shortname, reg.occurrence_date)
+                # removes any "CANCELED:" blocker event, best-effort.
+                try:
+                    calendar_sync.delete_cancellation_blocker(
+                        self.caldav, self._href(self.settings.booking_calendar), self.settings,
+                        reg.course_shortname, date.fromisoformat(reg.occurrence_date),
+                    )
+                except CalDAVError:
+                    log.warning("could not remove the cancellation blocker for %s on %s -- "
+                                "delete the CANCELED event from the calendar by hand",
+                                reg.course_shortname, reg.occurrence_date)
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
                 self._send_reinstatement_emails(
                     course, reg.occurrence_date, user,
@@ -4891,11 +4922,6 @@ class App:
                 "Not found", "<p>This link is invalid (course no longer configured).</p>", banner=banner
             )
         participants = find_cancelable_registrations_for_occurrence(self.store, course_shortname, occurrence_date_str)
-        already_canceled_note = (
-            f"<p>This session is already marked canceled -- new bookings for "
-            f"{esc(occurrence_date_str)} are blocked.</p>"
-            if self.store.is_occurrence_canceled(course_shortname, occurrence_date_str) else ""
-        )
         if method == "POST":
             form = self._read_form(environ)
             message = sanitize_csv_field(form.get("message", "").strip())
@@ -4904,9 +4930,9 @@ class App:
                 "Canceled",
                 f"<p>{len(result.canceled)} registration(s) for <b>{esc(course.title)}</b> "
                 f"on {esc(occurrence_date_str)} canceled, every participant notified.</p>"
-                f"<p>New bookings for this date are blocked -- the booking page no longer "
-                f"offers it. Rebooking any participant (from /admin, or your cancellation "
-                f"email's own link) reopens it.</p>",
+                f"<p>New bookings for this date are blocked: a <b>CANCELED</b> blocker event "
+                f"now sits in your calendar at the course hours, so the booking page no longer "
+                f"offers the date. Delete that event (or rebook any participant) to reopen it.</p>",
                 banner=banner,
             )
         recap = _course_recap_html(course, occurrence_date_str)
@@ -4914,7 +4940,7 @@ class App:
             return "200 OK", [("Content-Type", "text/html")], page(
                 "Cancel entire session",
                 f"<p>Nobody is currently booked for <b>{esc(course.title)}</b> on "
-                f"{esc(occurrence_date_str)} -- nothing to cancel.</p>" + already_canceled_note + recap
+                f"{esc(occurrence_date_str)} -- nothing to cancel.</p>" + recap
                 + '<p><a href="/" class="link-button">Back to home</a></p>',
                 banner=banner,
             )

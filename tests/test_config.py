@@ -123,6 +123,23 @@ capacity = 10
         # original relative file order -- stable sort, not re-shuffled.
         self.assertEqual([c.shortname for c in settings.courses], ["tie-b", "tie-a", "tie-c"])
 
+    def test_all_day_conflict_setting_defaults_to_false_when_omitted(self):
+        # 2026-07-16: all-day events (birthdays, notes) in the conflict
+        # calendars must not hide course dates unless opted into.
+        settings = load_settings(self._write(self._course_block("c1")))
+        self.assertFalse(settings.conflict_calendar_all_day_events_also_block_the_course)
+
+    def test_all_day_conflict_setting_parses_true(self):
+        toml_path = self._write(self._course_block("c1"))
+        text = toml_path.read_text().replace(
+            'conflict_calendars = ["Bookings"]',
+            'conflict_calendars = ["Bookings"]\n'
+            "conflict_calendar_all_day_events_also_block_the_course = true",
+        )
+        toml_path.write_text(text)
+        settings = load_settings(toml_path)
+        self.assertTrue(settings.conflict_calendar_all_day_events_also_block_the_course)
+
     def test_location_url_defaults_to_empty_string_when_omitted(self):
         # 2026-07-09: a location_url was added and used on /my in
         # the column location to make those clickable -- optional, so an

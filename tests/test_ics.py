@@ -1,7 +1,30 @@
 import unittest
 from datetime import datetime, timezone
 
-from app.ics import VEvent, parse_uid, parse_window
+from app.ics import VEvent, is_all_day, parse_uid, parse_window
+
+
+class IsAllDayTest(unittest.TestCase):
+    """Feeds the conflict check's all-day filter (see webapp.py::
+    _conflict_checker and [calendar].
+    conflict_calendar_all_day_events_also_block_the_course)."""
+
+    def test_date_only_dtstart_is_all_day(self):
+        ics = "BEGIN:VEVENT\r\nUID:x@y\r\nDTSTART;VALUE=DATE:20260708\r\nDTEND;VALUE=DATE:20260709\r\nEND:VEVENT\r\n"
+        self.assertTrue(is_all_day(ics))
+
+    def test_timed_dtstart_is_not_all_day(self):
+        ics = "BEGIN:VEVENT\r\nUID:x@y\r\nDTSTART:20260708T171500Z\r\nDTEND:20260708T185500Z\r\nEND:VEVENT\r\n"
+        self.assertFalse(is_all_day(ics))
+
+    def test_timed_dtstart_with_tzid_param_is_not_all_day(self):
+        # A TZID parameter must not be mistaken for VALUE=DATE -- the
+        # value itself still has a time-of-day.
+        ics = "BEGIN:VEVENT\r\nUID:x@y\r\nDTSTART;TZID=Europe/Luxembourg:20260708T191500\r\nEND:VEVENT\r\n"
+        self.assertFalse(is_all_day(ics))
+
+    def test_no_dtstart_is_not_all_day(self):
+        self.assertFalse(is_all_day("BEGIN:VEVENT\r\nUID:x@y\r\nEND:VEVENT\r\n"))
 
 
 class VEventTest(unittest.TestCase):

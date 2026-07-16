@@ -608,12 +608,27 @@ next occurrence, to keep them engaged despite the cancellation.
 Canceling an entire session also BLOCKS new bookings for that date
 (2026-07-14, verified live: without this, the date reappeared on the
 booking page as bookable with full capacity the moment its calendar
-event was deleted) -- the date simply stops being offered, same "no slot
-shown = no session" behavior as a calendar conflict, and a direct/stale
-POST for it is rejected server-side too. The block is lifted the moment
-YOU rebook any participant on it (from `/admin`, or your cancellation
-email's own rebook link) -- putting someone back in is you saying the
-session is happening after all.
+event was deleted): a visible **"CANCELED: `<course>`" blocker event**
+is placed on your booking calendar at the course hours, and the same
+real-time conflict check that already hides dates overlapping any of
+your own calendar events (a vacation entry, say) hides this one -- "no
+slot shown = no session", and a direct/stale POST for it is rejected
+server-side too. Reopen the date by simply **deleting that blocker
+event in your calendar app**, or by rebooking any participant (from
+`/admin`, or your cancellation email's own rebook link) -- both mean
+the session is happening after all. Requirement (checked by `my-bt
+admin health`): your `booking_calendar` must be listed in
+`[calendar].conflict_calendars`, or the blocker would never be seen by
+the conflict check.
+
+Note on what counts as a conflict: only **timed** events overlapping the
+course hours hide a date. **All-day** entries (birthdays, notes,
+"office closed" markers) are ignored by default -- set
+`[calendar].conflict_calendar_all_day_events_also_block_the_course =
+true` if an all-day event should also block that day's courses. The
+tool's own synced course event never blocks its own course (it's
+recognized by its UID and excluded), so a date with sign-ups stays
+bookable for further participants.
 
 **Undoing a cancellation:** both the attendee's own `/my` page and the web
 admin's `/admin` overview show a "Rebook" button (2026-07-10; relabeled

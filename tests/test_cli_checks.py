@@ -2014,6 +2014,32 @@ class CheckCaldavCalendarsTest(unittest.TestCase):
     def test_not_configured_is_a_noop(self):
         self.assertEqual(cli_checks.check_caldav_calendars({"calendar": {}}), [])
 
+    def test_booking_calendar_missing_from_conflict_calendars_warns(self):
+        # 2026-07-14, added with the cancel-entire-session blocker events:
+        # the blocker lands on booking_calendar, but only
+        # conflict_calendars are ever conflict-checked -- misconfigured
+        # like this, a canceled session's date would silently stay
+        # bookable.
+        raw = self._raw(conflict_calendars=["Calendar"])  # booking "Yoga-Bookings" not listed
+        with patch.object(cli_checks, "CalDAVClient") as klass:
+            klass.return_value.list_calendars.return_value = {
+                "Calendar": "/c/", "Yoga-Bookings": "/y/",
+            }
+            checks = cli_checks.check_caldav_calendars(raw)
+        warns = [c for c in checks if c[1] == "warn"]
+        self.assertEqual(len(warns), 1)
+        self.assertIn("not listed in conflict_calendars", warns[0][2])
+        self.assertIn("blocker", warns[0][2])
+
+    def test_booking_calendar_in_conflict_calendars_does_not_warn(self):
+        raw = self._raw()  # fixture default already lists it
+        with patch.object(cli_checks, "CalDAVClient") as klass:
+            klass.return_value.list_calendars.return_value = {
+                "Calendar": "/c/", "Yoga-Bookings": "/y/",
+            }
+            checks = cli_checks.check_caldav_calendars(raw)
+        self.assertEqual([c for c in checks if c[1] != "ok"], [])
+
     def test_partially_configured_is_a_noop(self):
         raw = self._raw(caldav_username=None)
         self.assertEqual(cli_checks.check_caldav_calendars(raw), [])

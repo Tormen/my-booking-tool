@@ -388,6 +388,22 @@ def check_caldav_calendars(raw: dict) -> list[Check]:
     wanted = {cal.get("booking_calendar")} | set(cal.get("conflict_calendars") or ())
     wanted.discard(None)
     checks: list[Check] = []
+    # 2026-07-14, added with the cancel-entire-session blocker events
+    # (calendar_sync.create_cancellation_blocker): the blocker lands on
+    # booking_calendar, but the booking page's conflict check only ever
+    # queries conflict_calendars -- if booking_calendar isn't listed
+    # there, a canceled session's date would NOT be hidden (and the
+    # tool's own sync events wouldn't self-conflict-check either, which
+    # is what conflict_calendars including it was always for).
+    booking = cal.get("booking_calendar")
+    if booking and booking not in (cal.get("conflict_calendars") or ()):
+        checks.append((
+            "CalDAV conflict_calendars", "warn",
+            f"booking_calendar {booking!r} is not listed in conflict_calendars -- "
+            "cancel-entire-session blocker events (and the tool's own synced events) "
+            "on it would never hide a date from the booking page; add it to "
+            "[calendar].conflict_calendars",
+        ))
     for name in sorted(wanted):
         if name in calendars:
             checks.append((f"CalDAV calendar '{name}'", "ok", "found"))

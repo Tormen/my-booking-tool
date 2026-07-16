@@ -173,6 +173,17 @@ def _parse_dt(value: str) -> datetime:
     return datetime.strptime(value, "%Y%m%d")
 
 
+def is_all_day(ics_text: str) -> bool:
+    """True if the VEVENT is an all-day event: a date-only DTSTART
+    (RFC 5545 `DTSTART;VALUE=DATE:YYYYMMDD` -- no time-of-day, so also no
+    'T' separator), as opposed to a timed DTSTART. Used by the booking
+    conflict check to skip all-day calendar entries unless
+    [calendar].conflict_calendar_all_day_events_also_block_the_course
+    is enabled (see app/config.py)."""
+    m = _DTSTART_RE.search(ics_text)
+    return bool(m) and "T" not in m.group(1)
+
+
 def parse_window(ics_text: str) -> tuple[datetime, datetime] | None:
     s, e = _DTSTART_RE.search(ics_text), _DTEND_RE.search(ics_text)
     if not s or not e:

@@ -48,17 +48,6 @@ REG_FIELDS = [
     "registered_at", "guest_cancel_token_hash", "canceled_at", "canceled_by", "host_message",
     "party_id", "invited_by_user_id",
 ]
-# One row per occurrence the host canceled ENTIRELY ("cancel entire
-# session" -- illness, venue unavailable; see app.cancel_flow.
-# cancel_occurrence). 2026-07-14, verified live: canceling every
-# registration alone did NOT stop the date from reappearing as bookable
-# with full capacity -- build_occurrences regenerates it from the weekly
-# schedule, and with the calendar event deleted there's no conflict left
-# to hide it either. This marker is what actually blocks NEW bookings
-# for that (course, date) -- see mark_occurrence_canceled() and
-# app/webapp.py::_booking_page_context's filter. No personal data: just
-# the course key, the date, when, and the host's optional message.
-CANCELED_OCCURRENCE_FIELDS = ["course_shortname", "occurrence_date", "canceled_at", "message"]
 
 STATUS_CONFIRMED = "confirmed"
 STATUS_WAITLISTED = "waitlisted"
@@ -504,7 +493,6 @@ class Store:
         self.archive_dir = Path(archive_dir) if archive_dir else self.data_dir / "archived"
         self.archived_users_path = self.archive_dir / "users.csv"
         self.archived_registrations_path = self.archive_dir / "registrations.csv"
-        self.canceled_occurrences_path = self.data_dir / "canceled_occurrences.csv"
 
     # -- users ---------------------------------------------------------------
 
@@ -1413,73 +1401,6 @@ class Store:
 
         return True
 
-    # -- host-canceled occurrences ("cancel entire session") -----------------
-
-    def mark_occurrence_canceled(self, course_shortname: str, occurrence_date: str, message: str = "") -> None:
-        """Records that the host canceled this ENTIRE occurrence -- from
-        then on the date is no longer offered/bookable on /book/<shortname>
-        (see app/webapp.py::_booking_page_context, whose one filter covers
-        both the rendered date picker and the POST's own server-side
-        occurrence lookup). Idempotent: re-marking an already-marked
-        occurrence (e.g. the magic link tapped twice) changes nothing --
-        the FIRST cancellation's timestamp/message stay authoritative."""
-        with _LockedCsv(self.canceled_occurrences_path, CANCELED_OCCURRENCE_FIELDS) as (rows, write):
-            if any(
-                r["course_shortname"] == course_shortname and r["occurrence_date"] == occurrence_date
-                for r in rows
-            ):
-                return
-            rows.append({
-                "course_shortname": course_shortname,
-                "occurrence_date": occurrence_date,
-                "canceled_at": now_iso(),
-                "message": message,
-            })
-            write(rows, "cancel entire occurrence")
-
-    def clear_occurrence_canceled(self, course_shortname: str, occurrence_date: str) -> bool:
-        """Un-blocks a host-canceled occurrence -- called when the host
-        REINSTATES a registration on it (admin_reinstate/host_reinstate):
-        putting someone back into a session is the host saying it IS
-        happening after all, and the alternative (a live calendar event +
-        confirmed registration for a date the booking page refuses to
-        show) would be incoherent. Returns whether anything was cleared
-        (False: this occurrence was never marked -- the overwhelmingly
-        common case, since most reinstates follow a single-row cancel)."""
-        with _LockedCsv(self.canceled_occurrences_path, CANCELED_OCCURRENCE_FIELDS) as (rows, write):
-            keep = [
-                r for r in rows
-                if not (r["course_shortname"] == course_shortname and r["occurrence_date"] == occurrence_date)
-            ]
-            if len(keep) == len(rows):
-                return False
-            write(keep, "reinstate entire occurrence")
-            return True
-
-    def canceled_occurrence_dates(self, course_shortname: str) -> set[str]:
-        """Every occurrence_date the host canceled entirely for this
-        course -- ONE read for _booking_page_context's filter, instead of
-        one is_occurrence_canceled() lookup per offered date."""
-        with _LockedCsv(self.canceled_occurrences_path, CANCELED_OCCURRENCE_FIELDS, readonly=True) as (rows, _write):
-            return {
-                r["occurrence_date"] for r in rows if r["course_shortname"] == course_shortname
-            }
-
-    def is_occurrence_canceled(self, course_shortname: str, occurrence_date: str) -> bool:
-        return occurrence_date in self.canceled_occurrence_dates(course_shortname)
-
-    def purge_canceled_occurrences_before(self, cutoff_date_iso: str) -> int:
-        """Retention tidy-up (app/retention.py::run_purge): a marker for a
-        long-past date has zero effect (past dates are never offered
-        anyway) -- drop rows with occurrence_date strictly before the
-        cutoff. Returns how many were dropped."""
-        with _LockedCsv(self.canceled_occurrences_path, CANCELED_OCCURRENCE_FIELDS) as (rows, write):
-            keep = [r for r in rows if r["occurrence_date"] >= cutoff_date_iso]
-            dropped = len(rows) - len(keep)
-            if dropped:
-                write(keep, "purge stale canceled-occurrence markers")
-            return dropped
-
     def rename_course_shortname(self, old_shortname: str, new_shortname: str) -> int:
         """Rewrites `course_shortname` from `old_shortname` to
         `new_shortname` on every registration row -- live AND archived --
@@ -1512,18 +1433,6 @@ class Store:
                 if n:
                     write(rows, f"rename course {old_shortname!r} -> {new_shortname!r}")
                 changed += n
-        # Canceled-occurrence markers key on course_shortname too
-        # (2026-07-14, added with the markers themselves) -- not counted
-        # in the returned row total, which callers report as
-        # "registration row(s) migrated".
-        with _LockedCsv(self.canceled_occurrences_path, CANCELED_OCCURRENCE_FIELDS) as (rows, write):
-            n = 0
-            for row in rows:
-                if row["course_shortname"] == old_shortname:
-                    row["course_shortname"] = new_shortname
-                    n += 1
-            if n:
-                write(rows, f"rename course {old_shortname!r} -> {new_shortname!r}")
         return changed
 
     # -- reporting: live + archived, for the my-bt CLI -----------------------

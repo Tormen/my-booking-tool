@@ -728,6 +728,101 @@ def resync_if_format_changed(
     return result
 
 
+# -- "Cancel entire session" blocker events (2026-07-14) ---------------------
+#
+# The host asked for the calendar itself to be the mechanism: "A canceled
+# event by me creates this blocker event in [the booking calendar], which
+# then must trigger this date to NOT be shown." The booking page already
+# hides any date whose course hours overlap a calendar event that isn't
+# the tool's own sync event (the real-time conflict check in
+# app/webapp.py::_conflict_checker / app/slots.py) -- so canceling an
+# entire session now PUTs a visible "CANCELED: <course>" event at the
+# course hours, and that existing mechanism does the blocking. Deleting
+# the blocker event in the calendar reopens the date -- the host's own
+# natural control, no admin page needed. (This replaced a same-day
+# interim canceled_occurrences.csv marker -- see SOLUTION-DESIGN.md #33.)
+
+
+def cancellation_blocker_uid(settings: Settings, course_shortname: str, occurrence_date: date) -> str:
+    """Deterministic UID for one occurrence's blocker -- deterministic so
+    a double-tapped cancel link maps to the SAME event (create is then
+    idempotent via If-None-Match, see create_cancellation_blocker) and so
+    a host reinstate can delete it without searching. Deliberately does
+    NOT match is_own_event() (the "canceled-" prefix comes before the
+    slug, and is_own_event requires the uid to START with the slug):
+    "own" events are exactly what the conflict check skips, and the whole
+    point of this one is to BE a conflict."""
+    slug, domain = _uid_parts(settings)
+    return f"canceled-{slug}-{course_shortname}-{occurrence_date.isoformat()}@{domain}"
+
+
+def create_cancellation_blocker(
+    client: CalDAVClient,
+    calendar_href: str,
+    settings: Settings,
+    course: Course,
+    occurrence_date: date,
+    message: str = "",
+) -> None:
+    """PUTs the blocker event for one canceled occurrence onto the
+    booking calendar, at the occurrence's real (override-aware) hours.
+    The description tells the host, right in their calendar app, how to
+    reopen the date. An already-existing blocker (double-tapped cancel
+    link -- put_event's If-None-Match create raises CalDAVConflictError)
+    is a no-op: the block is in place either way. Any OTHER CalDAV
+    failure propagates -- callers cancel registrations only AFTER this
+    succeeds (fail-closed: a session must never end up canceled but
+    still bookable because this PUT silently failed).
+
+    NOTE: the conflict check only queries [calendar].conflict_calendars
+    -- the booking calendar this blocker lands on must be listed there
+    (it is, in every shipped/example config; check_caldav_calendars
+    warns if not)."""
+    tz = ZoneInfo(settings.timezone)
+    start, end = occurrence_start_end(course, occurrence_date, tz)
+    lines = []
+    if message:
+        lines.append(message)
+        lines.append("")
+    lines += [
+        f"This blocker keeps {occurrence_date.isoformat()} unbookable for",
+        f"{course.title} ({settings.base_url}/book/{course.shortname}).",
+        "Delete this event to reopen the date for booking",
+        "(rebooking a canceled participant from /admin reopens it too).",
+    ]
+    event = VEvent(
+        uid=cancellation_blocker_uid(settings, course.shortname, occurrence_date),
+        summary=f"CANCELED: {course.title}",
+        description="\n".join(lines),
+        location=course.location,
+        start=start,
+        end=end,
+    )
+    try:
+        client.put_event(calendar_href, event.uid, event.to_ics(), etag=None)
+    except CalDAVConflictError:
+        log.debug("cancellation blocker for %s on %s already exists -- keeping it",
+                  course.shortname, occurrence_date.isoformat())
+
+
+def delete_cancellation_blocker(
+    client: CalDAVClient,
+    calendar_href: str,
+    settings: Settings,
+    course_shortname: str,
+    occurrence_date: date,
+) -> None:
+    """Removes one occurrence's blocker event -- called when the host
+    REINSTATES a registration on it (putting someone back in means the
+    session IS happening, and a blocker would keep hiding the date from
+    new bookings). No-op if there's no blocker (the overwhelmingly
+    common case -- most reinstates follow a single-row cancel;
+    delete_event already tolerates 404)."""
+    client.delete_event(
+        calendar_href, cancellation_blocker_uid(settings, course_shortname, occurrence_date)
+    )
+
+
 # -- Emailed guest invite/cancel attachments (2026-07-09: also attach a
 # calendar invite to the email sent to the participant) ---------------------
 #

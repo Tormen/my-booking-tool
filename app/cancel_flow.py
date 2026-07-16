@@ -256,6 +256,7 @@ def cancel_occurrence(
     occurrence_date_str: str,
     message: str = "",
     sync_fn: Callable[[str, str], None] | None = None,
+    blocker_fn: Callable[[str, str, str], None] | None = None,
 ) -> CancelOccurrenceResult:
     """"Cancel the entire session" (2026-07-13: lets the operator cancel
     one whole course occurrence at once -- illness, venue unavailable, ...
@@ -301,13 +302,31 @@ def cancel_occurrence(
     # 2026-07-14, verified live: canceling every registration alone did
     # NOT block the date -- it reappeared on /book/<shortname> as bookable
     # with full capacity (build_occurrences regenerates it from the
-    # weekly schedule, and deleting the calendar event also deletes the
-    # only "conflict" that could have hidden it). Mark the occurrence
-    # itself, unconditionally and first -- even a double-submit or an
-    # empty occurrence stays a real "this session is not happening"
-    # statement. Cleared only by a host reinstate on this occurrence
-    # (see Store.clear_occurrence_canceled).
-    store.mark_occurrence_canceled(course_shortname, occurrence_date_str, message=message)
+    # weekly schedule, and deleting the tool's own calendar event also
+    # deletes the only "conflict" that could have hidden it). The block
+    # is a visible "CANCELED: <course>" BLOCKER EVENT on the booking
+    # calendar (the host's own explicit design call, replacing a same-day
+    # interim CSV marker): the existing real-time conflict check then
+    # hides the date, and the host reopens it by simply deleting that
+    # event in their calendar app -- or by rebooking a participant, which
+    # deletes it too (see calendar_sync.create/delete_cancellation_blocker).
+    #
+    # Created FIRST, before any registration is touched, and any CalDAV
+    # failure other than "already exists" propagates: fail-closed -- a
+    # session must never end up canceled-but-still-bookable because the
+    # blocker PUT silently failed. `blocker_fn` mirrors `sync_fn` (App
+    # passes its cached-href variant); the default builds a one-off
+    # client path from `caldav`. Both None only happens in tests that
+    # exercise the row/email mechanics alone.
+    course_date = date.fromisoformat(occurrence_date_str)
+    if course is not None:
+        if blocker_fn is not None:
+            blocker_fn(course_shortname, occurrence_date_str, message)
+        elif caldav is not None:
+            href = calendar_href(caldav, settings)
+            calendar_sync.create_cancellation_blocker(
+                caldav, href, settings, course, course_date, message=message
+            )
 
     canceled: list[CanceledParticipant] = []
     for reg in live_regs:

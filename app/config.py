@@ -263,6 +263,15 @@ class Settings:
     trainer_calendar_reminder_minutes: tuple[int, ...] = ()
     guest_calendar_reminder_minutes: tuple[int, ...] = (60,)
 
+    # 2026-07-16: whether an ALL-DAY event (DTSTART;VALUE=DATE, no time of
+    # day) in a conflict calendar hides that day's course dates. Off by
+    # default: all-day entries are typically notes/birthdays/"office
+    # closed" markers, not "I am genuinely unavailable at course hours" --
+    # a real absence (vacation, or a cancel-entire-session CANCELED
+    # blocker) is a timed event overlapping the course hours. See
+    # app/webapp.py::_conflict_checker.
+    conflict_calendar_all_day_events_also_block_the_course: bool = False
+
     # Optional: also write logs to this file (in addition to stdout/journal
     # -- see app/logutil.py). None (the default, and what a settings.toml
     # without a [logging] section gets) means stdout/journal only.
@@ -636,6 +645,9 @@ def load_settings(toml_path: str | Path) -> Settings:
         caldav_password=_read_secret(cal["caldav_password_file"]),
         booking_calendar=cal["booking_calendar"],
         conflict_calendars=tuple(cal.get("conflict_calendars", [])),
+        conflict_calendar_all_day_events_also_block_the_course=bool(
+            cal.get("conflict_calendar_all_day_events_also_block_the_course", False)
+        ),
         trainer_calendar_reminder_minutes=tuple(int(m) for m in cal.get("trainer_reminder_minutes", [])),
         guest_calendar_reminder_minutes=tuple(int(m) for m in cal.get("guest_reminder_minutes", [60])),
         smtp_host=smtp["host"],

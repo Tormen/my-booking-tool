@@ -83,7 +83,16 @@ caldav_url            = "https://dav.example.org/"
 caldav_username       = "calendar@example.org"
 caldav_password_file  = "/etc/my-booking/secrets/caldav_password"
 booking_calendar      = "Bookings"
+# conflict_calendars MUST include booking_calendar: that's how a course
+# avoids double-booking against its own synced events, and how a
+# "cancel entire session" blocker event (placed on booking_calendar,
+# see README.md) actually hides the canceled date from the booking
+# page. `my-bt admin health` warns if it's missing.
 conflict_calendars    = ["Calendar", "Bookings"]
+# All-day events (birthdays, notes) in the conflict calendars do NOT hide
+# course dates by default -- only timed events overlapping the course
+# hours do. Set to true if an all-day entry should also block that day.
+#conflict_calendar_all_day_events_also_block_the_course = false
 # Calendar-invite reminders (minutes before start). Optional -- omit either
 # line to get its default. trainer_reminder_minutes defaults to [] (no
 # reminder at all) for the operator's own synced calendar event;

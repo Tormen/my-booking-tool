@@ -63,23 +63,102 @@ EMPTY_REPORT = """<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav"></D:multistatus>"""
 
 
+def _report_with_stored_events(ics_texts: list) -> str:
+    responses = "".join(f"""
+  <D:response>
+    <D:href>/caldav/stored.ics</D:href>
+    <D:propstat><D:prop>
+      <D:getetag>"stored"</D:getetag>
+      <C:calendar-data>{ics}</C:calendar-data>
+    </D:prop></D:propstat>
+  </D:response>""" for ics in ics_texts)
+    return f"""<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">{responses}
+</D:multistatus>"""
+
+
+def _report_with_all_day_event(uid: str) -> str:
+    # RFC 5545 all-day event: date-only DTSTART/DTEND (VALUE=DATE), the
+    # shape a birthday/"office closed" calendar entry has.
+    return f"""<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+  <D:response>
+    <D:href>/caldav/allday.ics</D:href>
+    <D:propstat><D:prop>
+      <D:getetag>"e2"</D:getetag>
+      <C:calendar-data>BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:{uid}
+DTSTART;VALUE=DATE:20260708
+DTEND;VALUE=DATE:20260709
+SUMMARY:All-day thing
+END:VEVENT
+END:VCALENDAR
+</C:calendar-data>
+    </D:prop></D:propstat>
+  </D:response>
+</D:multistatus>"""
+
+
+_REPORT_TIME_RANGE_RE = re.compile(r'time-range start="([0-9TZ]+)" end="([0-9TZ]+)"')
+
+
 class FakeTransport:
+    """2026-07-14 (cancel-entire-session blocker events): minimally
+    STATEFUL now -- PUT stores the ics by url, DELETE removes it, and
+    REPORT folds any stored event under the queried calendar whose OWN
+    DTSTART/DTEND overlaps the query's time-range into the response (a
+    real CalDAV server's time filtering, without which one stored
+    blocker would "conflict" with every date on the page). This is what
+    lets the blocker's behavior be tested end-to-end against the REAL
+    conflict-check path: cancel -> date hidden, reinstate -> date back.
+    The static per-href report_responses (older tests) stay as the
+    fallback when nothing stored matches."""
+
     def __init__(self):
         self.calls = []
         self.propfind_response = Response(207, {}, PROPFIND_BODY)
         # per-calendar-href REPORT response, keyed by href
         self.report_responses: dict[str, Response] = {}
+        self.put_events: dict[str, str] = {}
 
     def __call__(self, method, url, body="", extra_headers=None):
         self.calls.append((method, url))
         if method == "PROPFIND":
             return self.propfind_response
+        if method == "PUT":
+            if (extra_headers or {}).get("If-None-Match") == "*" and url in self.put_events:
+                return Response(412, {}, "already exists")
+            self.put_events[url] = body
+            return Response(201, {"etag": '"fake-etag"'}, "")
+        if method == "DELETE":
+            existed = self.put_events.pop(url, None) is not None
+            return Response(204 if existed else 404, {}, "")
         if method == "REPORT":
+            stored = self._stored_overlapping(url, body)
+            if stored:
+                return Response(207, {}, _report_with_stored_events(stored))
             for href, resp in self.report_responses.items():
                 if href in url:
                     return resp
             return Response(207, {}, EMPTY_REPORT)
         raise AssertionError(f"unexpected {method} {url}")
+
+    def _stored_overlapping(self, url: str, body: str) -> list:
+        from app.ics import parse_window
+        m = _REPORT_TIME_RANGE_RE.search(body)
+        if not m:
+            return [ics for u, ics in self.put_events.items() if u.startswith(url)]
+        q_start = datetime.strptime(m.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        q_end = datetime.strptime(m.group(2), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        out = []
+        for u, ics in self.put_events.items():
+            if not u.startswith(url):
+                continue
+            window = parse_window(ics)
+            if window and window[0] < q_end and window[1] > q_start:
+                out.append(ics)
+        return out
 
 
 class ConflictCheckerTest(unittest.TestCase):
@@ -121,6 +200,36 @@ class ConflictCheckerTest(unittest.TestCase):
         start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
         end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
         self.assertFalse(check(start, end))
+
+    def test_all_day_events_do_not_block_by_default(self):
+        # Birthdays/"office closed" notes are all-day entries; by default
+        # only a TIMED event overlapping the course hours hides a date --
+        # see [calendar].conflict_calendar_all_day_events_also_block_the_course.
+        self.transport.report_responses["YogaBookings"] = Response(
+            207, {}, _report_with_all_day_event("birthday@x")
+        )
+        check = self.app._conflict_checker(exclude_own=True)
+        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
+        self.assertFalse(check(start, end))
+
+    def test_all_day_events_block_when_setting_enabled(self):
+        settings = make_settings(
+            conflict_calendars=("Calendar", "Yoga-Bookings"),
+            conflict_calendar_all_day_events_also_block_the_course=True,
+        )
+        app = App(settings, self.store)
+        app.caldav = CalDAVClient(
+            settings.caldav_url, settings.caldav_username, settings.caldav_password,
+            transport=self.transport,
+        )
+        self.transport.report_responses["YogaBookings"] = Response(
+            207, {}, _report_with_all_day_event("office-closed@x")
+        )
+        check = app._conflict_checker(exclude_own=True)
+        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
+        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
+        self.assertTrue(check(start, end))
 
     def test_calendar_href_is_cached_not_refetched_per_check(self):
         check = self.app._conflict_checker(exclude_own=True)
@@ -2202,7 +2311,15 @@ class BookingFlowTest(unittest.TestCase):
         course = make_course(shortname="yoga-class-1", weekday="wed", capacity=1)
         # conflict_calendars must match what FakeTransport's PROPFIND lists
         # below ("Calendar", "Yoga-Bookings") -- same setup as ConflictCheckerTest.
-        self.settings = make_settings(courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        # booking_calendar="Calendar" (2026-07-14, with the cancel-entire-
+        # session blocker events): it must resolve against that same
+        # PROPFIND *and* be conflict-checked, exactly like the real
+        # deployment -- the blocker lands on the booking calendar and the
+        # conflict check is what hides the date.
+        self.settings = make_settings(
+            courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"),
+            booking_calendar="Calendar",
+        )
         self.app = App(self.settings, self.store)
         self.transport = FakeTransport()
         self.app.caldav = CalDAVClient(
@@ -4834,22 +4951,48 @@ class BookingFlowTest(unittest.TestCase):
         self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
         self.assertEqual(self.sent_emails, [])
 
+    def _blocker_url(self) -> str:
+        from app import calendar_sync
+        from datetime import date as _date
+        uid = calendar_sync.cancellation_blocker_uid(
+            self.settings, "yoga-class-1", _date.fromisoformat(self.occ_date)
+        )
+        return next((u for u in self.transport.put_events if u.endswith(f"{uid}.ics")), "")
+
     def test_host_cancel_occurrence_blocks_future_bookings_for_that_date(self):
         # 2026-07-14, verified live on booking.example.org (repo-review follow-up):
         # canceling every registration alone did NOT block the date -- it
         # reappeared on /book/<shortname> as bookable with full capacity
         # (build_occurrences regenerates it from the weekly schedule, and
-        # deleting the calendar event also removed the only conflict that
-        # could have hidden it), so a brand-new booking for the canceled
-        # session sailed straight through.
+        # deleting the tool's own calendar event also removed the only
+        # conflict that could have hidden it), so a brand-new booking for
+        # the canceled session sailed straight through. The block is a
+        # visible "CANCELED:" blocker EVENT on the booking calendar (the
+        # host's own design call: "a canceled event by me creates this
+        # blocker event ... which then must trigger this date to NOT be
+        # shown"), hidden by the existing real-time conflict check.
         self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         _status, _headers, body = self._post(
             self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": "sick"}
         )
         self.assertIn("New bookings for this date are blocked", body)
-        self.assertTrue(self.store.is_occurrence_canceled("yoga-class-1", self.occ_date))
-        # the date is no longer offered on the booking page...
+        # the blocker event landed on the booking calendar, at the course
+        # hours, with the host-facing summary and the reopen instructions
+        blocker_url = self._blocker_url()
+        self.assertTrue(blocker_url, "no CANCELED blocker event was PUT")
+        ics = self.transport.put_events[blocker_url]
+        unfolded = ics.replace("\r\n ", "")  # undo RFC 5545 75-octet line folding
+        self.assertIn("SUMMARY:CANCELED: Dynamic Ashtanga Vinyasa Yoga", unfolded)
+        self.assertIn("Delete this event to reopen the date", unfolded)
+        self.assertIn("sick", unfolded)
+        # its uid must NOT read as the tool's own sync event -- being a
+        # conflict is the whole point
+        from app import calendar_sync
+        from app.ics import parse_uid
+        self.assertFalse(calendar_sync.is_own_event(parse_uid(ics), self.settings))
+        # the date is no longer offered on the booking page (real conflict
+        # check against the stored blocker, not a marker)...
         _s, _h, get_body = self.app.book("GET", "yoga-class-1", {})
         self.assertNotIn(f'value="{self.occ_date}"', get_body)
         # ...and a direct/stale POST for it is rejected server-side, with
@@ -4861,27 +5004,40 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn("That slot is no longer available.", post_body)
         self.assertIsNone(self.store.find_user_by_email("newguy@example.org"))
 
+    def test_host_cancel_occurrence_double_tap_keeps_the_blocker(self):
+        self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
+        first = dict(self.transport.put_events)
+        # second tap: put_event's If-None-Match create 412s -> tolerated
+        self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
+        self.assertEqual(self.transport.put_events, first)
+
     def test_host_reinstate_reopens_a_canceled_entire_session(self):
-        # The one deliberate way back: a HOST putting a participant back
-        # into the session is the host saying it IS happening -- the
-        # occurrence un-blocks and the date is offered again.
+        # The way back besides deleting the blocker by hand in the
+        # calendar app: a HOST putting a participant back into the
+        # session deletes the blocker -- the date is offered again.
         user, _sid = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         reg = self.store.registrations_for_user(user.user_id)[0]
         self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
-        self.assertTrue(self.store.is_occurrence_canceled("yoga-class-1", self.occ_date))
+        self.assertTrue(self._blocker_url())
         self._post(self.app.host_reinstate, (reg.registration_id,), {"message": "back on"})
-        self.assertFalse(self.store.is_occurrence_canceled("yoga-class-1", self.occ_date))
+        self.assertFalse(self._blocker_url())
         _s, _h, get_body = self.app.book("GET", "yoga-class-1", {})
         self.assertIn(f'value="{self.occ_date}"', get_body)
 
-    def test_host_cancel_occurrence_get_shows_already_blocked_note(self):
+    def test_deleting_the_blocker_in_the_calendar_reopens_the_date(self):
+        # The host's own natural control: no admin page involved -- just
+        # delete the CANCELED event in the calendar app.
         self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
         self._post(self.app.host_cancel_occurrence, ("yoga-class-1", self.occ_date), {"message": ""})
-        _s, _h, body = self.app.host_cancel_occurrence("GET", "yoga-class-1", self.occ_date, {})
-        self.assertIn("nothing to cancel", body)
-        self.assertIn("already marked canceled", body)
+        _s, _h, get_body = self.app.book("GET", "yoga-class-1", {})
+        self.assertNotIn(f'value="{self.occ_date}"', get_body)
+        del self.transport.put_events[self._blocker_url()]  # host deletes it in their calendar
+        _s, _h, get_body = self.app.book("GET", "yoga-class-1", {})
+        self.assertIn(f'value="{self.occ_date}"', get_body)
 
     def test_host_cancel_occurrence_route_is_wired_up(self):
         self._login_as_guest("regular@example.org")
