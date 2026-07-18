@@ -343,7 +343,7 @@ def print_report(
         print_fn("   [SKIP] [site].static_site_dir not configured -- not checked")
     print_fn("   Swap each course's booking link to /book/<shortname> if you haven't.")
 
-    print_fn("\n9. CalDAV calendars (booking_calendar/conflict_calendars, checked live):")
+    print_fn("\n9. Calendars ([booking_calendar] + [[conflict_calendar]], checked live):")
     caldav_checks = report["caldav_calendars"]
     if caldav_checks:
         show(caldav_checks)
@@ -1014,7 +1014,7 @@ def interactive_setup(
     # exactly what check_caldav_calendars() found, the same as
     # print_report()'s step 9, so `status`/`setup`/`setup -i` never drift
     # out of sync with each other about this.
-    print_fn("\n-- 9. CalDAV calendars (booking_calendar/conflict_calendars, checked live) --")
+    print_fn("\n-- 9. Calendars ([booking_calendar] + [[conflict_calendar]], checked live) --")
     caldav_checks = cli_checks.check_caldav_calendars(raw)
     if not caldav_checks:
         print_fn("[skip] caldav_url/username/password not fully configured yet -- not checked")
@@ -1022,8 +1022,8 @@ def interactive_setup(
         for label, level, detail in caldav_checks:
             print_fn(f"[{level}] {label}: {detail}")
         if any(level != "ok" for _, level, _ in caldav_checks):
-            print_fn(f"Fix by editing {settings_path}'s [calendar].booking_calendar / ")
-            print_fn("conflict_calendars to match a real calendar name on your CalDAV server")
+            print_fn(f"Fix by editing {settings_path}'s [booking_calendar] / ")
+            print_fn("[[conflict_calendar]] entries to match a real calendar/feed on the server")
             print_fn("(every /book/<shortname> page 500s until this matches).")
 
     # 10. Watchdog: nginx_access_log detection + read access. The `acl`
@@ -1229,8 +1229,8 @@ def interactive_setup(
     # transient network hiccup, or CalDAV not fully configured yet, must
     # not crash the rest of this walkthrough.
     print_fn("\n-- 13. Calendar invite format --")
-    caldav_cal = raw.get("calendar", {})
-    if not caldav_cal.get("caldav_url") or not caldav_cal.get("caldav_username") or not caldav_cal.get("caldav_password_file"):
+    caldav_cal = raw.get("booking_calendar", {})
+    if not caldav_cal.get("caldav_url") or not caldav_cal.get("username") or not caldav_cal.get("password_file"):
         print_fn("[skip] caldav_url/username/password not fully configured yet -- not checked")
     else:
         try:

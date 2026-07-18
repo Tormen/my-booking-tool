@@ -38,7 +38,7 @@ class GuestBookingTestBase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.store = Store(self._tmp.name)
         self.course = make_course(shortname="yoga-class-1", weekday="wed", capacity=2)
-        self.settings = make_settings(courses=(self.course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        self.settings = make_settings(courses=(self.course,))
         self.app = App(self.settings, self.store)
         self.transport = FakeTransport()
         self.app.caldav = CalDAVClient(
@@ -117,7 +117,7 @@ class PartyAdmissionTest(GuestBookingTestBase):
 
     def test_whole_party_waitlisted_together_when_not_enough_room(self):
         course = make_course(shortname="yoga-class-1", weekday="wed", capacity=1)
-        self.settings = make_settings(courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        self.settings = make_settings(courses=(course,))
         self.app.settings = self.settings
         self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
         regs = self.store.all_registrations()
@@ -221,7 +221,7 @@ class PartyValidationTest(GuestBookingTestBase):
             form[f"guest_email_{i}"] = f"g{i}@example.org"
             form[f"guest_name_{i}"] = f"G{i}"
         status, _headers, body = self._post(form)
-        self.assertIn("At most 3 guests", body)
+        self.assertIn("At most 3 participants", body)
         self.assertEqual(self.store.all_registrations(), [])
 
 

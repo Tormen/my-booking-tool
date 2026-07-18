@@ -38,7 +38,7 @@ index_embedded_new_tab_links = true
 # custom_attention_message = "On vacation from 2026-08-01 til 2026-08-15, courses resume afterwards at their usual schedule."
 #
 # Optional: a directory of custom email templates to use instead of
-# this repo's own built-in ones. Every guest-facing email (booking
+# this repo's own built-in ones. Every participant-facing email (booking
 # confirmed/waitlisted, canceled, reinstated, promoted-from-waitlist,
 # account confirm/reset, email-change) reads a matching file HERE first
 # if it exists; a missing file
@@ -63,7 +63,7 @@ index_embedded_new_tab_links = true
 # a hard FAILURE, not a warning -- setting this path is you telling us this
 # file is real and matters. Comment out / remove to skip this check entirely.
 # nginx_conf_path = "/etc/nginx/conf.d/nginx-locations.conf"
-# Optional: while `my-bt admin site-maintenance on` is blocking every guest-facing
+# Optional: while `my-bt admin site-maintenance on` is blocking every participant-facing
 # page for everyone (see README.md "Maintenance mode" for the exact route
 # list), a request whose (nginx-forwarded) client IP matches
 # EITHER of these two still gets through as normal -- handy so you can
@@ -78,26 +78,52 @@ index_embedded_new_tab_links = true
 # recent IP change yet.
 # maintenance_bypass_ip_log = "/home/you/my-ip.log"
 
-[calendar]
-caldav_url            = "https://dav.example.org/"
-caldav_username       = "calendar@example.org"
-caldav_password_file  = "/etc/my-booking/secrets/caldav_password"
-booking_calendar      = "Bookings"
-# conflict_calendars MUST include booking_calendar: that's how a course
-# avoids double-booking against its own synced events, and how a
-# "cancel entire session" blocker event (placed on booking_calendar,
-# see README.md) actually hides the canceled date from the booking
-# page. `my-bt admin health` warns if it's missing.
-conflict_calendars    = ["Calendar", "Bookings"]
-# All-day events in the conflict calendars DO hide course dates by
-# default, same as timed events overlapping the course hours. Set to
-# false if all-day entries (birthdays, notes) should never block.
-#conflict_calendar_all_day_events_also_block_the_course = true
+[booking_calendar]
+# The READ+WRITE CalDAV calendar this tool's own course events, blocker
+# events and sync live in. CalDAV only -- published .ics links are
+# one-way, read-only exports; there is no writable-ics standard.
+caldav_url    = "https://dav.example.org/"
+username      = "calendar@example.org"
+password_file = "/etc/my-booking/secrets/caldav_password"
+calendar      = "Bookings"
+# Calendar-invite reminders (minutes before start). Optional -- omit
+# either line to get its default. trainer_reminder_minutes defaults to []
+# (no reminder at all) for the operator's own synced calendar event;
+# participant_reminder_minutes defaults to [60] (one reminder, 1h before)
+# for the .ics attached to a participant's booking-confirmed email.
+# Empty list = no VALARMs.
+# trainer_reminder_minutes     = []
+# participant_reminder_minutes = [60]
+
+# READ-ONLY conflict sources, one [[conflict_calendar]] block each,
+# consulted live for every candidate date (see README.md "Calendars").
+# mode = "blocks":   an event here HIDES the date (vacations, CANCELED
+#                    blocker events).
+# mode = "requires": a single matching event must SPAN the whole
+#                    from-till window or the date is hidden.
+# Each block applies to every course unless `courses = [...]` scopes it.
+# A source is EITHER source = "booking_calendar" (reuse its connection),
+# OR an ics_url (published read-only link), OR its own CalDAV set
+# (caldav_url + username + password_file + calendar).
+
+[[conflict_calendar]]
+# The booking calendar itself must stay conflict-checked in blocks mode:
+# that's how a course avoids double-booking against its own synced
+# events, and how a "cancel entire session" blocker event actually hides
+# the canceled date. `my-bt admin health` warns if this block is missing.
+name    = "own-calendar"
+source  = "booking_calendar"   # reuse [booking_calendar]'s connection
+mode    = "blocks"
+#show_as = "any"               # blocks-mode default: every event counts
+# All-day events DO hide course dates by default, same as timed events
+# overlapping the course hours. Set to false if all-day entries
+# (birthdays, notes) should never block.
+#all_day_events_also_count = true
 # Escape hatch for the exceptional all-day event that should NOT block:
 # an all-day event whose title contains this marker (case-insensitive)
-# is ignored by the conflict check, e.g. "#course-ok" or "#free" -- so
-# "Conference Day #course-ok" leaves that day's courses bookable. "" (the
-# default) disables the marker feature.
+# is ignored, e.g. "#course-ok" or "#free" -- so "Conference Day
+# #course-ok" leaves that day's courses bookable. "" (the default)
+# disables the marker feature.
 #all_day_non_blocking_title_marker = "#course-ok"
 # Second escape hatch, on by default: an all-day event marked "show as
 # Free" in the calendar app does not block. CAUTION: many calendar apps
@@ -105,14 +131,28 @@ conflict_calendars    = ["Calendar", "Bookings"]
 # block may need to be set to "Busy" by hand. Timed events always block,
 # Free or not.
 #all_day_free_events_do_not_block = true
-# Calendar-invite reminders (minutes before start). Optional -- omit either
-# line to get its default. trainer_reminder_minutes defaults to [] (no
-# reminder at all) for the operator's own synced calendar event;
-# guest_reminder_minutes defaults to [60] (one reminder, 1h before) for the
-# .ics attached to a participant's booking-confirmed email. Empty list =
-# no VALARMs.
-# trainer_reminder_minutes = []
-# guest_reminder_minutes   = [60]
+
+# Optional second kind of entry: courses only possible when ANOTHER
+# calendar (e.g. your employer's published Outlook calendar) shows a
+# matching event -- "no matching event = no session". Published ICS
+# links are cached under /var/lib/my-booking/conflict_cache/ and the
+# last good copy is reused if the source is down (with a WARNING email
+# to admin_email, at most one per day). NOTE: Outlook refreshes
+# published calendars on ITS own schedule -- the feed can lag the real
+# mailbox by minutes to hours.
+#[[conflict_calendar]]
+#name    = "work"
+#ics_url = "https://outlook.office365.com/owa/calendar/REPLACE-ME/calendar.ics"
+#courses = ["morning-flow"]    # omit to apply to every course
+#mode    = "requires"          # the default
+#show_as = "oof"               # requires-mode default; "ooo" also accepted.
+#                              # Other values: busy / tentative / free /
+#                              # workingelsewhere / any. Matched from
+#                              # Outlook's X-MICROSOFT-CDO-BUSYSTATUS.
+#from    = ""                  # "HH:MM"; default: the course's start time
+#till    = ""                  # "HH:MM"; default: the course's end time
+#title_contains = ""           # event title must contain this (default: off)
+#cache_minutes  = 10           # in-process fetch cache TTL
 
 [smtp]
 host          = "smtp.example.org"
@@ -121,8 +161,8 @@ username      = "calendar@example.org"
 password_file = "/etc/my-booking/secrets/smtp_password"
 from_address  = "admin@example.org"
 # Optional, comma-separated: BCC these addresses on every attendee-facing
-# email, e.g. to monitor what guests actually receive. Applied only to
-# attendee/guest-facing emails (booking confirmed/waitlisted, promoted,
+# email, e.g. to monitor what participants actually receive. Applied only to
+# attendee/participant-facing emails (booking confirmed/waitlisted, promoted,
 # canceled, reinstated, account confirm/reset/email-change) -- never to the
 # separate admin-facing copy of the same event (that already goes straight
 # to admin_email), and never to operator-only mail like the watchdog alert.
@@ -159,10 +199,10 @@ show_spots_left = true
 # of this setting, since that label has to stay literally true to what
 # submitting the form actually does.
 book_button_label = "Book"
-# Max number of "+ Add participant" guest rows the booking form offers (and
-# the most guests a submitted form's own POST will ever get admitted --
-# see app/webapp.py's _parse_guest_entries).
-max_guests = 3
+# Max number of "+ Add participant" rows the booking form offers (and
+# the most extra participants a submitted form's own POST will ever get
+# admitted -- see app/webapp.py's _parse_guest_entries).
+max_participants = 3
 # Displayed-only offset for A/B-testing whether perceived scarcity changes
 # booking behaviour. Positive = show fewer spots than really available
 # (more urgency), negative = show more, 0 = show the real number. This
@@ -174,7 +214,7 @@ max_guests = 3
 # says so, since that's what "join waitlist" in the email will actually do.
 spots_left_offset = 0
 # A brand-new email's first booking is held as PENDING (no real capacity,
-# no calendar sync) until the guest clicks the confirmation link emailed to
+# no calendar sync) until the participant clicks the confirmation link emailed to
 # them and sets a password -- see README's "Account confirmation" section.
 # A pending row abandoned longer than this many HOURS is purged by the
 # retention job (app/retention.py), independent of retention_months below.
@@ -191,7 +231,7 @@ pending_confirmation_hours = 48
 retention_months = 24
 # Canceled registrations are less useful to keep around; purge them sooner.
 canceled_retention_months = 6
-# Secret HMAC key used to hash a guest's email address when they exercise
+# Secret HMAC key used to hash a participant's email address when they exercise
 # their right to erasure (Art. 17). Generated once by scripts/install.sh
 # (`openssl rand -hex 32`); rotating it means previously-erased emails can no
 # longer be recognized as "the same erased person" if they ever come up again.
@@ -269,7 +309,7 @@ csp_violation_threshold = 3
 # off of if you support more than one. description is rendered as RAW HTML
 # on the booking page (not escaped) -- rich text (bold/italic/underline,
 # links, bullet lists) is fine here, since this is your own text, not
-# guest input. subtitle is optional plain text shown under the title on
+# participant input. subtitle is optional plain text shown under the title on
 # the booking page: omit it entirely to auto-show "<Weekday>s <from>h<mm> -
 # <till>h<mm> -- <location>" (e.g. "Saturdays 10h45 - 12h45 -- Ayur Yoga
 # Center Trier Nord", as below), set it to "" to show no subtitle at all,
@@ -290,7 +330,7 @@ csp_violation_threshold = 3
 # also invite (cc) on this course's own calendar entry. Each address gets
 # added as an ATTENDEE (ROLE=OPT-PARTICIPANT, RSVP=FALSE
 # -- a courtesy copy, not a scheduling request) on THIS course's own HOST
-# calendar event (never the guest's personal .ics). Omit entirely (the
+# calendar event (never the participant's personal .ics). Omit entirely (the
 # default) for no ORGANIZER/ATTENDEE properties at all, exactly as before
 # this existed. Whether an address actually receives an invite EMAIL (vs.
 # just appearing silently as an attendee) depends on your CalDAV server's

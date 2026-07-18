@@ -23,12 +23,11 @@ timezone = "Europe/Berlin"
 admin_email = "admin@example.org"
 base_url = "https://example.org"
 
-[calendar]
+[booking_calendar]
 caldav_url = "https://dav.example.org/"
-caldav_username = "calendar@example.org"
-caldav_password_file = "{caldav_password_file}"
-booking_calendar = "Bookings"
-conflict_calendars = ["Bookings"]
+username = "calendar@example.org"
+password_file = "{caldav_password_file}"
+calendar = "Bookings"
 
 [smtp]
 host = "smtp.example.org"
@@ -127,8 +126,8 @@ capacity = 10
     def _write_with_calendar_extra(self, extra_calendar_lines: str) -> Path:
         toml_path = self._write(self._course_block("c1"))
         toml_path.write_text(toml_path.read_text().replace(
-            'conflict_calendars = ["Bookings"]',
-            'conflict_calendars = ["Bookings"]\n' + extra_calendar_lines,
+            'calendar = "Bookings"',
+            'calendar = "Bookings"\n' + extra_calendar_lines,
         ))
         return toml_path
 
@@ -149,25 +148,102 @@ capacity = 10
         toml_path.write_text(toml_path.read_text() + '\n[logging]\nlog_file = "/tmp/custom.log"\n')
         self.assertEqual(load_settings(toml_path).log_file, "/tmp/custom.log")
 
-    def test_all_day_conflict_settings_defaults(self):
-        # 2026-07-16 (operator's call, same day the setting was born with
-        # default false): all-day events in the conflict calendars DO
-        # hide course dates by default; the title-marker escape hatch is
-        # disabled ("") and the "show as Free" one is on.
-        settings = load_settings(self._write(self._course_block("c1")))
-        self.assertTrue(settings.conflict_calendar_all_day_events_also_block_the_course)
-        self.assertEqual(settings.all_day_non_blocking_title_marker, "")
-        self.assertTrue(settings.all_day_free_events_do_not_block)
+    def _write_with_conflict_entry(self, entry_lines: str) -> Path:
+        toml_path = self._write(self._course_block("c1"))
+        toml_path.write_text(toml_path.read_text() + "\n[[conflict_calendar]]\n" + entry_lines + "\n")
+        return toml_path
 
-    def test_all_day_conflict_settings_parse_non_default_values(self):
-        settings = load_settings(self._write_with_calendar_extra(
-            "conflict_calendar_all_day_events_also_block_the_course = false\n"
-            'all_day_non_blocking_title_marker = "#course-ok"\n'
-            "all_day_free_events_do_not_block = false"
+    def test_old_calendar_section_is_a_hard_error(self):
+        # 2026-07-18 redesign: deliberately NO backward compatibility --
+        # a leftover [calendar] section must fail loudly with the
+        # migration mapping, never be silently half-interpreted.
+        toml_path = self._write(self._course_block("c1"))
+        toml_path.write_text(toml_path.read_text() + '\n[calendar]\ncaldav_url = "https://x/"\n')
+        with self.assertRaises(ValueError) as ctx:
+            load_settings(toml_path)
+        self.assertIn("[booking_calendar]", str(ctx.exception))
+        self.assertIn("[[conflict_calendar]]", str(ctx.exception))
+
+    def test_no_conflict_calendar_entries_is_fine(self):
+        settings = load_settings(self._write(self._course_block("c1")))
+        self.assertEqual(settings.conflict_calendars, ())
+
+    def test_conflict_entry_defaults_requires_mode_and_oof(self):
+        settings = load_settings(self._write_with_conflict_entry(
+            'ics_url = "https://cal.example.org/feed.ics"'
         ))
-        self.assertFalse(settings.conflict_calendar_all_day_events_also_block_the_course)
-        self.assertEqual(settings.all_day_non_blocking_title_marker, "#course-ok")
-        self.assertFalse(settings.all_day_free_events_do_not_block)
+        (entry,) = settings.conflict_calendars
+        self.assertEqual(entry.mode, "requires")
+        self.assertEqual(entry.show_as, "oof")
+        self.assertEqual(entry.name, "conflict-1")
+        self.assertTrue(entry.all_day_events_also_count)
+        self.assertEqual(entry.all_day_non_blocking_title_marker, "")
+        self.assertTrue(entry.all_day_free_events_do_not_block)
+
+    def test_blocks_mode_defaults_show_as_any(self):
+        # "oof" as a blocks-mode default would silently stop plain BUSY
+        # vacation events from blocking -- the default is mode-dependent.
+        settings = load_settings(self._write_with_conflict_entry(
+            'source = "booking_calendar"\nmode = "blocks"'
+        ))
+        self.assertEqual(settings.conflict_calendars[0].show_as, "any")
+        self.assertTrue(settings.conflict_calendars[0].use_booking_calendar)
+
+    def test_show_as_ooo_alias_and_explicit_values_parse(self):
+        settings = load_settings(self._write_with_conflict_entry(
+            'name = "work"\nics_url = "https://cal.example.org/feed.ics"\n'
+            'show_as = "ooo"\ncourses = ["c1"]\nfrom = "08:00"\ntill = "18:00"\n'
+            'title_contains = "office"\nall_day_events_also_count = false'
+        ))
+        (entry,) = settings.conflict_calendars
+        self.assertEqual(entry.show_as, "oof")
+        self.assertEqual(entry.courses, ("c1",))
+        self.assertEqual((entry.from_hm, entry.till_hm), ("08:00", "18:00"))
+        self.assertEqual(entry.title_contains, "office")
+        self.assertFalse(entry.all_day_events_also_count)
+        self.assertTrue(entry.applies_to("c1"))
+        self.assertFalse(entry.applies_to("other"))
+
+    def test_unknown_course_shortname_in_entry_is_an_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            load_settings(self._write_with_conflict_entry(
+                'ics_url = "https://cal.example.org/feed.ics"\ncourses = ["nope"]'
+            ))
+        self.assertIn("nope", str(ctx.exception))
+
+    def test_entry_without_any_source_is_an_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            load_settings(self._write_with_conflict_entry('mode = "blocks"'))
+        self.assertIn("exactly ONE source", str(ctx.exception))
+
+    def test_entry_with_two_sources_is_an_error(self):
+        with self.assertRaises(ValueError):
+            load_settings(self._write_with_conflict_entry(
+                'ics_url = "https://x/feed.ics"\nsource = "booking_calendar"'
+            ))
+
+    def test_bad_mode_show_as_and_time_format_are_errors(self):
+        for bad in ('ics_url = "https://x/f.ics"\nmode = "block"',
+                    'ics_url = "https://x/f.ics"\nshow_as = "ooof"',
+                    'ics_url = "https://x/f.ics"\nfrom = "8am"'):
+            with self.assertRaises(ValueError):
+                load_settings(self._write_with_conflict_entry(bad))
+
+    def test_caldav_entry_reads_its_own_password_file(self):
+        pw = self.dir / "other_caldav_password"
+        pw.write_text("other-secret")
+        settings = load_settings(self._write_with_conflict_entry(
+            'name = "other"\ncaldav_url = "https://dav.other.example/"\n'
+            f'username = "u@other.example"\npassword_file = "{pw}"\ncalendar = "Cal"'
+        ))
+        (entry,) = settings.conflict_calendars
+        self.assertEqual(entry.caldav_password, "other-secret")
+        self.assertEqual(entry.calendar, "Cal")
+
+    def test_max_participants_renamed_key_parses(self):
+        toml_path = self._write(self._course_block("c1"))
+        toml_path.write_text(toml_path.read_text() + "\n[defaults]\nmax_participants = 5\n")
+        self.assertEqual(load_settings(toml_path).max_participants, 5)
 
     def test_location_url_defaults_to_empty_string_when_omitted(self):
         # 2026-07-09: a location_url was added and used on /my in
@@ -260,7 +336,8 @@ class LoadSettingsIndexEmbeddedTest(LoadSettingsCourseOrderTest):
 class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
     """2026-07-07: the reminders (list) became a setting, defaulting
     to NO reminders (trainer's own CalDAV event) / invites to course
-    participants have a reminder 1h before (guest_reminder_minutes)."""
+    participants have a reminder 1h before (participant_reminder_minutes,
+    renamed from guest_reminder_minutes in the 2026-07-18 redesign)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -282,27 +359,27 @@ class LoadSettingsCalendarReminderMinutesTest(unittest.TestCase):
             admin_password_hash_file=self.admin_password_hash_file,
             erasure_pepper_file=self.erasure_pepper_file,
         )
-        # extra_calendar_lines gets appended right after the [calendar]
-        # section's own conflict_calendars line, still inside that table.
+        # extra_calendar_lines gets appended right after
+        # [booking_calendar]'s own calendar line, still inside that table.
         header = header.replace(
-            'conflict_calendars = ["Bookings"]',
-            'conflict_calendars = ["Bookings"]\n' + extra_calendar_lines,
+            'calendar = "Bookings"',
+            'calendar = "Bookings"\n' + extra_calendar_lines,
         )
         toml_path.write_text(header)
         return toml_path
 
-    def test_defaults_are_no_trainer_reminder_and_one_hour_guest_reminder(self):
+    def test_defaults_are_no_trainer_reminder_and_one_hour_participant_reminder(self):
         settings = load_settings(self._write())
         self.assertEqual(settings.trainer_calendar_reminder_minutes, ())
-        self.assertEqual(settings.guest_calendar_reminder_minutes, (60,))
+        self.assertEqual(settings.participant_calendar_reminder_minutes, (60,))
 
-    def test_explicit_values_are_read_from_the_calendar_section(self):
+    def test_explicit_values_are_read_from_the_booking_calendar_section(self):
         toml_path = self._write(
-            "trainer_reminder_minutes = [30]\nguest_reminder_minutes = [15, 60]\n"
+            "trainer_reminder_minutes = [30]\nparticipant_reminder_minutes = [15, 60]\n"
         )
         settings = load_settings(toml_path)
         self.assertEqual(settings.trainer_calendar_reminder_minutes, (30,))
-        self.assertEqual(settings.guest_calendar_reminder_minutes, (15, 60))
+        self.assertEqual(settings.participant_calendar_reminder_minutes, (15, 60))
 
 
 class LoadSettingsBccAttendeeEmailsTest(unittest.TestCase):

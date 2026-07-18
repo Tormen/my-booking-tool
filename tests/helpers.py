@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 
-from app.config import Course, Settings
+from app.config import ConflictCalendar, Course, Settings
 
 # app/logutil.py's configure_logging() is only called by the real
 # entrypoints (serve.py, retention.py, scripts/my-bt) -- tests call library
@@ -20,6 +20,14 @@ from app.config import Course, Settings
 logging.disable(logging.CRITICAL)
 
 
+def make_conflict_calendar(**overrides) -> ConflictCalendar:
+    defaults = dict(
+        name="own-calendar", mode="blocks", show_as="any", use_booking_calendar=True,
+    )
+    defaults.update(overrides)
+    return ConflictCalendar(**defaults)
+
+
 def make_settings(**overrides) -> Settings:
     defaults = dict(
         timezone="Europe/Berlin",
@@ -29,7 +37,9 @@ def make_settings(**overrides) -> Settings:
         caldav_username="calendar@example.org",
         caldav_password="secret",
         booking_calendar="Bookings",
-        conflict_calendars=("Calendar", "Bookings"),
+        # The shape every real config ships: the booking calendar itself
+        # conflict-checked in blocks mode (2026-07-18 redesign).
+        conflict_calendars=(make_conflict_calendar(),),
         smtp_host="smtp.mailbox.org",
         smtp_port=465,
         smtp_username="calendar@example.org",

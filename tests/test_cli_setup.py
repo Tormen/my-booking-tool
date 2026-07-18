@@ -81,7 +81,7 @@ def tearDownModule():
 
 def _raw(**overrides) -> dict:
     base = {
-        "calendar": {"caldav_password_file": None},
+        "booking_calendar": {"password_file": None},
         "smtp": {"password_file": None},
         "admin": {"password_hash_file": None},
         "privacy": {"erasure_pepper_file": None, "retention_months": 24, "canceled_retention_months": 6},
@@ -176,10 +176,10 @@ class PrintReportTest(unittest.TestCase):
         (data_dir / ".calendar_invite_format_version").write_text("0\n")
         password_file = self.home / "caldav_password"
         password_file.write_text("secret")
-        raw = _raw(calendar={
+        raw = _raw(booking_calendar={
             "caldav_url": "https://caldav.example.org/",
-            "caldav_username": "bot",
-            "caldav_password_file": str(password_file),
+            "username": "bot",
+            "password_file": str(password_file),
         })
         lines: list[str] = []
         fails, warns = cli_setup.print_report(
@@ -190,7 +190,7 @@ class PrintReportTest(unittest.TestCase):
 
     def test_reports_missing_secret(self):
         lines: list[str] = []
-        raw = _raw(calendar={"caldav_password_file": str(self.home / "nope")})
+        raw = _raw(booking_calendar={"password_file": str(self.home / "nope")})
         cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
         self.assertTrue(any("caldav_password" in ln and "FAIL" in ln for ln in lines))
 
@@ -356,7 +356,7 @@ class PrintReportTest(unittest.TestCase):
         self.assertEqual(warns, printed_warns)
 
     def test_a_real_failure_is_reflected_in_the_returned_count_and_summary_line(self):
-        raw = _raw(calendar={"caldav_password_file": str(self.home / "nope")})
+        raw = _raw(booking_calendar={"password_file": str(self.home / "nope")})
         lines: list[str] = []
         fails, warns = cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
         self.assertGreaterEqual(fails, 1)
@@ -367,7 +367,7 @@ class PrintReportTest(unittest.TestCase):
         # setup and status explicitly -- a real FAIL (missing secret)
         # must reappear, verbatim, in a repeated block after all twelve
         # numbered steps, not just once wherever it first printed.
-        raw = _raw(calendar={"caldav_password_file": str(self.home / "nope")})
+        raw = _raw(booking_calendar={"password_file": str(self.home / "nope")})
         lines: list[str] = []
         cli_setup.print_report(raw, self.settings_path, str(self.home), print_fn=lines.append)
         text = "\n".join(lines)
@@ -502,13 +502,13 @@ class InteractiveSetupSecretsTest(unittest.TestCase):
 
     def test_declining_a_missing_secret_leaves_it_unwritten(self):
         path = self.secrets_dir / "caldav_password"
-        raw = _raw(calendar={"caldav_password_file": str(path)})
+        raw = _raw(booking_calendar={"password_file": str(path)})
         self._run(raw, answers={"caldav_password": False})
         self.assertFalse(path.exists())
 
     def test_accepting_a_missing_plain_secret_writes_it_mode_600(self):
         path = self.secrets_dir / "caldav_password"
-        raw = _raw(calendar={"caldav_password_file": str(path)})
+        raw = _raw(booking_calendar={"password_file": str(path)})
         self._run(raw, answers={"caldav_password": True}, read_secret=lambda label: "hunter2")
         self.assertTrue(path.exists())
         self.assertEqual(path.read_text().strip(), "hunter2")
@@ -519,7 +519,7 @@ class InteractiveSetupSecretsTest(unittest.TestCase):
         # atomic_write_text (temp file + fsync + rename), not a bare
         # write_text() -- confirm no temp file lingers next to it.
         path = self.secrets_dir / "caldav_password"
-        raw = _raw(calendar={"caldav_password_file": str(path)})
+        raw = _raw(booking_calendar={"password_file": str(path)})
         self._run(raw, answers={"caldav_password": True}, read_secret=lambda label: "hunter2")
         leftover_tmps = [p.name for p in self.secrets_dir.iterdir() if p.name.endswith(".tmp")]
         self.assertEqual(leftover_tmps, [])
@@ -551,7 +551,7 @@ class InteractiveSetupSecretsTest(unittest.TestCase):
         path = self.secrets_dir / "caldav_password"
         self.secrets_dir.mkdir()
         path.write_text("already-here")
-        raw = _raw(calendar={"caldav_password_file": str(path)})
+        raw = _raw(booking_calendar={"password_file": str(path)})
         prompt, _ = self._run(raw, answers={})
         self.assertEqual(prompt.asked_matching("caldav_password"), [])
 
@@ -1756,18 +1756,20 @@ class InteractiveSetupCaldavTest(unittest.TestCase):
     @patch("app.cli_checks.CalDAVClient")
     def test_calendar_not_found_reports_fail_and_fix_hint(self, mock_cls):
         mock_cls.return_value.list_calendars.return_value = {"WebDAV Root": "/"}
-        raw = _raw(calendar={
-            "caldav_url": "https://dav.mailbox.org/caldav/",
-            "caldav_username": "calendar@example.org",
-            "caldav_password_file": None,
-            "booking_calendar": "Yoga-Bookings",
-            "conflict_calendars": ["Calendar"],
-        })
+        raw = _raw(
+            booking_calendar={
+                "caldav_url": "https://dav.mailbox.org/caldav/",
+                "username": "calendar@example.org",
+                "password_file": None,
+                "calendar": "Yoga-Bookings",
+            },
+            conflict_calendar=[{"name": "own-calendar", "source": "booking_calendar", "mode": "blocks"}],
+        )
         # password file check happens first in check_caldav_calendars --
         # give it a real (empty-ok) file so the CalDAVClient mock is reached.
         pw = self.home / "caldav_password"
         pw.write_text("hunter2")
-        raw["calendar"]["caldav_password_file"] = str(pw)
+        raw["booking_calendar"]["password_file"] = str(pw)
         lines, prompt = self._run(raw)
         text = "\n".join(lines)
         self.assertIn("fail", text)
@@ -1805,12 +1807,11 @@ timezone = "Europe/Berlin"
 admin_email = "admin@example.org"
 base_url = "https://example.org"
 
-[calendar]
+[booking_calendar]
 caldav_url = "https://dav.example.org/"
-caldav_username = "calendar@example.org"
-caldav_password_file = "{secrets / 'caldav_password'}"
-booking_calendar = "Bookings"
-conflict_calendars = ["Bookings"]
+username = "calendar@example.org"
+password_file = "{secrets / 'caldav_password'}"
+calendar = "Bookings"
 
 [smtp]
 host = "smtp.example.org"
@@ -1825,12 +1826,11 @@ password_hash_file = "{secrets / 'admin_password_hash'}"
 [privacy]
 erasure_pepper_file = "{secrets / 'erasure_pepper'}"
 """, encoding="utf-8")
-        self.raw = _raw(calendar={
+        self.raw = _raw(booking_calendar={
             "caldav_url": "https://dav.example.org/",
-            "caldav_username": "calendar@example.org",
-            "caldav_password_file": str(secrets / "caldav_password"),
-            "booking_calendar": "Bookings",
-            "conflict_calendars": ["Bookings"],
+            "username": "calendar@example.org",
+            "password_file": str(secrets / "caldav_password"),
+            "calendar": "Bookings",
         })
 
     def _run(self, **patches):

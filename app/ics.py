@@ -50,7 +50,7 @@ class VEvent:
     # NO reminders -- was (24*60, 60) (1 day + 1h before) for every
     # caller by default; every real call site now passes its own explicit
     # value from Settings (see app/config.py's
-    # trainer_calendar_reminder_minutes/guest_calendar_reminder_minutes),
+    # trainer_calendar_reminder_minutes/participant_calendar_reminder_minutes),
     # so this bare-class default only matters for a VEvent built without
     # going through Settings at all (e.g. ad-hoc/test use) -- "no reminder"
     # is the safer thing to default to in that case too.
@@ -204,10 +204,10 @@ def is_transparent(ics_text: str) -> bool:
 def is_all_day(ics_text: str) -> bool:
     """True if the VEVENT is an all-day event: a date-only DTSTART
     (RFC 5545 `DTSTART;VALUE=DATE:YYYYMMDD` -- no time-of-day, so also no
-    'T' separator), as opposed to a timed DTSTART. Used by the booking
-    conflict check to skip all-day calendar entries unless
-    [calendar].conflict_calendar_all_day_events_also_block_the_course
-    is enabled (see app/config.py)."""
+    'T' separator), as opposed to a timed DTSTART. (The conflict check
+    itself moved to app/conflict.py + app/ics_feed.py in the 2026-07-18
+    [[conflict_calendar]] redesign; this stays for single-VEVENT
+    callers/tests.)"""
     m = _DTSTART_RE.search(ics_text)
     return bool(m) and "T" not in m.group(1)
 

@@ -617,36 +617,70 @@ server-side too. Reopen the date by simply **deleting that blocker
 event in your calendar app**, or by rebooking any participant (from
 `/admin`, or your cancellation email's own rebook link) -- both mean
 the session is happening after all. Requirement (checked by `my-bt
-admin health`): your `booking_calendar` must be listed in
-`[calendar].conflict_calendars`, or the blocker would never be seen by
-the conflict check.
+admin health`): some blocks-mode `[[conflict_calendar]]` entry must
+cover your booking calendar (the shipped config's `source =
+"booking_calendar"` entry), or the blocker would never be seen by the
+conflict check. See "Calendars" below for the full conflict model.
 
-Note on what counts as a conflict: any event overlapping the course
-hours hides a date -- timed or all-day (an all-day vacation entry
-blocks without needing start/end times; disable that via
-`[calendar].conflict_calendar_all_day_events_also_block_the_course =
-false`). Two calendar-side escape hatches exist for the exceptional
-all-day event that should NOT block, both controllable from any
-calendar client, no server access needed:
+## Calendars
 
-- **Title marker** (`[calendar].all_day_non_blocking_title_marker`,
-  disabled by default with `""`): an all-day event whose title contains
-  the marker, case-insensitively -- e.g. "Conference Day #course-ok" --
-  is ignored by the conflict check.
-- **"Show as: Free"** (`[calendar].all_day_free_events_do_not_block`,
-  on by default): an all-day event marked Free (RFC 5545
-  `TRANSP:TRANSPARENT`) is ignored -- that flag literally means "does
-  not reserve the time". CAUTION: many calendar apps (Apple Calendar,
-  Google, Open-Xchange) create all-day events as Free **by default**,
-  so an all-day event meant to block may need flipping to "Busy" by
-  hand -- which is also why the title marker exists as the explicit,
-  no-surprises alternative.
+Two kinds of calendar configuration (2026-07-18 redesign; the old
+`[calendar]` section is gone, and the app refuses to start with a clear
+migration message if one is still present):
 
-Timed events never get these escape hatches -- they always block, Free
-or not, so "no slot shown = no session" stays predictable. The tool's
-own synced course event never blocks its own course (it's recognized by
-its UID and excluded), so a date with sign-ups stays bookable for
-further participants.
+**`[booking_calendar]` -- READ+WRITE, CalDAV only.** Where the tool's
+own course events, CANCELED blocker events and sync live
+(`caldav_url` + `username` + `password_file` + `calendar`), plus
+`trainer_reminder_minutes` / `participant_reminder_minutes` for the two
+invite flavors. CalDAV only by nature: published `.ics` links are
+one-way exports, there is no writable-ics standard.
+
+**`[[conflict_calendar]]` -- READ-ONLY, any number of entries.** Each
+entry is one calendar source consulted live for every candidate date; a
+source is either a published ICS link (`ics_url`, e.g. an Outlook "publish
+calendar" URL), a CalDAV calendar with its own credentials, or `source =
+"booking_calendar"` to reuse the booking connection. An entry applies to
+every course unless `courses = [...]` scopes it. Two modes:
+
+- `mode = "blocks"`: any matching event overlapping the course hours
+  HIDES the date -- vacation entries, the CANCELED blockers.
+- `mode = "requires"` (the default): a SINGLE matching event must span
+  the whole `from`--`till` window (default: the course's own start/end)
+  or the date is hidden -- e.g. "these courses only happen when my work
+  calendar shows an out-of-office event".
+
+Which events count is filtered per entry: `show_as` (default `"oof"`
+in requires mode, `"any"` in blocks mode; other values `busy` /
+`tentative` / `free` / `workingelsewhere`, matched from Outlook's
+`X-MICROSOFT-CDO-BUSYSTATUS`, falling back to RFC `TRANSP` where only
+free-vs-busy is detectable), `title_contains`, and three all-day knobs:
+`all_day_events_also_count` (on by default -- an all-day vacation entry
+blocks, an all-day out-of-office satisfies a requires entry), the
+`all_day_non_blocking_title_marker` escape hatch (an all-day event
+titled e.g. "Conference Day #course-ok" is ignored; `""` = disabled),
+and `all_day_free_events_do_not_block` (an all-day event marked "show
+as Free" is ignored -- CAUTION: many calendar apps create all-day
+events as Free BY DEFAULT, so a blocking all-day event may need a
+manual flip to "Busy"; that trap is exactly why the explicit title
+marker exists alongside it). Timed events never get the all-day escape
+hatches. The tool's own synced course event never blocks its own course
+(recognized by UID and excluded), so a date with sign-ups stays
+bookable for further participants.
+
+ICS feeds are parsed in full (recurring events with EXDATEs and
+moved/edited instances included, Windows timezone names resolved from
+the feed's own VTIMEZONE rules) and cached in-process for
+`cache_minutes` (default 10). **Source errors:** every successful ICS
+fetch is stored as a last-known-good copy under
+`/var/lib/my-booking/conflict_cache/`; if the source goes down,
+bookings continue against that copy indefinitely and a
+`WARNING:`-subject email goes to `admin_email` -- at most one per day
+per source. No cached copy yet (or a CalDAV conflict source failing)
+hides the affected dates instead, fail-closed, with the same email.
+`my-bt admin health` shows the live state of every source at any time.
+One caveat for Outlook published links: Microsoft regenerates them on
+ITS own schedule, so the feed can lag the real mailbox by minutes to
+hours.
 
 **Undoing a cancellation:** both the attendee's own `/my` page and the web
 admin's `/admin` overview show a "Rebook" button (2026-07-10; relabeled
@@ -845,10 +879,12 @@ perform what it safely can:
   (re)generate `privacy.html` there from the current `settings.toml`
   values right away -- no rebuild/reinstall needed. See "Static-site
   pages" below.
-- CalDAV calendars: if `[calendar].caldav_url`/`caldav_username`/the
-  password secret are all configured, does a live PROPFIND against your
-  CalDAV server and reports whether `booking_calendar` and every
-  `conflict_calendars` name actually exists there right now -- catches a
+- Calendars: if `[booking_calendar]` is fully configured, does a live
+  PROPFIND against your CalDAV server and reports whether the booking
+  calendar and every CalDAV `[[conflict_calendar]]` name actually
+  exists there right now (ICS entries get a live fetch+parse check, and
+  a missing blocks-mode entry covering the booking calendar is warned
+  about) -- catches a
   calendar that was renamed, reset, or never created on the provider's
   side, which otherwise 500s every single `/book/<shortname>` page with
   no earlier warning. Informational only (there's no safe guess at which
@@ -1188,8 +1224,8 @@ password), the spots-left display A/B-test knob
 (never fakes "FULL", never drops below "1 spot(s) left" while still
 bookable-as-confirmed), `site/privacy.html` rendering (`test_site_render.py`),
 the `my-bt admin health`/`admin setup` health checks and interactive walkthrough,
-including a live CalDAV PROPFIND check that `booking_calendar`/
-`conflict_calendars` actually exist on the configured server right now
+including a live CalDAV PROPFIND check that the booking calendar and
+every `[[conflict_calendar]]` source actually exist/respond right now
 (`test_cli_checks.py`, `test_cli_setup.py` -- every side effect, including
 prompting, running external commands, and the CalDAV connection itself, is
 a fake, so these don't need root/systemd/rpm/a real tty/network), and the

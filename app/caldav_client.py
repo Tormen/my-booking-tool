@@ -145,7 +145,7 @@ class CalDAVClient:
             return calendars[display_name]
         raise CalDAVError(
             f"calendar '{display_name}' not found among {list(calendars)} -- "
-            "check settings.toml [calendar].booking_calendar / conflict_calendars"
+            "check settings.toml [booking_calendar].calendar / [[conflict_calendar]]"
         )
 
     # -- events ------------------------------------------------------------

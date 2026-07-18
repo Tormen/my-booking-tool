@@ -23,7 +23,7 @@ from app.storage import (
 )
 from app.webapp import App
 
-from .helpers import make_course, make_settings
+from .helpers import make_conflict_calendar, make_course, make_settings
 
 PROPFIND_BODY = """<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:">
@@ -34,6 +34,10 @@ PROPFIND_BODY = """<?xml version="1.0"?>
   <D:response>
     <D:href>/caldav/YogaBookings/</D:href>
     <D:propstat><D:prop><D:displayname>Yoga-Bookings</D:displayname></D:prop></D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/caldav/Bookings/</D:href>
+    <D:propstat><D:prop><D:displayname>Bookings</D:displayname></D:prop></D:propstat>
   </D:response>
 </D:multistatus>"""
 
@@ -164,75 +168,87 @@ class FakeTransport:
 
 
 class ConflictCheckerTest(unittest.TestCase):
+    """App-level behavior of the [[conflict_calendar]] engine through the
+    default blocks-mode entry covering the booking calendar (2026-07-18
+    redesign -- helpers.make_settings ships exactly that entry, the shape
+    every real config has). Multi-entry, requires-mode, per-course
+    scoping, ICS sources and the error/cache/alert policy are unit-tested
+    in tests/test_conflict.py; these lock the webapp wiring."""
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.store = Store(self._tmp.name)
-        self.settings = make_settings(conflict_calendars=("Calendar", "Yoga-Bookings"))
-        self.app = App(self.settings, self.store)
-        self.transport = FakeTransport()
-        self.app.caldav = CalDAVClient(
-            self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
-            transport=self.transport,
-        )
+        self.settings = make_settings()
+        self.app = self._make_app(self.settings)
+        self.course = make_course()
 
-    def test_checks_every_configured_conflict_calendar_not_just_first(self):
-        # "Calendar" (the first one) has nothing; "Yoga-Bookings" (the
-        # second) has a real conflicting event -- this must still be caught.
-        self.transport.report_responses["YogaBookings"] = Response(207, {}, _report_with_event("other-event@x"))
-        check = self.app._conflict_checker(exclude_own=True)
-        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
-        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        self.assertTrue(check(start, end))
-
-    def test_no_conflict_when_all_calendars_empty(self):
-        check = self.app._conflict_checker(exclude_own=True)
-        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
-        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        self.assertFalse(check(start, end))
-
-    def test_own_generated_events_excluded_in_every_calendar(self):
-        # UID domain is derived from settings.base_url (see
-        # calendar_sync._uid_parts) -- make_settings()'s default base_url
-        # is https://example.org, so "our own" events look like this.
-        self.transport.report_responses["YogaBookings"] = Response(
-            207, {}, _report_with_event("example-org-yoga-class-1-2026-07-08@example.org")
-        )
-        check = self.app._conflict_checker(exclude_own=True)
-        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
-        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        self.assertFalse(check(start, end))
-
-    def _check_with(self, report_xml: str, **settings_overrides):
-        """Fresh App with an all-day (or any) event stored in the second
-        conflict calendar; returns the conflict verdict for the standard
-        course window."""
-        settings = make_settings(
-            conflict_calendars=("Calendar", "Yoga-Bookings"), **settings_overrides
-        )
+    def _make_app(self, settings):
         app = App(settings, self.store)
+        self.transport = FakeTransport()
         app.caldav = CalDAVClient(
             settings.caldav_url, settings.caldav_username, settings.caldav_password,
             transport=self.transport,
         )
-        self.transport.report_responses["YogaBookings"] = Response(207, {}, report_xml)
-        check = app._conflict_checker(exclude_own=True)
-        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
-        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        return check(start, end)
+        return app
 
-    # All-day conflict behavior (2026-07-16, operator's call): all-day
-    # events BLOCK by default, with two individually-toggleable
-    # calendar-side escape hatches -- a title marker and "show as Free".
-    # See webapp._all_day_event_blocks / config.py's setting comments.
+    _WINDOW = (
+        datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc),
+        datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc),
+    )
+
+    def test_event_in_booking_calendar_blocks(self):
+        self.transport.report_responses["Bookings"] = Response(207, {}, _report_with_event("other-event@x"))
+        check = self.app._conflict_checker(self.course, exclude_own=True)
+        self.assertTrue(check(*self._WINDOW))
+
+    def test_no_conflict_when_calendar_empty(self):
+        check = self.app._conflict_checker(self.course, exclude_own=True)
+        self.assertFalse(check(*self._WINDOW))
+
+    def test_own_generated_events_excluded(self):
+        # UID domain is derived from settings.base_url (see
+        # calendar_sync._uid_parts) -- make_settings()'s default base_url
+        # is https://example.org, so "our own" events look like this.
+        self.transport.report_responses["Bookings"] = Response(
+            207, {}, _report_with_event("example-org-yoga-class-1-2026-07-08@example.org")
+        )
+        check = self.app._conflict_checker(self.course, exclude_own=True)
+        self.assertFalse(check(*self._WINDOW))
+
+    def test_entry_scoped_to_another_course_is_skipped(self):
+        settings = make_settings(conflict_calendars=(
+            make_conflict_calendar(courses=("some-other-course",)),
+        ))
+        app = self._make_app(settings)
+        self.transport.report_responses["Bookings"] = Response(207, {}, _report_with_event("other-event@x"))
+        check = app._conflict_checker(self.course, exclude_own=True)
+        self.assertFalse(check(*self._WINDOW))
+
+    def _check_with(self, report_xml: str, **entry_overrides):
+        """Fresh App whose single blocks-mode entry carries the given
+        overrides, with the event stored in the booking calendar; returns
+        the conflict verdict for the standard course window."""
+        settings = make_settings(conflict_calendars=(
+            make_conflict_calendar(**entry_overrides),
+        ))
+        app = self._make_app(settings)
+        self.transport.report_responses["Bookings"] = Response(207, {}, report_xml)
+        check = app._conflict_checker(self.course, exclude_own=True)
+        return check(*self._WINDOW)
+
+    # All-day conflict behavior: all-day events BLOCK by default, with
+    # two individually-toggleable calendar-side escape hatches -- a title
+    # marker and "show as Free". Per [[conflict_calendar]] entry since
+    # the 2026-07-18 redesign (see config.ConflictCalendar).
 
     def test_all_day_events_block_by_default(self):
         self.assertTrue(self._check_with(_report_with_all_day_event("vacation@x")))
 
-    def test_all_day_events_never_block_when_main_setting_off(self):
+    def test_all_day_events_never_block_when_entry_knob_off(self):
         self.assertFalse(self._check_with(
             _report_with_all_day_event("birthday@x"),
-            conflict_calendar_all_day_events_also_block_the_course=False,
+            all_day_events_also_count=False,
         ))
 
     def test_all_day_title_marker_unblocks_case_insensitively(self):
@@ -248,8 +264,6 @@ class ConflictCheckerTest(unittest.TestCase):
         ))
 
     def test_empty_marker_setting_disables_the_marker_feature(self):
-        # Default marker is "" -- a title that happens to contain some
-        # would-be marker text must not unblock anything.
         self.assertTrue(self._check_with(
             _report_with_all_day_event("conf@x", summary="Conference Day #yoga-ok"),
         ))
@@ -259,7 +273,7 @@ class ConflictCheckerTest(unittest.TestCase):
             _report_with_all_day_event("note@x", transparent=True),
         ))
 
-    def test_all_day_marked_free_blocks_when_free_flag_setting_off(self):
+    def test_all_day_marked_free_blocks_when_free_knob_off(self):
         self.assertTrue(self._check_with(
             _report_with_all_day_event("note@x", transparent=True),
             all_day_free_events_do_not_block=False,
@@ -272,18 +286,15 @@ class ConflictCheckerTest(unittest.TestCase):
         timed_free = _report_with_event("busy@x").replace(
             "SUMMARY:Test", "SUMMARY:Test\nTRANSP:TRANSPARENT"
         )
-        self.assertTrue(self._check_with(timed_free, all_day_free_events_do_not_block=True))
+        self.assertTrue(self._check_with(timed_free))
 
     def test_calendar_href_is_cached_not_refetched_per_check(self):
-        check = self.app._conflict_checker(exclude_own=True)
-        start = datetime(2026, 7, 8, 17, 15, tzinfo=timezone.utc)
-        end = datetime(2026, 7, 8, 18, 55, tzinfo=timezone.utc)
-        check(start, end)
-        check(start, end)
+        check = self.app._conflict_checker(self.course, exclude_own=True)
+        check(*self._WINDOW)
+        check(*self._WINDOW)
         propfind_calls = [c for c in self.transport.calls if c[0] == "PROPFIND"]
-        # Two conflict calendars, but PROPFIND (which lists ALL calendars at
-        # once) should only ever run once total, cached after that -- not
-        # once per calendar per check.
+        # PROPFIND (which lists ALL calendars at once) should only ever
+        # run once total, cached after that -- not once per check.
         self.assertEqual(len(propfind_calls), 1)
 
 
@@ -957,7 +968,7 @@ class SessionBannerTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.store = Store(self._tmp.name)
         self.course = make_course(shortname="yoga-class-1", weekday="wed", capacity=10)
-        self.settings = make_settings(courses=(self.course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        self.settings = make_settings(courses=(self.course,))
         self.app = App(self.settings, self.store)
         self.app.caldav = CalDAVClient(
             self.settings.caldav_url, self.settings.caldav_username, self.settings.caldav_password,
@@ -1281,7 +1292,7 @@ class SessionBannerTest(unittest.TestCase):
             shortname="yoga-class-1", weekday="wed", capacity=10,
             date_overrides=(CourseDateOverride(date=first_date, start_time="09:00"),),
         )
-        settings = make_settings(courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        settings = make_settings(courses=(course,))
         app = App(settings, self.store)
         app.caldav = self.app.caldav
         app._sync = lambda *a, **kw: None
@@ -2360,7 +2371,7 @@ class BookingFlowTest(unittest.TestCase):
         # deployment -- the blocker lands on the booking calendar and the
         # conflict check is what hides the date.
         self.settings = make_settings(
-            courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"),
+            courses=(course,),
             booking_calendar="Calendar",
         )
         self.app = App(self.settings, self.store)
@@ -3391,7 +3402,7 @@ class BookingFlowTest(unittest.TestCase):
             shortname="yoga-class-2", weekday="wed", capacity=10,
             location="Trier Studio", location_url="https://maps.example.org/?q=Trier+Studio",
         )
-        settings = make_settings(courses=(course,), conflict_calendars=("Calendar", "Yoga-Bookings"))
+        settings = make_settings(courses=(course,))
         app = App(settings, store)
         app.caldav = CalDAVClient(
             settings.caldav_url, settings.caldav_username, settings.caldav_password, transport=FakeTransport(),

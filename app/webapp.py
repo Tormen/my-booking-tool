@@ -115,7 +115,6 @@ from zoneinfo import ZoneInfo
 
 from . import calendar_sync
 from . import cli_list
-from . import ics
 from . import maintenance
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancel_flow import (
@@ -125,7 +124,8 @@ from .cancellation import (
     attention_html, booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text,
     intro_html, join_attention_sections, send_cancellation_emails, send_reinstatement_emails,
 )
-from .config import Settings, upcoming_date_overrides
+from .config import Course, Settings, upcoming_date_overrides
+from .conflict import ConflictEngine
 from .email_templates import load_email_template, render_template
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
@@ -978,6 +978,7 @@ class App:
         self.store = store
         self.caldav = CalDAVClient(settings.caldav_url, settings.caldav_username, settings.caldav_password)
         self._calendars_cache: dict[str, str] | None = None
+        self._conflict_engine_cache: ConflictEngine | None = None
 
     # -- calendar helpers -----------------------------------------------
 
@@ -995,46 +996,35 @@ class App:
         if display_name not in calendars:
             raise CalDAVError(
                 f"calendar '{display_name}' not found among {list(calendars)} -- "
-                "check settings.toml [calendar].booking_calendar / conflict_calendars"
+                "check settings.toml [booking_calendar].calendar / [[conflict_calendar]]"
             )
         return calendars[display_name]
 
-    def _conflict_checker(self, exclude_own: bool):
-        def check(start: datetime, end: datetime) -> bool:
-            # Check EVERY configured conflict calendar, not just the first --
-            # settings.toml can list several (e.g. a personal calendar plus
-            # the booking calendar itself).
-            for calendar_name in self.settings.conflict_calendars:
-                href = self._href(calendar_name)
-                for uid, event_ics, _etag in self.caldav.query_events(href, start, end):
-                    if exclude_own and calendar_sync.is_own_event(uid, self.settings):
-                        continue
-                    if ics.is_all_day(event_ics) and not self._all_day_event_blocks(event_ics):
-                        continue
-                    return True
-            return False
-        return check
+    def _conflict_engine(self) -> ConflictEngine:
+        """One engine per App (2026-07-18 [[conflict_calendar]] redesign,
+        see app/conflict.py) so its in-process ICS cache survives across
+        requests. Lazy: tests that never touch the conflict path don't
+        need a cache dir."""
+        if self._conflict_engine_cache is None:
+            self._conflict_engine_cache = ConflictEngine(
+                self.settings,
+                self.store.data_dir / "conflict_cache",
+                booking_client_fn=lambda: self.caldav,
+                booking_href_fn=lambda: self._href(self.settings.booking_calendar),
+            )
+        return self._conflict_engine_cache
 
-    def _all_day_event_blocks(self, event_ics: str) -> bool:
-        """Whether an ALL-DAY conflict-calendar event hides course dates.
-        Three [calendar] settings, all decidable from the calendar app
-        alone (the point: cancellation/blocking state lives ONLY in the
-        calendar -- see README "Canceling"): all-day events block when
-        conflict_calendar_all_day_events_also_block_the_course is on
-        (the default), EXCEPT one whose title contains
-        all_day_non_blocking_title_marker (case-insensitive; "" disables
-        the marker) or one marked "show as Free" while
-        all_day_free_events_do_not_block is on. Timed events never get
-        these escape hatches -- they always block."""
-        s = self.settings
-        if not s.conflict_calendar_all_day_events_also_block_the_course:
-            return False
-        marker = s.all_day_non_blocking_title_marker
-        if marker and marker.lower() in ics.parse_summary(event_ics).lower():
-            return False
-        if s.all_day_free_events_do_not_block and ics.is_transparent(event_ics):
-            return False
-        return True
+    def _conflict_checker(self, course: Course, exclude_own: bool):
+        """slots.build_occurrences-shaped closure (start, end) -> bool
+        over the [[conflict_calendar]] engine -- True = date hidden. The
+        course is needed for per-entry `courses` scoping and the entry
+        from/till defaults; blocks/requires/show_as/all-day semantics all
+        live in app/conflict.py."""
+        def check(start: datetime, end: datetime) -> bool:
+            return self._conflict_engine().occurrence_is_hidden(
+                course, start, end, exclude_own=exclude_own
+            )
+        return check
 
     def _sync(self, course_shortname: str, occurrence_date: date) -> None:
         course = self.settings.course(course_shortname)
@@ -1433,7 +1423,7 @@ class App:
 
         now = datetime.now(timezone.utc)
         occurrences = build_occurrences(
-            course, self.settings, now, capacity_lookup, self._conflict_checker(exclude_own=True)
+            course, self.settings, now, capacity_lookup, self._conflict_checker(course, exclude_own=True)
         )
 
         # NOTE on canceled-entirely sessions (2026-07-14, verified live):
@@ -1897,9 +1887,9 @@ class App:
                 )
             seen.add(key)
             entries.append((g_email, g_name))
-            if len(entries) > self.settings.max_guests:
+            if len(entries) > self.settings.max_participants:
                 return [], (
-                    f"At most {self.settings.max_guests} guests can be added per booking -- "
+                    f"At most {self.settings.max_participants} participants can be added per booking -- "
                     "please remove one and try again."
                 )
         return entries, None
@@ -2554,7 +2544,7 @@ class App:
             {err_html}
             <form method="post" class="card" id="book-form" autocomplete="off" target="_top"
               data-book-label="{esc(self.settings.book_button_label)}"
-              data-max-guests="{self.settings.max_guests}">
+              data-max-guests="{self.settings.max_participants}">
               <label>Dates available
                 <div class="dates" role="radiogroup" aria-label="Dates available">{date_buttons}</div>
               </label>

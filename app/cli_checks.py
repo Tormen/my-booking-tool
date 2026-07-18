@@ -63,12 +63,19 @@ def summarize_problems(checks: list[Check]) -> list[str]:
 
 
 def secret_file_map(raw: dict) -> dict[str, str | None]:
-    return {
-        "caldav_password": raw.get("calendar", {}).get("caldav_password_file"),
+    out = {
+        "caldav_password": raw.get("booking_calendar", {}).get("password_file"),
         "smtp_password": raw.get("smtp", {}).get("password_file"),
         "admin_password_hash": raw.get("admin", {}).get("password_hash_file"),
         "erasure_pepper": raw.get("privacy", {}).get("erasure_pepper_file"),
     }
+    # CalDAV [[conflict_calendar]] entries carry their own password files
+    # (2026-07-18 redesign) -- same permission/existence checks apply.
+    for i, entry in enumerate(raw.get("conflict_calendar", []) or []):
+        if entry.get("caldav_url"):
+            name = entry.get("name") or f"conflict-{i + 1}"
+            out[f"conflict_calendar '{name}' password"] = entry.get("password_file")
+    return out
 
 
 def check_secrets(raw: dict) -> list[Check]:
@@ -353,67 +360,120 @@ def _check_selinux_context(label: str, path: Path) -> list[Check]:
               f"is '{actual}', policy expects '{expected}' -- sudo restorecon -Rv {path}")]
 
 
-def check_caldav_calendars(raw: dict) -> list[Check]:
-    """Live PROPFIND against the configured CalDAV server, verifying
-    `[calendar].booking_calendar` and every `[calendar].conflict_calendars`
-    name actually exists there right now. Catches the exact failure mode
-    hit in practice 2026-07-05: a calendar got renamed/reset on the
-    provider's side (mailbox.org), so settings.toml pointed at names that
-    no longer existed -- every single `/book/<shortname>` page 500'd with
-    a CalDAVError, and nothing caught it ahead of time (`status` only
-    checked local files/services, never actually asked the CalDAV server
-    what it has). A no-op if caldav_url/username/the password secret
-    aren't all configured yet -- check_secrets() already covers that.
-    Best-effort: any connection/auth/parsing failure is reported as one
-    warn rather than raised, since a transient network hiccup shouldn't
-    make `status` itself fail."""
-    cal = raw.get("calendar", {})
-    caldav_url = cal.get("caldav_url")
-    username = cal.get("caldav_username")
-    password_file = cal.get("caldav_password_file")
+def _list_calendars_for(caldav_url: str, username: str, password_file: str) -> tuple[dict | None, str]:
+    """(calendars, "") on success; (None, "") when not configured enough
+    to try (check_secrets covers missing secrets); (None, problem) on a
+    live failure worth reporting."""
     if not caldav_url or not username or not password_file:
-        return []
+        return None, ""
     password_path = Path(password_file)
     if not password_path.exists():
-        return []  # check_secrets() already reports this
+        return None, ""
     try:
         password = password_path.read_text(encoding="utf-8", errors="replace").strip()
     except OSError:
-        return []
+        return None, ""
     transport = HttpTransport(username, password, timeout=_CALDAV_CHECK_TIMEOUT)
     try:
-        calendars = CalDAVClient(caldav_url, username, password, transport=transport).list_calendars()
+        return CalDAVClient(caldav_url, username, password, transport=transport).list_calendars(), ""
     except Exception as exc:  # noqa: BLE001 -- network/auth/XML-parse failure, report don't crash
-        return [("CalDAV calendars", "warn", f"couldn't reach/list calendars at {caldav_url}: {exc}")]
-    wanted = {cal.get("booking_calendar")} | set(cal.get("conflict_calendars") or ())
-    wanted.discard(None)
+        return None, f"couldn't reach/list calendars at {caldav_url}: {exc}"
+
+
+def check_caldav_calendars(raw: dict) -> list[Check]:
+    """Live check of every configured calendar source (2026-07-18
+    redesign: [booking_calendar] + [[conflict_calendar]]):
+
+    - [booking_calendar]: PROPFIND, verify the named calendar exists.
+      Catches the exact failure mode hit in practice 2026-07-05: a
+      calendar renamed/reset provider-side while settings.toml pointed at
+      the stale name -- every /book/<shortname> page 500'd and nothing
+      caught it ahead of time.
+    - each CalDAV [[conflict_calendar]]: same, with its own credentials.
+    - each ICS [[conflict_calendar]]: live GET, verify it parses as a
+      calendar (event count reported).
+    - structural warn kept from the 2026-07-14 blocker-event work: some
+      blocks-mode entry must cover the booking calendar, or a canceled
+      session's CANCELED blocker event (and the tool's own synced
+      events) would never hide a date.
+
+    Best-effort throughout: failures are warns, never raises -- a
+    transient network hiccup shouldn't fail `status`/`setup` outright."""
+    booking = raw.get("booking_calendar", {})
+    entries = raw.get("conflict_calendar", []) or []
     checks: list[Check] = []
-    # 2026-07-14, added with the cancel-entire-session blocker events
-    # (calendar_sync.create_cancellation_blocker): the blocker lands on
-    # booking_calendar, but the booking page's conflict check only ever
-    # queries conflict_calendars -- if booking_calendar isn't listed
-    # there, a canceled session's date would NOT be hidden (and the
-    # tool's own sync events wouldn't self-conflict-check either, which
-    # is what conflict_calendars including it was always for).
-    booking = cal.get("booking_calendar")
-    if booking and booking not in (cal.get("conflict_calendars") or ()):
-        checks.append((
-            "CalDAV conflict_calendars", "warn",
-            f"booking_calendar {booking!r} is not listed in conflict_calendars -- "
-            "cancel-entire-session blocker events (and the tool's own synced events) "
-            "on it would never hide a date from the booking page; add it to "
-            "[calendar].conflict_calendars",
-        ))
-    for name in sorted(wanted):
+
+    calendars, problem = _list_calendars_for(
+        booking.get("caldav_url", ""), booking.get("username", ""), booking.get("password_file", ""),
+    )
+    if problem:
+        checks.append(("CalDAV booking calendar", "warn", problem))
+    elif calendars is not None:
+        name = booking.get("calendar")
         if name in calendars:
-            checks.append((f"CalDAV calendar '{name}'", "ok", "found"))
-        else:
-            checks.append((f"CalDAV calendar '{name}'", "fail",
+            checks.append((f"booking calendar '{name}'", "ok", "found"))
+        elif name:
+            checks.append((f"booking calendar '{name}'", "fail",
                             f"not found among {sorted(calendars)} -- update settings.toml "
-                            "[calendar].booking_calendar/conflict_calendars, or recreate/rename "
-                            "it with your CalDAV provider (every booking page 500s until this "
-                            "is fixed)"))
+                            "[booking_calendar].calendar, or recreate/rename it with your "
+                            "CalDAV provider (every booking page 500s until this is fixed)"))
+
+    if not any(
+        e.get("mode", "requires") == "blocks"
+        and (str(e.get("source", "")) == "booking_calendar"
+             or (e.get("caldav_url") == booking.get("caldav_url")
+                 and e.get("calendar") == booking.get("calendar")))
+        for e in entries
+    ):
+        checks.append((
+            "conflict_calendar coverage", "warn",
+            "no blocks-mode [[conflict_calendar]] entry covers the booking calendar "
+            "(e.g. source = \"booking_calendar\", mode = \"blocks\") -- "
+            "cancel-entire-session blocker events (and the tool's own synced events) "
+            "on it would never hide a date from the booking page",
+        ))
+
+    for i, entry in enumerate(entries):
+        name = entry.get("name") or f"conflict-{i + 1}"
+        if entry.get("ics_url"):
+            checks.append(_check_ics_conflict_source(name, entry["ics_url"]))
+        elif entry.get("caldav_url"):
+            cals, problem = _list_calendars_for(
+                entry.get("caldav_url", ""), entry.get("username", ""), entry.get("password_file", ""),
+            )
+            if problem:
+                checks.append((f"conflict calendar '{name}'", "warn", problem))
+            elif cals is not None:
+                if entry.get("calendar") in cals:
+                    checks.append((f"conflict calendar '{name}'", "ok",
+                                    f"calendar '{entry.get('calendar')}' found"))
+                else:
+                    checks.append((f"conflict calendar '{name}'", "fail",
+                                    f"calendar {entry.get('calendar')!r} not found among {sorted(cals)}"))
+        # source = "booking_calendar" entries are covered by the booking
+        # calendar check above -- nothing separate to reach.
     return checks
+
+
+def _check_ics_conflict_source(name: str, url: str) -> Check:
+    import urllib.error
+    import urllib.request
+
+    from . import ics_feed
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "my-booking-tool"})
+        with urllib.request.urlopen(req, timeout=_CALDAV_CHECK_TIMEOUT) as resp:
+            text = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return (f"conflict calendar '{name}'", "warn",
+                f"ICS fetch failed: {exc} -- bookings fall back to the last cached copy "
+                "(see README.md \"Calendars\"); a WARNING email is sent when guests hit this")
+    if "BEGIN:VCALENDAR" not in text[:2000]:
+        return (f"conflict calendar '{name}'", "fail",
+                f"response from {url} is not an ICS calendar")
+    feed = ics_feed.parse_feed(text)
+    return (f"conflict calendar '{name}'", "ok",
+            f"ICS feed fetched and parsed ({len(feed.events)} events)")
 
 
 def check_calendar_invite_format(raw: dict, data_dir: str | Path) -> list[Check]:
@@ -437,8 +497,8 @@ def check_calendar_invite_format(raw: dict, data_dir: str | Path) -> list[Check]
     A no-op (empty list, matching every other CalDAV-adjacent check's own
     "not configured yet" convention) if CalDAV isn't fully configured --
     nothing to be stale about yet."""
-    cal = raw.get("calendar", {})
-    if not cal.get("caldav_url") or not cal.get("caldav_username") or not cal.get("caldav_password_file"):
+    cal = raw.get("booking_calendar", {})
+    if not cal.get("caldav_url") or not cal.get("username") or not cal.get("password_file"):
         return []
     from . import calendar_sync as app_calendar_sync
 

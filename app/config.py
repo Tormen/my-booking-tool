@@ -7,6 +7,8 @@ nothing about the zero-runtime-dependency story on the actual server.
 """
 from __future__ import annotations
 
+import re
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11 (dev/test only, not the target server)
@@ -198,16 +200,70 @@ class Course:
 
 
 @dataclass(frozen=True)
+class ConflictCalendar:
+    """One [[conflict_calendar]] entry (2026-07-18 settings redesign,
+    SOLUTION-DESIGN #35): a READ-ONLY calendar source consulted per
+    candidate course date. Two source kinds -- a published ICS link
+    (`ics_url`, e.g. an Outlook/OWA "publish calendar" URL) or CalDAV
+    (`caldav_url`+`caldav_username`+`caldav_password`+`calendar`) -- plus
+    the `use_booking_calendar` shorthand (settings.toml: `source =
+    "booking_calendar"`) reusing [booking_calendar]'s CalDAV connection.
+
+    `mode` is the whole point of an entry:
+    - "blocks":   an overlapping event HIDES the date (vacation entries,
+                  cancel-entire-session CANCELED blockers).
+    - "requires": a single matching event must SPAN the from-till window
+                  or the date is hidden (e.g. "Lux courses only happen
+                  when the work calendar shows an out-of-office event").
+
+    `show_as` filters which events count, from Outlook's
+    X-MICROSOFT-CDO-BUSYSTATUS when present (falling back to RFC TRANSP:
+    TRANSPARENT->"free", else "busy" -- so "oof"/"tentative"/
+    "workingelsewhere" are only detectable on feeds carrying the
+    Microsoft property). Load-time default is mode-dependent: "oof" for
+    requires, "any" for blocks -- a blocks entry defaulting to "oof"
+    would silently stop plain BUSY vacation events from blocking."""
+    name: str
+    mode: str                       # "blocks" | "requires"
+    show_as: str                    # "oof"|"busy"|"tentative"|"free"|"workingelsewhere"|"any"
+    ics_url: str = ""
+    caldav_url: str = ""
+    caldav_username: str = ""
+    caldav_password: str = ""
+    calendar: str = ""              # CalDAV displayname (CalDAV sources)
+    use_booking_calendar: bool = False
+    courses: tuple[str, ...] = ()   # () = applies to every course
+    from_hm: str = ""               # "HH:MM"; "" = course start
+    till_hm: str = ""               # "HH:MM"; "" = course end
+    title_contains: str = ""        # "" = no title filter
+    cache_minutes: int = 10         # in-process fetch cache TTL (ICS sources)
+    # The three all-day knobs, per entry now (previously global under the
+    # removed [calendar] section). `all_day_events_also_count` is the
+    # 2026-07-18 rename of ..._also_block_the_course -- "count" because in
+    # requires mode a matching all-day event SATISFIES the requirement
+    # (covers the whole day) rather than blocking anything.
+    all_day_events_also_count: bool = True
+    all_day_non_blocking_title_marker: str = ""
+    all_day_free_events_do_not_block: bool = True
+
+    def applies_to(self, course_shortname: str) -> bool:
+        return not self.courses or course_shortname in self.courses
+
+
+@dataclass(frozen=True)
 class Settings:
     timezone: str
     admin_email: str
     base_url: str
 
+    # [booking_calendar] -- the READ+WRITE CalDAV calendar our own course
+    # events, blocker events, and sync live in. CalDAV only: published
+    # .ics links are one-way exports, there is no writable-ics standard.
     caldav_url: str
     caldav_username: str
     caldav_password: str
     booking_calendar: str
-    conflict_calendars: tuple[str, ...]
+    conflict_calendars: tuple[ConflictCalendar, ...]
 
     smtp_host: str
     smtp_port: int
@@ -252,43 +308,24 @@ class Settings:
 
     courses: tuple[Course, ...] = field(default_factory=tuple)
 
-    # Calendar-invite VALARM reminders (minutes before start) -- see
+    # Calendar-invite VALARM reminders (minutes before start), both under
+    # [booking_calendar] since 2026-07-18 -- see
     # ics.py::VEvent.alarms_minutes_before. 2026-07-07: reminders became
     # a configurable setting, defaulting to NO reminders, for the
     # TRAINER's own event (app/calendar_sync.py::sync_occurrence, the one
     # PUT to the operator's CalDAV calendar), while course PARTICIPANTS'
-    # emailed invite (guest_invite_ics) should default to exactly one
-    # reminder, 1h before. Both configurable, in case that changes later;
-    # empty tuple = no VALARMs at all (matches VEvent's own default now).
+    # emailed invite should default to exactly one reminder, 1h before.
+    # Both configurable, in case that changes later; empty tuple = no
+    # VALARMs at all (matches VEvent's own default now). The participant
+    # one was renamed from guest_reminder_minutes in the 2026-07-18
+    # settings redesign ("participant" is this project's chosen word;
+    # "guest" no longer appears in settings).
     trainer_calendar_reminder_minutes: tuple[int, ...] = ()
-    guest_calendar_reminder_minutes: tuple[int, ...] = (60,)
+    participant_calendar_reminder_minutes: tuple[int, ...] = (60,)
 
-    # 2026-07-16: whether an ALL-DAY event (DTSTART;VALUE=DATE, no time of
-    # day) in a conflict calendar hides that day's course dates. On by
-    # default (the operator's explicit call, same day the setting was
-    # born with default false): an all-day vacation entry should block
-    # without needing a start/end time. The two settings below are the
-    # calendar-side escape hatches for the exceptional all-day event
-    # that should NOT block. See app/webapp.py::_conflict_checker.
-    conflict_calendar_all_day_events_also_block_the_course: bool = True
-
-    # Escape hatch 1: an all-day event whose TITLE contains this marker
-    # (case-insensitive) does not block course dates -- lets the operator
-    # whitelist one specific all-day event from any calendar client, no
-    # server access needed. "" (the default) disables the marker feature
-    # entirely.
-    all_day_non_blocking_title_marker: str = ""
-
-    # Escape hatch 2: an all-day event marked "show as Free" in the
-    # calendar app (RFC 5545 TRANSP:TRANSPARENT) does not block course
-    # dates -- that flag literally means "does not reserve the time".
-    # On by default. CAUTION, and why this can't be the only mechanism:
-    # many clients (Apple Calendar, Google, Open-Xchange) create all-day
-    # events as Free BY DEFAULT, so an all-day event the operator wants
-    # to block with may need to be flipped to "Busy" by hand. Timed
-    # events are deliberately not affected -- they always block, Free or
-    # not, since "no slot shown = no session" must stay predictable.
-    all_day_free_events_do_not_block: bool = True
+    # The all-day conflict knobs that used to sit here globally moved
+    # into each ConflictCalendar entry (2026-07-18 redesign, see that
+    # dataclass above).
 
     # Also write logs to this file (in addition to stdout/journal -- see
     # app/logutil.py, size-capped rotation). ON by default (2026-07-16,
@@ -345,13 +382,17 @@ class Settings:
     # submitting the form actually does.
     book_button_label: str = "Book"
 
-    # Hard ceiling on how many "+ Add participant" guest rows the booking
-    # form offers, and how many guests book() will ever admit per booking
-    # (enforced on the count of guest_email_N fields submitted, not their
-    # index values -- see app/webapp.py's _parse_guest_entries).
+    # Hard ceiling on how many "+ Add participant" rows the booking form
+    # offers, and how many extra participants book() will ever admit per
+    # booking (enforced on the count of guest_email_N fields submitted,
+    # not their index values -- see app/webapp.py's _parse_guest_entries).
     # 2026-07-09: made configurable, defaulting to 3 (was a fixed
-    # constant of 9 before).
-    max_guests: int = 3
+    # constant of 9 before). 2026-07-18: renamed from max_guests
+    # ("participant" is this project's chosen word; "guest" no longer
+    # appears in settings -- the internal guest_email_N form-field
+    # namespace is not a setting and deliberately kept, its bytes feed a
+    # CSP-hashed script).
+    max_participants: int = 3
 
     # A booking made under a not-yet-confirmed email (see
     # storage.STATUS_PENDING_CONFIRMATION and app/webapp.py::book) doesn't
@@ -661,13 +702,113 @@ def upcoming_date_overrides(courses, today: str) -> list[dict]:
     return items
 
 
+_SHOW_AS_VALUES = ("oof", "busy", "tentative", "free", "workingelsewhere", "any")
+# Operator-friendly spellings, normalized at load time so the runtime
+# only ever compares one canonical form.
+_SHOW_AS_ALIASES = {"ooo": "oof", "out-of-office": "oof", "working-elsewhere": "workingelsewhere"}
+_HM_RE = re.compile(r"^\d{1,2}:\d{2}$")
+
+
+def _conflict_calendar_from_raw(
+    entry: dict, index: int, course_shortnames: set[str],
+) -> ConflictCalendar:
+    """One [[conflict_calendar]] block -> ConflictCalendar, with all
+    validation done HERE at load time (unknown mode/show_as/course names,
+    ambiguous or missing source) so a typo fails the service start with a
+    named error instead of silently mis-checking dates forever."""
+    name = str(entry.get("name", "") or f"conflict-{index + 1}")
+
+    mode = str(entry.get("mode", "requires")).strip().lower()
+    if mode not in ("requires", "blocks"):
+        raise ValueError(f"[[conflict_calendar]] {name!r}: mode must be \"requires\" or \"blocks\", not {mode!r}")
+
+    ics_url = str(entry.get("ics_url", "")).strip()
+    caldav_url = str(entry.get("caldav_url", "")).strip()
+    use_booking = str(entry.get("source", "")).strip() == "booking_calendar"
+    sources = sum(1 for s in (ics_url, caldav_url, use_booking) if s)
+    if sources != 1:
+        raise ValueError(
+            f"[[conflict_calendar]] {name!r}: exactly ONE source required -- "
+            "ics_url, OR caldav_url+username+password_file+calendar, OR "
+            "source = \"booking_calendar\""
+        )
+    caldav_username = caldav_password = calendar = ""
+    if caldav_url:
+        try:
+            caldav_username = entry["username"]
+            caldav_password = _read_secret(entry["password_file"])
+            calendar = entry["calendar"]
+        except KeyError as exc:
+            raise ValueError(
+                f"[[conflict_calendar]] {name!r}: CalDAV source needs username, "
+                f"password_file and calendar (missing {exc})"
+            ) from None
+
+    show_as = str(entry.get("show_as", "")).strip().lower().replace("_", "-")
+    show_as = _SHOW_AS_ALIASES.get(show_as, show_as)
+    if not show_as:
+        # Mode-dependent default: "oof" would silently stop plain BUSY
+        # vacation events from blocking in blocks mode.
+        show_as = "oof" if mode == "requires" else "any"
+    if show_as not in _SHOW_AS_VALUES:
+        raise ValueError(
+            f"[[conflict_calendar]] {name!r}: show_as must be one of "
+            f"{', '.join(_SHOW_AS_VALUES)} (or the ooo/out-of-office aliases), not {show_as!r}"
+        )
+
+    courses = tuple(str(c) for c in entry.get("courses", []))
+    unknown = [c for c in courses if c not in course_shortnames]
+    if unknown:
+        raise ValueError(
+            f"[[conflict_calendar]] {name!r}: courses lists unknown shortname(s) "
+            f"{', '.join(unknown)} -- check the [[course]] shortnames"
+        )
+
+    from_hm = str(entry.get("from", "")).strip()
+    till_hm = str(entry.get("till", "")).strip()
+    for label, value in (("from", from_hm), ("till", till_hm)):
+        if value and not _HM_RE.match(value):
+            raise ValueError(f"[[conflict_calendar]] {name!r}: {label} must be \"HH:MM\", not {value!r}")
+
+    return ConflictCalendar(
+        name=name, mode=mode, show_as=show_as,
+        ics_url=ics_url, caldav_url=caldav_url,
+        caldav_username=caldav_username, caldav_password=caldav_password,
+        calendar=calendar, use_booking_calendar=use_booking,
+        courses=courses, from_hm=from_hm, till_hm=till_hm,
+        title_contains=str(entry.get("title_contains", "")),
+        cache_minutes=int(entry.get("cache_minutes", 10)),
+        all_day_events_also_count=bool(entry.get("all_day_events_also_count", True)),
+        all_day_non_blocking_title_marker=str(entry.get("all_day_non_blocking_title_marker", "")),
+        all_day_free_events_do_not_block=bool(entry.get("all_day_free_events_do_not_block", True)),
+    )
+
+
 def load_settings(toml_path: str | Path) -> Settings:
     toml_path = Path(toml_path)
     with toml_path.open("rb") as f:
         raw = tomllib.load(f)
 
+    if "calendar" in raw:
+        # 2026-07-18 redesign (SOLUTION-DESIGN #35): deliberately NO
+        # backward compatibility -- fail loudly with the mapping instead
+        # of guessing at old semantics.
+        raise ValueError(
+            "settings.toml still has a [calendar] section -- it was replaced "
+            "by [booking_calendar] + [[conflict_calendar]] (2026-07-18). "
+            "Migrate: caldav_url/caldav_username/caldav_password_file and "
+            "booking_calendar -> [booking_calendar] (key: calendar); "
+            "trainer_reminder_minutes/guest_reminder_minutes -> "
+            "[booking_calendar] trainer_reminder_minutes/"
+            "participant_reminder_minutes; each conflict_calendars name -> "
+            "its own [[conflict_calendar]] block (mode = \"blocks\", "
+            "source = \"booking_calendar\" for the booking calendar itself); "
+            "the three all_day_* keys -> per [[conflict_calendar]] entry "
+            "(all_day_events_also_count is the renamed ..._also_block_the_course). "
+            "See settings.toml.example and README.md \"Calendars\"."
+        )
     site = raw["site"]
-    cal = raw["calendar"]
+    booking_cal = raw["booking_calendar"]
     smtp = raw["smtp"]
     admin = raw["admin"]
     defaults = raw.get("defaults", {})
@@ -675,6 +816,10 @@ def load_settings(toml_path: str | Path) -> Settings:
     watchdog = raw.get("watchdog", {})
 
     courses = courses_from_raw(raw)
+    conflict_calendars = tuple(
+        _conflict_calendar_from_raw(entry, i, {c.shortname for c in courses})
+        for i, entry in enumerate(raw.get("conflict_calendar", []))
+    )
 
     return Settings(
         timezone=site["timezone"],
@@ -687,18 +832,13 @@ def load_settings(toml_path: str | Path) -> Settings:
         email_templates_folder=site.get("email_templates_folder", ""),
         maintenance_bypass_hostname=(site.get("maintenance_bypass_hostname") or None),
         maintenance_bypass_ip_log=(site.get("maintenance_bypass_ip_log") or None),
-        caldav_url=cal["caldav_url"],
-        caldav_username=cal["caldav_username"],
-        caldav_password=_read_secret(cal["caldav_password_file"]),
-        booking_calendar=cal["booking_calendar"],
-        conflict_calendars=tuple(cal.get("conflict_calendars", [])),
-        conflict_calendar_all_day_events_also_block_the_course=bool(
-            cal.get("conflict_calendar_all_day_events_also_block_the_course", True)
-        ),
-        all_day_non_blocking_title_marker=str(cal.get("all_day_non_blocking_title_marker", "")),
-        all_day_free_events_do_not_block=bool(cal.get("all_day_free_events_do_not_block", True)),
-        trainer_calendar_reminder_minutes=tuple(int(m) for m in cal.get("trainer_reminder_minutes", [])),
-        guest_calendar_reminder_minutes=tuple(int(m) for m in cal.get("guest_reminder_minutes", [60])),
+        caldav_url=booking_cal["caldav_url"],
+        caldav_username=booking_cal["username"],
+        caldav_password=_read_secret(booking_cal["password_file"]),
+        booking_calendar=booking_cal["calendar"],
+        conflict_calendars=conflict_calendars,
+        trainer_calendar_reminder_minutes=tuple(int(m) for m in booking_cal.get("trainer_reminder_minutes", [])),
+        participant_calendar_reminder_minutes=tuple(int(m) for m in booking_cal.get("participant_reminder_minutes", [60])),
         smtp_host=smtp["host"],
         smtp_port=int(smtp["port"]),
         smtp_username=smtp["username"],
@@ -713,7 +853,7 @@ def load_settings(toml_path: str | Path) -> Settings:
         spots_left_offset=int(defaults.get("spots_left_offset", 0)),
         min_required_participants=int(defaults.get("min_required_participants", 1)),
         book_button_label=defaults.get("book_button_label", "Book"),
-        max_guests=int(defaults.get("max_guests", 3)),
+        max_participants=int(defaults.get("max_participants", 3)),
         pending_confirmation_hours=int(defaults.get("pending_confirmation_hours", 48)),
         retention_months=int(privacy.get("retention_months", 24)),
         canceled_retention_months=int(privacy.get("canceled_retention_months", 6)),

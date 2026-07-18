@@ -774,10 +774,10 @@ def create_cancellation_blocker(
     succeeds (fail-closed: a session must never end up canceled but
     still bookable because this PUT silently failed).
 
-    NOTE: the conflict check only queries [calendar].conflict_calendars
-    -- the booking calendar this blocker lands on must be listed there
-    (it is, in every shipped/example config; check_caldav_calendars
-    warns if not)."""
+    NOTE: the conflict check only consults [[conflict_calendar]] entries
+    -- some blocks-mode entry must cover the booking calendar this
+    blocker lands on (source = "booking_calendar" in every shipped/
+    example config; check_caldav_calendars warns if not)."""
     tz = ZoneInfo(settings.timezone)
     start, end = occurrence_start_end(course, occurrence_date, tz)
     lines = []
@@ -866,7 +866,7 @@ def guest_invite_ics(settings: Settings, course: Course, occurrence_date: date) 
         start=start,
         end=end,
         method="PUBLISH",
-        alarms_minutes_before=settings.guest_calendar_reminder_minutes,
+        alarms_minutes_before=settings.participant_calendar_reminder_minutes,
     )
     return f"{course.shortname}-{occurrence_date.isoformat()}.ics", event.to_ics()
 

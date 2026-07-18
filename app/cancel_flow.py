@@ -114,7 +114,7 @@ def calendar_href(caldav: CalDAVClient, settings: Settings) -> str:
     if settings.booking_calendar not in calendars:
         raise CalDAVError(
             f"calendar '{settings.booking_calendar}' not found among {list(calendars)} -- "
-            "check settings.toml [calendar].booking_calendar / conflict_calendars"
+            "check settings.toml [booking_calendar].calendar"
         )
     return calendars[settings.booking_calendar]
 

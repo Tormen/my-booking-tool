@@ -25,7 +25,7 @@ class CheckSecretsTest(unittest.TestCase):
 
     def _raw(self, **paths) -> dict:
         return {
-            "calendar": {"caldav_password_file": paths.get("caldav_password")},
+            "booking_calendar": {"password_file": paths.get("caldav_password")},
             "smtp": {"password_file": paths.get("smtp_password")},
             "admin": {"password_hash_file": paths.get("admin_password_hash")},
             "privacy": {"erasure_pepper_file": paths.get("erasure_pepper")},
@@ -1990,9 +1990,12 @@ class CheckMaintenanceModeTest(unittest.TestCase):
 
 class CheckCaldavCalendarsTest(unittest.TestCase):
     """CalDAVClient itself is exercised in tests/test_caldav.py -- these
-    tests are about check_caldav_calendars()'s own logic (config
-    gating, error handling, want/found diffing), so CalDAVClient is
-    mocked wholesale rather than driven through a fake transport."""
+    tests are about check_caldav_calendars()'s own logic over the
+    2026-07-18 [booking_calendar] + [[conflict_calendar]] shape (config
+    gating, error handling, structural blocks-coverage warn), so
+    CalDAVClient is mocked wholesale rather than driven through a fake
+    transport. ICS conflict sources are fetch-level and covered in
+    tests/test_conflict.py; here only the reachability check's shape."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -2000,80 +2003,76 @@ class CheckCaldavCalendarsTest(unittest.TestCase):
         self.password_file = Path(self._tmp.name) / "caldav_password"
         self.password_file.write_text("hunter2", encoding="utf-8")
 
-    def _raw(self, **overrides) -> dict:
-        cal = {
+    def _raw(self, entries=None, **booking_overrides) -> dict:
+        booking = {
             "caldav_url": "https://dav.mailbox.org/caldav/",
-            "caldav_username": "calendar@example.org",
-            "caldav_password_file": str(self.password_file),
-            "booking_calendar": "Yoga-Bookings",
-            "conflict_calendars": ["Calendar", "Yoga-Bookings"],
+            "username": "calendar@example.org",
+            "password_file": str(self.password_file),
+            "calendar": "Yoga-Bookings",
         }
-        cal.update(overrides)
-        return {"calendar": cal}
+        booking.update(booking_overrides)
+        if entries is None:
+            entries = [{"name": "own-calendar", "source": "booking_calendar", "mode": "blocks"}]
+        return {"booking_calendar": booking, "conflict_calendar": entries}
 
-    def test_not_configured_is_a_noop(self):
-        self.assertEqual(cli_checks.check_caldav_calendars({"calendar": {}}), [])
+    def test_not_configured_is_a_noop_except_coverage_warn(self):
+        checks = cli_checks.check_caldav_calendars({"booking_calendar": {}, "conflict_calendar": []})
+        # Nothing reachable to check, but the structural blocks-coverage
+        # warn still applies (no entry covers the booking calendar).
+        self.assertEqual([c[1] for c in checks], ["warn"])
+        self.assertIn("blocks-mode", checks[0][2])
 
-    def test_booking_calendar_missing_from_conflict_calendars_warns(self):
-        # 2026-07-14, added with the cancel-entire-session blocker events:
-        # the blocker lands on booking_calendar, but only
-        # conflict_calendars are ever conflict-checked -- misconfigured
-        # like this, a canceled session's date would silently stay
-        # bookable.
-        raw = self._raw(conflict_calendars=["Calendar"])  # booking "Yoga-Bookings" not listed
-        with patch.object(cli_checks, "CalDAVClient") as klass:
-            klass.return_value.list_calendars.return_value = {
-                "Calendar": "/c/", "Yoga-Bookings": "/y/",
-            }
-            checks = cli_checks.check_caldav_calendars(raw)
+    def test_no_blocks_entry_covering_booking_calendar_warns(self):
+        # 2026-07-14, kept through the 2026-07-18 redesign: the
+        # cancel-entire-session blocker lands on the booking calendar,
+        # but only [[conflict_calendar]] entries are conflict-checked --
+        # without a blocks-mode entry covering it, a canceled session's
+        # date would silently stay bookable.
+        raw = self._raw(entries=[{"name": "other", "ics_url": "https://x/feed.ics"}])
+        with patch.object(cli_checks, "_check_ics_conflict_source",
+                          return_value=("conflict calendar 'other'", "ok", "fetched")):
+            with patch.object(cli_checks, "CalDAVClient") as klass:
+                klass.return_value.list_calendars.return_value = {"Yoga-Bookings": "/y/"}
+                checks = cli_checks.check_caldav_calendars(raw)
         warns = [c for c in checks if c[1] == "warn"]
         self.assertEqual(len(warns), 1)
-        self.assertIn("not listed in conflict_calendars", warns[0][2])
         self.assertIn("blocker", warns[0][2])
 
-    def test_booking_calendar_in_conflict_calendars_does_not_warn(self):
-        raw = self._raw()  # fixture default already lists it
+    def test_blocks_coverage_via_source_booking_calendar_does_not_warn(self):
         with patch.object(cli_checks, "CalDAVClient") as klass:
-            klass.return_value.list_calendars.return_value = {
-                "Calendar": "/c/", "Yoga-Bookings": "/y/",
-            }
-            checks = cli_checks.check_caldav_calendars(raw)
+            klass.return_value.list_calendars.return_value = {"Yoga-Bookings": "/y/"}
+            checks = cli_checks.check_caldav_calendars(self._raw())
         self.assertEqual([c for c in checks if c[1] != "ok"], [])
 
-    def test_partially_configured_is_a_noop(self):
-        raw = self._raw(caldav_username=None)
-        self.assertEqual(cli_checks.check_caldav_calendars(raw), [])
+    def test_partially_configured_booking_is_quiet_besides_coverage(self):
+        raw = self._raw(entries=[], username=None)
+        self.assertEqual([c[1] for c in cli_checks.check_caldav_calendars(raw)], ["warn"])
 
-    def test_missing_password_file_is_a_noop(self):
+    def test_missing_password_file_skips_the_live_check(self):
         # check_secrets() already reports a missing secret file -- this
         # check shouldn't also complain about it a second way.
-        raw = self._raw(caldav_password_file=str(self.password_file) + ".missing")
-        self.assertEqual(cli_checks.check_caldav_calendars(raw), [])
+        raw = self._raw(password_file=str(self.password_file) + ".missing")
+        self.assertEqual([c for c in cli_checks.check_caldav_calendars(raw) if c[1] == "fail"], [])
 
     @patch("app.cli_checks.CalDAVClient")
-    def test_connection_or_auth_failure_is_one_warn(self, mock_cls):
+    def test_connection_or_auth_failure_is_a_warn(self, mock_cls):
         mock_cls.return_value.list_calendars.side_effect = RuntimeError(
             "PROPFIND https://dav.mailbox.org/caldav/ -> HTTP 401"
         )
         checks = cli_checks.check_caldav_calendars(self._raw())
-        self.assertEqual(len(checks), 1)
-        label, level, detail = checks[0]
-        self.assertEqual(level, "warn")
-        self.assertIn("401", detail)
+        warns = [c for c in checks if c[1] == "warn"]
+        self.assertEqual(len(warns), 1)
+        self.assertIn("401", warns[0][2])
 
     @patch("app.cli_checks.CalDAVClient")
-    def test_calendars_found_are_ok(self, mock_cls):
-        mock_cls.return_value.list_calendars.return_value = {
-            "Calendar": "/caldav/Y2FsOi8vMC8zMQ/",
-            "Yoga-Bookings": "/caldav/somewhere/",
-        }
+    def test_booking_calendar_found_is_ok(self, mock_cls):
+        mock_cls.return_value.list_calendars.return_value = {"Yoga-Bookings": "/y/"}
         checks = cli_checks.check_caldav_calendars(self._raw())
         levels = _levels(checks)
-        self.assertEqual(levels["CalDAV calendar 'Calendar'"], "ok")
-        self.assertEqual(levels["CalDAV calendar 'Yoga-Bookings'"], "ok")
+        self.assertEqual(levels["booking calendar 'Yoga-Bookings'"], "ok")
 
     @patch("app.cli_checks.CalDAVClient")
-    def test_calendar_not_found_fails_with_the_real_list(self, mock_cls):
+    def test_booking_calendar_not_found_fails_with_the_real_list(self, mock_cls):
         # The exact failure mode hit in production 2026-07-05: the
         # configured base URL only ever resolved "WebDAV Root" -- the
         # detail message should surface what was actually found so this
@@ -2081,17 +2080,34 @@ class CheckCaldavCalendarsTest(unittest.TestCase):
         mock_cls.return_value.list_calendars.return_value = {"WebDAV Root": "/"}
         checks = cli_checks.check_caldav_calendars(self._raw())
         levels = _levels(checks)
-        self.assertEqual(levels["CalDAV calendar 'Calendar'"], "fail")
-        self.assertEqual(levels["CalDAV calendar 'Yoga-Bookings'"], "fail")
+        self.assertEqual(levels["booking calendar 'Yoga-Bookings'"], "fail")
         details = {label: detail for label, _, detail in checks}
-        self.assertIn("WebDAV Root", details["CalDAV calendar 'Calendar'"])
+        self.assertIn("WebDAV Root", details["booking calendar 'Yoga-Bookings'"])
 
     @patch("app.cli_checks.CalDAVClient")
-    def test_booking_and_conflict_overlap_is_deduped(self, mock_cls):
-        mock_cls.return_value.list_calendars.return_value = {"Calendar": "/x"}
-        raw = self._raw(booking_calendar="Calendar", conflict_calendars=["Calendar"])
+    def test_caldav_conflict_entry_checked_with_its_own_calendar_name(self, mock_cls):
+        mock_cls.return_value.list_calendars.return_value = {"Yoga-Bookings": "/y/", "Work": "/w/"}
+        raw = self._raw(entries=[
+            {"name": "own-calendar", "source": "booking_calendar", "mode": "blocks"},
+            {"name": "work", "caldav_url": "https://dav.other/", "username": "u",
+             "password_file": str(self.password_file), "calendar": "Work"},
+        ])
         checks = cli_checks.check_caldav_calendars(raw)
-        self.assertEqual(len(checks), 1)
+        levels = _levels(checks)
+        self.assertEqual(levels["conflict calendar 'work'"], "ok")
+
+    def test_ics_conflict_entry_is_checked_via_fetch(self):
+        raw = self._raw(entries=[
+            {"name": "own-calendar", "source": "booking_calendar", "mode": "blocks"},
+            {"name": "feed", "ics_url": "https://x/feed.ics"},
+        ])
+        with patch.object(cli_checks, "_check_ics_conflict_source",
+                          return_value=("conflict calendar 'feed'", "ok", "fetched (3 events)")) as m:
+            with patch.object(cli_checks, "CalDAVClient") as klass:
+                klass.return_value.list_calendars.return_value = {"Yoga-Bookings": "/y/"}
+                checks = cli_checks.check_caldav_calendars(raw)
+        m.assert_called_once_with("feed", "https://x/feed.ics")
+        self.assertEqual(_levels(checks)["conflict calendar 'feed'"], "ok")
 
 
 class CheckCalendarInviteFormatTest(unittest.TestCase):
@@ -2113,17 +2129,17 @@ class CheckCalendarInviteFormatTest(unittest.TestCase):
     def _raw(self, **overrides) -> dict:
         cal = {
             "caldav_url": "https://dav.mailbox.org/caldav/",
-            "caldav_username": "calendar@example.org",
-            "caldav_password_file": str(self.password_file),
+            "username": "calendar@example.org",
+            "password_file": str(self.password_file),
         }
         cal.update(overrides)
-        return {"calendar": cal}
+        return {"booking_calendar": cal}
 
     def test_not_configured_is_a_noop(self):
-        self.assertEqual(cli_checks.check_calendar_invite_format({"calendar": {}}, self.data_dir), [])
+        self.assertEqual(cli_checks.check_calendar_invite_format({"booking_calendar": {}}, self.data_dir), [])
 
     def test_partially_configured_is_a_noop(self):
-        raw = self._raw(caldav_username=None)
+        raw = self._raw(username=None)
         self.assertEqual(cli_checks.check_calendar_invite_format(raw, self.data_dir), [])
 
     def test_no_marker_yet_is_a_warn(self):

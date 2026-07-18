@@ -1062,10 +1062,10 @@ class GuestInviteAndCancelIcsTest(unittest.TestCase):
         # 17:15 local (normal, unaffected) -> 15:15 UTC.
         self.assertIn("DTSTART:20260725T151500Z", ics_text)
 
-    def test_invite_honors_a_configured_guest_reminder(self):
+    def test_invite_honors_a_configured_participant_reminder(self):
         settings = make_settings(
             courses=(self.course,), base_url="https://example.org",
-            guest_calendar_reminder_minutes=(15, 60),
+            participant_calendar_reminder_minutes=(15, 60),
         )
         _filename, ics_text = guest_invite_ics(settings, self.course, date(2026, 8, 1))
         self.assertEqual(ics_text.count("BEGIN:VALARM"), 2)
