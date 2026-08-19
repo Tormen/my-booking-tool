@@ -1114,7 +1114,7 @@ class SyncOccurrenceHostCalendarEntryCcListTest(unittest.TestCase):
         # caldav_username is make_settings()'s default -- "calendar@example.org".
         self.assertIn("ORGANIZER:mailto:calendar@example.org", ics_text)
         self.assertIn(
-            "ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:"
+            "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:"
             "mailto:work.copy@example.org",
             ics_text,
         )
@@ -1127,7 +1127,7 @@ class SyncOccurrenceHostCalendarEntryCcListTest(unittest.TestCase):
         ics_text = self._sync(course)
         self.assertIn("mailto:a@example.org", ics_text)
         self.assertIn("mailto:b@example.org", ics_text)
-        self.assertEqual(ics_text.count("ATTENDEE;ROLE=OPT-PARTICIPANT"), 2)
+        self.assertEqual(ics_text.count("ATTENDEE;ROLE=REQ-PARTICIPANT"), 2)
 
 
 if __name__ == "__main__":

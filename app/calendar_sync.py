@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 
 from .atomic_io import atomic_write_text, fsync_dir
 from .caldav_client import CalDAVClient, CalDAVConflictError, CalDAVError
-from .cancellation import html_to_text
+from .cancellation import host_cancel_occurrence_url, host_cancel_url, html_to_text
 from .config import Course, Settings
 from .ics import VEvent, parse_sequence
 from .storage import (
@@ -366,7 +366,7 @@ def sync_occurrence(
         # all).
         lines.append(
             f"cancel entire session (all participants): "
-            f"{settings.base_url}/host-cancel-occurrence/{course.shortname}/{occurrence_date.isoformat()}"
+            f"{host_cancel_occurrence_url(settings, course.shortname, occurrence_date.isoformat())}"
         )
 
     if active or waiting:
@@ -378,14 +378,14 @@ def sync_occurrence(
             lines.append(
                 f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
                 f"registered {format_display_timestamp(r.registered_at)} | "
-                f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
+                f"cancel: {host_cancel_url(settings, r.registration_id)}"
             )
         for r in waiting:
             name, email = _name_email(r, users_by_id)
             lines.append(
                 f"- waitlisted #{waiting.index(r) + 1} | {name} | {email} | "
                 f"{_self_or_guest(r, users_by_id)} | registered {format_display_timestamp(r.registered_at)} | "
-                f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
+                f"cancel: {host_cancel_url(settings, r.registration_id)}"
             )
     if canceled:
         # Separate group, listed last -- kept OUT of the active/waiting
@@ -402,7 +402,7 @@ def sync_occurrence(
             lines.append(
                 f"- {r.status} | {name} | {email} | {_self_or_guest(r, users_by_id)} | "
                 f"canceled {format_display_timestamp(r.canceled_at)} by {r.canceled_by} | "
-                f"cancel: {settings.base_url}/host-cancel/{r.registration_id}"
+                f"cancel: {host_cancel_url(settings, r.registration_id)}"
             )
     summary = f"{course.title} ({len(active)}/{course.capacity}"
     summary += f"+{len(waiting)}wl)" if waiting else ")"
@@ -774,10 +774,13 @@ def create_cancellation_blocker(
     succeeds (fail-closed: a session must never end up canceled but
     still bookable because this PUT silently failed).
 
-    NOTE: the conflict check only consults [[conflict_calendar]] entries
-    -- some blocks-mode entry must cover the booking calendar this
-    blocker lands on (source = "booking_calendar" in every shipped/
-    example config; check_caldav_calendars warns if not)."""
+    NOTE: the conflict check hides the date off this blocker either via a
+    blocks-mode [[conflict_calendar]] entry that covers the booking
+    calendar AND applies to this course, OR -- for a course scoped out of
+    every such entry (e.g. via all_courses_but) -- via the always-on,
+    UID-keyed cancellation-blocker check in
+    conflict.ConflictEngine.occurrence_is_hidden, which is independent of
+    scoping precisely so this mechanism can never be configured away."""
     tz = ZoneInfo(settings.timezone)
     start, end = occurrence_start_end(course, occurrence_date, tz)
     lines = []

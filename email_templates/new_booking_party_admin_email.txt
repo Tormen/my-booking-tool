@@ -1,1 +1,7 @@
-{{who}} {{verb}} {{course_title}} on {{occ_date}} (party of {{party_size}}, all {{status_word}} together).
+{{intro}}
+
+{{details}}
+{{spots_taken}} / {{capacity}} spots taken now.
+
+{{cancel_links}}
+Cancel the entire session (all participants): {{cancel_session_url}}

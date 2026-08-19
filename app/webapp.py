@@ -121,8 +121,9 @@ from .cancel_flow import (
     CANCELABLE_STATUSES, cancel_and_promote, cancel_occurrence, find_cancelable_registrations_for_occurrence,
 )
 from .cancellation import (
-    attention_html, booking_details_text, course_recap_html, greeting_html, html_email_body, html_to_text,
-    intro_html, join_attention_sections, send_cancellation_emails, send_reinstatement_emails,
+    attention_html, booking_details_text, course_recap_html, greeting_html, host_cancel_occurrence_url,
+    host_cancel_url, host_details_text, host_subject, html_email_body, html_to_text, intro_html,
+    join_attention_sections, send_cancellation_emails, send_reinstatement_emails,
 )
 from .config import Course, Settings, upcoming_date_overrides
 from .conflict import ConflictEngine
@@ -1613,7 +1614,7 @@ class App:
                     shortname, occ_date, user.user_id, hash_token(token), course.capacity
                 )
                 self._sync(shortname, date.fromisoformat(occ_date))
-                self._send_booking_result_email(user, course, occ_date, reg.status, token)
+                self._send_booking_result_email(user, course, occ_date, reg.status, token, reg.registration_id)
                 msg = (
                     f"You're on the waitlist for <b>{esc(course.title)}</b> on {esc(occ_date)}."
                     if reg.status == STATUS_WAITLISTED
@@ -1697,7 +1698,11 @@ class App:
         ics_filename, ics_text = calendar_sync.guest_cancel_ics(self.settings, course, date.fromisoformat(occ_date))
         send_cancellation_emails(
             self.settings, course, occ_date, user, canceled_by, message,
-            registration_id, reinstate_token,
+            registration_id,
+            # Every web call site cancels the row BEFORE calling this, so
+            # this is the freed-up count the host's copy should report.
+            spots_taken=self._occupancy(course, occ_date)[0],
+            reinstate_token=reinstate_token,
             ics_attachment=(ics_filename, ics_text, "CANCEL"),
         )
 
@@ -1718,6 +1723,7 @@ class App:
             ics_attachment = (ics_filename, ics_text, "PUBLISH")
         send_reinstatement_emails(
             self.settings, course, occ_date, user, confirmed, reinstated_by, message,
+            spots_taken=self._occupancy(course, occ_date)[0],
             ics_attachment=ics_attachment,
         )
 
@@ -1810,7 +1816,17 @@ class App:
                 bcc_addrs=self.settings.bcc_attendee_email_list,
             )
 
-    def _send_booking_result_email(self, user, course, occ_date: str, status: str, cancel_token: str) -> None:
+    def _occupancy(self, course, occ_date: str) -> tuple[int, int]:
+        """(confirmed spots taken now, capacity) for one occurrence -- used
+        for the "x / capacity spots taken now" line the host sees in every
+        new-booking/waitlist admin email (subject + body). count_confirmed
+        already excludes waitlisted and pending-confirmation rows, so a
+        waitlist entry correctly reports a full "capacity / capacity"."""
+        return self.store.count_confirmed(course.shortname, occ_date), course.capacity
+
+    def _send_booking_result_email(
+        self, user, course, occ_date: str, status: str, cancel_token: str, registration_id: str,
+    ) -> None:
         """The guest-facing booked/waitlisted email + admin notification --
         shared by the instant-booking path above and by my_confirm()'s
         promotion of a newly-confirmed account's pending registrations, so
@@ -1818,16 +1834,28 @@ class App:
         path only (see _book_with_guests() for the party equivalent, which
         sends the same guest-facing email via
         _send_booking_result_guest_email() but consolidates the admin
-        notification)."""
+        notification).
+
+        `registration_id` is the just-created/promoted row's id -- used only
+        for the admin notification's "cancel this one booking" magic link
+        (see host_cancel_url); the guest-facing half uses `cancel_token`,
+        a separate bearer token."""
         self._send_booking_result_guest_email(user, course, occ_date, status, cancel_token)
         who = f"{user.name} <{user.email}>"
         verb = "joined the waitlist for" if status == STATUS_WAITLISTED else "booked"
+        taken, capacity = self._occupancy(course, occ_date)
         send_mail(
             self.settings, self.settings.admin_email,
-            f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
+            host_subject(
+                "New waitlist entry" if status == STATUS_WAITLISTED else "New booking",
+                course, occ_date, taken,
+            ),
             render_template(
                 load_email_template(self.settings, "new_booking_admin_email.txt"),
-                who=who, verb=verb, course_title=course.title, occ_date=occ_date,
+                intro=f"{who} {verb} this session:", details=host_details_text(course, occ_date),
+                spots_taken=str(taken), capacity=str(capacity),
+                cancel_booking_url=host_cancel_url(self.settings, registration_id),
+                cancel_session_url=host_cancel_occurrence_url(self.settings, course.shortname, occ_date),
             ),
             reply_to=user.email,
         )
@@ -1894,13 +1922,21 @@ class App:
                 )
         return entries, None
 
-    def _send_party_admin_email(self, users: list, course, occ_date: str, status: str) -> None:
+    def _send_party_admin_email(self, users: list, regs: list, course, occ_date: str, status: str) -> None:
         """ONE admin email covering an entire guest-booking party (leader +
         every guest) -- see _send_booking_result_guest_email()'s docstring
         for why this is split out instead of reusing
         _send_booking_result_email()'s per-person admin email unchanged
         (that would mean one admin email per party member for what is, to
-        the admin, a single booking event)."""
+        the admin, a single booking event).
+
+        `regs` is aligned with `users` (leader first, then each guest in
+        add order -- see _book_with_guests / add_party_registrations_
+        checking_capacity, which return in that same order), so each member
+        can be paired with their own row for a per-person "cancel this one
+        booking" magic link. A party has no single registration to cancel
+        as a unit, so the notification lists one cancel link per member
+        plus the one "cancel the entire session" link."""
         leader, guests = users[0], users[1:]
         verb = "joined the waitlist for" if status == STATUS_WAITLISTED else "booked"
         if guests:
@@ -1909,13 +1945,27 @@ class App:
         else:
             who = f"{leader.name} <{leader.email}>"
         status_word = "waitlisted" if status == STATUS_WAITLISTED else "confirmed"
+        taken, capacity = self._occupancy(course, occ_date)
+        cancel_links = "\n".join(
+            f"Cancel {u.name} <{u.email}>'s booking: {host_cancel_url(self.settings, r.registration_id)}"
+            for u, r in zip(users, regs)
+        )
         send_mail(
             self.settings, self.settings.admin_email,
-            f"New {'waitlist entry' if status == STATUS_WAITLISTED else 'booking'}: {course.title} on {occ_date}",
+            host_subject(
+                "New waitlist entry" if status == STATUS_WAITLISTED else "New booking",
+                course, occ_date, taken,
+            ),
             render_template(
                 load_email_template(self.settings, "new_booking_party_admin_email.txt"),
-                who=who, verb=verb, course_title=course.title, occ_date=occ_date,
-                party_size=str(len(users)), status_word=status_word,
+                intro=(
+                    f"{who} {verb} this session "
+                    f"(party of {len(users)}, all {status_word} together):"
+                ),
+                details=host_details_text(course, occ_date),
+                spots_taken=str(taken), capacity=str(capacity),
+                cancel_links=cancel_links,
+                cancel_session_url=host_cancel_occurrence_url(self.settings, course.shortname, occ_date),
             ),
             reply_to=leader.email,
         )
@@ -1969,7 +2019,7 @@ class App:
         status = regs[0].status  # all-or-nothing -- every row shares the same status
         for member, token in zip(users, tokens):
             self._send_booking_result_guest_email(member, course, occ_date, status, token)
-        self._send_party_admin_email(users, course, occ_date, status)
+        self._send_party_admin_email(users, regs, course, occ_date, status)
 
         party_size = len(users)
         if status == STATUS_WAITLISTED:
@@ -3448,7 +3498,9 @@ class App:
                 if updated is None:
                     continue  # no longer pending (already handled, e.g. a stale duplicate link)
                 self._sync(reg.course_shortname, date.fromisoformat(reg.occurrence_date))
-                self._send_booking_result_email(user, course, reg.occurrence_date, updated.status, new_cancel_token)
+                self._send_booking_result_email(
+                    user, course, reg.occurrence_date, updated.status, new_cancel_token, updated.registration_id
+                )
                 # Status suffix only for the non-obvious outcome (waitlisted)
                 # -- "went through" below already says what confirmed means,
                 # no need to repeat it on every line too.

@@ -639,15 +639,38 @@ one-way exports, there is no writable-ics standard.
 entry is one calendar source consulted live for every candidate date; a
 source is either a published ICS link (`ics_url`, e.g. an Outlook "publish
 calendar" URL), a CalDAV calendar with its own credentials, or `source =
-"booking_calendar"` to reuse the booking connection. An entry applies to
-every course unless `courses = [...]` scopes it. Two modes:
+"booking_calendar"` to reuse the booking connection. Two modes:
 
-- `mode = "blocks"`: any matching event overlapping the course hours
-  HIDES the date -- vacation entries, the CANCELED blockers.
+- `mode = "blocks"`: any matching event overlapping the `from`--`till`
+  window (default: the course's own start/end) HIDES the date -- vacation
+  entries, the CANCELED blockers.
 - `mode = "requires"` (the default): a SINGLE matching event must span
-  the whole `from`--`till` window (default: the course's own start/end)
-  or the date is hidden -- e.g. "these courses only happen when my work
-  calendar shows an out-of-office event".
+  the whole `from`--`till` window or the date is hidden -- e.g. "these
+  courses only happen when my work calendar shows an out-of-office event".
+
+`from`/`till` work in **both** modes -- the overlap window for `blocks`,
+the span window for `requires` -- and both default to the course's own
+start/end.
+
+**Course scoping.** An entry applies to every course unless one of two
+mutually-exclusive keys narrows it: `courses = [...]` (a whitelist -- only
+those shortnames) or `all_courses_but = [...]` (a blacklist -- every
+course except those). Both are optional, work on every source kind
+(including the `source = "booking_calendar"` block), and are validated at
+load time (unknown shortnames, or setting both at once, fail the service
+start with a named error).
+
+Scoping a course out of the booking-calendar block does **not** disable
+"cancel entire session" for it. The CANCELED blocker event is a
+booking-tool internal, not a user-configured conflict, so it is caught by
+an always-on check keyed on the blocker's own deterministic UID -- it
+hides the date for *every* course regardless of `courses` /
+`all_courses_but`. (Only a genuine *personal* event on the booking
+calendar respects the scoping.) That check reads the booking calendar
+only for a course scoped out of every booking-calendar blocks entry (no
+extra query otherwise), and **fails closed**: if the booking calendar is
+unreachable, the date is hidden -- no booking is taken while the tool
+can't confirm the session wasn't canceled.
 
 Which events count is filtered per entry: `show_as` (default `"oof"`
 in requires mode, `"any"` in blocks mode; other values `busy` /
@@ -663,9 +686,15 @@ as Free" is ignored -- CAUTION: many calendar apps create all-day
 events as Free BY DEFAULT, so a blocking all-day event may need a
 manual flip to "Busy"; that trap is exactly why the explicit title
 marker exists alongside it). Timed events never get the all-day escape
-hatches. The tool's own synced course event never blocks its own course
-(recognized by UID and excluded), so a date with sign-ups stays
-bookable for further participants.
+hatches. All of these filters apply to **every** source kind, ICS links
+included -- for an ICS feed the "Free" status comes from the feed's own
+`TRANSP` / `X-MICROSOFT-CDO-BUSYSTATUS`. The tool's own synced course
+event never blocks its own course (recognized by UID and excluded), so a
+date with sign-ups stays bookable for further participants.
+
+Two per-entry keys are ICS-source-only and ignored for CalDAV /
+`booking_calendar` sources: `cache_minutes` (in-process fetch-cache TTL,
+default 10) and `debug` (verbose per-fetch trace, below).
 
 ICS feeds are parsed in full (recurring events with EXDATEs and
 moved/edited instances included, Windows timezone names resolved from
@@ -677,10 +706,85 @@ bookings continue against that copy indefinitely and a
 `WARNING:`-subject email goes to `admin_email` -- at most one per day
 per source. No cached copy yet (or a CalDAV conflict source failing)
 hides the affected dates instead, fail-closed, with the same email.
+When a source that had been failing is read successfully again, a
+one-off `RESOLVED:`-subject email follows (the "calendar is back"
+notice), reporting how long it was down; recovery also resets the
+once-per-day rate limit, so a fresh incident later alerts immediately.
+Both transitions leave greppable lines in the log
+(`/var/lib/my-booking/my-booking.log`, timestamps in UTC): failures at
+`ERROR` (`... CalDAV error: ...`) and `sent alert email`, recovery at
+`... RESOLVED -- reachable again ...` and `sent RESOLVED email` -- e.g.
+`grep -E "CalDAV error|RESOLVED|sent .* email" my-booking.log` shows the
+full down/up history of every source.
 `my-bt admin health` shows the live state of every source at any time.
 One caveat for Outlook published links: Microsoft regenerates them on
 ITS own schedule, so the feed can lag the real mailbox by minutes to
 hours.
+
+**Seeing what a feed change actually did (2026-07-22).** Two lags sit
+between editing your work calendar and the booking page reflecting it:
+Outlook's own publish delay (minutes to hours), then the app's
+`cache_minutes` in-process TTL. The booking page only re-fetches an ICS
+source once that TTL has expired on a page request -- reloading inside
+the window changes nothing on disk. To force a fresh fetch immediately,
+`sudo systemctl restart my-booking` (this clears the in-process cache;
+the very next `/book/...` request re-fetches), then reload the page.
+
+To confirm the *upstream* feed independently of the app, fetch the
+published link directly:
+
+```
+curl -s '<the ics_url from settings.toml>' | grep -i 20260722   # your date, YYYYMMDD
+```
+
+On each **changed** fetch the app now keeps the immediately-previous copy
+alongside the current one, so you can diff exactly what just arrived:
+
+```
+diff /var/lib/my-booking/conflict_cache/<name>.ics.prev \
+     /var/lib/my-booking/conflict_cache/<name>.ics
+```
+
+`<name>` is the `[[conflict_calendar]]` `name` (e.g. `dbg-work`). The
+`.prev` file is written only when the content genuinely changes, so it
+always holds the last *distinct* version rather than being overwritten
+with an identical copy on every routine TTL refresh; a first-ever fetch
+has no `.prev` yet. Both files live under `conflict_cache/`, which is
+excluded from the data-dir git snapshots.
+
+**Tracing fetches in the log (2026-07-22).** With `MY_BOOKING_DEBUG=1`
+each ICS source logs one `DEBUG` line per *actual* network fetch --
+`conflict feed 'dbg-work': fetched N bytes (changed -> rotated .prev |
+unchanged -> .prev kept)` -- plus a `served from in-process cache` line
+each time a page consult reuses the cached parse instead. Counting those
+for a single `/book/...` request is how you confirm a page load fetches
+the feed only once. A **failure** fetching a source, or writing its
+`.prev`, is logged at `ERROR` and so stays visible in the default
+(debug-off) log; only the routine success line is DEBUG-gated.
+
+**Per-source verbose trace (`debug = true`).** Set `debug = true` on a
+single `[[conflict_calendar]]` block and restart the service to get a full
+`WARNING`-level trace of every fetch of *that* source (no `MY_BOOKING_DEBUG`
+needed) -- millisecond-timestamped, one block per fetch:
+
+```
+[conflict-debug dbg-work] pid=1234 ===== FETCH BEGIN =====
+[conflict-debug dbg-work] pid=1234 BEFORE  .ics      size=1112238 mtime=... sha256=...
+[conflict-debug dbg-work] pid=1234 BEFORE  .ics.prev size=1076837 mtime=... sha256=...
+[conflict-debug dbg-work] pid=1234 BACKUP  /bin/cp -a .ics .ics.prev -> rc=0
+[conflict-debug dbg-work] pid=1234 AFTER-CP .ics.prev size=1112238 mtime=... sha256=...
+[conflict-debug dbg-work] pid=1234 FETCHED 1112238 bytes in 2.9s sha256=...
+[conflict-debug dbg-work] pid=1234 AFTER   .ics      size=1112238 mtime=... sha256=...
+[conflict-debug dbg-work] pid=1234 ===== FETCH END =====
+```
+
+In this mode the current `.ics` is copied to `.ics.prev` with a real
+`/bin/cp -a` (preserving mtime/owner/SELinux context) **before** the
+network fetch, so `.ics.prev` is byte-identical to the pre-fetch `.ics`.
+The `pid` and the `FETCH BEGIN/END` pairing make it unmissable if one
+`/book/...` request fetches the feed more than once (two blocks, same pid),
+or if a second process is writing the same cache (different pid).
+Diagnostic only -- deliberately noisy; turn it off again afterward.
 
 **Undoing a cancellation:** both the attendee's own `/my` page and the web
 admin's `/admin` overview show a "Rebook" button (2026-07-10; relabeled
@@ -2248,6 +2352,80 @@ by the nightly retention job after `pending_confirmation_hours` (default
 48, `[defaults]` in `settings.toml`) -- independent of, and much sooner
 than, `retention_months`/`canceled_retention_months` below, since a
 pending row never held a real booking in the first place.
+
+## Host notifications (`admin_email`)
+
+Every registration event -- a new booking, a waitlist entry, a
+cancellation, a rebooking, a promotion off the waitlist -- emails a short
+notification to `admin_email` (`[site]` in `settings.toml`), separately
+from the attendee's own copy. Its `Reply-To` is the participant's
+address, so replying from your inbox reaches them directly (2026-07-16).
+
+**All five follow one shape** (2026-08-19 -- before this, the
+new-booking ones were plain ASCII with an occupancy count while the
+cancellation/rebooking/promotion ones were emoji-rich HTML without one):
+
+- **Plain text, no HTML part.** These land only in your own inbox; they
+  are receipts, not letters to a guest.
+- **Pure ASCII** -- no emoji. (The participant-facing emails keep theirs;
+  only the host copies are stripped, by the same shared builder, so the
+  What/When/Where layout itself can never drift between the two.)
+- **No course description repeated back at you** -- you wrote it in
+  `settings.toml`.
+- **Subject: `<what happened>: <shortname> on <date> [taken/capacity]`.**
+  The course SHORTNAME, not its long title, so you can tell at a glance
+  which course it is; the full title is still on the body's `What:` line.
+  This is the one place a shortname is deliberately still shown.
+- **Occupancy everywhere**, in the subject and as one body line,
+  `3 / 12 spots taken now.` -- always the state AFTER whatever the email
+  is reporting, so a cancellation already shows you the freed-up number.
+
+Examples:
+
+```
+New booking: lux-wed-yoga on 2026-09-09 [1/14]
+New waitlist entry: trier-sat-yoga on 2026-08-22 [12/12]
+Canceled: lux-wed-yoga on 2026-08-19 [0/14]
+Rebooked: lux-fri-yoga on 2026-08-21 [8/12]
+Promoted from waitlist: lux-fri-yoga on 2026-08-21 [8/12]
+```
+
+Everything above is template-driven: each host email is one file under
+`email_templates/` (`new_booking_admin_email.txt`,
+`new_booking_party_admin_email.txt`, `cancel_email_admin.txt`,
+`reinstate_email_admin.txt`, `promoted_admin_email.txt`), all built from
+the same macros -- `{{intro}}`, `{{message_line}}`, `{{details}}`,
+`{{spots_taken}}`, `{{capacity}}`, plus each one's own links. Reorder
+them, reword the occupancy line, drop a section: override the file via
+`[site].email_templates_folder` (see "Email templates") without touching
+any code. Note a template referencing a macro that isn't passed to it
+fails loudly rather than shipping a half-rendered email.
+
+The count is the confirmed total (`Store.count_confirmed`), which by
+definition excludes waitlisted and not-yet-confirmed `pending_confirmation`
+rows -- so a waitlist entry correctly reports a full `capacity / capacity`,
+and a brand-new email's still-pending booking doesn't inflate it. Every
+path reports it from the same helper (`App._occupancy`), and every
+subject is built by the same `host_subject()`, so they can't drift apart.
+
+The new-booking notification also carries no-login **cancel links** (2026-07-22), so
+you can act on it straight from your inbox without opening `/admin` --
+the same unguessable-token "magic links" that already appear in your
+calendar event (see "Calendars" above), just surfaced in the email too:
+
+- **Cancel this booking** -- `/host-cancel/<registration_id>`, cancels
+  just this one registration.
+- **Cancel the entire session (all participants)** --
+  `/host-cancel-occurrence/<course>/<date>`, cancels every registration
+  for that occurrence at once and blocks new bookings for the date (see
+  "cancel the entire session" under the CLI/Calendars sections).
+
+For a party booking there's no single row to cancel as a unit, so the
+email lists one "Cancel `<name>`'s booking" link per party member,
+alongside the one entire-session link. Both link types are built by
+`host_cancel_url`/`host_cancel_occurrence_url` (`app/cancellation.py`) --
+the single source shared with the calendar-event body so the two can't
+format the same link two different ways.
 
 ## Account settings (`/my/settings`, `/my/confirm-email/<token>`) (2026-07-10)
 

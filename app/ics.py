@@ -86,13 +86,25 @@ class VEvent:
     # above -- a course with no cc list configured renders exactly as
     # before these fields existed. organizer is a plain email address (no
     # "mailto:" prefix -- added by to_ics()); attendees are ROLE=
-    # OPT-PARTICIPANT (never REQ-PARTICIPANT: this is a courtesy copy, not
-    # a scheduling request the recipient is expected to RSVP to) and
-    # RSVP=FALSE (no reply expected). Whether an ATTENDEE actually
+    # REQ-PARTICIPANT with RSVP=TRUE. Whether an ATTENDEE actually
     # triggers an invite EMAIL from the CalDAV server (vs. just appearing
     # silently in the event's own attendee list) depends entirely on that
     # server's own iTIP/scheduling support -- this class only controls
     # what goes in the .ics itself.
+    #
+    # 2026-08-19: these started as OPT-PARTICIPANT + RSVP=FALSE ("a
+    # courtesy copy nobody has to answer"). Changed at the operator's
+    # request while investigating a real symptom: the invite arriving at
+    # the cc'd work address carried no description text at all, while the
+    # event we PUT demonstrably does (verified by generating the exact
+    # bytes). Since the invite EMAIL is composed by the CalDAV server
+    # (Open-Xchange), not by us, the leading theory is that OPT + no-RSVP
+    # reads to it as "send a light FYI notice" rather than a full
+    # invitation -- this pair is the cheap test of that. If the text is
+    # still missing afterwards, the server strips it and the fix is to
+    # stop relying on server-side scheduling for the cc list entirely
+    # (send our own METHOD:REQUEST invite, see SOLUTION-DESIGN #41).
+    # Cost of being wrong: the recipient now gets an RSVP prompt.
     organizer: str | None = None
     attendees: tuple[str, ...] = ()
 
@@ -115,7 +127,7 @@ class VEvent:
         if self.organizer:
             lines.append(f"ORGANIZER:mailto:{self.organizer}")
         for email in self.attendees:
-            lines.append(f"ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:{email}")
+            lines.append(f"ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{email}")
         if self.status:
             lines.append(f"STATUS:{self.status}")
         for minutes in self.alarms_minutes_before:

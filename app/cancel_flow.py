@@ -30,8 +30,8 @@ from typing import Callable
 from . import calendar_sync
 from .caldav_client import CalDAVClient, CalDAVError
 from .cancellation import (
-    booking_details_text, course_recap_html, greeting_html, html_email_body, intro_html,
-    send_cancellation_emails,
+    booking_details_text, course_recap_html, greeting_html, host_details_text, host_subject,
+    html_email_body, intro_html, send_cancellation_emails,
 )
 from .config import Settings
 from .email_templates import load_email_template, render_template
@@ -223,19 +223,17 @@ def cancel_and_promote(
             names = ", ".join(f"{u.name} <{u.email}>" for u in promoted_users)
             verb = "were" if len(promoted_users) > 1 else "was"
             admin_intro = f"{names} {verb} promoted from the waitlist to confirmed for:"
-            admin_details = booking_details_text(course, occurrence_date_str)
-            admin_recap_html = course_recap_html(course, occurrence_date_str)
+            # Plain-text ASCII + occupancy, same shape as every other
+            # host-only email (see app.cancellation.host_subject).
+            promoted_taken = store.count_confirmed(course_shortname, occurrence_date_str)
             send_mail(
                 settings, settings.admin_email,
-                f"Promoted from waitlist: {course.title} on {occurrence_date_str}",
+                host_subject("Promoted from waitlist", course, occurrence_date_str, promoted_taken),
                 render_template(
                     load_email_template(settings, "promoted_admin_email.txt"),
-                    intro=admin_intro, details=admin_details,
+                    intro=admin_intro, details=host_details_text(course, occurrence_date_str),
+                    spots_taken=str(promoted_taken), capacity=str(course.capacity),
                 ),
-                html_body=html_email_body(render_template(
-                    load_email_template(settings, "promoted_admin_email.html"),
-                    intro=intro_html(admin_intro), recap=admin_recap_html,
-                )),
                 # 2026-07-16: reply-to the first (leader) promoted user --
                 # same "who does 'reply' go to for a party" call as
                 # webapp.py's own _send_party_admin_email (new bookings).
@@ -354,7 +352,12 @@ def cancel_occurrence(
             )
             send_cancellation_emails(
                 settings, course, occurrence_date_str, user, canceled_by="host", message=message,
-                registration_id=reg.registration_id, reinstate_token=reinstate_token,
+                registration_id=reg.registration_id,
+                # Read fresh per row: this loop cancels the whole session
+                # one registration at a time, so each host copy reports
+                # the occupancy as of its own cancellation.
+                spots_taken=store.count_confirmed(course_shortname, occurrence_date_str),
+                reinstate_token=reinstate_token,
                 ics_attachment=(ics_filename, ics_text, "CANCEL"),
             )
 

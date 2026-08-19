@@ -31,6 +31,27 @@ _HTML_BLOCK_RE = re.compile(r"</?(p|div|ul|ol|br)\b[^>]*>", re.IGNORECASE)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
 
+def host_cancel_url(settings: Settings, registration_id: str) -> str:
+    """The no-login "magic link" that cancels ONE registration (see
+    app/webapp.py::host_cancel and /host-cancel/<reg_id>) -- gated purely
+    by the unguessable uuid4 registration_id, host/operator-only, same
+    trust boundary as the calendar event's own per-participant cancel
+    lines. Single source of truth for this URL so the calendar event body
+    (app/calendar_sync.py) and the host booking-notification email
+    (app/webapp.py) can never format it two different ways."""
+    return f"{settings.base_url}/host-cancel/{registration_id}"
+
+
+def host_cancel_occurrence_url(settings: Settings, course_shortname: str, occurrence_date: str) -> str:
+    """The no-login "magic link" that cancels an ENTIRE session at once
+    (every confirmed/waitlisted/pending registration for one course
+    occurrence -- see app/webapp.py::host_cancel_occurrence and
+    app.cancel_flow.cancel_occurrence). `occurrence_date` is an ISO date
+    string ("YYYY-MM-DD"). Same single-source-of-truth reasoning as
+    host_cancel_url() above."""
+    return f"{settings.base_url}/host-cancel-occurrence/{course_shortname}/{occurrence_date}"
+
+
 def html_to_text(markup: str) -> str:
     """Best-effort HTML -> plain text for course.description (operator-
     authored rich text -- see app/config.py's docstring on that field) when
@@ -60,7 +81,10 @@ _WHEN_EMOJI = "\U0001F550"  # clock face
 _WHERE_EMOJI = "\U0001F4CD"  # round pushpin
 
 
-def booking_details_text(course: Course, occ_date: str, message: str = "") -> str:
+def booking_details_text(
+    course: Course, occ_date: str, message: str = "",
+    *, emoji: bool = True, include_description: bool = True,
+) -> str:
     """Shared What/When/Where(+message)(+description) block (this
     layout, 2026-07-05) for every guest email that tells them
     about one specific confirmed/waitlisted spot -- used by every booking-
@@ -82,10 +106,13 @@ def booking_details_text(course: Course, occ_date: str, message: str = "") -> st
     (the default) omits the line entirely, exactly like the old separate
     `reason_block`/`reason_html` this replaces did in
     send_cancellation_emails()/send_reinstatement_emails()."""
+    what, when, where = (
+        (f"{_WHAT_EMOJI} ", f"{_WHEN_EMOJI} ", f"{_WHERE_EMOJI} ") if emoji else ("", "", "")
+    )
     details = (
-        f"{_WHAT_EMOJI} What: {course.title}\n"
-        f"{_WHEN_EMOJI} When: {occ_date} {course.time_range_label_for(occ_date)}\n"
-        f"{_WHERE_EMOJI} Where: {course.location}\n"
+        f"{what}What: {course.title}\n"
+        f"{when}When: {occ_date} {course.time_range_label_for(occ_date)}\n"
+        f"{where}Where: {course.location}\n"
     )
     # 2026-07-16: exceptional per-date time changes (Course.
     # date_overrides) get an automatic ATTENTION line here -- looked up
@@ -97,8 +124,52 @@ def booking_details_text(course: Course, occ_date: str, message: str = "") -> st
     attention = course.override_message_for(occ_date)
     attention_block = f"\nATTENTION: {attention}\n" if attention else ""
     message_block = f"\nMessage: {message}\n" if message else ""
-    description_text = html_to_text(course.description) if course.description else ""
+    description_text = html_to_text(course.description) if include_description and course.description else ""
     return details + attention_block + message_block + (f"\n{description_text}\n" if description_text else "")
+
+
+def host_details_text(course: Course, occ_date: str) -> str:
+    """booking_details_text()'s HOST-ONLY variant (2026-08-19): the same
+    What/When/Where(+ATTENTION) block, but ASCII (no emoji) and WITHOUT
+    the course description.
+
+    Both differences are the operator's own call, from comparing two real
+    emails side by side: emails that only ever land in the operator's own
+    inbox should be plain ASCII, and the description is theirs -- they
+    wrote it in settings.toml, repeating it back is noise. Deliberately a
+    thin wrapper over the same builder rather than a second copy of the
+    layout: What/When/Where ordering and the ATTENTION line stay defined
+    in exactly ONE place, so the host and participant blocks can never
+    drift apart (the same anti-drift rule that made this function shared
+    in the first place -- see its docstring).
+
+    Note there is no host twin of course_recap_html(): host-only emails
+    are plain-text only now (see send_cancellation_emails)."""
+    return booking_details_text(course, occ_date, emoji=False, include_description=False)
+
+
+def host_subject(prefix: str, course: Course, occ_date: str, spots_taken: int) -> str:
+    """The ONE subject-line shape every host-only email uses (2026-08-19):
+    "<prefix>: <shortname> on <date> [taken/capacity]".
+
+    The course SHORTNAME, not its title (operator's explicit choice): a
+    subject line only has to say which course this is at a glance, and
+    the real titles run to 50+ characters. This is deliberately the one
+    place a shortname is still shown -- the standing "translate
+    shortnames to titles" rule (2026-07-05) is about GUI pages and
+    participant-facing text; the body's own What: line still carries the
+    full title.
+
+    The [taken/capacity] counter is read as taken-of-capacity (see
+    App._occupancy) and is always the state AFTER whatever this email is
+    reporting -- so a cancellation's subject already shows the freed-up
+    number.
+
+    The matching BODY line lives in the templates themselves
+    ("{{spots_taken}} / {{capacity}} spots taken now."), not here -- every
+    host template is passed both macros, so its wording and placement are
+    editable without touching Python."""
+    return f"{prefix}: {course.shortname} on {occ_date} [{spots_taken}/{course.capacity}]"
 
 
 def course_recap_html(course: Course, occ_date: str, message: str = "") -> str:
@@ -273,7 +344,7 @@ def html_email_body(inner_html: str) -> str:
 
 def send_cancellation_emails(
     settings: Settings, course: Course, occ_date: str, user, canceled_by: str, message: str,
-    registration_id: str, reinstate_token: str | None = None,
+    registration_id: str, spots_taken: int, reinstate_token: str | None = None,
     ics_attachment: tuple[str, str, str] | None = None,
 ) -> None:
     """Every cancellation -- whichever of the four paths triggers it (the
@@ -371,6 +442,9 @@ def send_cancellation_emails(
     recap_html = course_recap_html(course, occ_date)
     subject = f"Canceled: {course.title} on {occ_date}"
     my_url = f"{settings.base_url}/my"
+    # `spots_taken` is the count AFTER this cancellation (every caller
+    # reads it once the row is already persisted), so the host's copy
+    # reports the freed-up number -- see host_subject().
     host_reinstate_url = f"{settings.base_url}/host-reinstate/{registration_id}"
     if user:
         participant_who = "You" if canceled_by == "guest" else "The host"
@@ -456,7 +530,6 @@ def send_cancellation_emails(
     # as the plain "Message:" label -- there's no "direction" to convey to
     # the operator's own inbox.
     admin_message_line = f"\nMessage: {message}\n" if message else ""
-    admin_message_line_html = message_html(message) if message else ""
     # 2026-07-14: looked for a simpler, more intuitive word than
     # "reinstate" -- picked "Rebook" (visible text only; the
     # underlying route/function/variable names -- reinstate_token,
@@ -464,26 +537,26 @@ def send_cancellation_emails(
     # etc. -- are deliberately UNCHANGED, since /host-reinstate/<id> and
     # /reinstate/<token> are real URLs already sitting in guests'
     # already-sent emails; renaming those would break old links).
-    admin_reinstate_link_html = f'<p>Rebook this booking: <a href="{host_reinstate_url}">{host_reinstate_url}</a></p>'
+    # 2026-08-19: host-only copies are plain-text ASCII now -- no HTML
+    # part, no emoji, no description repeated back, plus the occupancy
+    # counter every other host email carries. See host_details_text()/
+    # host_subject() and SOLUTION-DESIGN #40.
     send_mail(
-        settings, settings.admin_email, subject,
+        settings, settings.admin_email, host_subject("Canceled", course, occ_date, spots_taken),
         render_template(
             load_email_template(settings, "cancel_email_admin.txt"),
-            intro=admin_intro, message_line=admin_message_line, details=details,
+            intro=admin_intro, message_line=admin_message_line,
+            details=host_details_text(course, occ_date),
+            spots_taken=str(spots_taken), capacity=str(course.capacity),
             reinstate_url=host_reinstate_url,
         ),
-        html_body=html_email_body(render_template(
-            load_email_template(settings, "cancel_email_admin.html"),
-            intro=intro_html(admin_intro), message_line=admin_message_line_html,
-            recap=recap_html, reinstate_link=admin_reinstate_link_html,
-        )),
         reply_to=user.email if user else None,
     )
 
 
 def send_reinstatement_emails(
     settings: Settings, course: Course, occ_date: str, user, confirmed: bool, reinstated_by: str, message: str,
-    ics_attachment: tuple[str, str, str] | None = None,
+    spots_taken: int, ics_attachment: tuple[str, str, str] | None = None,
 ) -> None:
     """The "undo a cancel" twin of send_cancellation_emails() above
     (2026-07-10: a reschedule button for
@@ -542,12 +615,22 @@ def send_reinstatement_emails(
         )
     admin_who = "You" if reinstated_by == "host" else (f"{user.name} <{user.email}>" if user else "The attendee")
     admin_intro = f"{admin_who} rebooked this booking -- {status_phrase}:"
+    # Plain-text ASCII host copy, same shape as every other host email
+    # (see send_cancellation_emails' own note).
     send_mail(
-        settings, settings.admin_email, subject,
-        render_template(load_email_template(settings, "reinstate_email_admin.txt"), intro=admin_intro, details=details),
-        html_body=html_email_body(render_template(
-            load_email_template(settings, "reinstate_email_admin.html"),
-            intro=intro_html(admin_intro), recap=recap_html,
-        )),
+        settings, settings.admin_email, host_subject("Rebooked", course, occ_date, spots_taken),
+        render_template(
+            load_email_template(settings, "reinstate_email_admin.txt"),
+            intro=admin_intro,
+            # 2026-08-19: the optional comment is its OWN macro here now,
+            # like the cancellation admin copy already had -- host_details_text()
+            # deliberately never carries it, so a template can place it
+            # without ever risking it appearing twice. (It used to ride
+            # inside `details`; keeping it visible to the host matters --
+            # that's how someone acting on a guest's behalf gets noticed.)
+            message_line=f"\nMessage: {message}\n" if message else "",
+            details=host_details_text(course, occ_date),
+            spots_taken=str(spots_taken), capacity=str(course.capacity),
+        ),
         reply_to=user.email if user else None,
     )

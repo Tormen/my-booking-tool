@@ -392,10 +392,13 @@ def check_caldav_calendars(raw: dict) -> list[Check]:
     - each CalDAV [[conflict_calendar]]: same, with its own credentials.
     - each ICS [[conflict_calendar]]: live GET, verify it parses as a
       calendar (event count reported).
-    - structural warn kept from the 2026-07-14 blocker-event work: some
-      blocks-mode entry must cover the booking calendar, or a canceled
-      session's CANCELED blocker event (and the tool's own synced
-      events) would never hide a date.
+    - structural warn from the 2026-07-14 blocker-event work: without a
+      blocks-mode entry covering the booking calendar, the operator's own
+      personal events on it won't block any course. (Cancel-entire-session
+      itself is NOT at risk -- its CANCELED blocker is caught regardless by
+      the always-on, UID-keyed check in conflict.occurrence_is_hidden,
+      2026-07-24 -- so this stays a warn about personal-event conflicts,
+      not the hard dependency it used to be.)
 
     Best-effort throughout: failures are warns, never raises -- a
     transient network hiccup shouldn't fail `status`/`setup` outright."""
@@ -428,9 +431,9 @@ def check_caldav_calendars(raw: dict) -> list[Check]:
         checks.append((
             "conflict_calendar coverage", "warn",
             "no blocks-mode [[conflict_calendar]] entry covers the booking calendar "
-            "(e.g. source = \"booking_calendar\", mode = \"blocks\") -- "
-            "cancel-entire-session blocker events (and the tool's own synced events) "
-            "on it would never hide a date from the booking page",
+            "(e.g. source = \"booking_calendar\", mode = \"blocks\") -- your own "
+            "personal events on it won't block any course (cancel-entire-session "
+            "still works: its blocker is caught by the always-on check)",
         ))
 
     for i, entry in enumerate(entries):

@@ -93,8 +93,9 @@ class Course:
     # optional (cc) so they receive the same invite as well. Passed straight through to
     # app.ics.VEvent's own organizer/attendees fields by
     # app.calendar_sync.sync_occurrence() -- see that call site and
-    # VEvent's own docstring for the ROLE=OPT-PARTICIPANT/RSVP=FALSE
-    # semantics, and the caveat that whether this actually triggers an
+    # VEvent's own docstring for the ROLE=REQ-PARTICIPANT/RSVP=TRUE
+    # semantics (2026-08-19: raised from OPT/RSVP=FALSE -- see that
+    # docstring), and the caveat that whether this actually triggers an
     # invite EMAIL depends on the CalDAV server's own scheduling support.
     # Empty tuple (the default -- key omitted in settings.toml) means no
     # ORGANIZER/ATTENDEE properties at all, byte-identical to before this
@@ -232,7 +233,13 @@ class ConflictCalendar:
     caldav_password: str = ""
     calendar: str = ""              # CalDAV displayname (CalDAV sources)
     use_booking_calendar: bool = False
-    courses: tuple[str, ...] = ()   # () = applies to every course
+    # Course scoping (2026-07-24): both optional, mutually exclusive (enforced
+    # at load time), and available on EVERY source kind incl. booking_calendar.
+    #   courses         -> whitelist: applies ONLY to these shortnames
+    #   all_courses_but -> blacklist: applies to every course EXCEPT these
+    # Neither set (the default) = applies to every course.
+    courses: tuple[str, ...] = ()
+    all_courses_but: tuple[str, ...] = ()
     from_hm: str = ""               # "HH:MM"; "" = course start
     till_hm: str = ""               # "HH:MM"; "" = course end
     title_contains: str = ""        # "" = no title filter
@@ -245,9 +252,23 @@ class ConflictCalendar:
     all_day_events_also_count: bool = True
     all_day_non_blocking_title_marker: str = ""
     all_day_free_events_do_not_block: bool = True
+    # Per-source verbose fetch tracing (2026-07-22). When true, every fetch
+    # of THIS source logs a full trace at WARNING (so it shows in the
+    # default log without MY_BOOKING_DEBUG): before/after stat + sha256 of
+    # the .ics and .ics.prev files, an explicit `/bin/cp -a` backup of the
+    # current .ics BEFORE the network fetch, the fetched byte count/hash,
+    # the pid, and cache HIT/MISS -- so a single request that fetches the
+    # feed more than once is impossible to miss. Diagnostic only; leave off
+    # (the default) in normal operation, it's deliberately noisy. See
+    # app/conflict.py::_ics_feed_debug and README "Calendars".
+    debug: bool = False
 
     def applies_to(self, course_shortname: str) -> bool:
-        return not self.courses or course_shortname in self.courses
+        if self.courses:
+            return course_shortname in self.courses
+        if self.all_courses_but:
+            return course_shortname not in self.all_courses_but
+        return True
 
 
 @dataclass(frozen=True)
@@ -757,12 +778,19 @@ def _conflict_calendar_from_raw(
         )
 
     courses = tuple(str(c) for c in entry.get("courses", []))
-    unknown = [c for c in courses if c not in course_shortnames]
-    if unknown:
+    all_courses_but = tuple(str(c) for c in entry.get("all_courses_but", []))
+    if courses and all_courses_but:
         raise ValueError(
-            f"[[conflict_calendar]] {name!r}: courses lists unknown shortname(s) "
-            f"{', '.join(unknown)} -- check the [[course]] shortnames"
+            f"[[conflict_calendar]] {name!r}: set courses (whitelist) OR "
+            "all_courses_but (blacklist), not both -- they are mutually exclusive"
         )
+    for key, values in (("courses", courses), ("all_courses_but", all_courses_but)):
+        unknown = [c for c in values if c not in course_shortnames]
+        if unknown:
+            raise ValueError(
+                f"[[conflict_calendar]] {name!r}: {key} lists unknown shortname(s) "
+                f"{', '.join(unknown)} -- check the [[course]] shortnames"
+            )
 
     from_hm = str(entry.get("from", "")).strip()
     till_hm = str(entry.get("till", "")).strip()
@@ -775,12 +803,14 @@ def _conflict_calendar_from_raw(
         ics_url=ics_url, caldav_url=caldav_url,
         caldav_username=caldav_username, caldav_password=caldav_password,
         calendar=calendar, use_booking_calendar=use_booking,
-        courses=courses, from_hm=from_hm, till_hm=till_hm,
+        courses=courses, all_courses_but=all_courses_but,
+        from_hm=from_hm, till_hm=till_hm,
         title_contains=str(entry.get("title_contains", "")),
         cache_minutes=int(entry.get("cache_minutes", 10)),
         all_day_events_also_count=bool(entry.get("all_day_events_also_count", True)),
         all_day_non_blocking_title_marker=str(entry.get("all_day_non_blocking_title_marker", "")),
         all_day_free_events_do_not_block=bool(entry.get("all_day_free_events_do_not_block", True)),
+        debug=bool(entry.get("debug", False)),
     )
 
 

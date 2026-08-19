@@ -1,1 +1,7 @@
-{{who}} {{verb}} {{course_title}} on {{occ_date}}.
+{{intro}}
+
+{{details}}
+{{spots_taken}} / {{capacity}} spots taken now.
+
+Cancel this booking: {{cancel_booking_url}}
+Cancel the entire session (all participants): {{cancel_session_url}}

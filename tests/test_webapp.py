@@ -2403,10 +2403,16 @@ class BookingFlowTest(unittest.TestCase):
         self.occs = occs
         self.occ_date = occs[0].date.isoformat()
 
+        # 2026-08-19: same opt-in convention as the two lists above --
+        # host-only emails must have NO html part at all, which can only
+        # be checked by capturing it.
+        self.sent_email_html: list[tuple[str, str, str | None]] = []
+
         def recorder(settings, to, subject, body, html_body=None, ics_attachment=None, bcc_addrs=(), reply_to=None):
             self.sent_emails.append((to, subject, body))
             self.sent_email_bcc.append((to, subject, bcc_addrs))
             self.sent_email_reply_to.append((to, subject, reply_to))
+            self.sent_email_html.append((to, subject, html_body))
 
         # Cancellation emails are composed in app.cancellation (factored
         # out of App on 2026-07-06 so `my-bt cancel` can reuse them), and the
@@ -2712,9 +2718,13 @@ class BookingFlowTest(unittest.TestCase):
             b for t, s, b in self.sent_emails
             if t == "admin@example.org" and s.startswith("Promoted from waitlist:")
         )
+        # 2026-08-19: host-only subjects are "<prefix>: <shortname> on
+        # <date> [taken/capacity]" -- shortname (not the long title) so
+        # the course is recognizable at a glance, plus the occupancy
+        # counter every host email carries now. See cancellation.host_subject.
         self.assertEqual(
             next(s for t, s, _ in self.sent_emails if t == "admin@example.org" and s.startswith("Promoted")),
-            f"Promoted from waitlist: Dynamic Ashtanga Vinyasa Yoga on {self.occ_date}",
+            f"Promoted from waitlist: yoga-class-1 on {self.occ_date} [1/1]",
         )
         self.assertIn("Guest1 <guest1@example.org>", admin_mail)
         self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", admin_mail)
@@ -3644,6 +3654,75 @@ class BookingFlowTest(unittest.TestCase):
             (t, s, r) for t, s, r in self.sent_email_reply_to if t == "admin@example.org" and s.startswith("New booking:")
         )
         self.assertEqual(reply_to, "regular@example.org")
+
+    def test_new_booking_admin_notification_reports_occupancy(self):
+        # 2026-07-22: the host's new-booking email now carries how many of
+        # how many spots are taken -- [x/capacity] in the subject and one
+        # line in the body. Course capacity is 1 here (see setUp), so a
+        # single solo booking fills it.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        _to, subject, body = next(
+            (t, s, b) for t, s, b in self.sent_emails
+            if t == "admin@example.org" and s.startswith("New booking:")
+        )
+        self.assertIn("[1/1]", subject)
+        self.assertIn("1 / 1 spots taken now", body)
+
+    def test_every_host_email_is_plain_ascii_with_an_occupancy_count(self):
+        # 2026-08-19, the standing rule for host-only mail: whatever the
+        # event, the operator's own copy is plain text (no HTML part), pure
+        # ASCII (no emoji), subject "<prefix>: <shortname> on <date>
+        # [taken/capacity]", and body carries the same count. This drives
+        # every host-facing path in one test on purpose -- the bug being
+        # fixed was exactly two of these having quietly drifted apart.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")          # new booking (fills capacity=1)
+        other, other_env = self._login_as_guest("second@example.org")
+        self._book("second@example.org", name="Second")            # new waitlist entry
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        self._post_with_session(                                   # cancel -> also promotes the waitlisted one
+            self.app.my_cancel, (reg.registration_id,), {"message": "cannot make it"}, environ,
+        )
+        promoted = self.store.registrations_for_user(other.user_id)[0]
+        self.app._send_reinstatement_emails(                       # rebooked
+            self.settings.course("yoga-class-1"), self.occ_date, other,
+            confirmed=True, reinstated_by="host", message="welcome back",
+        )
+        host_mails = [(s, b) for t, s, b in self.sent_emails if t == "admin@example.org"]
+        self.assertGreaterEqual(len(host_mails), 4)
+        for subject, body in host_mails:
+            self.assertTrue(subject.isascii(), subject)
+            self.assertTrue(body.isascii(), body)
+            self.assertRegex(subject, r"^.+: yoga-class-1 on \d{4}-\d{2}-\d{2} \[\d+/1\]$")
+            self.assertRegex(body, r"\d+ / 1 spots taken now\.")
+        for to, subject, html_body in self.sent_email_html:
+            if to == "admin@example.org":
+                self.assertIsNone(html_body, f"host copy {subject!r} still has an HTML part")
+        prefixes = {s.split(":")[0] for s, _ in host_mails}
+        self.assertEqual(
+            prefixes,
+            {"New booking", "New waitlist entry", "Canceled", "Promoted from waitlist", "Rebooked"},
+        )
+
+    def test_new_booking_admin_notification_has_both_cancel_links(self):
+        # 2026-07-22: the host email carries two no-login "magic" cancel
+        # links -- one for this single booking, one for the whole session.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._book("regular@example.org", name="Regular")
+        reg = self.store.registrations_for_user(user.user_id)[0]
+        _to, _subject, body = next(
+            (t, s, b) for t, s, b in self.sent_emails
+            if t == "admin@example.org" and s.startswith("New booking:")
+        )
+        self.assertIn(
+            f"Cancel this booking: https://example.org/host-cancel/{reg.registration_id}", body,
+        )
+        self.assertIn(
+            f"Cancel the entire session (all participants): "
+            f"https://example.org/host-cancel-occurrence/yoga-class-1/{self.occ_date}",
+            body,
+        )
 
     def test_participants_own_booking_confirmation_has_no_reply_to(self):
         user, environ = self._login_as_guest("regular@example.org")

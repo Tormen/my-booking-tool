@@ -11,11 +11,75 @@ bodies."""
 import unittest
 
 from app.cancellation import (
-    attention_html, booking_details_text, course_recap_html, greeting_html, html_email_body, intro_html, message_html,
+    attention_html, booking_details_text, course_recap_html, greeting_html, host_details_text, host_subject,
+    html_email_body, intro_html, message_html,
 )
 from app.config import CourseDateOverride
 
 from .helpers import make_course
+
+
+class HostDetailsTextTest(unittest.TestCase):
+    """2026-08-19: emails that only ever land in the operator's own inbox
+    are plain ASCII and drop the course description -- from comparing two
+    real host emails that had drifted apart (one emoji-rich HTML, one
+    plain text; one with an occupancy count, one without). Same builder
+    as the participant block, so the What/When/Where layout can't drift."""
+
+    def test_no_emoji_anywhere(self):
+        course = make_course(description="<p>Some description</p>")
+        details = host_details_text(course, "2026-08-19")
+        self.assertTrue(details.isascii(), details)
+
+    def test_keeps_what_when_where_in_the_same_order_as_the_guest_block(self):
+        course = make_course(description="")
+        details = host_details_text(course, "2026-08-19")
+        self.assertLess(details.index("What:"), details.index("When:"))
+        self.assertLess(details.index("When:"), details.index("Where:"))
+        self.assertIn("What: Dynamic Ashtanga Vinyasa Yoga", details)
+
+    def test_course_description_is_not_repeated_back_to_the_host(self):
+        course = make_course(description="<p>ONLY FOR DBG COWORKERS</p>")
+        self.assertNotIn("ONLY FOR DBG COWORKERS", host_details_text(course, "2026-08-19"))
+        # ...but the guest copy still gets it -- this is a host-only trim.
+        self.assertIn("ONLY FOR DBG COWORKERS", booking_details_text(course, "2026-08-19"))
+
+    def test_date_override_attention_line_survives(self):
+        # An exceptional time change is exactly what the host must still
+        # see -- only the emoji and the description are dropped.
+        course = make_course(description="", date_overrides=(
+            CourseDateOverride(date="2026-08-19", start_time="09:45", message="Starts an hour earlier"),
+        ))
+        details = host_details_text(course, "2026-08-19")
+        self.assertIn("ATTENTION: Starts an hour earlier", details)
+        self.assertTrue(details.isascii(), details)
+
+    def test_never_carries_the_optional_message(self):
+        # Every host template renders the comment via its own
+        # {{message_line}} macro -- if it also rode inside details, it
+        # would print twice.
+        course = make_course(description="")
+        self.assertNotIn("welcome back", host_details_text(course, "2026-08-19"))
+
+
+class HostSubjectTest(unittest.TestCase):
+    def test_shortname_date_and_occupancy(self):
+        course = make_course(shortname="lux-wed-yoga", capacity=14)
+        self.assertEqual(
+            host_subject("New booking", course, "2026-09-09", 1),
+            "New booking: lux-wed-yoga on 2026-09-09 [1/14]",
+        )
+
+    def test_uses_the_shortname_not_the_long_title(self):
+        course = make_course(shortname="lux-wed-yoga", title="DBG-only WED@Lux - Dynamic Ashtanga Vinyasa Yoga")
+        self.assertNotIn("Dynamic Ashtanga", host_subject("Canceled", course, "2026-09-09", 0))
+
+    def test_full_course_reads_as_taken_of_capacity(self):
+        course = make_course(shortname="trier-sat-yoga", capacity=12)
+        self.assertEqual(
+            host_subject("New waitlist entry", course, "2026-08-22", 12),
+            "New waitlist entry: trier-sat-yoga on 2026-08-22 [12/12]",
+        )
 
 
 class BookingDetailsTextTest(unittest.TestCase):

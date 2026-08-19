@@ -140,8 +140,8 @@ class VEventTest(unittest.TestCase):
         # test module/tests/test_calendar_sync.py.
         unfolded = ev.to_ics().replace("\r\n ", "")
         self.assertIn("ORGANIZER:mailto:calendar@example.org", unfolded)
-        self.assertIn("ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:cc1@example.org", unfolded)
-        self.assertIn("ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=FALSE:mailto:cc2@example.org", unfolded)
+        self.assertIn("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:cc1@example.org", unfolded)
+        self.assertIn("ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:cc2@example.org", unfolded)
 
 
 if __name__ == "__main__":

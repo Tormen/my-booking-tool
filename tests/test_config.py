@@ -211,6 +211,44 @@ capacity = 10
             ))
         self.assertIn("nope", str(ctx.exception))
 
+    def test_all_courses_but_blacklist_scopes_every_course_except_listed(self):
+        # 2026-07-24: mirror image of `courses` -- applies to every course
+        # NOT in the list. Works on any source kind (here booking_calendar).
+        toml_path = self._write(self._course_block("c1") + self._course_block("c2"))
+        toml_path.write_text(
+            toml_path.read_text()
+            + '\n[[conflict_calendar]]\nsource = "booking_calendar"\n'
+            'mode = "blocks"\nall_courses_but = ["c2"]\n'
+        )
+        (entry,) = load_settings(toml_path).conflict_calendars
+        self.assertEqual(entry.all_courses_but, ("c2",))
+        self.assertTrue(entry.applies_to("c1"))
+        self.assertFalse(entry.applies_to("c2"))
+
+    def test_courses_and_all_courses_but_together_is_an_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            load_settings(self._write_with_conflict_entry(
+                'ics_url = "https://cal.example.org/feed.ics"\n'
+                'courses = ["c1"]\nall_courses_but = ["c1"]'
+            ))
+        self.assertIn("mutually exclusive", str(ctx.exception))
+
+    def test_unknown_shortname_in_all_courses_but_is_an_error(self):
+        with self.assertRaises(ValueError) as ctx:
+            load_settings(self._write_with_conflict_entry(
+                'ics_url = "https://cal.example.org/feed.ics"\nall_courses_but = ["nope"]'
+            ))
+        self.assertIn("nope", str(ctx.exception))
+        self.assertIn("all_courses_but", str(ctx.exception))
+
+    def test_neither_scoping_key_applies_to_every_course(self):
+        settings = load_settings(self._write_with_conflict_entry(
+            'ics_url = "https://cal.example.org/feed.ics"'
+        ))
+        (entry,) = settings.conflict_calendars
+        self.assertEqual((entry.courses, entry.all_courses_but), ((), ()))
+        self.assertTrue(entry.applies_to("anything"))
+
     def test_entry_without_any_source_is_an_error(self):
         with self.assertRaises(ValueError) as ctx:
             load_settings(self._write_with_conflict_entry('mode = "blocks"'))

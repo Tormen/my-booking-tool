@@ -133,7 +133,9 @@ def cancel_registration(
         ics_filename, ics_text = calendar_sync.guest_cancel_ics(settings, course, date.fromisoformat(reg.occurrence_date))
         send_cancellation_emails(
             settings, course, reg.occurrence_date, user, canceled_by="host", message=message,
-            registration_id=registration_id, reinstate_token=reinstate_token,
+            registration_id=registration_id,
+            spots_taken=store.count_confirmed(course.shortname, reg.occurrence_date),
+            reinstate_token=reinstate_token,
             ics_attachment=(ics_filename, ics_text, "CANCEL"),
         )
         emailed = True

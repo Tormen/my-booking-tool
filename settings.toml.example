@@ -95,64 +95,104 @@ calendar      = "Bookings"
 # trainer_reminder_minutes     = []
 # participant_reminder_minutes = [60]
 
-# READ-ONLY conflict sources, one [[conflict_calendar]] block each,
-# consulted live for every candidate date (see README.md "Calendars").
-# mode = "blocks":   an event here HIDES the date (vacations, CANCELED
-#                    blocker events).
-# mode = "requires": a single matching event must SPAN the whole
-#                    from-till window or the date is hidden.
-# Each block applies to every course unless `courses = [...]` scopes it.
-# A source is EITHER source = "booking_calendar" (reuse its connection),
-# OR an ics_url (published read-only link), OR its own CalDAV set
-# (caldav_url + username + password_file + calendar).
+# ============================================================================
+# [[conflict_calendar]] -- READ-ONLY conflict sources. Any number of blocks;
+# each is consulted live for every candidate course date. Every block below is
+# written in full teaching form: each knob annotated inline (mandatory /
+# optional / default / what it depends on), with the values this template
+# ships ACTIVE and the unused options shown commented out right beside them.
+# ============================================================================
 
 [[conflict_calendar]]
-# The booking calendar itself must stay conflict-checked in blocks mode:
-# that's how a course avoids double-booking against its own synced
-# events, and how a "cancel entire session" blocker event actually hides
-# the canceled date. `my-bt admin health` warns if this block is missing.
-name    = "own-calendar"
-source  = "booking_calendar"   # reuse [booking_calendar]'s connection
-mode    = "blocks"
-#show_as = "any"               # blocks-mode default: every event counts
-# All-day events DO hide course dates by default, same as timed events
-# overlapping the course hours. Set to false if all-day entries
-# (birthdays, notes) should never block.
-#all_day_events_also_count = true
-# Escape hatch for the exceptional all-day event that should NOT block:
-# an all-day event whose title contains this marker (case-insensitive)
-# is ignored, e.g. "#course-ok" or "#free" -- so "Conference Day
-# #course-ok" leaves that day's courses bookable. "" (the default)
-# disables the marker feature.
-#all_day_non_blocking_title_marker = "#course-ok"
-# Second escape hatch, on by default: an all-day event marked "show as
-# Free" in the calendar app does not block. CAUTION: many calendar apps
-# create all-day events as Free BY DEFAULT -- an all-day event meant to
-# block may need to be set to "Busy" by hand. Timed events always block,
-# Free or not.
-#all_day_free_events_do_not_block = true
+# WHAT THIS BLOCK DOES: the booking calendar itself, in blocks mode -- how a
+# course avoids double-booking against its own synced events, and how a
+# "cancel entire session" blocker event hides the canceled date.
+# `my-bt admin health` warns if this block is missing.
 
-# Optional second kind of entry: courses only possible when ANOTHER
-# calendar (e.g. your employer's published Outlook calendar) shows a
-# matching event -- "no matching event = no session". Published ICS
-# links are cached under /var/lib/my-booking/conflict_cache/ and the
-# last good copy is reused if the source is down (with a WARNING email
-# to admin_email, at most one per day). NOTE: Outlook refreshes
-# published calendars on ITS own schedule -- the feed can lag the real
-# mailbox by minutes to hours.
+# (1) IDENTITY + SOURCE -- choose EXACTLY ONE source kind (mandatory: one)
+name    = "own-calendar"        # OPTIONAL label (default "conflict-N")
+source  = "booking_calendar"    # (a) reuse [booking_calendar]'s connection  <-- USED
+#ics_url = "https://.../calendar.ics"                # (b) published ICS link
+#caldav_url    = "https://dav.example.org/caldav/"   # (c) own CalDAV, and then
+#username      = "cal@example.org"                    #     these THREE become
+#password_file = "/etc/my-booking/secrets/other_caldav_password"  # mandatory:
+#calendar      = "Work"                              #     username/pw/calendar
+
+# (2) MODE + its window
+mode    = "blocks"              # "requires" (default) | "blocks"  <-- USED:
+#                               #   blocks   -> event OVERLAPPING window HIDES date
+#                               #   requires -> ONE event must SPAN window, else HIDE
+#from    = "HH:MM"              # OPTIONAL window start (default: this course's start)
+#till    = "HH:MM"              # OPTIONAL window end   (default: this course's end);
+#                               #   both work in EITHER mode (overlap/span window)
+
+# (3) FILTERS -- which events COUNT, and which courses (any source, any mode)
+#show_as = "any"               # DEFAULT DEPENDS ON MODE: "any" for blocks (this),
+#                               #   "oof" for requires. oof|busy|tentative|free|
+#                               #   workingelsewhere|any ("ooo" = oof alias)
+#title_contains = "text"       # OPTIONAL; event title must contain this (default off)
+# Course scope -- at most ONE of the next two (mutually exclusive); omit BOTH
+# (the default, as shipped) = this block checks EVERY course against the calendar:
+#courses         = ["morning-flow"]   # whitelist: apply ONLY to these
+#all_courses_but = ["morning-flow"]   # blacklist: apply to all courses EXCEPT these
+#all_day_events_also_count         = true  # default true: all-day events count like
+#                               #   timed ones; false -> all-day (birthdays) ignored
+#all_day_non_blocking_title_marker = ""    # default "" (off): all-day title contains
+#                               #   this -> ignored, e.g. "#free" in "Offsite #free"
+#all_day_free_events_do_not_block  = true  # default true: all-day "Free" ignored
+#                               #   (many apps default all-day to Free; set "Busy"
+#                               #   to count). Applies to ICS sources too.
+
+# (4) ICS-ONLY (ignored for CalDAV / booking_calendar) -- N/A for this source
+#cache_minutes = 10            # ICS only, default 10: in-process fetch-cache TTL (min)
+#debug         = true          # ICS only, default false: verbose per-fetch log trace
+
+# ----------------------------------------------------------------------------
+# OPTIONAL second block (shipped commented out -- uncomment the key lines and
+# fill in your own feed to enable). Same full teaching form as block A. Use it
+# to ALSO gate courses on ANOTHER calendar, e.g. your employer's published
+# Outlook feed: "no matching event = no session". Published ICS links are
+# cached under /var/lib/my-booking/conflict_cache/ and reused if the source is
+# down (a WARNING then a RESOLVED email to admin_email). Outlook refreshes
+# published calendars on ITS own schedule -- the feed can lag by min-to-hours.
+#
 #[[conflict_calendar]]
-#name    = "work"
-#ics_url = "https://outlook.office365.com/owa/calendar/REPLACE-ME/calendar.ics"
-#courses = ["morning-flow"]    # omit to apply to every course
-#mode    = "requires"          # the default
-#show_as = "oof"               # requires-mode default; "ooo" also accepted.
-#                              # Other values: busy / tentative / free /
-#                              # workingelsewhere / any. Matched from
-#                              # Outlook's X-MICROSOFT-CDO-BUSYSTATUS.
-#from    = ""                  # "HH:MM"; default: the course's start time
-#till    = ""                  # "HH:MM"; default: the course's end time
-#title_contains = ""           # event title must contain this (default: off)
-#cache_minutes  = 10           # in-process fetch cache TTL
+#
+# (1) IDENTITY + SOURCE -- choose EXACTLY ONE source kind (mandatory: one)
+#name    = "work"               # OPTIONAL label (default "conflict-N")
+##source  = "booking_calendar"  # (a) reuse [booking_calendar]'s connection
+#ics_url = "https://outlook.office365.com/owa/calendar/REPLACE-ME/calendar.ics"  # (b) published ICS link  <-- USED
+##caldav_url    = "https://dav.example.org/caldav/"  # (c) own CalDAV, and then
+##username      = "cal@example.org"                   #     these THREE become
+##password_file = "/etc/my-booking/secrets/other_caldav_password"  # mandatory:
+##calendar      = "Work"                             #     username/pw/calendar
+#
+# (2) MODE + its window
+#mode    = "requires"           # "requires" (default, USED here) | "blocks":
+#                               #   requires -> ONE event must SPAN window, else HIDE
+#                               #   blocks   -> event OVERLAPPING window HIDES date
+##from    = "HH:MM"             # OPTIONAL window start (default: this course's start)
+##till    = "HH:MM"             # OPTIONAL window end   (default: this course's end);
+#                               #   both work in EITHER mode (span/overlap window)
+#
+# (3) FILTERS -- which events COUNT, and which courses
+##show_as = "oof"              # DEFAULT DEPENDS ON MODE: "oof" for requires (this),
+#                               #   "any" for blocks. busy|tentative|free|
+#                               #   workingelsewhere|any ("ooo" = oof alias)
+##title_contains = "text"      # OPTIONAL; event title must contain this (default off)
+# Course scope -- at most ONE (mutually exclusive); omit both = every course:
+#courses = ["morning-flow"]     # whitelist: apply ONLY to these  <-- USED
+##all_courses_but = ["other-course"]  # blacklist form (apply to all EXCEPT these)
+##all_day_events_also_count         = true  # default true (see block A for the
+##all_day_non_blocking_title_marker = ""    #   full meaning of the 3 all-day knobs;
+##all_day_free_events_do_not_block  = true  #   identical here, ICS feeds included)
+#
+# (4) ICS-ONLY (this IS an ICS source, so these apply)
+##cache_minutes = 10           # ICS only, default 10: in-process fetch-cache TTL (min)
+##debug   = true               # ICS only, default false: verbose per-fetch log trace
+#                               #   at WARNING -- stat+sha256 of .ics/.ics.prev, a
+#                               #   /bin/cp -a backup before fetch, bytes+hash, pid.
+#                               #   Diagnostic only, noisy; leave off in normal use.
 
 [smtp]
 host          = "smtp.example.org"

@@ -142,6 +142,35 @@ class PartyAdmissionTest(GuestBookingTestBase):
         self.assertEqual(regs[0].status, STATUS_PENDING_CONFIRMATION)
         self.assertEqual(regs[0].party_id, "")
 
+    def test_party_admin_email_has_a_cancel_link_per_member_and_the_session(self):
+        # 2026-07-22: the host notification carries cancel links -- one
+        # per party member (there's no single "cancel this party" route)
+        # plus one "cancel the entire session" link.
+        self._book("leader@example.org", "Leader", [("guest@example.org", "Guest One")])
+        _to, subject, body = next(
+            (t, s, b) for t, s, b in self.sent_emails
+            if t == "admin@example.org" and s.startswith("New booking:")
+        )
+        self.assertIn("[2/2]", subject)  # capacity 2, both confirmed
+        regs = {r.user_id: r for r in self.store.all_registrations()}
+        leader = self.store.find_user_by_email("leader@example.org")
+        guest = self.store.find_user_by_email("guest@example.org")
+        self.assertIn(
+            f"Cancel Leader <leader@example.org>'s booking: "
+            f"https://example.org/host-cancel/{regs[leader.user_id].registration_id}",
+            body,
+        )
+        self.assertIn(
+            f"Cancel Guest One <guest@example.org>'s booking: "
+            f"https://example.org/host-cancel/{regs[guest.user_id].registration_id}",
+            body,
+        )
+        self.assertIn(
+            f"Cancel the entire session (all participants): "
+            f"https://example.org/host-cancel-occurrence/yoga-class-1/{self.occ_date}",
+            body,
+        )
+
 
 class PartyValidationTest(GuestBookingTestBase):
     def test_duplicate_guest_email_matching_leader_is_rejected(self):

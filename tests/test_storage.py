@@ -304,6 +304,31 @@ class RegistrationTest(StoreTestBase):
         self.assertFalse(self.store.cancel(reg.registration_id, canceled_by="guest"))
         self.assertEqual(self.store.count_confirmed("yoga-class-1", "2026-07-08"), 0)
 
+    def test_canceling_frees_the_place_back_for_both_guest_and_host_cancels(self):
+        # The available-places counter shown on the booking page is
+        # capacity - count_confirmed (see app/slots.py Occurrence.spots_left),
+        # so booking then canceling -- whether the GUEST cancels their own
+        # booking or the HOST cancels it for them -- must hand that place
+        # back by dropping count_confirmed by one.
+        capacity = 5
+        u1 = self.store.upsert_user_for_booking("a@b.com", "Alice")
+        u2 = self.store.upsert_user_for_booking("c@d.com", "Bob")
+        r1 = self.store.add_registration("yoga-class-1", "2026-07-08", u1.user_id, hash_token(new_token()))
+        r2 = self.store.add_registration("yoga-class-1", "2026-07-08", u2.user_id, hash_token(new_token()))
+
+        def places_left() -> int:
+            return capacity - self.store.count_confirmed("yoga-class-1", "2026-07-08")
+
+        self.assertEqual(places_left(), 3)  # two of five taken
+
+        # Guest cancels their own booking -> one place comes back.
+        self.assertTrue(self.store.cancel(r1.registration_id, canceled_by="guest"))
+        self.assertEqual(places_left(), 4)
+
+        # Host cancels the other booking -> that place comes back too.
+        self.assertTrue(self.store.cancel(r2.registration_id, canceled_by="host"))
+        self.assertEqual(places_left(), 5)  # back to fully open
+
     def test_cancel_works_on_pending_confirmation_row(self):
         # 2026-07-13: a guest who registered but hasn't yet clicked
         # their account-confirmation email link (STATUS_PENDING_CONFIRMATION)
