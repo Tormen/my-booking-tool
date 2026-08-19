@@ -880,7 +880,8 @@ def interactive_setup(
         # auto-copied silently -- but actively OFFER to act on each one
         # your checkout has a real (or .example) source for, instead of
         # just reporting a problem and leaving you to fix it yourself.
-        # Staying silent here was the actual bug (see the maintainer's local notes).
+        # Staying silent here was the actual bug (see the maintainer's
+        # local notes).
         # Two different offers depending on the situation: if nothing's
         # deployed yet, there's nothing to lose by a straight copy; but if
         # BOTH sides already have real content that differs, blindly

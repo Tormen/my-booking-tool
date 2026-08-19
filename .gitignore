@@ -2,8 +2,8 @@
 # Generic placeholders ship as the *.example versions (tracked); your real,
 # filled-in versions keep their normal filenames on disk and are simply
 # invisible to git. Nothing in this project (my-bt, the RPM, build/install
-# scripts) ever deletes or overwrites these -- see README.md and
-# the maintainer's local notes for the full reasoning.
+# scripts) ever deletes or overwrites these -- see README.md and the
+# maintainer's local notes for the full reasoning.
 /settings.toml
 /site/index.html
 /site/impressum.html

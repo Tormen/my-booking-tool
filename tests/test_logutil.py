@@ -5,8 +5,8 @@ datetime.now(timezone.utc) calls) -- and app/watchdog.py's
 _parse_app_log_timestamp() parses this exact asctime format and labels it
 UTC directly. That was only "correct by accident" as long as the server's
 OS timezone happened to be UTC; changing the server's system timezone
-(e.g. to Europe/Brussels, see the maintainer's local notes) would have silently skewed
-the watchdog's rate-limit-block detection window by the UTC offset.
+(e.g. to Europe/Brussels) would have silently skewed the watchdog's
+rate-limit-block detection window by the UTC offset.
 configure_logging() now forces UTC via Formatter.converter, independent
 of whatever the OS clock is set to.
 """

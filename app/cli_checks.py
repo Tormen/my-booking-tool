@@ -1119,8 +1119,9 @@ def check_static_pages_reachable(raw: dict) -> list[Check]:
     keep a git-tracked staging directory (static_site_dir) separate from
     the public webroot on purpose (e.g. to avoid exposing a `.git` folder
     under the public root), symlinking in only the specific files meant to
-    be public -- see the maintainer's local notes. So the suggested fix here is always
-    a per-file symlink, never "change static_site_dir". Hit in practice
+    be public -- see the maintainer's local notes. So the suggested fix
+    here is always a per-file symlink, never "change static_site_dir".
+    Hit in practice
     2026-07-05: privacy.html/terms.html/impressum.html existed in
     static_site_dir but had no matching symlink in nginx's actual root, so
     they 404'd for every visitor despite `status` reporting them fine."""
@@ -1229,8 +1230,8 @@ def check_static_pages_deployed(raw: dict, home: str) -> list[Check]:
         else:
             checks.append((f"static site content ({deployed})", "warn",
                             f"differs from your checkout's {source} -- vimdiff {deployed} {source} "
-                            "to compare/merge (both sides may have real content, unlike privacy.html "
-                            "-- see the maintainer's local notes)"))
+                            "to compare/merge (both sides may have real content, "
+                            "unlike privacy.html)"))
     return checks
 
 
@@ -1472,8 +1473,8 @@ def check_static_site_drift(raw: dict, template_path: str | Path) -> list[Check]
         # same message is shown both by `my-bt status` (which already ends
         # its report with that instruction once, generically) and inside
         # `my-bt setup -i` itself, where telling the user to run the very
-        # command they're already running is just confusing (see
-        # the maintainer's local notes).
+        # command they're already running is just confusing (see the
+        # maintainer's local notes).
         return [(f"static site ({deployed_path})", "warn",
                   "not deployed yet -- once generated, copy site/*.html to "
                   "your live host as usual (see README.md)")]

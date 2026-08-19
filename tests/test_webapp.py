@@ -3519,8 +3519,8 @@ class BookingFlowTest(unittest.TestCase):
         )
         self.assertIn("Yes, delete everything", body)
         # No-JS/no-<dialog>-support fallback must still be a real confirmation,
-        # not silently removed (see the maintainer's local notes -- this was a regression
-        # caught and fixed while wiring up the dialog).
+        # not silently removed (this was a regression caught and fixed
+        # while wiring up the dialog).
         self.assertIn(
             "onsubmit=\"return confirm('Delete your account and all related data? "
             "This will cancel any booking you still have!');\"",
@@ -5295,7 +5295,7 @@ class AdminLoginRateLimitTest(unittest.TestCase):
     could lock the real admin out of /admin/login for up to an hour with 5
     wrong guesses from any IP. It's now keyed per client IP (via
     webapp._client_ip(), which trusts X-Forwarded-For -- see
-    nginx/my-booking.conf) -- see the maintainer's local notes."""
+    nginx/my-booking.conf)."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -206,9 +206,9 @@ install -m 644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 # SOLUTION-DESIGN.md and the *-suggestion.html early drafts are NOT
 # packaged: they're personal design-rationale/history for one specific
 # deployment (real server details, real legal analysis), gitignored for
-# the same reason -- see the maintainer's local notes. Only the generic README.md and
-# the site/*.html below (real if you have them, else the generic
-# .example placeholders -- see scripts/build-rpm.sh) get shipped.
+# the same reason -- see the maintainer's local notes. Only the generic
+# README.md and the site/*.html below (real if you have them, else the
+# generic .example placeholders -- see scripts/build-rpm.sh) get shipped.
 #
 # site/index_embedded.html is included here unconditionally -- it's
 # DERIVED straight from site/index.html itself (real or .example, same

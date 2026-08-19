@@ -60,7 +60,7 @@ def html_to_text(markup: str) -> str:
     is NOT a general HTML sanitizer/renderer -- it only handles the tags a
     course description realistically uses (p/div/ul/ol/li/br/b/i/u/a), which
     is all settings.toml.example and every real course description in
-    the maintainer's local notes's deployment actually contain.
+    the maintainer's own deployment actually contain.
     """
     text = _HTML_A_RE.sub(lambda m: f"{_HTML_TAG_RE.sub('', m.group(2))} ({m.group(1)})", markup)
     text = _HTML_LI_RE.sub(lambda m: f"- {_HTML_TAG_RE.sub('', m.group(1)).strip()}\n", text)

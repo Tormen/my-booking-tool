@@ -20,8 +20,8 @@ line (log a user_id/registration_id instead; that's enough to cross-
 reference the CSVs if you need more detail). journald has its own
 retention that's independent of this app's GDPR retention_months config,
 so anything logged here effectively bypasses that -- keep it minimal on
-purpose. If you ever paste `journalctl` output into a bug report (e.g. to
-the assistant, or anyone else), skim it first for anything personal.
+purpose. If you ever paste `journalctl` output into a bug report, or
+share it with anyone else, skim it first for anything personal.
 """
 from __future__ import annotations
 
@@ -77,8 +77,8 @@ def configure_logging(log_file: str | None = None) -> bool:
     # defaults to the LOCAL system time for %(asctime)s, which was only
     # "correct by accident" as long as the server's OS timezone happened
     # to be UTC -- caught 2026-07-05 when changing the server's system
-    # timezone came up (see the maintainer's local notes): without this, the
-    # watchdog's rate-limit-block window would silently skew by the
+    # timezone came up: without this, the watchdog's rate-limit-block
+    # window would silently skew by the
     # server's UTC offset the moment the OS clock isn't UTC.
     formatter.converter = time.gmtime
     handlers: list[logging.Handler] = [logging.StreamHandler()]

@@ -83,9 +83,9 @@ trap 'rm -rf "$STAGE"' EXIT
 DEST="$STAGE/$NAME-$VERSION"
 mkdir -p "$DEST"
 # Copy everything except runtime/data/vcs cruft AND personal files that
-# are never packaged (same set .gitignore keeps out of git -- see
-# the maintainer's local notes): the package ships generic code + templates only,
-# never your actual registrations/secrets/personal design doc.
+# are never packaged (same set .gitignore keeps out of git -- see the
+# maintainer's local notes): the package ships generic code + templates
+# only, never your actual registrations/secrets/personal design doc.
 tar -C "$HERE" --exclude='./data' --exclude='./secrets' --exclude='./.git' \
     --exclude='./__pycache__' --exclude='./app/__pycache__' \
     --exclude='./tests/__pycache__' --exclude='./*.local.md' \

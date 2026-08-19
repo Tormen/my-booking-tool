@@ -8,9 +8,8 @@ an error, so no error message needs to be written.
 scripts/my-bt has no .py extension and lives outside app/, so it can't be
 imported with a plain `import` statement -- loaded here via
 importlib.machinery.SourceFileLoader, the same approach used for ad hoc
-manual smoke-testing of this script during development (see other
-the maintainer's local notes notes); this is the first time that loader pattern is
-checked into a committed test file.
+manual smoke-testing of this script during development; this is the first
+time that loader pattern is checked into a committed test file.
 """
 import contextlib
 import importlib.machinery

@@ -690,8 +690,8 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
     already guards the real file at `my-bt admin health` time, but that can
     only ever run somewhere the real file actually exists -- it never runs
     in this test suite/CI, since the real file is deliberately gitignored
-    (see the maintainer's local notes). This test instead guards the one nginx
-    reference file that IS tracked and ships to every fresh install,
+    (see the maintainer's local notes). This test instead guards the one
+    nginx reference file that IS tracked and ships to every fresh install,
     directly off disk (not a synthetic fixture like the tests above) --
     so any future new required location that's added to
     _REQUIRED_NGINX_LOCATIONS but forgotten in the .example file fails
@@ -781,10 +781,10 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
         file is never otherwise touched by this suite).
 
         The real file won't exist at all in a fresh checkout, CI, or the
-        RPM build environment (it's deliberately gitignored -- see
-        the maintainer's local notes and this class's own docstring) -- this test
-        no-ops (skips) rather than failing when it's absent, so it only
-        ever actually runs, and only ever protects against drift, on a
+        RPM build environment (it's deliberately gitignored -- see the
+        maintainer's local notes and this class's own docstring) -- this
+        test no-ops (skips) rather than failing when it's absent, so it
+        only ever actually runs, and only ever protects against drift, on a
         machine (the operator's own) where the real file lives alongside the
         checkout -- which is exactly where this kind of drift can happen
         unnoticed."""
