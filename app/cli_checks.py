@@ -1673,7 +1673,7 @@ def check_static_site_compliance(raw: dict) -> list[Check]:
 
 # -- CSP violation scanning (2026-07-13) --------------------------------------
 #
-# the operator had been manually clicking through every page after any inline-
+# The operator had been manually clicking through every page after any inline-
 # <script> edit to catch a stale CSP script-src hash (see the real
 # incidents documented in site/nginx-locations.conf.example's own CSP
 # comment -- this bit the schedule-exceptions banner and the booking-form's
@@ -2001,7 +2001,7 @@ def csp_script_src_patch(conf_text: str, hashes_to_add: list[str]) -> str:
 
 # -- Forensic log aggregation: `my-bt admin health report`/`errors` (2026-07-13) --
 #
-# the operator's own explicit ask: "my-bt health should also allow to collect
+# The operator's own explicit ask: "my-bt health should also allow to collect
 # information from all possible places for a given period ... in order to
 # support investigating anything strange happening with booking.example.org", to
 # include "nginx global logs, nginx yoga logs, my-bt logs and anything

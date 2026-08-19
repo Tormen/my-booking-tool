@@ -20,7 +20,7 @@ def _row(**overrides):
         "Meeting type": "Dynamic Ashtanga Vinyasa Yoga",
         "Meeting name": "Dynamic Ashtanga Vinyasa Yoga",
         "Location": "Example Gym",
-        "User name ": "the operator (admin@example.org)",
+        "User name ": "Example Host (host@example.org)",
         "Notes": "",
         "Is canceled": "No",
         "Cancellation time": "",

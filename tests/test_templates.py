@@ -82,7 +82,7 @@ class IdInputWidthTest(unittest.TestCase):
     stretched across the full-width 1000px body, section 14's own width
     change, showed the Name, Email, Password fields should not be that
     wide -- but wide enough for really long passwords (maybe 50 chars) and
-    emails like firstname.doublebarrelled-name@long-company.example (54
+    emails like firstname.doublebarrelled-name@long-company.example (51
     chars); 50 chars was confirmed as the actual target. `.id-input`
     caps `.big-input`'s own width:100% at a character-count width (ch
     scales with .big-input's own font-size) rather than a fixed pixel

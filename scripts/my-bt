@@ -2752,7 +2752,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_time_window_args(hsp)
     hsp.set_defaults(func=cmd_admin_health_errors)
 
-    # the operator's own preference (2026-07-13): reachable BOTH nested under
+    # The operator's own preference (2026-07-13): reachable BOTH nested under
     # `health` and as flat top-level admin commands, so there's no need to
     # remember which one it lives under -- same dual-registration precedent
     # as `admin logout`/`users logout` (exact same function, two names).
