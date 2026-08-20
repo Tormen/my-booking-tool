@@ -46,3 +46,8 @@ venv/
 # -- editor/OS cruft -----------------------------------------------------------
 .DS_Store
 *.swp
+
+# Local-only files: never published, carried between machines by
+# the container repo (see its .git.force-add-patterns).
+*.local
+*.local.*
