@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import cli_checks, maintenance, site_render
+from app import cli_checks, local_overlay, maintenance, site_render
 
 
 def _levels(checks):
@@ -679,6 +679,23 @@ class CheckNginxConfRepoFileTest(unittest.TestCase):
         self.assertIn("REPLACE-ME", detail)
 
 
+def _real_site_file(name: str) -> Path | None:
+    """The real, gitignored site/<name> wherever this checkout keeps it:
+    a `*.local/` overlay directory (app/local_overlay.py) first, then the
+    ordinary site/ path. None if there is no real copy at all, which is
+    what a fresh clone and CI look like -- the tests below skip then.
+
+    Resolved here rather than hardcoding site/<name>: when the real files
+    moved into an overlay, a hardcoded path made these tests skip
+    silently, i.e. a guard that quietly stopped guarding."""
+    repo_root = Path(__file__).resolve().parent.parent
+    from_overlay = local_overlay.source(repo_root, f"site/{name}")
+    if from_overlay is not None:
+        return from_overlay
+    ordinary = repo_root / "site" / name
+    return ordinary if ordinary.exists() else None
+
+
 class TrackedNginxExampleFileTest(unittest.TestCase):
     """Real regression, 2026-07-08: /host-cancel-occurrence/ was added to
     _REQUIRED_NGINX_LOCATIONS and to the tracked site/nginx-locations.conf
@@ -817,9 +834,9 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
         checkout -- which is exactly where this kind of drift can happen
         unnoticed."""
         base = Path(__file__).resolve().parent.parent / "site"
-        real_path = base / "nginx-locations.conf"
-        if not real_path.exists():
-            self.skipTest("site/nginx-locations.conf (real, gitignored) not present in this checkout")
+        real_path = _real_site_file("nginx-locations.conf")
+        if real_path is None:
+            self.skipTest("real, gitignored nginx-locations.conf not present in this checkout")
         example_path = base / "nginx-locations.conf.example"
         real_hashes = set(re.findall(r"'(sha256-[A-Za-z0-9+/=]+)'", real_path.read_text(encoding="utf-8")))
         example_hashes = set(
@@ -858,9 +875,9 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
         exact class of drift, on a machine (the operator's own) where the real,
         gitignored site/index.html lives alongside the checkout."""
         base = Path(__file__).resolve().parent.parent / "site"
-        real_index_path = base / "index.html"
-        if not real_index_path.exists():
-            self.skipTest("site/index.html (real, gitignored) not present in this checkout")
+        real_index_path = _real_site_file("index.html")
+        if real_index_path is None:
+            self.skipTest("real, gitignored index.html not present in this checkout")
         example_conf_path = base / "nginx-locations.conf.example"
         conf_hashes = set(
             re.findall(r"'(sha256-[A-Za-z0-9+/=]+)'", example_conf_path.read_text(encoding="utf-8"))
