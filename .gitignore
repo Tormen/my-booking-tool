@@ -1,27 +1,6 @@
-# -- your real, personal files ------------------------------------------------
-# Keep them in a directory whose name ends in .local (see README.md and
-# app/local_overlay.py) -- the two rules at the bottom of this file are
-# what hides them, and what your own backup/sync tooling carries.
-
-# -- runtime/local state -----------------------------------------------------
-/data/
-/secrets/
-__pycache__/
-*.pyc
-*.pyo
-
-# -- local build output -------------------------------------------------------
-*.egg-info/
-build/
-dist/
-.venv/
-venv/
-
-# -- editor/OS cruft -----------------------------------------------------------
-.DS_Store
-*.swp
-
 # Local-only files: never published, carried between machines by
-# the container repo (see its .git.force-add-patterns).
+# the container repo (see its .git.force-add-patterns). Everything
+# personal in this checkout is named this way -- see README.md and
+# app/local_overlay.py.
 *.local
 *.local.*
