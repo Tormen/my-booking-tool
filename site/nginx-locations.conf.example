@@ -16,6 +16,35 @@
 # (The redirect server{} block further down still uses certbot's original
 # if-based idiom for host matching; that one's fine as-is, see note there.)
 
+# ---------------------------------------------------------------------------
+# Serve the no-JavaScript homepage variant to <iframe> embeds (see
+# index_embedded.html in README.md "Static-site pages").
+#
+# A cross-origin frame carrying inline JavaScript is what security suites,
+# corporate web filters and privacy extensions react to -- several report
+# it to the visitor as an "XSS" block and refuse to render the frame at
+# all. index_embedded.html has no <script> tags whatsoever and every link
+# on it opens in a new top-level tab, so the framed document gives them
+# nothing to object to.
+#
+# Every current browser states what a navigation is FOR: Sec-Fetch-Dest is
+# "iframe" for a framed load and "document" for an ordinary one (Chrome 76+,
+# Firefox 90+, Safari 16.4+). Nothing here depends on WHO is embedding --
+# that would need Referer, which the embedding page controls and can
+# suppress. Which sites may embed at all stays the CSP frame-ancestors
+# directive's job, further down.
+#
+# This needs no cooperation from the embedding site: it keeps working
+# whatever URL they point their <iframe> at, as long as it is this site's
+# root. A browser too old to send the header simply gets index.html, i.e.
+# exactly what it got before. The try_files fallback below means a
+# deployment that has not deployed index_embedded.html serves index.html to
+# everyone, so this is safe to leave in place unconditionally.
+map $http_sec_fetch_dest $index_variant {
+    default  /index.html;
+    iframe   /index_embedded.html;
+}
+
 server {
     server_name REPLACE-ME-YOUR-DOMAIN;
     root /var/www/REPLACE-ME-YOUR-DOMAIN/public_html;
@@ -216,6 +245,11 @@ server {
     add_header Permissions-Policy "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()" always;
     add_header Cross-Origin-Opener-Policy "same-origin" always;
 
+    # Responses at "/" differ by Sec-Fetch-Dest (see the map at the top of
+    # this file), so caches must not reuse the framed variant for an
+    # ordinary visit, or the other way round.
+    add_header Vary "Sec-Fetch-Dest" always;
+
     # HARDENING: rate limiting for the static homepage itself (index.html).
     # Deliberately looser than the "booking" zone below - see nginx.conf for
     # the rationale. This location has no other effect: root/index are still
@@ -224,6 +258,16 @@ server {
     location = / {
         limit_req zone=homepage burst=20 nodelay;
         limit_conn perip 20;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
+        # Framed visitors get the script-free variant (see the map above);
+        # everyone else gets index.html, and so does everyone if
+        # index_embedded.html was never deployed.
+        #
+        # Deliberately NO add_header here: an add_header in a nested block
+        # DROPS every add_header inherited from the server block, which
+        # would silently serve the homepage with no CSP at all. The
+        # matching `Vary: Sec-Fetch-Dest` therefore sits up at server level
+        # with the other headers.
+        try_files $index_variant /index.html =404;
     }
 
     ############################################################

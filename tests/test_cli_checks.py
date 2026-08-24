@@ -708,6 +708,34 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
                     f"{path} missing from site/nginx-locations.conf.example",
                 )
 
+    def test_example_file_serves_the_embedded_variant_to_iframes(self):
+        """The three pieces of the Sec-Fetch-Dest homepage switch have to
+        stay together: a map at http level, the try_files that uses it, and
+        the matching Vary. Losing any one silently reverts framed visitors
+        to the scripted index.html -- the exact page some security products
+        refuse to render inside a cross-origin frame.
+
+        Also asserts what must NOT be there: an add_header inside
+        `location = /`. nginx drops every inherited add_header as soon as a
+        nested block sets one of its own, so that would serve the homepage
+        with no CSP at all."""
+        example = Path(__file__).resolve().parent.parent / "site" / "nginx-locations.conf.example"
+        text = example.read_text(encoding="utf-8")
+        self.assertRegex(text, r"map\s+\$http_sec_fetch_dest\s+\$index_variant\s*\{")
+        self.assertRegex(text, r"iframe\s+/index_embedded\.html\s*;")
+        # ...and the fallback, so a deployment without index_embedded.html
+        # still serves index.html to everyone rather than 404ing frames.
+        self.assertRegex(text, r"try_files\s+\$index_variant\s+/index\.html\s+=404\s*;")
+        self.assertIn('add_header Vary "Sec-Fetch-Dest" always;', text)
+
+        root_location = re.search(r"location\s*=\s*/\s*\{(.*?)\n    \}", text, re.DOTALL)
+        self.assertIsNotNone(root_location, "no `location = /` block in the example conf")
+        directives = "\n".join(
+            line for line in root_location.group(1).splitlines()
+            if not line.strip().startswith("#")      # the block's own comment SAYS add_header
+        )
+        self.assertNotIn("add_header", directives)
+
     def test_example_file_has_no_leftover_replace_me_in_the_csp_hash_count(self):
         # A cheap drift check this file's own comment block warns about:
         # the prose says how many hashes are allow-listed, and that number

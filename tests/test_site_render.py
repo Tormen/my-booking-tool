@@ -136,11 +136,17 @@ class DeriveIndexEmbeddedHtmlTest(unittest.TestCase):
         )
         self.assertIn('href="/my" target="_top"', out)
         self.assertIn('href="/book/sat-trier" target="_top"', out)
+        self.assertIn('href="https://example.org/unrelated" target="_top"', out)
         self.assertNotIn("rel=\"noopener noreferrer\"", out)
 
-    def test_leaves_unrelated_links_untouched(self):
+    def test_unrelated_links_are_retargeted_too_only_non_navigating_ones_are_not(self):
+        # Retargeting used to apply ONLY to this app's own routes, which
+        # left any other link loading inside the embedding iframe -- for a
+        # link back to the embedding site itself, that meant rendering that
+        # page nested inside its own frame. See RetargetEveryLinkTest.
         out = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
-        self.assertIn('<a href="https://example.org/unrelated">Unrelated external link</a>', out)
+        self.assertIn('<a href="https://example.org/unrelated" target="_blank" '
+                      'rel="noopener noreferrer">Unrelated external link</a>', out)
         self.assertIn('<a href="mailto:someone@example.org">Email us</a>', out)
 
     def test_base_url_prefixed_links_also_match(self):
@@ -289,6 +295,50 @@ class DeriveIndexEmbeddedHtmlTest(unittest.TestCase):
             content = out_path.read_text(encoding="utf-8")
             self.assertIn("ATTENTION", content)
             self.assertTrue(content.startswith(site_render.EMBEDDED_MANAGED_MARKER))
+
+
+class RetargetEveryLinkTest(unittest.TestCase):
+    """Every navigating link on the embedded page must leave the iframe --
+    not only the ones pointing at this app's own routes. A link back to the
+    embedding site, left alone, would render that page nested inside its
+    own frame."""
+
+    def _derive(self, extra_links: str, new_tab_links: bool = True) -> str:
+        html = _SAMPLE_INDEX_HTML.replace("</body>", f"{extra_links}</body>")
+        return site_render.derive_index_embedded_html(
+            html, (_course(),), "2026-07-10", "", new_tab_links,
+        )
+
+    def test_a_link_to_an_unrelated_site_is_retargeted_too(self):
+        out = self._derive('<a href="https://embedding-site.example/page/">back</a>')
+        self.assertIn(
+            '<a href="https://embedding-site.example/page/" target="_blank" '
+            'rel="noopener noreferrer">', out,
+        )
+
+    def test_new_tab_links_false_breaks_out_in_the_same_tab_instead(self):
+        out = self._derive('<a href="https://embedding-site.example/">back</a>',
+                           new_tab_links=False)
+        self.assertIn('<a href="https://embedding-site.example/" target="_top">', out)
+
+    def test_an_existing_target_is_replaced_not_duplicated(self):
+        out = self._derive('<a href="https://elsewhere.example/" target="_self">x</a>')
+        self.assertIn('<a href="https://elsewhere.example/" target="_blank" '
+                      'rel="noopener noreferrer">', out)
+        self.assertNotIn('target="_self"', out)
+
+    def test_mailto_tel_and_fragment_links_are_left_exactly_alone(self):
+        # A mail or phone link opened in a new tab strands a blank tab, and
+        # a bare fragment scrolls the page it is already on.
+        for href in ("mailto:someone@example.org", "tel:+352123456", "#top"):
+            with self.subTest(href=href):
+                out = self._derive(f'<a href="{href}">x</a>')
+                self.assertIn(f'<a href="{href}">', out)
+
+    def test_the_apps_own_routes_still_get_retargeted(self):
+        out = self._derive("")
+        self.assertNotIn('<a href="/my">', out)
+        self.assertIn('href="/my" target="_blank" rel="noopener noreferrer"', out)
 
 
 if __name__ == "__main__":

@@ -1730,12 +1730,29 @@ that ever applies to it:
 - The schedule-exceptions banner is baked in **at derivation time** from
   whatever upcoming `[[course.date_override]]` entries `settings.toml` has,
   not fetched live in the visitor's browser.
-- Every link to one of this app's own routes (Login/`/my`, every course's
-  `/book/<shortname>` link, and the footer's `/terms.html`/`/privacy.html`/
-  `/impressum.html` links) gets its `target`/`rel` rewritten per
-  `[site].index_embedded_new_tab_links` (see below) -- any OTHER link
-  (a `mailto:`, an external site, custom markup) is left exactly as
-  `index.html` has it.
+- EVERY link that navigates somewhere gets its `target`/`rel` rewritten
+  per `[site].index_embedded_new_tab_links` (see below) -- this app's own
+  routes (Login/`/my`, each course's `/book/<shortname>`, the footer's
+  legal pages) and any other link alike, including one pointing back at
+  the embedding site itself: left alone, that would render the embedding
+  page nested inside its own frame. Links that do not navigate --
+  `mailto:`, `tel:`, a bare `#fragment` -- are left exactly as
+  `index.html` has them, since opening a mail link in a new tab just
+  strands a blank one.
+
+**Serving it to embeds without the embedding site changing anything.**
+`site/nginx-locations.conf(.example)` maps `Sec-Fetch-Dest` -- which every
+current browser sends, `iframe` for a framed load and `document` for an
+ordinary one -- so `/` serves `index_embedded.html` inside a frame and
+`index.html` everywhere else, with `Vary: Sec-Fetch-Dest` set at server
+level so caches keep them apart. Nothing depends on WHO is embedding (that
+would need `Referer`, which the embedding page controls and can suppress);
+which sites may embed at all remains `frame-ancestors`' job. A browser too
+old to send the header, or a deployment that never deployed
+`index_embedded.html`, simply gets `index.html` -- so the mapping is safe
+to leave in place whether or not you embed. Pointing the `<iframe>`
+straight at `/index_embedded.html` also works and needs no mapping; the
+mapping is what makes an embed you do not control work anyway.
 
 **Optional, and DERIVED straight from `index.html` itself -- no separate
 template file to maintain:** unlike `privacy.html` (rendered from a

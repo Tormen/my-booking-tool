@@ -220,10 +220,16 @@ _ANCHOR_TAG_RE = re.compile(r'<a\s+[^>]*?href="([^"]*)"[^>]*>', re.IGNORECASE)
 _TARGET_ATTR_RE = re.compile(r'\s+target="[^"]*"', re.IGNORECASE)
 _REL_ATTR_RE = re.compile(r'\s+rel="[^"]*"', re.IGNORECASE)
 
-# The routes this app itself serves that must never try to load inside the
-# embedding <iframe> -- everything else on the page is left untouched (see
-# module comment above).
+# The routes this app itself serves. Their <a> tags are the ones whose
+# presence is verified (see derive_index_embedded_html's fail-fast checks);
+# retargeting itself applies to every link on the page, see
+# _retarget_links below.
 _KNOWN_STATIC_PATHS = ("/terms.html", "/privacy.html", "/impressum.html")
+
+# Schemes that must NEVER be given target="_blank": opening a mail or phone
+# link in a new tab leaves the visitor with a blank tab that never
+# navigates, and a bare "#fragment" scrolls the page it is already on.
+_NON_NAVIGATING_HREF_PREFIXES = ("mailto:", "tel:", "sms:", "javascript:", "#")
 
 
 def extract_script_bodies(html_text: str) -> list[str]:
@@ -266,22 +272,36 @@ def _known_app_path(href: str, base_url: str) -> str | None:
     return None
 
 
+def _retargetable(href: str) -> bool:
+    """Whether `href` is a link that navigates somewhere and can therefore
+    sensibly be retargeted -- see _NON_NAVIGATING_HREF_PREFIXES."""
+    stripped = href.strip()
+    if not stripped:
+        return False
+    return not stripped.lower().startswith(_NON_NAVIGATING_HREF_PREFIXES)
+
+
 def _retarget_links(html_text: str, base_url: str, new_tab_links: bool) -> tuple[str, int, int]:
-    """Rewrites target/rel on every <a> tag whose href matches one of this
-    app's own known routes (see _known_app_path above); every other <a> tag
-    is returned byte-identical. Returns (rewritten_html, my_link_count,
-    book_link_count) -- the two counts are exactly what
-    derive_index_embedded_html()'s own fail-fast checks below need, counted
-    here (one regex pass) rather than re-scanning the text a second time."""
+    """Rewrites target/rel on EVERY navigating <a> tag, not only the ones
+    pointing at this app's own routes. Anything left on its own target
+    would load inside the embedding <iframe>, which for a link back to the
+    embedding site itself means rendering that page nested inside its own
+    frame. Links that do not navigate (mailto:, tel:, #fragment -- see
+    _retargetable) are returned byte-identical.
+
+    Returns (rewritten_html, my_link_count, book_link_count) -- the two
+    counts are exactly what derive_index_embedded_html()'s own fail-fast
+    checks below need, counted here (one regex pass) rather than
+    re-scanning the text a second time."""
     counts = {"/my": 0, "/book/": 0}
 
     def repl(m: re.Match) -> str:
         tag, href = m.group(0), m.group(1)
         matched = _known_app_path(href, base_url)
-        if matched is None:
-            return tag  # not one of this app's own routes -- leave untouched
         if matched in counts:
             counts[matched] += 1
+        if matched is None and not _retargetable(href):
+            return tag
         tag = _TARGET_ATTR_RE.sub("", tag)
         tag = _REL_ATTR_RE.sub("", tag)
         attrs = ' target="_blank" rel="noopener noreferrer"' if new_tab_links else ' target="_top"'
