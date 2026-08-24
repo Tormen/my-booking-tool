@@ -51,14 +51,24 @@ except ModuleNotFoundError:  # Python < 3.11 (dev/test only, not the target serv
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from app import site_render  # noqa: E402 - after sys.path setup, deliberately
+from app import local_overlay, site_render  # noqa: E402 - after sys.path setup, deliberately
 
 
 def resolve_real_or_example(real_path: Path) -> Path:
-    """Prefer `real_path` if it exists (your real, customized file --
-    never touched); otherwise fall back to `<real_path>.example` (the
-    tracked, generic placeholder). Raises FileNotFoundError if neither
-    exists, so a genuinely missing file still fails loudly."""
+    """Prefer the real file -- from a `*.local/` overlay directory if
+    this checkout has one (see app/local_overlay.py), else at its
+    ordinary path -- and never touch it. Otherwise fall back to
+    `<real_path>.example` (the tracked, generic placeholder). Raises
+    FileNotFoundError if none of them exists, so a genuinely missing file
+    still fails loudly."""
+    try:
+        rel = real_path.relative_to(REPO_ROOT)
+    except ValueError:
+        rel = None                       # an explicit path from outside the checkout
+    if rel is not None:
+        from_overlay = local_overlay.source(REPO_ROOT, str(rel))
+        if from_overlay is not None:
+            return from_overlay
     if real_path.exists():
         return real_path
     example_path = real_path.with_name(real_path.name + ".example")
@@ -101,7 +111,8 @@ def render(settings_path: Path | None = None) -> tuple[list[str], dict]:
     for tmpl_rel, out_rel in TEMPLATES:
         tmpl_path = resolve_real_or_example(REPO_ROOT / tmpl_rel)
         site_render.write_privacy_html(
-            tmpl_path, retention_months, canceled_retention_months, REPO_ROOT / out_rel
+            tmpl_path, retention_months, canceled_retention_months,
+            local_overlay.output(REPO_ROOT, out_rel),
         )
         written.append(out_rel)
 
@@ -116,7 +127,7 @@ def render(settings_path: Path | None = None) -> tuple[list[str], dict]:
     try:
         site_render.write_derived_index_embedded_html(
             embedded_source_path.read_text(encoding="utf-8"), courses, today, base_url, new_tab_links,
-            REPO_ROOT / EMBEDDED_OUTPUT_REL, custom_attention_message,
+            local_overlay.output(REPO_ROOT, EMBEDDED_OUTPUT_REL), custom_attention_message,
         )
         written.append(EMBEDDED_OUTPUT_REL)
     except site_render.IndexEmbeddedDerivationError as exc:
@@ -135,6 +146,12 @@ def render(settings_path: Path | None = None) -> tuple[list[str], dict]:
 
 
 def main() -> int:
+    # The `written` paths below are repo-relative names; say once where
+    # they actually landed when this checkout keeps its real files in a
+    # `*.local/` overlay directory (app/local_overlay.py).
+    overlay = local_overlay.find(REPO_ROOT)
+    if overlay is not None:
+        print(f"writing into {overlay.name}/")
     written, values = render()
     for out_rel in written:
         if out_rel == "site/privacy.html":

@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlparse
 
-from . import config, maintenance, site_render
+from . import config, local_overlay, maintenance, site_render
 from .caldav_client import CalDAVClient, HttpTransport
 
 Check = tuple[str, str, str]  # (label, "ok"|"warn"|"fail", detail)
@@ -725,6 +725,74 @@ def check_nginx_locations() -> list[Check]:
 _NGINX_CONF_FILENAME = "nginx-locations.conf"
 
 
+# The real, per-deployment files a `*.local/` overlay may hold, as paths
+# relative to the repo root -- the same set scripts/build-rpm.sh stages
+# into the package. The second element says whether a generic
+# `<name>.example` exists for it: site/privacy.html and
+# site/index_embedded.html are GENERATED (from privacy.html.tmpl and from
+# index.html respectively), so there is no placeholder to fall back to and
+# "would be packaged from the .example" can never apply to them.
+_OVERLAY_REAL_FILES = (
+    ("settings.toml", True),
+    ("site/index.html", True),
+    ("site/impressum.html", True),
+    ("site/terms.html", True),
+    ("site/privacy.html.tmpl", True),
+    ("site/nginx-locations.conf", True),
+    ("site/privacy.html", False),
+    ("site/index_embedded.html", False),
+)
+
+
+def check_local_overlay(home: str) -> list[Check]:
+    """Whether this checkout's `*.local/` overlay directory (see
+    app/local_overlay.py) is in a state that will package correctly.
+
+    A no-op returning [] when there is no overlay at all -- that is what a
+    fresh clone of the public template and every INSTALLED system look
+    like, and the overlay is an operator convention, never a requirement.
+    So this check never suggests creating one, and never names one.
+
+    What it catches, all of it BEFORE a build rather than after:
+
+    - Two or more overlay directories: a hard failure, since which one
+      holds the real files is ambiguous and picking silently would package
+      the wrong site.
+    - A file that exists BOTH in the overlay and at its ordinary in-repo
+      path: one copy silently wins every lookup and the other rots. Left
+      behind by an interrupted move, typically. `setup -i` offers a
+      vimdiff rather than a blind copy -- either side may be the keeper,
+      the same reasoning as the .rpmnew and static-page flows.
+    - A file present in NEITHER, whose generic `<name>.example` would
+      therefore be packaged in its place. That fallback is deliberate (a
+      stranger's clone must still build) but silent, which is exactly how
+      a set of missing real files once went unnoticed for weeks. Related
+      to check_static_site_compliance(), which finds the same problem one
+      step later, in the pages already deployed under static_site_dir."""
+    try:
+        overlay = local_overlay.find(home)
+    except local_overlay.LocalOverlayError as exc:
+        return [("local overlay", "fail", str(exc))]
+    if overlay is None:
+        return []
+
+    out: list[Check] = [("local overlay", "ok", f"{overlay.name}/")]
+    for rel, has_example in _OVERLAY_REAL_FILES:
+        in_overlay = (overlay / rel).is_file()
+        in_repo = (Path(home) / rel).is_file()
+        if in_overlay and in_repo:
+            out.append((f"local overlay ({rel})", "warn",
+                        f"exists in BOTH {overlay.name}/{rel} and {rel} -- the overlay "
+                        "copy wins every lookup and the other one goes stale; merge and "
+                        "remove one"))
+        elif not in_overlay and not in_repo and has_example:
+            if (Path(home) / f"{rel}.example").is_file():
+                out.append((f"local overlay ({rel})", "warn",
+                            f"no real file anywhere -- a build would package the generic "
+                            f"{rel}.example in its place"))
+    return out
+
+
 def check_nginx_conf_repo_file(home: str) -> list[Check]:
     """Whether a real, filled-in nginx vhost conf file exists at the fixed
     site/nginx-locations.conf path in this checkout, and if so, whether it
@@ -747,7 +815,9 @@ def check_nginx_conf_repo_file(home: str) -> list[Check]:
     a from-scratch install legitimately has none until you've hardened
     one, same as [site].static_site_dir being optional elsewhere in this
     module."""
-    f = Path(home) / "site" / _NGINX_CONF_FILENAME
+    f = local_overlay.source(home, f"site/{_NGINX_CONF_FILENAME}")
+    if f is None:
+        f = Path(home) / "site" / _NGINX_CONF_FILENAME
     if not f.exists():
         return [(f"nginx vhost conf (site/{_NGINX_CONF_FILENAME})", "warn",
                   f"no real, personal nginx vhost conf file found yet -- copy "
@@ -834,6 +904,9 @@ def _resolve_nginx_conf_checkout_source(home: str) -> Path | None:
     LONGER depends on nginx_conf_path's own basename -- the checkout side
     always uses the one fixed filename (_NGINX_CONF_FILENAME), regardless
     of what nginx_conf_path is called on the live server."""
+    from_overlay = local_overlay.source(home, f"site/{_NGINX_CONF_FILENAME}")
+    if from_overlay is not None:
+        return from_overlay
     real = Path(home) / "site" / _NGINX_CONF_FILENAME
     if real.exists():
         return real
@@ -1163,10 +1236,16 @@ _DOC_SITE_DIR = Path("/usr/share/doc/my-booking-tool/site")
 
 
 def _resolve_static_source(home: str, name: str) -> Path | None:
-    """The checkout's real site/<name>, falling back to site/<name>.example
-    (both relative to `home` -- correct when running straight from a git
+    """The checkout's real site/<name> -- from a `*.local/` overlay
+    directory first if there is one (see app/local_overlay.py), else at
+    its ordinary path -- falling back to site/<name>.example (both
+    relative to `home` -- correct when running straight from a git
     checkout), then to the RPM's installed %doc reference copy at
-    _DOC_SITE_DIR (correct on an actual installed system)."""
+    _DOC_SITE_DIR (correct on an actual installed system, which never has
+    an overlay, so that first lookup is simply a no-op there)."""
+    from_overlay = local_overlay.source(home, f"site/{name}")
+    if from_overlay is not None:
+        return from_overlay
     real = Path(home) / "site" / name
     if real.exists():
         return real

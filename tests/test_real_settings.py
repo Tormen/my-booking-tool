@@ -36,7 +36,8 @@ does this feed fetch) belong to `my-bt admin health`, which already does
 them; duplicating them here would make the test suite depend on the
 network and on someone else's uptime.
 
-Searched, in order: $MY_BOOKING_SETTINGS, this checkout's own
+Searched, in order: $MY_BOOKING_SETTINGS, this checkout's `*.local/`
+overlay directory (app/local_overlay.py), this checkout's own
 settings.toml, then the installed /etc/my-booking/settings.toml.
 """
 import os
@@ -44,10 +45,15 @@ import unittest
 from pathlib import Path
 
 from app import config as app_config
+from app import local_overlay
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_OVERLAY_SETTINGS = local_overlay.source(_REPO_ROOT, "settings.toml")
 
 _CANDIDATES = (
     os.environ.get("MY_BOOKING_SETTINGS") or "",
-    str(Path(__file__).resolve().parent.parent / "settings.toml"),
+    str(_OVERLAY_SETTINGS) if _OVERLAY_SETTINGS else "",
+    str(_REPO_ROOT / "settings.toml"),
     "/etc/my-booking/settings.toml",
 )
 

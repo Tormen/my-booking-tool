@@ -61,6 +61,29 @@ The split:
   (`settings.toml`, `site/privacy.html.tmpl`) that `my-bt` reads at
   runtime -- see "Installing" below.
 
+**Optional: keep your real files together in a `*.local/` directory.**
+Instead of leaving them at the paths above, you can put the whole set in
+one directory whose name ends in `.local` at the repo root, mirroring the
+repo's own layout:
+
+    my-booking.local/settings.toml
+    my-booking.local/site/index.html
+    my-booking.local/site/nginx-locations.conf
+
+Every lookup prefers that copy -- `my-bt admin health`/`admin setup`,
+`scripts/render-site.py` (which also writes the generated
+`site/privacy.html` and `site/index_embedded.html` there), and
+`scripts/build-rpm.sh`, which packages from it. Exactly one such directory
+is allowed; two are an error, since which one is meant would be ambiguous.
+Nothing requires this -- with no such directory, everything behaves exactly
+as described above -- and it never applies to an installed system, where
+`my-bt` reads the real files the package already baked in. The point is
+backup and sync tooling that works on name patterns: a directory called
+`my-booking.local` is easy to carry as a unit, where seven files scattered
+at ordinary paths are easy to leave behind. `my-bt admin health` warns if a
+file ends up in both places, or if a real file is missing so that a generic
+`.example` would be packaged in its place.
+
 `site/nginx-locations.conf` is a real, hardened nginx vhost reference --
 a FIXED filename (2026-07-10: renamed from being named after the host's own
 domain, specifically so every real-vs-`.example` pair in `site/` follows

@@ -13,21 +13,12 @@
 /site/nginx-locations.conf
 /site/index_embedded.html
 
-# Early drafts of the same real legal content above, kept locally for
-# history but not meant for the public template repo.
-/legal-notice-suggestion.html
-/privacy-policy-suggestion.html
-/terms-suggestion.html
-
-# Full design-rationale doc: written for/about this specific deployment
-# (real server, real accounts, real legal analysis) -- personal reference,
-# not a generic template like README.md.
-/SOLUTION-DESIGN.md
-
-# Personal, non-shared dev notes. Deliberately matched by extension
-# (*.local.md), not by the literal filename, so this file never has to be
-# named in a file that itself gets published.
-*.local.md
+# ...or keep that whole set together in ONE directory named `*.local`
+# instead (e.g. my-booking.local/settings.toml,
+# my-booking.local/site/index.html), which the two rules at the bottom of
+# this file already cover. Every lookup prefers it -- see
+# app/local_overlay.py. The per-path rules above stay regardless, so the
+# ordinary layout keeps working and stays unpublishable either way.
 
 # -- runtime/local state -----------------------------------------------------
 /data/

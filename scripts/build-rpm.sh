@@ -48,28 +48,21 @@ fi
 
 rpmdev-setuptree >/dev/null 2>&1 || mkdir -p "$RPMBUILD_DIR"/{SOURCES,SPECS,RPMS,SRPMS,BUILD,BUILDROOT}
 
-# Fresh clone of the public template repo? This checkout only has the
-# tracked *.example placeholders (settings.toml.example, site/*.example),
-# not real per-deployment files -- materialize the real filenames from
-# them so the build below has something to package, exactly mirroring
-# what scripts/install.sh already does for settings.toml ("if you don't
-# already have one, install the generic default; never overwrite one you
-# do have"). If you already have real files (the normal case for an
-# actual deployment), every line below is a no-op -- this NEVER
-# overwrites a real file that already exists.
-#
-# site/nginx-locations.conf added 2026-07-10: without this, the packaged
-# RPM never carried this file at all (see packaging/my-booking-tool.spec's
-# %install/%files, updated the same day) -- meaning `my-bt setup -i`
-# (default MY_BOOKING_HOME=/opt/my-booking) could never find a real one to
-# vimdiff against, no matter how complete this SOURCE checkout's own copy
-# was -- the whole point of having this file locally.
-for real in settings.toml site/index.html site/impressum.html site/terms.html site/privacy.html.tmpl site/nginx-locations.conf; do
-  if [ ! -f "$HERE/$real" ] && [ -f "$HERE/$real.example" ]; then
-    cp "$HERE/$real.example" "$HERE/$real"
-    echo "no $real found -- using the generic $real.example as a starting point"
+# Real, per-deployment files may live in a `*.local/` OVERLAY directory
+# (see app/local_overlay.py) instead of at their ordinary paths, so that
+# the operator's own backup/sync tooling -- which carries what is named
+# `*.local` -- actually carries them. Locate it here for the staging step
+# further down; exactly one is allowed, none is perfectly normal.
+OVERLAY=""
+for _candidate in "$HERE"/*.local; do
+  [ -d "$_candidate" ] || continue
+  if [ -n "$OVERLAY" ]; then
+    echo "more than one *.local/ overlay directory in $HERE -- keep exactly one" >&2
+    exit 1
   fi
+  OVERLAY="$_candidate"
 done
+[ -n "$OVERLAY" ] && echo "using real files from $(basename "$OVERLAY")/"
 
 # Regenerate generated static-site pages (site/privacy.html) from their
 # .tmpl source + the actual settings.toml in this checkout, so a package
@@ -88,12 +81,32 @@ mkdir -p "$DEST"
 # only, never your actual registrations/secrets/personal design doc.
 tar -C "$HERE" --exclude='./data' --exclude='./secrets' --exclude='./.git' \
     --exclude='./__pycache__' --exclude='./app/__pycache__' \
-    --exclude='./tests/__pycache__' --exclude='./*.local.md' \
-    --exclude='./SOLUTION-DESIGN.md' \
-    --exclude='./legal-notice-suggestion.html' \
-    --exclude='./privacy-policy-suggestion.html' \
-    --exclude='./terms-suggestion.html' \
+    --exclude='./tests/__pycache__' \
+    --exclude='./*.local' --exclude='./*.local.*' \
     -cf - . | tar -C "$DEST" -xf -
+
+# Now put the real files in place INSIDE the staging copy only -- this
+# never writes into the checkout itself. Two sources, in the same order
+# every other lookup uses: the overlay first, then the generic .example
+# placeholder for anything still missing (a fresh clone of the public
+# template has only the latter, and must still build).
+#
+# site/nginx-locations.conf is in this list since 2026-07-10: without it
+# the packaged RPM never carried the file at all (see packaging/
+# my-booking-tool.spec's %install/%files), so `my-bt setup -i` on the
+# installed system could never find a real one to vimdiff against, no
+# matter how complete this SOURCE checkout's copy was.
+for real in settings.toml site/index.html site/impressum.html site/terms.html \
+            site/privacy.html site/privacy.html.tmpl site/index_embedded.html \
+            site/nginx-locations.conf; do
+  if [ -n "$OVERLAY" ] && [ -f "$OVERLAY/$real" ]; then
+    mkdir -p "$DEST/$(dirname "$real")"
+    cp "$OVERLAY/$real" "$DEST/$real"
+  elif [ ! -f "$DEST/$real" ] && [ -f "$DEST/$real.example" ]; then
+    cp "$DEST/$real.example" "$DEST/$real"
+    echo "no $real found -- using the generic $real.example as a starting point"
+  fi
+done
 
 # `my-bt --version` (app/version.py) reads this at runtime -- the
 # installed tree has no .git directory (excluded above), so bake the

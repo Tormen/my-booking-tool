@@ -199,6 +199,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "selinux": cli_checks.check_selinux(),
         "nginx_locations": cli_checks.check_nginx_locations(),
         "nginx_conf_repo_file": cli_checks.check_nginx_conf_repo_file(home),
+        "local_overlay": cli_checks.check_local_overlay(home),
         "nginx_conf_deployed": cli_checks.check_nginx_conf_deployed(raw),
         "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
         "index_embedded_drift": cli_checks.check_index_embedded_drift(raw),
@@ -314,6 +315,9 @@ def print_report(
 
     print_fn("\n   Real, personal nginx vhost conf kept in this checkout's site/ dir (if any):")
     show(report["nginx_conf_repo_file"])
+    # Silent unless this checkout keeps its real files in a *.local/
+    # overlay directory -- always empty on an installed system.
+    show(report["local_overlay"])
 
     print_fn("\n   Real, DEPLOYED nginx vhost conf ([site].nginx_conf_path, read directly off disk):")
     if report["nginx_conf_deployed"]:
