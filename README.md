@@ -52,19 +52,21 @@ The split:
   throughout, marked with `REPLACE-ME`.
 - `settings.toml`, `site/index.html`, `site/impressum.html`,
   `site/privacy.html`, `site/privacy.html.tmpl`, `site/terms.html`,
-  `site/nginx-locations.conf` -- your own real, filled-in versions.
-  **Gitignored on purpose**: if you already have these (a real
-  deployment), they are never overwritten, never deleted, and never
-  published -- by this repo's own `.gitignore`, by `my-bt`, or by the
-  RPM/install scripts. `%config(noreplace)` in the RPM spec gives the
+  `site/nginx-locations.conf` -- your own real, filled-in versions. They
+  are never overwritten, never deleted, and never published by `my-bt` or
+  the RPM/install scripts. **Keeping them out of git is up to where you
+  put them**: this repo's `.gitignore` hides anything named `*.local`, so
+  put the whole set in a `*.local/` directory (next section) and they are
+  invisible to git automatically. If you would rather keep them at the
+  ordinary paths above, add your own rules for them to `.gitignore`
+  first -- nothing hides them there. `%config(noreplace)` in the RPM spec gives the
   same guarantee at the installed-system level for the two of these
   (`settings.toml`, `site/privacy.html.tmpl`) that `my-bt` reads at
   runtime -- see "Installing" below.
 
-**Optional: keep your real files together in a `*.local/` directory.**
-Instead of leaving them at the paths above, you can put the whole set in
-one directory whose name ends in `.local` at the repo root, mirroring the
-repo's own layout:
+**Keep your real files together in a `*.local/` directory.** Put the whole
+set in one directory whose name ends in `.local` at the repo root,
+mirroring the repo's own layout:
 
     my-booking.local/settings.toml
     my-booking.local/site/index.html
@@ -75,12 +77,13 @@ Every lookup prefers that copy -- `my-bt admin health`/`admin setup`,
 `site/privacy.html` and `site/index_embedded.html` there), and
 `scripts/build-rpm.sh`, which packages from it. Exactly one such directory
 is allowed; two are an error, since which one is meant would be ambiguous.
-Nothing requires this -- with no such directory, everything behaves exactly
-as described above -- and it never applies to an installed system, where
-`my-bt` reads the real files the package already baked in. The point is
-backup and sync tooling that works on name patterns: a directory called
-`my-booking.local` is easy to carry as a unit, where seven files scattered
-at ordinary paths are easy to leave behind. `my-bt admin health` warns if a
+The code does not require it -- with no such directory everything falls
+back to the ordinary paths -- and it never applies to an installed system,
+where `my-bt` reads the real files the package already baked in. Two
+reasons to use it anyway: `.gitignore` hides it with no per-file rules,
+and backup or sync tooling that works on name patterns can carry
+`my-booking.local` as a unit, where seven files scattered at ordinary
+paths are easy to leave behind. `my-bt admin health` warns if a
 file ends up in both places, or if a real file is missing so that a generic
 `.example` would be packaged in its place.
 

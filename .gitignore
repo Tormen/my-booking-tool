@@ -1,11 +1,7 @@
-# -- your real, personal files -- never tracked, never overwritten ----------
-# Only the generic *.example versions are published. Your own filled-in
-# copies stay invisible to git, whether you keep them at their ordinary
-# paths (below) or together in a *.local directory (bottom rule) -- see
-# README.md. Nothing in this project ever deletes or overwrites them.
-/settings.toml
-/site/*
-!/site/*.example
+# -- your real, personal files ------------------------------------------------
+# Keep them in a directory whose name ends in .local (see README.md and
+# app/local_overlay.py) -- the two rules at the bottom of this file are
+# what hides them, and what your own backup/sync tooling carries.
 
 # -- runtime/local state -----------------------------------------------------
 /data/
