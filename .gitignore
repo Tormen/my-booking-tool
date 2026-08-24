@@ -1,24 +1,11 @@
-# -- your real, personal config -- never tracked, never overwritten --------
-# Generic placeholders ship as the *.example versions (tracked); your real,
-# filled-in versions keep their normal filenames on disk and are simply
-# invisible to git. Nothing in this project (my-bt, the RPM, build/install
-# scripts) ever deletes or overwrites these -- see README.md and the
-# maintainer's local notes for the full reasoning.
+# -- your real, personal files -- never tracked, never overwritten ----------
+# Only the generic *.example versions are published. Your own filled-in
+# copies stay invisible to git, whether you keep them at their ordinary
+# paths (below) or together in a *.local directory (bottom rule) -- see
+# README.md. Nothing in this project ever deletes or overwrites them.
 /settings.toml
-/site/index.html
-/site/impressum.html
-/site/privacy.html
-/site/privacy.html.tmpl
-/site/terms.html
-/site/nginx-locations.conf
-/site/index_embedded.html
-
-# ...or keep that whole set together in ONE directory named `*.local`
-# instead (e.g. my-booking.local/settings.toml,
-# my-booking.local/site/index.html), which the two rules at the bottom of
-# this file already cover. Every lookup prefers it -- see
-# app/local_overlay.py. The per-path rules above stay regardless, so the
-# ordinary layout keeps working and stays unpublishable either way.
+/site/*
+!/site/*.example
 
 # -- runtime/local state -----------------------------------------------------
 /data/
