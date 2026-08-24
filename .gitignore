@@ -1,6 +1,19 @@
-# Local-only files: never published, carried between machines by
-# the container repo (see its .git.force-add-patterns). Everything
-# personal in this checkout is named this way -- see README.md and
+# Local-only files: never published, carried between machines by the
+# container repo (see its .git.force-add-patterns). Everything personal
+# in this checkout is named this way, and the real per-deployment files
+# live together in one *.local directory -- see README.md and
 # app/local_overlay.py.
 *.local
 *.local.*
+
+# Python byte-code. This project is stdlib-only and packages via
+# rpmbuild (into a temporary staging directory), not setuptools -- so
+# there is no build/, dist/, *.egg-info/ or virtualenv to ignore here.
+__pycache__/
+*.py[co]
+
+# Runtime state, should a dev run ever be pointed at the checkout rather
+# than /var/lib/my-booking and /etc/my-booking/secrets: participant
+# records and secrets, never publishable.
+/data/
+/secrets/

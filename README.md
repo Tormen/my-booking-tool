@@ -64,13 +64,17 @@ The split:
   (`settings.toml`, `site/privacy.html.tmpl`) that `my-bt` reads at
   runtime -- see "Installing" below.
 
-**How this repo keeps personal files out of git.** `.gitignore` carries
-two rules and nothing else -- `*.local` and `*.local.*`. Name anything
-personal that way (the `*.local/` directory below is the tidiest form) and
-git will not see it. Byte-code, build output, virtualenvs and editor/OS
-droppings are not listed here on purpose: every project you own produces
-them, so they belong in your user-level ignore file
-(`~/.config/git/ignore`) rather than being repeated per repository.
+**How this repo keeps personal files out of git.** `.gitignore` hides
+anything named `*.local` or `*.local.*` -- name personal files that way
+(the `*.local/` directory below is the tidiest form) and git will not see
+them. Alongside that it ignores this project's own artifacts: Python
+byte-code, and `/data/`, `/secrets/` in case a dev run is ever pointed at
+the checkout rather than at `/var/lib/my-booking` and
+`/etc/my-booking/secrets`. There is no `build/`, `dist/`, `*.egg-info/` or
+virtualenv rule because this project is stdlib-only and packages via
+rpmbuild, not setuptools. Editor and OS droppings (`.DS_Store`, `*.swp`)
+are not listed either: those belong in your own user-level ignore file,
+since they have nothing to do with this project.
 
 **Keep your real files together in a `*.local/` directory.** Put the whole
 set in one directory whose name ends in `.local` at the repo root,
