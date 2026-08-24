@@ -65,26 +65,12 @@ The split:
   runtime -- see "Installing" below.
 
 **How this repo keeps personal files out of git.** `.gitignore` carries
-two rules and nothing else -- `*.local` and `*.local.*` -- so anything
-named that way is invisible to git, and that is the only naming
-convention to remember. Two further pieces do the actual enforcing,
-because an ignore rule is silent and only stops an accidental `git add`:
-
-- `scripts/check-repo-hygiene.sh` refuses real per-deployment files at
-  their ordinary paths, anything `*.local`, runtime state (`data/`,
-  `secrets/`), byte-code, build output and editor/OS droppings. Run it
-  any time; it prints what is wrong and exits non-zero.
-- `tests/test_repo_hygiene.py` runs it over every tracked file, so it
-  travels with the repo -- every clone and the RPM's own `%check`. Run
-  `scripts/install-git-hooks.sh` once per clone to have the same script
-  block a `git commit` locally as well (hooks live in `.git`, which is
-  never cloned).
-
-Byte-code, virtualenvs and OS droppings are deliberately NOT listed in
-this repo's `.gitignore`: they are produced by tools in every project you
-own, so they belong in your user-level ignore file
-(`~/.config/git/ignore`), not repeated per repository. The hygiene script
-above still refuses them here if they ever get staged anyway.
+two rules and nothing else -- `*.local` and `*.local.*`. Name anything
+personal that way (the `*.local/` directory below is the tidiest form) and
+git will not see it. Byte-code, build output, virtualenvs and editor/OS
+droppings are not listed here on purpose: every project you own produces
+them, so they belong in your user-level ignore file
+(`~/.config/git/ignore`) rather than being repeated per repository.
 
 **Keep your real files together in a `*.local/` directory.** Put the whole
 set in one directory whose name ends in `.local` at the repo root,
