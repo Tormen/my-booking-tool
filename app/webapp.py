@@ -112,7 +112,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from http import cookies
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from zoneinfo import ZoneInfo
 
 from . import calendar_sync
@@ -127,6 +127,7 @@ from .cancellation import (
     host_cancel_url, host_details_text, host_subject, html_email_body, html_to_text, intro_html,
     join_attention_sections, send_cancellation_emails, send_reinstatement_emails,
 )
+from . import config, macros
 from .config import (
     Course, Settings, annotate_superseded_override, merge_console_overrides,
     upcoming_date_overrides,
@@ -657,6 +658,133 @@ _LOCKOUT_COUNTDOWN_SCRIPT = """<script>
 # emails briefly did earlier the same day (see _booking_details_text()).
 # No per-page interpolation needed (button/dialog pairing is entirely
 # data-attribute driven), so this is a plain string, not an f-string.
+_SETTINGS_SCRIPT = r"""<script>
+(function () {
+  var NL = String.fromCharCode(10);
+
+  function buildTips(root) {
+    (root || document).querySelectorAll("[data-tip]").forEach(function (host) {
+      var tip = host.querySelector(":scope > .tip");
+      if (!tip) { tip = document.createElement("span"); tip.className = "tip"; host.appendChild(tip); }
+      tip.textContent = "";
+      (host.getAttribute("data-tip") || "").split(NL).forEach(function (line) {
+        var row = document.createElement("span");
+        row.className = "tip-body";
+        row.textContent = line;
+        tip.appendChild(row);
+      });
+      var warn = host.getAttribute("data-warn");
+      if (warn) {
+        var w = document.createElement("span");
+        w.className = "tip-warn";
+        w.textContent = warn;
+        tip.appendChild(w);
+      }
+    });
+  }
+
+  var TAGS = {a:1, b:1, i:1, u:1, em:1, strong:1, small:1, code:1, span:1, div:1,
+    p:1, br:1, hr:1, ul:1, ol:1, li:1, h1:1, h2:1, h3:1, h4:1, blockquote:1};
+  var VOID_TAGS = {br:1, hr:1, img:1, wbr:1};
+  var TAG_RE = /<(\/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s[^>]*)?)\/?>/g;
+
+  function htmlState(value) {
+    var m, stack = [], seen = false;
+    TAG_RE.lastIndex = 0;
+    while ((m = TAG_RE.exec(value))) {
+      var name = m[2].toLowerCase();
+      if (!TAGS[name]) { continue; }
+      seen = true;
+      if (VOID_TAGS[name] || /\/>$/.test(m[0])) { continue; }
+      if (m[1]) { if (stack.pop() !== name) { return "broken"; } }
+      else { stack.push(name); }
+    }
+    if (!seen) { return /<\/[a-zA-Z]/.test(value) ? "broken" : "none"; }
+    if (value.lastIndexOf("<") > value.lastIndexOf(">")) { return "broken"; }
+    return stack.length ? "broken" : "ok";
+  }
+
+  var TIP_OK = "This value contains HTML, so it renders as markup where markup is allowed. " +
+    "In a plain field it is reduced to its text instead.";
+  var TIP_BAD = "This markup does not hold together: a tag is left open, unterminated, or " +
+    "closed out of order. Saved as it is, it will not render the way it reads here.";
+
+  function fitBadge(badge) {
+    var label = badge.querySelector("i");
+    if (!label || badge.hidden) { return; }
+    var need = label.offsetWidth, have = badge.clientHeight - 6;
+    badge.style.setProperty("--squeeze", (need > 0 ? Math.min(1, have / need) : 1).toFixed(3));
+  }
+
+  function markHtml(area) {
+    var badge = area.parentNode.querySelector(".macro-badge");
+    if (!badge) { return; }
+    var state = htmlState(area.value);
+    badge.hidden = state === "none";
+    badge.classList.toggle("is-broken", state === "broken");
+    badge.setAttribute("data-tip", state === "broken" ? TIP_BAD : TIP_OK);
+    buildTips(badge.parentNode);
+    fitBadge(badge);
+  }
+
+  function grow(area) {
+    area.style.height = "auto";
+    area.style.height = area.scrollHeight + "px";
+    var badge = area.parentNode.querySelector(".macro-badge");
+    if (badge) { fitBadge(badge); }
+  }
+
+  document.querySelectorAll("textarea.grow").forEach(function (area) {
+    grow(area); markHtml(area);
+    area.addEventListener("input", function () { grow(area); markHtml(area); });
+    area.addEventListener("blur", function () { grow(area); markHtml(area); });
+  });
+
+  document.querySelectorAll(".name-input").forEach(function (el) {
+    el.addEventListener("input", function () {
+      var caret = el.selectionStart, before = el.value;
+      var after = before.replace(/[^A-Za-z0-9_]/g, "").replace(/^[0-9]+/, "");
+      if (after !== before) {
+        el.value = after;
+        el.setSelectionRange(Math.min(caret, after.length), Math.min(caret, after.length));
+      }
+    });
+  });
+
+  var MACROS = {};
+  document.querySelectorAll("#macro-values > span").forEach(function (el) {
+    MACROS[el.getAttribute("data-name")] = el.textContent;
+  });
+
+  function expand(text) {
+    return text.replace(/\{\{([$!]?)([A-Za-z0-9_]+)\}\}/g, function (whole, sigil, name) {
+      if (!sigil && Object.prototype.hasOwnProperty.call(MACROS, name)) { return MACROS[name]; }
+      return '<span class="macro-missing">' + whole + "</span>";
+    });
+  }
+
+  document.querySelectorAll(".desc-input").forEach(function (area) {
+    var split = area.closest(".split");
+    var box = split ? split.querySelector(".preview-body") : null;
+    if (!box) { return; }
+    function render() {
+      box.innerHTML = expand(area.value);
+      area.style.height = "auto";
+      box.style.height = "auto";
+      var needed = Math.ceil(Math.max(area.scrollHeight, box.scrollHeight));
+      area.style.height = needed + "px";
+      box.style.height = needed + "px";
+    }
+    render();
+    area.addEventListener("input", render);
+    area.addEventListener("blur", render);
+  });
+
+  buildTips();
+})();
+</script>"""
+
+
 _DIALOG_WIRING_SCRIPT = """<script>
 (function() {
   document.querySelectorAll(".confirm-dialog-btn").forEach(function(btn) {
@@ -1101,6 +1229,8 @@ class App:
         self.settings = settings
         self.store = store
         self.settings_path = settings_path
+        self._settings_mtime = None
+        self._stamp_settings_mtime()
         self._overrides_mtime: float | None = None
         self.caldav = CalDAVClient(settings.caldav_url, settings.caldav_username, settings.caldav_password)
         self._calendars_cache: dict[str, str] | None = None
@@ -1123,6 +1253,56 @@ class App:
             self._overrides_mtime = self._overrides_path().stat().st_mtime
         except OSError:
             self._overrides_mtime = None
+
+    def _web_editable_path(self):
+        return config.web_editable_path(self.settings_path) if self.settings_path else None
+
+    def _reload_settings_file(self) -> None:
+        """Re-read settings from disk after the console has written the
+        web-editable half, keeping the LAST KNOWN GOOD config if the file
+        does not load.
+
+        No restart, and no privilege for the web process to ask for one:
+        the file is re-read when its mtime changes, exactly as
+        date_overrides.csv already is. A typo in a file /admin can write
+        must never take the site down -- the same policy conflict.py uses
+        for an unreachable feed."""
+        if not self.settings_path:
+            return
+        try:
+            fresh = config.load_settings(self.settings_path, self.store.data_dir)
+        except Exception as exc:  # noqa: BLE001 -- last known good, whatever broke
+            # Deliberately every exception, not a chosen few: a settings
+            # file missing a section raises KeyError, a bad value raises
+            # ValueError, an unreadable file OSError. The POINT is that
+            # the running site survives all of them, so listing the ones
+            # thought of would be the bug.
+            # WARNING, not DEBUG: the operator is looking at a page that
+            # will not show what they just saved, and this line is the
+            # only place that says why.
+            log.warning("settings not reloaded, keeping the running config: %s", exc)
+            self._stamp_settings_mtime()
+            return
+        self.settings = fresh
+        self._base_courses = fresh.courses
+        self._conflict_engine_cache = None
+        self._stamp_settings_mtime()
+
+    def _stamp_settings_mtime(self) -> None:
+        path = self._web_editable_path()
+        try:
+            self._settings_mtime = path.stat().st_mtime if path else None
+        except OSError:
+            self._settings_mtime = None
+
+    def _refresh_settings_if_changed(self) -> None:
+        path = self._web_editable_path()
+        try:
+            mtime = path.stat().st_mtime if path else None
+        except OSError:
+            mtime = None
+        if mtime != getattr(self, "_settings_mtime", "unset"):
+            self._reload_settings_file()
 
     def _refresh_overrides_if_changed(self) -> None:
         """Pick up an override set elsewhere (another process, `my-bt`, a
@@ -1311,6 +1491,10 @@ class App:
         # leave on without leaking anything from a booking form into logs.
         log.debug("%s %s", method, path)
         self._refresh_overrides_if_changed()
+        # Same mtime check for the console-writable settings file, so a
+        # course or macro saved in /admin is live on the very next
+        # request with nothing restarted.
+        self._refresh_settings_if_changed()
         _record_page_view(environ, path)
         try:
             status, headers, body = self.route(method, path, environ)
@@ -1376,6 +1560,10 @@ class App:
             return self.admin_login(method, environ)
         if path == "/admin":
             return self.admin_overview(method, environ)
+        if path == "/admin/settings":
+            return self.admin_settings(method, environ)
+        if path == "/admin/settings/macro":
+            return self.admin_settings_macro(method, environ)
         if m := re.fullmatch(r"/admin/cancel/([0-9a-fA-F-]+)", path):
             return self.admin_cancel(method, m.group(1), environ)
         if m := re.fullmatch(r"/admin/reinstate/([0-9a-fA-F-]+)", path):
@@ -2353,7 +2541,7 @@ class App:
             "</div>"
         )
 
-    def _admin_banner_html(self, environ) -> str:
+    def _admin_banner_html(self, environ, *, on_settings: bool = False) -> str:
         """The same boxed `.session-banner` style as _session_banner_html(),
         for /admin's own pages (2026-07-14, expanding the always-
         visible-banner request: /admin should get the same boxed
@@ -2375,8 +2563,16 @@ class App:
         return (
             '<div class="session-banner">'
             f'<span class="session-role">{esc(label)}</span>'
-            f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
-            "</div>"
+            # Behind the role, the way to the settings console: the banner
+            # is where a reader looks to see which role they are in, so it
+            # is where they look for what that role can do. Dropped on the
+            # settings page itself -- a link to the page you are looking
+            # at is dead weight (the guest banner's `current` does the
+            # same for its own links).
+            + ("" if on_settings else
+               '<span><a href="/admin/settings">Edit Macros &amp; Courses</a></span>')
+            + f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
+            + "</div>"
         )
 
     def _homepage_only_banner_html(self) -> str:
@@ -5425,6 +5621,304 @@ class App:
             # Sessions). The browser tab keeps the full title.
             "Admin overview", body, banner=self._admin_banner_html(environ), heading="",
         )
+
+    _SETTINGS_TIPS = {
+        "shortname": (
+            "The course's key, not a display name -- guests never see it. It is in the "
+            "/book/&lt;shortname&gt; link, in the course_shortname column of every booking "
+            "already made, and in the UID of every calendar event.&#10;"
+            "&bull; Lowercase letters, digits and hyphens.&#10;"
+            "&bull; Changing it rewrites that stored data; it is a migration, not a rename."),
+        "title": ("The course name, shown to guests everywhere. Plain text: a macro holding "
+                  "HTML is reduced to its text here, tags and all removed."),
+        "location": "Where the session takes place. Shown to guests and written into the calendar event.",
+        "weekday": ("Which day this course recurs on. Every future occurrence moves with it -- a "
+                    "booking already made does not, so change it for a real schedule change, not "
+                    "for a one-off (use a date override for that)."),
+        "start_time": "When the session begins, in the site's timezone.",
+        "duration": ("How long a session runs. Sets the end time shown everywhere and the length "
+                     "of the calendar event, which is what makes a conflict overlap."),
+        "capacity": ("Confirmed places per session.&#10;"
+                     "&bull; Full: further bookings join the waitlist.&#10;"
+                     "&bull; A cancellation promotes the first waitlisted guest, automatically.&#10;"
+                     "&bull; Each added participant takes a place of its own.&#10;"
+                     "&bull; Lowering it un-books nobody; it only stops new confirmations."),
+        "audience": ("DISPLAY ONLY -- it restricts nothing. 'private' omits the course from the "
+                     "/courses overview; the /book link still works for anyone who has it, so this "
+                     "hides a course, it does not protect it."),
+        "order": ("A sort key for /courses, not a rank: lowest first, ties keep settings-file "
+                  "order, unset counts as 0. Gaps are the point -- 10, 20, 30 leaves room to slot "
+                  "one in without renumbering."),
+        "subtitle": ("The line under the course title. Left empty it is derived from this course's "
+                     "own weekday, time and location, so it stays right when those change."),
+        "description": ("The course blurb, shown on its booking page and repeated in emails. HTML "
+                        "and macros both render here.&#10;"
+                        "&bull; Anything not on the allowed-tag list is removed on save.&#10;"
+                        "&bull; The preview beside it shows the result, macros expanded."),
+    }
+
+    @staticmethod
+    def _lbl(text: str, key: str, warn: str = "") -> str:
+        """A field name: shaded, and it explains itself on hover. The
+        dotted underline is the promise that it does -- nothing without a
+        tip wears it. `warn` adds the yellow glyph and a red line in the
+        panel, for a field whose change has consequences."""
+        tip = App._SETTINGS_TIPS.get(key, "")
+        warn_attr = f' data-warn="{esc(warn)}"' if warn else ""
+        return (f'<span class="lbl" data-tip="{tip}"{warn_attr} tabindex="0">'
+                f"{esc(text)}</span>")
+
+    def _macro_rows_html(self) -> str:
+        rows = []
+        for name, value in sorted(self.settings.macros.items()):
+            rows.append(f"""
+      <tr>
+        <td class="nowrap">
+          <form method="post" action="/admin/settings/macro" id="macro-{esc(name)}">
+            <input type="hidden" name="old_name" value="{esc(name)}">
+            <input class="big-input name-input" name="name" value="{esc(name)}"
+                   maxlength="20" pattern="_?[a-zA-Z][a-zA-Z0-9_]*" required></form></td>
+        <td><div class="value-cell">
+          <span class="macro-badge" tabindex="0" hidden><i>HTML</i></span>
+          <textarea class="big-input grow" rows="1" name="value"
+                    form="macro-{esc(name)}">{esc(value)}</textarea></div></td>
+        <td class="actions"><div class="btn-row">
+          <button type="submit" form="macro-{esc(name)}" name="action" value="save">Save</button>
+          <button type="submit" form="macro-{esc(name)}" name="action" value="remove"
+                  class="danger">Remove</button>
+        </div></td>
+      </tr>""")
+        rows.append("""
+      <tr>
+        <td class="nowrap">
+          <form method="post" action="/admin/settings/macro" id="macro-new">
+            <input type="hidden" name="old_name" value="">
+            <input class="big-input name-input" name="name" placeholder="new_name"
+                   maxlength="20" pattern="_?[a-zA-Z][a-zA-Z0-9_]*"></form></td>
+        <td><div class="value-cell">
+          <span class="macro-badge" tabindex="0" hidden><i>HTML</i></span>
+          <textarea class="big-input grow" rows="1" name="value" form="macro-new"
+                    placeholder="Its text -- HTML allowed"></textarea></div></td>
+        <td class="actions"><div class="btn-row">
+          <button type="submit" form="macro-new" name="action" value="save">Add</button>
+        </div></td>
+      </tr>""")
+        return "".join(rows)
+
+    def _settings_body(self, tab: str, message: str, error: str) -> str:
+        courses = self.settings.courses
+        active = next((c for c in courses if c.shortname == tab), courses[0] if courses else None)
+        note = ""
+        if error:
+            note = f'<p class="err">{esc(error)}</p>'
+        elif message:
+            note = f'<p class="note">{esc(message)}</p>'
+
+        macros_frame = f"""
+    <div class="card">
+      <div class="card-head"><h2>Macros</h2>
+        <span class="note">usable in every text below, and in emails</span></div>
+      {note}
+      <table class="sessions">
+        <tr><th>Name <span class="th-note">used as {{{{name}}}}<br>Renaming renames it in
+          every text using it.</span></th>
+          <th>Value (text or HTML) <span class="th-note"><span class="badge-inline">HTML</span>
+            renders as markup in rich fields where offered below.</span></th>
+          <th>Actions</th></tr>
+      {self._macro_rows_html()}
+      </table>
+    </div>"""
+
+        tabs = "".join(
+            f'<a class="tab-label{" tab-active" if active is not None and c.shortname == active.shortname else ""}"'
+            f' href="/admin/settings?tab={esc(c.shortname)}">{esc(c.shortname)}</a>'
+            for c in courses
+        )
+        courses_frame = f"""
+    <div class="card">
+      <div class="card-head"><h2>Courses</h2></div>
+      <div class="tab-labels tab-courses">{tabs}</div>
+      {self._course_form_html(active) if active is not None else "<p>No courses configured.</p>"}
+    </div>"""
+        values = "".join(
+            f'<span data-name="{esc(name)}">{esc(value)}</span>'
+            for name, value in sorted(self.settings.macros.items())
+        )
+        # Data, not code: the preview reads the macro values from these
+        # hidden spans, so no operator text is ever spliced into a
+        # <script> body -- which would change the script's CSP hash on
+        # every edit, and put un-escaped text one quote away from being
+        # markup.
+        data = f'<div id="macro-values" hidden>{values}</div>'
+        return macros_frame + courses_frame + data + _SETTINGS_SCRIPT
+
+    def _course_form_html(self, course) -> str:
+        """One course, read-only for now except its macros preview: the
+        SAVE path for course fields lands with the shortname migration
+        (it rewrites stored data, so it is not a plain field save)."""
+        chips = self._macro_chips_html(rich_ok=False)
+        rich_chips = self._macro_chips_html(rich_ok=True)
+        return f"""
+      <p class="course-head">
+        <span class="when"><span class="wd">{esc(course.weekday_label()[:3])}</span>
+          {esc(course.time_range_label())}</span>
+        <b>{esc(course.title)}</b></p>
+      <label>{self._lbl("Shortname", "shortname",
+                        "Changing it MOVES the existing data: every booking row and every "
+                        "upcoming calendar event is rewritten to the new key.")}
+        <span class="req">(required)</span>
+        <input class="big-input id-input" value="{esc(course.shortname)}" readonly></label>
+      <label>{self._lbl("Title", "title")}
+        <input class="big-input" value="{esc(course.title)}" readonly></label>
+      {chips}
+      <label>{self._lbl("Location", "location")}
+        <input class="big-input" value="{esc(course.location)}" readonly></label>
+      {chips}
+      <div class="field-row">
+        <label>{self._lbl("Weekday", "weekday")}
+          <input class="lang-input" value="{esc(course.weekday)}" readonly></label>
+        <label>{self._lbl("Start time", "start_time")}
+          <input class="lang-input" value="{esc(course.start_time)}" readonly></label>
+        <label>{self._lbl("Duration (min)", "duration")}
+          <input class="num-input" value="{course.duration_minutes}" readonly></label>
+        <label>{self._lbl("Capacity", "capacity")}
+          <input class="num-input" value="{course.capacity}" readonly></label>
+        <label>{self._lbl("Audience", "audience")}
+          <input class="lang-input" value="{esc(course.audience)}" readonly></label>
+        <label>{self._lbl("Order", "order")}
+          <input class="num-input" value="{course.order_in_all_courses}" readonly></label>
+      </div>
+      <label>{self._lbl("Subtitle", "subtitle")}
+        <span class="with-tag"><input class="big-input" value="{esc(course.subtitle or "")}"
+          placeholder="{esc(course.derived_subtitle())}" readonly>
+          <span class="auto-tag">auto-generated</span></span></label>
+      {chips}
+      <div class="split">
+        <label class="split-head">{self._lbl("Description", "description")}</label>
+        <div class="split-head preview-head">Preview</div>
+        <div class="split-half">
+          <textarea class="big-input desc-input" rows="10" readonly>{esc(course.description)}</textarea>
+        </div>
+        <div class="split-half">
+          <div class="description preview-body"></div>
+          <p class="hint sanitize-note" hidden></p>
+        </div>
+      </div>
+      <div class="split-foot">{rich_chips}</div>
+      <p class="hint">Editing a course from here lands with the shortname migration -- the
+        fields are shown read-only until then. Saving writes
+        <code>settings.web-editable.toml</code>; <code>settings.toml</code>, which holds the
+        credentials, is never written from here.</p>"""
+
+    def _macro_chips_html(self, *, rich_ok: bool) -> str:
+        if not self.settings.macros:
+            return ""
+        chips = []
+        for name in sorted(self.settings.macros):
+            value = self.settings.macros[name]
+            rich = value != macros.expand("{{" + name + "}}", user=self.settings.macros,
+                                          rich=False, to_text=html_to_text)
+            cls = "macro-chip" + ("" if rich_ok or not rich else " macro-rich")
+            tip = value if rich_ok or not rich else (
+                "Contains HTML. Used here it is reduced to its text, tags removed.")
+            chips.append(f'<code class="{cls}" tabindex="0" data-tip="{esc(tip)}">'
+                         f"{{{{{esc(name)}}}}}</code>")
+        return f'<p class="hint">Macros you can use here: {" ".join(chips)}</p>'
+
+    # -- the settings console (macros + courses) --------------------------
+
+    def _settings_gate(self, environ):
+        """(None, response) unless this is an admin session."""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "admin":
+            return None, ("302 Found", [("Location", "/admin/login")], "")
+        if not self.settings_path:
+            return None, ("503 Service Unavailable", [("Content-Type", "text/plain")],
+                          "no settings path configured -- nothing to write")
+        return True, None
+
+    def _save_settings(self, macro_table, courses):
+        """Write both halves of the console-owned file, then reload.
+
+        Returns an error string, or None. Nothing partial can be left
+        behind: config.write_web_editable serialises, parses the result
+        back, and only then writes atomically -- so a value that would
+        not load is refused while the operator is still looking at it,
+        rather than in a later request nobody is watching."""
+        try:
+            config.write_web_editable(self.settings_path, macro_table, courses)
+        except (OSError, ValueError, TypeError) as exc:
+            log.warning("settings not saved: %s", exc)
+            return f"Not saved: {exc}"
+        self._reload_settings_file()
+        return None
+
+    def admin_settings(self, method: str, environ):
+        ok, error_response = self._settings_gate(environ)
+        if not ok:
+            return error_response
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        tab = (query.get("tab") or [""])[0]
+        message = (query.get("msg") or [""])[0]
+        error = (query.get("err") or [""])[0]
+        return ("200 OK", [("Content-Type", "text/html")],
+                page("Macros & Courses",
+                     self._settings_body(tab, message, error),
+                     banner=self._admin_banner_html(environ, on_settings=True),
+                     heading=""))
+
+    def admin_settings_macro(self, method: str, environ):
+        """Add, rename, retype or remove ONE macro."""
+        ok, error_response = self._settings_gate(environ)
+        if not ok:
+            return error_response
+        if method != "POST":
+            return "405 Method Not Allowed", [("Allow", "POST")], ""
+        form = self._read_form(environ)
+        # _read_form already collapses each field to a single string.
+        old_name = form.get("old_name", "").strip()
+        name = form.get("name", "").strip()
+        value = form.get("value", "")
+        action = form.get("action", "")
+
+        table = dict(self.settings.macros)
+        if action == "remove":
+            table.pop(old_name, None)
+            return self._settings_redirect(self._save_settings(table, self.settings.courses),
+                                           f"{old_name} removed")
+        try:
+            macros.validate_name(name)
+        except macros.MacroError as exc:
+            return self._settings_redirect(str(exc))
+        if name != old_name and name in table:
+            # Refused rather than merged: silently overwriting the other
+            # macro would change every text that uses it.
+            return self._settings_redirect(f"There is already a macro called {name}")
+        used = macros.names_used(value, macros.SYSTEM)
+        if used:
+            return self._settings_redirect(
+                f"{{{{!{used[0]}}}}} reads settings.toml and cannot be used here")
+        clean = macros.sanitize(value)
+        if old_name and old_name != name:
+            table.pop(old_name, None)
+            # A rename that left {{old}} behind would raise at send time,
+            # so it is applied to every value this file holds.
+            table = {k: v.replace("{{" + old_name + "}}", "{{" + name + "}}")
+                     for k, v in table.items()}
+        table[name] = clean.html
+        note = f"{name} saved"
+        if clean.dropped:
+            note += " -- removed: " + ", ".join(clean.dropped)
+        return self._settings_redirect(self._save_settings(table, self.settings.courses), note)
+
+    def _settings_redirect(self, error: str | None, message: str = ""):
+        params = {}
+        if error:
+            params["err"] = error
+        elif message:
+            params["msg"] = message
+        query = ("?" + urlencode(params)) if params else ""
+        return "302 Found", [("Location", f"/admin/settings{query}")], ""
 
     def _admin_gate(self, method: str, environ, course_shortname: str):
         """(course, error_response) for the three Future Sessions

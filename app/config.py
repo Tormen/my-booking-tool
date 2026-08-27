@@ -148,6 +148,13 @@ class Course:
         # so from/till always line up visually in the rendered subtitle.
         return f"{h}h{m:02d}"
 
+    def derived_subtitle(self) -> str:
+        """What the booking page shows when `subtitle` is unset. Named so
+        the console can put it in the field as a greyed placeholder --
+        showing the default beats describing how it is produced, and it
+        stays right when the weekday, time or location changes."""
+        return f"{self.weekday_label()}s {self.time_range_label()} -- {self.location}"
+
     def time_range_label(self) -> str:
         """e.g. "10h45 - 12h45" -- used by app/webapp.py to auto-derive the
         booking page's subtitle line when Course.subtitle isn't set."""
@@ -1087,6 +1094,104 @@ def macros_from_raw(raw: dict, *, source: str = WEB_EDITABLE_FILENAME) -> dict[s
             )
         out[name] = value
     return out
+
+
+_WEB_EDITABLE_HEADER = """\
+# settings.web-editable.toml -- WRITTEN BY /admin.
+#
+# This is the half of the configuration a web process is trusted with:
+# your text macros and your courses. The other half, settings.toml, holds
+# the CalDAV account, the paths to every secret file and the admin
+# password hash, and is never written from a browser.
+#
+# You may edit this file by hand -- but the console REWRITES IT WHOLE
+# when you save, so comments you add here are lost at that point. Put
+# anything you want to keep in settings.toml, which no program rewrites.
+#
+# A course defined here wins over one of the same shortname in
+# settings.toml; `my-bt admin health` reports it when both define one.
+"""
+
+
+def _toml_value(value) -> str:
+    """The few types this file can hold. Not a general TOML writer: it
+    serialises exactly what the console can produce, and raises on
+    anything else rather than emitting something that will not parse
+    back."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        if "\n" in value:
+            body = value.replace("\\", "\\\\").replace('"""', '\\"\\"\\"')
+            return f'"""\n{body}"""'
+        body = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{body}"'
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
+    raise TypeError(f"cannot serialise {type(value).__name__} into TOML here")
+
+
+def dump_web_editable(macro_table: dict[str, str], courses: tuple[Course, ...]) -> str:
+    """The whole console-owned file as text, ready to write.
+
+    Written whole rather than patched line by line, unlike settings.toml
+    (see annotate_superseded_override): this file is the console's own,
+    its shape is known, and a full rewrite cannot leave a half-applied
+    edit behind. The header says plainly that hand-written comments do
+    not survive that."""
+    out = [_WEB_EDITABLE_HEADER]
+    if macro_table:
+        out.append("\n[macros]")
+        for name in sorted(macro_table):
+            out.append(f"{name} = {_toml_value(macro_table[name])}")
+    for course in courses:
+        out.append("\n[[course]]")
+        for key, value in (
+            ("shortname", course.shortname),
+            ("title", course.title),
+            ("location", course.location),
+            ("location_url", course.location_url),
+            ("weekday", course.weekday),
+            ("start_time", course.start_time),
+            ("duration_minutes", course.duration_minutes),
+            ("capacity", course.capacity),
+            ("audience", course.audience),
+            ("language", course.language),
+            ("subtitle", course.subtitle),
+            ("description", course.description),
+            ("order_in_all_courses", course.order_in_all_courses),
+            ("host_calendar_entry_cc_list", list(course.host_calendar_entry_cc_list)),
+        ):
+            if value in ("", None, [], ()):
+                continue
+            out.append(f"{key} = {_toml_value(value)}")
+        for override in course.date_overrides:
+            out.append("\n[[course.date_override]]")
+            out.append(f"date = {_toml_value(override.date)}")
+            if override.start_time:
+                out.append(f"start_time = {_toml_value(override.start_time)}")
+            if override.duration_minutes:
+                out.append(f"duration_minutes = {_toml_value(override.duration_minutes)}")
+            if override.message:
+                out.append(f"message = {_toml_value(override.message)}")
+    return "\n".join(out) + "\n"
+
+
+def write_web_editable(toml_path: str | Path, macro_table: dict[str, str],
+                       courses: tuple[Course, ...]) -> Path:
+    """Serialises and writes atomically, then parses the result back.
+
+    The read-back is the point: this file is loaded on the next request,
+    and a file that fails to parse would leave the site running on its
+    last known good config with no idea why. Better to fail HERE, where
+    a person is watching, than in a request nobody is looking at."""
+    path = web_editable_path(toml_path)
+    text = dump_web_editable(macro_table, courses)
+    tomllib.loads(text)          # raises before anything is written
+    atomic_write_text(path, text)
+    return path
 
 
 def operator_macros(toml_path: str | Path) -> dict[str, str]:

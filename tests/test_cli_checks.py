@@ -773,7 +773,9 @@ class TrackedNginxExampleFileTest(unittest.TestCase):
         digit_words = {1: "ONE", 2: "TWO", 3: "THREE", 4: "FOUR", 5: "FIVE",
                        6: "SIX", 7: "SEVEN", 8: "EIGHT", 9: "NINE", 10: "TEN",
                        11: "ELEVEN", 12: "TWELVE", 13: "THIRTEEN", 14: "FOURTEEN",
-                       15: "FIFTEEN", 16: "SIXTEEN", 17: "SEVENTEEN", 18: "EIGHTEEN"}
+                       15: "FIFTEEN", 16: "SIXTEEN", 17: "SEVENTEEN", 18: "EIGHTEEN",
+                       19: "NINETEEN", 20: "TWENTY", 21: "TWENTY-ONE",
+                       22: "TWENTY-TWO", 23: "TWENTY-THREE"}
         expected_word = digit_words.get(hash_count)
         self.assertIsNotNone(expected_word, f"unexpected hash count {hash_count} -- extend digit_words")
         self.assertIn(f"{expected_word} hashes", text)

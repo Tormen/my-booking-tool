@@ -142,3 +142,51 @@ capacity = 12
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WriteWebEditableTest(unittest.TestCase):
+    """The console owns this file, so it writes it whole -- and reads it
+    back before letting the write stand."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        self.toml = self.dir / "settings.toml"
+        self.course = config.Course(
+            shortname="yoga", title="Yoga", location="Studio", weekday="wed",
+            start_time="18:00", duration_minutes=60, capacity=10,
+        )
+
+    def test_what_it_writes_parses_back_to_what_went_in(self):
+        rich = config.Course(
+            shortname="trier", title='A "quoted" title', location="Hall",
+            weekday="sat", start_time="10:45", duration_minutes=120, capacity=14,
+            description='<p>One<br>two</p>\nthird line',
+        )
+        config.write_web_editable(self.toml, {"studio": "Ayur Yoga"}, (self.course, rich))
+        raw = config.load_web_editable(self.toml)
+        self.assertEqual(config.macros_from_raw(raw), {"studio": "Ayur Yoga"})
+        courses = config.courses_from_raw(raw)
+        self.assertEqual([c.shortname for c in courses], ["yoga", "trier"])
+        self.assertEqual(courses[1].title, 'A "quoted" title')
+        self.assertEqual(courses[1].description, '<p>One<br>two</p>\nthird line')
+
+    def test_it_writes_beside_settings_toml(self):
+        path = config.write_web_editable(self.toml, {}, (self.course,))
+        self.assertEqual(path, self.dir / "settings.web-editable.toml")
+
+    def test_the_header_says_the_file_is_rewritten(self):
+        config.write_web_editable(self.toml, {}, (self.course,))
+        text = (self.dir / "settings.web-editable.toml").read_text()
+        self.assertIn("WRITTEN BY /admin", text)
+        self.assertIn("REWRITES IT WHOLE", text)
+
+    def test_a_value_that_cannot_be_serialised_raises_before_writing(self):
+        with self.assertRaises(TypeError):
+            config.write_web_editable(self.toml, {"bad": 3.5}, ())
+        self.assertFalse((self.dir / "settings.web-editable.toml").exists())
+
+    def test_an_empty_macro_table_writes_no_section(self):
+        config.write_web_editable(self.toml, {}, (self.course,))
+        self.assertNotIn("[macros]", (self.dir / "settings.web-editable.toml").read_text())

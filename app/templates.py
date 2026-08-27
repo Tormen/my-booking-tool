@@ -113,6 +113,21 @@ _SUBMIT_FEEDBACK_SCRIPT = """<script>
     waitFor("link");
   });
 
+  // ESC closes the server-rendered overlay too. A NON-modal <dialog
+  // open> -- which is what that one is, since it is rendered without any
+  // script -- gets no ESC handling from the browser: only showModal()
+  // buys that. So every overlay on the site closes the same three ways
+  // (X, click outside, ESC) rather than two of them depending on how the
+  // overlay happened to be opened. Progressive enhancement: without JS
+  // the X and the backdrop are plain links and still work.
+  document.addEventListener("keydown", function(ev) {
+    if (ev.key !== "Escape") return;
+    var panel = document.querySelector("dialog[open]");
+    if (!panel) return;
+    var close = panel.querySelector(".dialog-x");
+    if (close && close.getAttribute("href")) { window.location.href = close.getAttribute("href"); }
+  });
+
   // Coming BACK to a cached page (the back button) must not leave the
   // panel sitting on top of it.
   window.addEventListener("pageshow", function() {
@@ -422,6 +437,180 @@ td.actions .btn-row{{display:flex;flex-wrap:wrap;gap:.4em;align-items:flex-start
 .sk-btn{{height:2.2em;width:9em;margin-top:1.2em}}
 @keyframes sk-sweep{{from{{background-position:150% 0}}to{{background-position:-150% 0}}}}
 @media (prefers-reduced-motion:reduce){{.sk,.sk-grid i{{animation:none}}}}
+/* --- the settings console (/admin/settings) --------------------------
+   Ported from my-booking.local/,mockups/admin-settings.html, which is
+   now a preview of THIS stylesheet rather than a holder of its own copy
+   (a mockup that redefines app rules goes on showing the old version).
+   Everything below is used only by that page; it costs every other page
+   the bytes and nothing else. */
+.sn-input:invalid,.name-input:invalid{{border-color:#b00020;background:#fff6f6}}
+/* The field and its preview are one thing seen two ways, so they share a
+   row. TWO COLUMNS AND TWO ROWS, not two self-contained halves: both
+   labels sit in row 1 and both boxes in row 2, so the labels stay on one
+   line and the boxes start level. Stacking each label above its own box
+   inside a half is what let the two sides drift apart.
+
+   minmax(0,1fr) rather than 1fr: a grid column's default minimum is its
+   CONTENT, so one long unbroken line in the preview would push the halves
+   out of true and overflow the card. Stacks below 900px, where two halves
+   are narrower than either deserves. */
+.split{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  grid-template-rows:auto auto;align-items:stretch;column-gap:1.2em;row-gap:0;
+  margin:.6em 0 .2em}}
+@media (max-width:900px){{.split{{grid-template-columns:minmax(0,1fr)}}
+/* Same margins on both, overriding the block-label rule on the left one,
+   and .2em to its box -- the same distance every other field has, which
+   is the input's own margin. */
+.split-head{{margin:.6em 0 .2em;align-self:end}}
+/* Sits against the box above it, full width under BOTH halves: the
+   macros apply to the description as a whole, and the hint's own top
+   margin would otherwise leave it floating between the two. */
+.split-foot{{margin:.2em 0 0}}
+/* A tag INSIDE the field, at its right edge, saying that the grey text
+   in front of it is generated rather than typed. It disappears the
+   moment the field holds a real value, because then the grey text is
+   gone and there is nothing left to explain. */
+.with-tag{{position:relative;display:block}}
+.with-tag .big-input{{padding-right:9.5em}}
+.auto-tag{{position:absolute;right:.5em;top:50%;transform:translateY(-50%);
+  background:#e8eef8;color:#3a5a99;border:1px solid #cdd9ef;border-radius:4px;
+  padding:.05em .4em;font-style:normal;letter-spacing:.04em;
+  pointer-events:none}}
+.auto-tag[hidden]{{display:none}}
+/* A label that explains itself on hover. Dotted underline so it is
+   visibly askable -- an invisible tooltip is one nobody finds. */
+/* ONE shape for every field: name (and its note) on its own line, the
+   control beneath it. In front, each control starts at a different x
+   depending on how long its name is, so a row of four can never line up
+   -- above, every field shares one left edge whatever it is called. */
+label > input,label > select,label > textarea{{display:block}}
+/* The name reads as a small header rather than as running text: a slight
+   grey, hugging the words (width:fit-content, so the shade and the dotted
+   hover underline stop where the text does, not at the far edge of a
+   full-width field). */
+.lbl{{display:inline-block;background:#f1f3f1;border-radius:4px;padding:.05em .4em;
+  border-bottom:1px dotted #999;cursor:help}}
+/* Preview is NOT a field: no shading, no dotted underline. Both of those
+   mark something you can type into or ask about, and it is neither -- it
+   is a read-only view of the box to its left. */
+.preview-head{{color:#555;font-style:italic}}
+/* Sized to the largest value each field could sensibly hold -- three
+   digits plus the stepper -- instead of stretching to whatever the row
+   allows. A box far wider than its content invites the reader to wonder
+   what else belongs in it. */
+.num-input{{width:7ch}}
+.lang-input{{width:9ch}}
+/* Bullet lines wrap under their own text, not back under the marker. */
+.tip-body{{display:block;text-indent:-.75em;padding-left:.75em}}
+.split-foot .hint{{margin:0}}
+.split-half{{min-width:0;display:flex;flex-direction:column}}
+/* Both boxes start on the row's top edge. align-items on the CONTAINER
+   was :end, which aligned the boxes by their BOTTOMS -- so any fraction
+   of a pixel between the two heights (the script sets a measured
+   scrollHeight) opened a visible gap above one of them. Only the labels
+   want end-alignment, and they ask for it themselves. The textarea also
+   had .2em of its own top margin from the shared control rule, which the
+   preview does not; zeroed here so the two top edges are the same edge. */
+.split-half .desc-input,.split-half .preview-body{{margin:0;align-self:stretch}}
+/* border-box so a height set on it INCLUDES its padding and border: the
+   script sets the same number on this and on the textarea, and without
+   this the padding was added on top and the preview ran taller. */
+.preview-body{{box-sizing:border-box;min-height:6em;overflow:auto;margin:0}}
+/* An unresolved name is shown rather than left to look like literal text
+   the reader will see: it is the one thing a preview must not render
+   silently, because on the live page it would either be an error or the
+   braces themselves. */
+.macro-missing{{background:#fde8e8;color:#b00020;border-radius:4px;padding:0 .2em;
+  font-family:monospace}}
+/* A macro name is typed INTO other texts as {{name}}, so it stays short:
+   20 characters, letters/digits/underscore. The box is sized to hold
+   exactly that many, so the field itself states the limit -- no sentence
+   needed, and a name that fits is visibly a name that fits. */
+.name-input{{width:21ch;max-width:100%}}
+/* Hovering hint on a macro chip. A real element rather than the browser's
+   own title=: that one cannot wrap, cannot be styled, and opens after a
+   fixed ~1s delay the page has no say over. This one is instant -- no
+   transition at all. Shown on focus too, so it is reachable by keyboard. */
+/* The hint is a real ELEMENT, not a ::after fed by one attribute. A
+   pseudo-element carries a single string, so no part of it can be
+   coloured -- and a consequence like the shortname's needs to be red.
+   Built by script from data-tip/data-warn (see buildTips) so every hover
+   surface on the page uses this one mechanism: labels, macro chips and
+   the HTML badge alike. */
+[data-tip]{{position:relative}}
+.tip{{display:none;position:absolute;left:0;bottom:calc(100% + .4em);z-index:5;
+  min-width:14em;max-width:38em;width:max-content;
+  background:#333;color:#fff;border-radius:6px;padding:.5em .7em;font-family:sans-serif;
+  font-style:normal;font-weight:normal;line-height:1.35;text-align:left;
+  letter-spacing:normal;text-transform:none;box-shadow:0 4px 14px rgba(0,0,0,.3)}}
+[data-tip]:hover > .tip,[data-tip]:focus-visible > .tip{{display:block}}
+.tip-warn{{display:block;margin-top:.5em;background:#b00020;color:#fff;
+  border-radius:4px;padding:.3em .5em}}
+/* A name whose hint carries a consequence says so on its face: the hover
+   holds the detail, but nobody hovers what looks ordinary. Yellow rather
+   than red -- red is the panel's own line, and an alarm on a field you
+   are only reading would cry wolf. */
+.lbl[data-warn]::after{{content:"⚠";color:#e0a500;margin-left:.4em;
+  font-style:normal;text-shadow:0 0 1px rgba(0,0,0,.25)}}
+/* .course-head, .when and .wd come from the app's own stylesheet, which
+   this page already loads -- redefining them here meant the mockup went
+   on showing a button-sized green chip after the app rule was made
+   shorter. A mockup that keeps its own copy of a rule stops being a
+   preview of the real page. Only the digit alignment is added, and only
+   because the mockup shows four courses side by side. */
+.when{{font-variant-numeric:tabular-nums}}
+/* One row for every short field. align-items:end keeps the CONTROLS on
+   one line even where a name wraps to two; flex-wrap lets the row break
+   by itself on a narrow window instead of being split by hand. */
+.field-row{{display:flex;flex-wrap:wrap;gap:.4em 1.2em;align-items:flex-end}}
+.field-row label{{margin-top:.6em}}
+.macro-chip{{cursor:help;background:#eef2fb;color:#3a5a99;border-radius:4px;padding:.05em .35em}}
+.macro-rich{{cursor:help;background:#f0f0f0;color:#999;text-decoration:line-through}}
+/* Sits INSIDE the value cell, beside the field it describes -- "contains
+   HTML" is a property of the value, not of the name. On its own line under
+   the name box it dangled, and stretched that one row taller than the
+   others. Same palette as a macro chip, so it reads as part of the family
+   rather than as a warning. */
+/* The marker hangs OUTSIDE the box, to its left, rather than sharing the
+   row with it: every value box then starts on the same left edge as the
+   column heading, marked or not, and the marker costs the field no width
+   at all. A spacer for unmarked rows would have aligned the boxes but
+   pushed all of them right, away from the heading. */
+.value-cell{{position:relative}}
+/* A macro value is prose, not a word: it wraps and the box grows with it.
+   Scrolling a one-line field to read the end of a sentence is the thing
+   this replaces. No resize grip: the box already settles at the height
+   its text needs on every edit and on blur, so a hand-dragged height
+   would only be overwritten a moment later. */
+textarea.grow{{resize:none;overflow:hidden;line-height:1.35;min-height:2.05rem;
+  font-family:inherit}}
+.value-cell .big-input{{flex:1;min-width:0}}
+/* Vertical: writing-mode turns the text on its side, the rotation makes
+   it read bottom-to-top (the usual direction for a spine label). Costs
+   ~1.6em of width whatever the value's length, instead of a chip whose
+   width follows its own label. */
+.macro-badge{{position:absolute;right:100%;top:.2em;bottom:.2em;margin-right:.45em;
+  width:1.7em;overflow:hidden;cursor:help;
+  background:#eef2fb;color:#3a5a99;border:1px solid #cdd9ef;border-radius:4px;
+  font-weight:bold;font-style:normal}}
+/* The label is CONDENSED along its own length rather than shrunk: rotated
+   upright, then scaled on the axis it reads along, so the letters keep
+   their height and only the run gets shorter. "HTML" needs ~41px upright
+   and a one-line row is 33px, which is what overflowed. Absolutely
+   positioned so its unrotated width never widens the spine. */
+.macro-badge i{{position:absolute;top:50%;left:50%;white-space:nowrap;
+  font-style:normal;letter-spacing:.04em;
+  transform:translate(-50%,-50%) rotate(-90deg) scaleX(var(--squeeze,1))}}
+.macro-badge[hidden]{{display:none}}
+/* Red says the markup will not render as written -- a tag left open or
+   closed out of order. Same spine, so the eye finds it in the same place. */
+.macro-badge.is-broken{{background:#fde8e8;color:#b00020;border-color:#f0b8b8}}
+/* The legend in the note below is prose, so it stays horizontal. */
+.badge-inline{{background:#eef2fb;color:#3a5a99;border:1px solid #cdd9ef;border-radius:4px;
+  padding:.05em .4em;font-weight:bold;letter-spacing:.04em;font-style:normal}}
+table.sessions td,table.sessions th{{border-bottom:1px solid #eee;padding:.45em .6em;
+  text-align:left;vertical-align:top}}
+td.actions .btn-row{{display:flex;gap:.4em;align-items:flex-start}}
 /* Which build this page came from, so a screenshot of it identifies
    itself. Italic + grey rather than smaller: nothing here renders below
    the 1em button baseline (see the .note/.hint rules above). */
