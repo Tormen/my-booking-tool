@@ -261,3 +261,94 @@ capacity = 10
         detail = [d for _l, level, d in self._check() if level == "warn"][0]
         self.assertIn("yoga", detail)
         self.assertIn("wins", detail)
+
+
+class MacroExpansionInCoursesTest(unittest.TestCase):
+    """A macro used in a course text must reach the page EXPANDED.
+
+    2026-08-28, from the live site: the console saved {{cancel_please}}
+    into a description and the booking page served those braces
+    verbatim. Everything existed -- the file, the engine, the console --
+    and nothing called the engine when rendering a course."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        secrets = self.dir / "secrets"
+        secrets.mkdir()
+        for name in ("caldav", "smtp", "admin"):
+            (secrets / name).write_text("x")
+        (secrets / "pepper").write_text("00" * 32)
+        self.toml = self.dir / "settings.toml"
+        self.toml.write_text(BASE.format(secrets=secrets))
+
+    def _editable(self, text: str) -> None:
+        path = config.web_editable_path(self.toml)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+    def _course(self):
+        return config.load_settings(self.toml).courses[0]
+
+    def test_a_macro_in_the_description_renders_as_markup(self):
+        self._editable('''
+[macros]
+hint = "cancel under <a href=\\"https://x/my\\">x/my</a>"
+
+[[course]]
+shortname = "yoga"
+title = "Yoga"
+location = "Studio"
+weekday = "wed"
+start_time = "18:00"
+duration_minutes = 60
+capacity = 10
+description = "<p>Cannot come? {{hint}}</p>"
+''')
+        description = self._course().description
+        self.assertNotIn("{{hint}}", description)
+        self.assertIn('<a href="https://x/my">', description)
+
+    def test_a_macro_in_a_plain_field_is_reduced_to_its_text(self):
+        # A title reaches an escaped field, a calendar SUMMARY and an
+        # email subject -- none of which can show markup.
+        self._editable('''
+[macros]
+studio = "Ayur <b>Yoga</b>"
+
+[[course]]
+shortname = "yoga"
+title = "Class at {{studio}}"
+location = "{{studio}}"
+weekday = "wed"
+start_time = "18:00"
+duration_minutes = 60
+capacity = 10
+''')
+        course = self._course()
+        self.assertEqual(course.title, "Class at Ayur Yoga")
+        self.assertNotIn("<b>", course.location)
+
+    def test_a_course_without_macros_is_untouched(self):
+        self._editable('[macros]\nstudio = "S"\n')
+        self.assertEqual(self._course().title, "Yoga")
+
+    def test_an_unknown_macro_is_loud_rather_than_silent(self):
+        # The console refuses to save one, so this means a hand-edit --
+        # and a macro vanishing from a booking page is the worse outcome.
+        self._editable('''
+[macros]
+studio = "S"
+
+[[course]]
+shortname = "yoga"
+title = "Class at {{typo}}"
+location = "Studio"
+weekday = "wed"
+start_time = "18:00"
+duration_minutes = 60
+capacity = 10
+''')
+        with self.assertRaises(Exception):
+            config.load_settings(self.toml)

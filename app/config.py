@@ -1223,6 +1223,51 @@ def operator_macros(toml_path: str | Path) -> dict[str, str]:
         return {}
 
 
+def expand_macros_in_courses(courses: tuple[Course, ...],
+                             macro_table: dict[str, str]) -> tuple[Course, ...]:
+    """Resolves the operator's macros in every course text, ONCE, here.
+
+    At load time rather than at each place a course is displayed: a
+    course reaches the booking page, five emails, the calendar event and
+    the /courses list, and expanding per call site means every new one
+    has to remember -- which is exactly how {{cancel_please}} reached a
+    live page verbatim (2026-08-28). Downstream code keeps receiving a
+    plain Course and needs to know nothing about macros.
+
+    Two contexts, because the destinations differ: `description` is rich
+    (a macro's markup renders, as it does on the booking page), while
+    title, location and subtitle are plain -- they end up in an escaped
+    field, a calendar SUMMARY or an email subject, none of which can show
+    markup, so a macro's tags are reduced to their text instead of being
+    refused.
+
+    An unknown name raises, and that is deliberate: the console refuses
+    to save one, so a stray {{name}} here means a hand-edited file, and a
+    macro silently vanishing from a booking page is the failure worth
+    preventing."""
+    if not macro_table:
+        return courses
+    from .cancellation import html_to_text        # here: it imports config
+
+    def rich(text: str) -> str:
+        return macros.expand(text, user=macro_table, rich=True) if text else text
+
+    def plain(text: str) -> str:
+        return (macros.expand(text, user=macro_table, rich=False, to_text=html_to_text)
+                if text else text)
+
+    return tuple(
+        replace(
+            course,
+            title=plain(course.title),
+            location=plain(course.location),
+            subtitle=None if course.subtitle is None else plain(course.subtitle),
+            description=rich(course.description),
+        )
+        for course in courses
+    )
+
+
 def merge_courses(base: tuple[Course, ...], editable: tuple[Course, ...]) -> tuple[Course, ...]:
     """Both files may define courses; the EDITABLE one wins per shortname.
 
@@ -1282,6 +1327,7 @@ def load_settings(toml_path: str | Path, data_dir: str | Path | None = None) -> 
     macro_table = macros_from_raw(editable_raw) if editable_raw else {}
     if data_dir is not None:
         courses = merge_console_overrides(courses, data_dir)
+    courses = expand_macros_in_courses(courses, macro_table)
     conflict_calendars = tuple(
         _conflict_calendar_from_raw(entry, i, {c.shortname for c in courses})
         for i, entry in enumerate(raw.get("conflict_calendar", []))
