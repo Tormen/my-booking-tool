@@ -117,5 +117,37 @@ class CheckBlockSkipExpectationTest(unittest.TestCase):
         self.assertIn("--- skipped".replace("---", r"\.\.\."), self.block)
 
 
+class VersionIsWrittenOnceTest(unittest.TestCase):
+    """The package version lives in the spec, and nowhere else in the
+    build path.
+
+    2026-08-27: scripts/build-rpm.sh carried its own VERSION="1.0.0". The
+    1.1.0 bump moved the spec but not the script, so the build died in
+    %prep looking for a tarball named after the old version -- an error
+    that says nothing whatsoever about the real cause."""
+
+    BUILD = Path(__file__).resolve().parent.parent / "scripts" / "build-rpm.sh"
+
+    def test_the_build_script_reads_the_version_from_the_spec(self):
+        text = self.BUILD.read_text(encoding="utf-8")
+        self.assertRegex(text, r'VERSION="\$\(sed[^"]*Version:')
+
+    def test_it_does_not_hardcode_one(self):
+        text = self.BUILD.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("VERSION=") and not stripped.startswith("VERSION=\"$("):
+                self.fail(f"build-rpm.sh hardcodes a version: {stripped!r}")
+
+    def test_python_and_the_spec_agree(self):
+        # `my-bt --version` and the RPM must never disagree about which
+        # version this is; they are two files, so this is the sync point.
+        from app.version import PACKAGE_VERSION
+        spec = SPEC.read_text(encoding="utf-8")
+        m = re.search(r"^Version:\s*(\S+)", spec, re.MULTILINE)
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group(1), PACKAGE_VERSION)
+
+
 if __name__ == "__main__":
     unittest.main()

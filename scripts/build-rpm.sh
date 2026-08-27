@@ -14,13 +14,22 @@
 set -euo pipefail
 
 NAME="my-booking-tool"
-VERSION="1.0.0"
 # UTC timestamp -- becomes the RPM's Release (see packaging/my-booking-tool.spec).
 # Every build gets a strictly newer NEVRA this way, so `dnf install` on the
 # result always applies as an upgrade instead of dnf refusing with
 # "already installed, nothing to do" when you rebuild without bumping VERSION.
 BUILD_TS="$(date -u +%Y%m%d%H%M%S)"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Read from the spec, never repeated here: a hardcoded copy silently
+# drifted on the 1.0.0 -> 1.1.0 bump and the build died in %prep looking
+# for a tarball named after the OLD version, which says nothing about the
+# real cause. The spec's `Version:` is the one place it is written.
+VERSION="$(sed -n 's/^Version:[[:space:]]*//p' "$HERE/packaging/$NAME.spec" | head -n 1)"
+if [ -z "$VERSION" ]; then
+  echo "cannot read Version: from packaging/$NAME.spec" >&2
+  exit 1
+fi
 # Absolute path, not "~" -- this script builds as your regular user but the
 # RPM is later installed with sudo/as root, so any "~" here would be
 # ambiguous depending on who/how it gets re-run or copy-pasted. Resolve the
