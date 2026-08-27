@@ -1416,8 +1416,8 @@ def format_active_sessions_overview(payload: dict) -> str:
     lines = [header, "-" * len(header)]
     lines.extend("  ".join(str(r.get(c, "")).ljust(widths[c]) for c in cols) for r in rows)
     lines.append("")
-    lines.append("Force-end a session with `my-bt admin logout EMAIL`, or every session with")
-    lines.append("`my-bt admin logout --all`.")
+    lines.append("Force-end a session with `my-bt admin logout EMAIL`, or every session with:")
+    lines.append("my-bt admin logout --all")
     return "\n".join(lines)
 
 

@@ -1304,8 +1304,8 @@ def _print_live_status(payload: dict) -> None:
     rows = cli_checks.active_sessions_rows(payload)
     _print_rows(rows, "table")
     print()
-    print("Force-end a session with `my-bt admin logout EMAIL`, or every session with")
-    print("`my-bt admin logout --all`.")
+    print("Force-end a session with `my-bt admin logout EMAIL`, or every session with:")
+    print("my-bt admin logout --all")
 
 
 # -- status / setup --------------------------------------------------------------
