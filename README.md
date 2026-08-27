@@ -2122,6 +2122,31 @@ recap is an error at send time, not a blank. When editing a template,
 check the macro is supplied where you are putting it -- that template's
 call site in `app/emailer.py` is the list.
 
+### Where macros are defined
+
+`settings.web-editable.toml`, beside `settings.toml` and optional -- an
+install that never opens `/admin` never grows one. The split is drawn
+along one question: **can a web process be trusted with this?**
+
+| file | holds | written by |
+|---|---|---|
+| `settings.toml` | site, calendars, SMTP, admin, privacy, logging, watchdog, defaults | you, by hand |
+| `settings.web-editable.toml` | `[macros]` and `[[course]]` blocks | you **and** `/admin` |
+
+A course may live in either file; the editable one wins per shortname,
+and `my-bt admin health` says so when both define one. Its shortname
+cannot be renamed from `/admin` in that case -- the console cannot write
+`settings.toml`, so the old block would stay and the course would exist
+twice. Use `my-bt admin rename-course`, which moves the bookings and the
+calendar events too.
+
+Saving from `/admin` is live on the next request: the file is re-read
+when its timestamp changes, exactly as `date_overrides.csv` already is.
+Nothing restarts, and no web process is given the privilege to restart
+anything. If the file will not load, the running configuration is kept
+and `my-bt admin health` reports it -- a typo in a file the browser can
+write must never take the site down.
+
 A name is at most 20 characters, letters/digits/underscore, and never
 starts with a digit. Renaming a user macro rewrites every use of it in
 the web-editable file, and refuses if the old name still appears in a

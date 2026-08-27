@@ -27,7 +27,7 @@ from pathlib import Path
 # Python without adding a parsing dependency, so this is a manual (but
 # rare -- only on an actual semver bump) sync point, same as the Release-
 # vs-Version split documented in the spec itself.
-PACKAGE_VERSION = "1.1.0"
+PACKAGE_VERSION = "1.2.0"
 
 _UNKNOWN = "unknown (not built via scripts/build-rpm.sh, and not a git checkout either)"
 

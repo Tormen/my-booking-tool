@@ -1,5 +1,5 @@
 Name:           my-booking-tool
-Version:        1.1.0
+Version:        1.2.0
 # Release is a timestamp, not a hand-bumped counter: scripts/build-rpm.sh
 # passes --define "build_timestamp <UTC YYYYmmddHHMMSS>" on every run, so
 # each build produces a strictly newer NEVRA. That means `dnf install` on
@@ -507,6 +507,31 @@ exit 0
 # builds (this is just packaging metadata, not tracked separately from
 # this file, so it's your call each release, same as git commit
 # authorship).
+* Thu Aug 27 2026 Tormen <tormen@mail.ch> - 1.2.0-1
+- Text macros: define a piece of text once (a studio name, an address, a
+  standing note) and use it in course texts, in emails and in the privacy
+  page. Three kinds, told apart by the name itself: {{studio}} is yours,
+  {{!retention_months}} comes from settings.toml, {{$name}} is supplied by
+  the code for one send. A sigil means the system owns the name.
+- settings.web-editable.toml, optional and new: the half of the config a
+  web process is trusted with ([macros] and [[course]]). settings.toml,
+  which holds the CalDAV account, the secret paths and the admin password
+  hash, is never written from a browser.
+- /admin/settings, reached from the banner: add, rename and edit macros,
+  and edit every course field, with a live preview of the description and
+  the markup allowlist applied on save. Saved config is live on the next
+  request -- nothing is restarted, and the service keeps its last known
+  good config if a file will not load.
+- privacy.html.tmpl uses the same macro syntax as everything else;
+  ${retention_months} is now {{!retention_months}}. Existing templates
+  need that one substitution (`my-bt admin health` reports a leftover).
+- `my-bt admin health` reports the new file: a parse failure (the site is
+  serving older config), and any course defined in both files.
+- Fixes: a date already booked was offered twice in /my's booking
+  overlay; nine dialogs were never centred; /my/settings validated both
+  its forms at once, so a half-typed address blocked saving a name; a
+  slow click now shows a loading panel instead of looking ignored.
+
 * Thu Aug 27 2026 Tormen <tormen@mail.ch> - 1.1.0-1
 - Future Sessions in the admin console: per-date time overrides, hide and
   cancel, journalled in date_overrides.csv instead of settings.toml
