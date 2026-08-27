@@ -400,3 +400,45 @@ class SecureDataPathTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublicFileModeTest(unittest.TestCase):
+    """Pages written into a web root must be readable by the WEB SERVER.
+
+    Real incident, 2026-08-27: a freshly deployed index_embedded.html
+    returned 403 for every visitor. tempfile.mkstemp creates its file
+    0600, atomic_write_text renames that file into place, and nothing in
+    between changed the mode -- so the page was root-only, and nginx
+    could not read it. Nothing in the test suite would have noticed,
+    because every other assertion is about CONTENT."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "index_embedded.html"
+
+    def test_public_writes_are_world_readable(self):
+        atomic_write_text(self.path, "<html>", public=True)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o644)
+
+    def test_the_default_is_still_private(self):
+        # Secrets go through this same function (cli_setup writes
+        # /etc/my-booking/secrets/* with it), so the DEFAULT must never
+        # become world-readable to fix a web page.
+        atomic_write_text(self.path, "secret")
+        self.assertEqual(self.path.stat().st_mode & 0o777 & 0o077, 0)
+
+    def test_public_and_secure_together_are_refused(self):
+        # secure=True chowns into the my-booking group model, which would
+        # leave a web page unreadable by the web server -- asking for both
+        # is a contradiction, not something to resolve silently.
+        with self.assertRaises(ValueError):
+            atomic_write_text(self.path, "<html>", secure=True, public=True)
+
+    def test_an_existing_private_file_is_replaced_with_a_readable_one(self):
+        # The actual repair path: a page deployed by the old code is 0600
+        # on disk, and re-deploying it must fix the mode, not inherit it.
+        self.path.write_text("old", encoding="utf-8")
+        self.path.chmod(0o600)
+        atomic_write_text(self.path, "new", public=True)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o644)

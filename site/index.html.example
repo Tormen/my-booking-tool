@@ -68,6 +68,18 @@
     site/index.html's own (real, Word-exported) copy of this same comment
     for the actual incident this fixes. */
  .attention a { color: #a61b1b; }
+
+ /* The banner's list is the LAST thing in the box, so its default
+    bottom margin lands on top of the box's own padding and reads as a
+    stray gap under the text. The box's padding alone is the spacing
+    here -- same reasoning as .selected-box on the booking page. */
+ .attention ul { margin: 0.25em 0 0; padding-left: 1.4em; }
+ /* The page-wide `li { margin-bottom: 0.35em }` above also applies to
+    the LAST bullet, where it stacks on the box's own padding and makes
+    the bottom gap larger than the top one. Zeroed here; the spacing
+    BETWEEN bullets is put back on the next line. */
+ .attention ul li { margin-bottom: 0; }
+ .attention ul li + li { margin-top: 0.2em; }
 </style>
 </head>
 <body>

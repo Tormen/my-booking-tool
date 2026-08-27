@@ -120,8 +120,17 @@ def secure_data_path(path, mode: int = 0o640) -> None:
         log.warning("could not chgrp %s to %r (%s)", path, SERVICE_GROUP, exc)
 
 
+# Anything a WEB SERVER has to read. tempfile.mkstemp creates its file
+# 0600 and atomic_write_text renames that file into place, so without
+# an explicit mode a page written here is unreadable by nginx and the
+# visitor gets 403 -- which is exactly what happened to a freshly
+# deployed index_embedded.html on 2026-08-27.
+PUBLIC_FILE_MODE = 0o644
+
+
 def atomic_write_text(
-    path: str | Path, text: str, encoding: str = "utf-8", *, secure: bool = False, mode: int = 0o640,
+    path: str | Path, text: str, encoding: str = "utf-8", *, secure: bool = False,
+    mode: int = 0o640, public: bool = False,
 ) -> None:
     """Crash-safe replacement for `Path(path).write_text(text)`: on a
     crash mid-write, the target either still has its old, complete
@@ -138,7 +147,17 @@ def atomic_write_text(
     (the default) for anything else -- e.g. secrets, or files nginx/other
     services own -- where this app's my-booking group model doesn't
     apply. Callers that need some OTHER chmod/chown scheme entirely
-    should still do that on `path` themselves AFTER this returns."""
+    should still do that on `path` themselves AFTER this returns.
+
+    `public=True` writes PUBLIC_FILE_MODE (0644) instead -- for the pages
+    that get deployed into a web root, where the reader is nginx, not
+    this app. It is applied to the temp file BEFORE the rename for the
+    same reason `secure` is: the mode has to be right at the instant the
+    file becomes visible, not a moment later. Mutually exclusive with
+    `secure`, which is about the my-booking group model and would leave a
+    web page unreadable by the web server."""
+    if secure and public:
+        raise ValueError("atomic_write_text: secure and public are mutually exclusive")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
@@ -149,6 +168,8 @@ def atomic_write_text(
             os.fsync(tmp.fileno())
         if secure:
             secure_data_path(tmp_path, mode=mode)
+        elif public:
+            os.chmod(tmp_path, PUBLIC_FILE_MODE)
         os.replace(tmp_path, path)
         fsync_dir(path.parent)
     except BaseException:

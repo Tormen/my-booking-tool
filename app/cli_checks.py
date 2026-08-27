@@ -1668,13 +1668,115 @@ def _my_booking_can_read(path: Path) -> bool | None:
     isn't root or `runuser` isn't installed -- switching to another user
     needs root, and a wrong guess here is worse than admitting we don't
     know (see the incident above)."""
+    return _user_can_read("my-booking", path)
+
+
+def _user_can_read(user: str, path: Path) -> bool | None:
+    """The generalised form (2026-08-27): does `user` have read access to
+    `path`, per the kernel? None when it cannot be determined (not root,
+    or no `runuser`).
+
+    Generalised out of _my_booking_can_read when nginx needed the same
+    question asked of the deployed static pages. Worth reusing rather than
+    re-modelling: a 403 from nginx can be a mode, an ACL, an SELinux
+    label, or a non-executable parent directory, and `test -r` as that
+    user settles all four at once."""
     if os.geteuid() != 0 or not shutil.which("runuser"):
         return None
     result = subprocess.run(
-        ["runuser", "-u", "my-booking", "--", "test", "-r", str(path)],
+        ["runuser", "-u", user, "--", "test", "-r", str(path)],
         capture_output=True,
     )
     return result.returncode == 0
+
+
+def _nginx_user(raw: dict, default: str = "nginx") -> str:
+    """The user nginx's worker processes run as, read from its own live
+    config (`user <name>;`) rather than assumed."""
+    conf = _live_nginx_config(raw)
+    if conf:
+        m = re.search(r"^\s*user\s+([A-Za-z0-9_-]+)", conf, re.MULTILINE)
+        if m:
+            return m.group(1)
+    return default
+
+
+def _selinux_context(path: Path) -> str | None:
+    """`ls -Z`'s context for one path, or None. Reported only to explain a
+    failure -- never used to DECIDE one, since the decision is already
+    made by asking the kernel (see _user_can_read)."""
+    if not shutil.which("ls"):
+        return None
+    try:
+        out = subprocess.run(
+            ["ls", "-Zd", str(path)], capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.split()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for field in out:
+        if ":" in field and field.count(":") >= 3:
+            return field
+    return None
+
+
+def check_static_pages_readable(raw: dict) -> list[Check]:
+    """Can nginx actually READ the pages deployed under static_site_dir?
+
+    Real incident, 2026-08-27: index_embedded.html was deployed correctly
+    -- right content, right place, symlinked into the web root -- and
+    every visitor got 403, because it had been written 0600 (see
+    atomic_io.PUBLIC_FILE_MODE). Every existing check passed: content
+    matched, the path was reachable, the directory's own SELinux context
+    was right. Nothing asked the only question that decides whether a
+    visitor sees the page.
+
+    Deliberately ONE check for what are really several possible causes --
+    mode, ACL, SELinux label, a parent directory nginx cannot traverse.
+    `test -r` run AS the nginx user answers all of them at once; the mode
+    and SELinux context are then reported alongside a failure purely to
+    say WHICH it was."""
+    static_site_dir = raw.get("site", {}).get("static_site_dir")
+    if not static_site_dir:
+        return []
+    user = _nginx_user(raw)
+    nginx_root = _nginx_root_for_host(raw)
+    out: list[Check] = []
+    for name in _SITE_PAGES:
+        # Test the path a VISITOR actually resolves -- the one under
+        # nginx's own root -- falling back to static_site_dir when they
+        # are the same directory or the root cannot be determined. Going
+        # through the visitor's path is what makes this cover the whole
+        # chain: `test -r` follows the symlink and needs every parent
+        # directory traversable, so a perfect file behind an unreadable
+        # directory is caught too.
+        path = Path(static_site_dir) / name
+        if nginx_root:
+            via_root = Path(nginx_root) / name
+            if via_root.exists() or via_root.is_symlink():
+                path = via_root
+        if not path.exists():
+            continue
+        label = f"nginx-readable: {name}"
+        readable = _user_can_read(user, path)
+        if readable is None:
+            out.append((label, "ok", f"can't verify without root (would test as user '{user}')"))
+            continue
+        if readable:
+            out.append((label, "ok", f"user '{user}' can read it"))
+            continue
+        try:
+            mode = oct(path.stat().st_mode & 0o777)
+        except OSError:
+            mode = "?"
+        context = _selinux_context(path) or "unknown"
+        out.append((
+            label, "warn",
+            f"user '{user}' CANNOT read {path} -- visitors get 403. "
+            f"mode {mode}, SELinux context {context}. "
+            f"Fix: chmod 644 {path}"
+            + ("; restorecon -v " + str(path) if "httpd_sys_content_t" not in context else "")
+        ))
+    return out
 
 
 def check_watchdog_nginx_access(raw: dict) -> list[Check]:

@@ -37,6 +37,24 @@ class ExtractScriptBodiesTest(unittest.TestCase):
         )
         self.assertEqual(site_render.extract_script_bodies(html), ["real();"])
 
+    def test_a_json_ld_data_block_is_not_a_script_to_hash(self):
+        # <script type="application/ld+json"> (SEO structured data, added
+        # to the real index.html) is a DATA BLOCK: the browser never
+        # executes it, so CSP's script-src does not govern it. Hashing it
+        # would put a hash in script-src that PERMITS those exact bytes to
+        # run -- the opposite of what a data block asks for.
+        html = ('<script>real();</script>'
+                '<script type="application/ld+json">{"@type": "Course"}</script>')
+        self.assertEqual(site_render.extract_script_bodies(html), ["real();"])
+
+    def test_javascript_types_and_modules_still_count(self):
+        html = ('<script type="text/javascript">one();</script>'
+                '<script type="module">two();</script>'
+                "<script type='application/javascript'>three();</script>")
+        self.assertEqual(
+            site_render.extract_script_bodies(html), ["one();", "two();", "three();"]
+        )
+
 
 class RenderPrivacyHtmlTest(unittest.TestCase):
     def setUp(self):

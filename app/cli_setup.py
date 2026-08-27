@@ -171,6 +171,30 @@ def _write_nginx_conf_path_setting(settings_path: str, value: str) -> None:
     atomic_write_text(settings_path, text)
 
 
+def _page_is_ours(path: Path) -> bool:
+    """True when `path` holds nothing this tool would be sorry to
+    overwrite: either it does not exist yet, or it carries the MANAGED BY
+    my-bt marker that only this tool's own generated pages have (see
+    app.site_render.is_managed_page).
+
+    2026-08-27, from a live `setup -i` run: asking "derive and copy
+    index_embedded.html now?" and then "symlink it now?" is ceremony when
+    the answer can only ever be yes -- that file is DERIVED, there is no
+    hand-authored version of it in existence, and the operator already
+    said yes by configuring index_embedded_enabled. A prompt is worth
+    something only where a wrong answer costs something, i.e. where a
+    file somebody else wrote is at that path. That case still asks.
+
+    Unreadable is treated as NOT ours: something is there that we cannot
+    account for, which is exactly when to ask rather than act."""
+    try:
+        if not path.exists():
+            return True
+        return site_render.is_managed_page(path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
+
+
 def tmpl_path(home: str) -> Path:
     return Path(home) / "site" / site_render.TEMPLATE_NAME
 
@@ -206,6 +230,10 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
         "static_pages_reachable": cli_checks.check_static_pages_reachable(raw),
+        # Reachable is not the same as readable: a page can be in the right
+        # place, with the right content, and still 403 because the web
+        # server cannot read it. See check_static_pages_readable.
+        "static_pages_readable": cli_checks.check_static_pages_readable(raw),
         "caldav_calendars": cli_checks.check_caldav_calendars(raw),
         "watchdog_nginx_log_config": cli_checks.check_watchdog_nginx_access_log_config(raw),
         "watchdog_nginx_access": cli_checks.check_watchdog_nginx_access(raw),
@@ -339,7 +367,7 @@ def print_report(
     static_site_checks = (
         report["static_site"] + report["index_embedded_drift"] + report["static_site_compliance"]
         + report["static_pages_deployed"] + report["static_pages_reachable"]
-        + report["static_site_dir_group_selinux"]
+        + report["static_pages_readable"] + report["static_site_dir_group_selinux"]
     )
     if static_site_checks:
         show(static_site_checks)
@@ -869,7 +897,14 @@ def interactive_setup(
         # deployed: "matches" here means regenerating would write the
         # identical bytes again, so asking anyway was pure noise.
         needs_regen = any(level != "ok" for _, level, _ in drift_checks)
-        if needs_regen and prompt(f"(Re)generate {out_path} from current settings.toml now?"):
+        # Don't ask about a file this tool wrote itself. A deployed page
+        # carrying the MANAGED BY my-bt marker (or no deployed page at
+        # all) holds nothing hand-authored, so regenerating it destroys
+        # nothing and the prompt was pure ceremony. A page WITHOUT the
+        # marker is somebody else's file at that path -- that one still
+        # gets asked about.
+        if needs_regen and (_page_is_ours(out_path)
+                            or prompt(f"(Re)generate {out_path} from current settings.toml now?")):
             privacy = raw.get("privacy", {})
             try:
                 site_render.write_privacy_html(
@@ -905,7 +940,12 @@ def interactive_setup(
                         # 2026-07-15: atomic_write_text, not a bare
                         # write_text() -- this is a live, publicly-served
                         # page. See app/atomic_io.py.
-                        atomic_write_text(deployed, source.read_text(encoding="utf-8"))
+                        # public=True: this lands in the web root, where
+                        # the reader is nginx. Without it the file keeps
+                        # tempfile.mkstemp's 0600 and every visitor gets
+                        # 403 (2026-08-27, on a real deployment).
+                        atomic_write_text(
+                            deployed, source.read_text(encoding="utf-8"), public=True)
                         print_fn(f"[ok] wrote {deployed}")
                     except OSError as exc:
                         print_fn(f"[fail] could not write {deployed}: {exc}")
@@ -959,10 +999,22 @@ def interactive_setup(
 
                 if derived is not None:
                     embedded_out_path = Path(static_site_dir) / site_render.EMBEDDED_OUTPUT_NAME
-                    if not embedded_out_path.exists():
-                        if prompt(f"Derive and copy {embedded_out_path} from index.html now?"):
+                    # This file is DERIVED -- there is no hand-authored
+                    # version of it to protect, so when it is missing or
+                    # carries our own marker it is just written, no
+                    # prompt (see _page_is_ours). Only a file at that
+                    # path that we did NOT write still gets the vimdiff
+                    # ask below.
+                    if _page_is_ours(embedded_out_path):
+                        deployed_text = ""
+                        if embedded_out_path.exists():
+                            deployed_text = embedded_out_path.read_text(encoding="utf-8", errors="replace")
+                        if deployed_text and cli_checks._diffable_static_page_text(deployed_text) == \
+                                cli_checks._diffable_static_page_text(derived):
+                            print_fn(f"[ok] {embedded_out_path} matches current index.html + settings.toml")
+                        else:
                             try:
-                                atomic_write_text(embedded_out_path, derived)
+                                atomic_write_text(embedded_out_path, derived, public=True)
                                 print_fn(f"[ok] wrote {embedded_out_path}")
                             except OSError as exc:
                                 print_fn(f"[fail] could not write {embedded_out_path}: {exc}")
@@ -992,6 +1044,26 @@ def interactive_setup(
         # own comment: some setups keep static_site_dir as a separate
         # git-tracked staging dir on purpose, symlinking in only what's
         # meant to be public).
+        # Readability by the web server. Offered as an actual fix rather
+        # than only reported: a 403 on a page that is otherwise perfectly
+        # deployed is the least self-explanatory failure in this whole
+        # setup, and `chmod 644` is unambiguous for a file whose entire
+        # purpose is to be served publicly.
+        for label, level, detail in cli_checks.check_static_pages_readable(raw):
+            if level == "ok":
+                print_fn(f"[ok] {label}: {detail}")
+                continue
+            print_fn(f"[{level}] {label}: {detail}")
+            name = label.split(": ", 1)[1]
+            target = Path(static_site_dir) / name
+            if not is_root():
+                print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+                continue
+            if prompt(f"chmod 644 {target} now?"):
+                _run_tolerant(["chmod", "644", str(target)], print_fn)
+                if "restorecon" in detail and shutil.which("restorecon"):
+                    _run_tolerant(["restorecon", "-v", str(target)], print_fn)
+
         for label, level, detail in cli_checks.check_static_pages_reachable(raw):
             if level == "ok":
                 print_fn(f"[ok] {label}: {detail}")
@@ -1005,6 +1077,19 @@ def interactive_setup(
             target = Path(static_site_dir) / name
             if not is_root():
                 print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
+            # A page this tool generates, with nothing at all in the way,
+            # gets its symlink without asking -- the operator already said
+            # yes to the page itself, and a link into an empty path
+            # displaces nothing. Anything else (a hand-authored page, or
+            # ANY existing file/link at link_path) keeps the prompt: that
+            # is where a wrong answer would actually cost something.
+            elif (name in site_render.MANAGED_PAGE_NAMES
+                  and not link_path.exists() and not link_path.is_symlink()):
+                try:
+                    link_path.symlink_to(target)
+                    print_fn(f"[ok] symlinked {link_path} -> {target}")
+                except OSError as exc:
+                    print_fn(f"[fail] could not symlink {link_path}: {exc}")
             elif prompt(f"Symlink {link_path} -> {target} now?"):
                 try:
                     link_path.symlink_to(target)

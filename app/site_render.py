@@ -79,6 +79,26 @@ EMBEDDED_MANAGED_MARKER = (
 
 EMBEDDED_OUTPUT_NAME = "index_embedded.html"
 
+# Both markers above open with this line. A deployed page carrying it was
+# written by this tool, which is what lets `my-bt setup -i` regenerate it
+# without asking: there is no hand-authored work in it to lose. A page
+# WITHOUT it is somebody's own file that happens to sit at that path, and
+# it keeps the ask-before-touching treatment.
+_MANAGED_MARKER_PREFIX = "<!-- MANAGED BY my-bt"
+
+# The generated pages, by filename -- the set `my-bt setup -i` may
+# (re)write and symlink into place unprompted.
+MANAGED_PAGE_NAMES = (OUTPUT_NAME, EMBEDDED_OUTPUT_NAME)
+
+
+def is_managed_page(text: str) -> bool:
+    """True if `text` is a page this tool generated (see
+    _MANAGED_MARKER_PREFIX). Matches anywhere rather than only at the
+    start: privacy.html puts the marker first, but a future generated
+    page might legitimately need a doctype or an XML declaration ahead
+    of any comment."""
+    return _MANAGED_MARKER_PREFIX in text
+
 
 class IndexEmbeddedDerivationError(ValueError):
     """Raised by derive_index_embedded_html() when the source index.html is
@@ -120,6 +140,7 @@ def write_privacy_html(
     # app/atomic_io.py.
     atomic_write_text(
         out_path, render_privacy_html(template_path, retention_months, canceled_retention_months),
+        public=True,
     )
 
 
@@ -212,7 +233,19 @@ _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 # is exactly the byte range a CSP 'sha256-...' hash must be computed over.
 # Kept as its own regex (rather than deriving from _SCRIPT_RE) so a change to
 # one can't accidentally desync the other.
-_SCRIPT_BODY_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_BODY_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.IGNORECASE | re.DOTALL)
+_SCRIPT_TYPE_ATTR_RE = re.compile(r'\btype\s*=\s*["\']?([^"\'>\s]+)', re.IGNORECASE)
+# A <script> whose `type` is not a JavaScript type is a DATA BLOCK in HTML
+# terms -- the browser parses it as text and never executes it, so CSP's
+# script-src has nothing to govern and no hash is needed or wanted. The
+# case that brought this up is `application/ld+json` (SEO structured
+# data). Hashing one anyway is not merely useless: it puts a hash into
+# script-src that permits an inline script with those exact bytes to RUN,
+# which is the opposite of what the data block asked for.
+_EXECUTABLE_SCRIPT_TYPES = frozenset({
+    "module", "text/javascript", "application/javascript",
+    "text/ecmascript", "application/ecmascript", "text/jscript",
+})
 _SCHEDULE_EXCEPTIONS_DIV_RE = re.compile(
     r'<div\s+id="schedule-exceptions"[^>]*>.*?</div>', re.IGNORECASE | re.DOTALL
 )
@@ -251,7 +284,15 @@ def extract_script_bodies(html_text: str) -> list[str]:
     Used by app.cli_checks.expected_csp_hashes() to compute index.html's own
     script hashes automatically instead of by hand."""
     stripped = _HTML_COMMENT_RE.sub("", html_text)
-    return _SCRIPT_BODY_RE.findall(stripped)
+    bodies = []
+    for attrs, body in _SCRIPT_BODY_RE.findall(stripped):
+        m = _SCRIPT_TYPE_ATTR_RE.search(attrs)
+        # No type= at all is the classic executable script; a type= that
+        # names a JavaScript type is too. Anything else is a data block --
+        # see _EXECUTABLE_SCRIPT_TYPES.
+        if m is None or m.group(1).strip().lower() in _EXECUTABLE_SCRIPT_TYPES:
+            bodies.append(body)
+    return bodies
 
 
 def _known_app_path(href: str, base_url: str) -> str | None:
@@ -408,7 +449,8 @@ def write_derived_index_embedded_html(
     before deciding whether to write anything."""
     atomic_write_text(
         out_path,
-        derive_index_embedded_html(
+        public=True,
+        text=derive_index_embedded_html(
             index_html_text, courses, today, base_url, new_tab_links, custom_attention_message,
         ),
     )

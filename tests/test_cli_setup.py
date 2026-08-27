@@ -967,7 +967,29 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         self.assertTrue(out.exists())
         self.assertIn("MANAGED BY my-bt", out.read_text())
 
-    def test_declining_leaves_it_unwritten(self):
+    def test_a_page_we_generate_is_written_without_asking(self):
+        # 2026-08-27: privacy.html is generated from privacy.html.tmpl +
+        # settings.toml and carries the MANAGED BY my-bt marker saying so.
+        # Nothing deployed yet means nothing to lose, so the old
+        # "(Re)generate ... now?" prompt only had one sensible answer.
+        raw = _raw(site={"static_site_dir": str(self.static_dir)})
+        prompt = FakePrompts({}, default=False)
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        out = self.static_dir / site_render.OUTPUT_NAME
+        self.assertEqual(prompt.asked_matching("Re)generate"), [])
+        self.assertTrue(out.exists())
+        self.assertIn("MANAGED BY my-bt", out.read_text())
+
+    def test_a_hand_authored_page_at_that_path_is_still_asked_about(self):
+        # No marker -> somebody else wrote it -> overwriting it would
+        # destroy real work, which is precisely where a prompt earns its
+        # keep. Declining leaves their file byte-for-byte alone.
+        out = self.static_dir / site_render.OUTPUT_NAME
+        out.write_text("<html>my own privacy page</html>", encoding="utf-8")
         raw = _raw(site={"static_site_dir": str(self.static_dir)})
         prompt = FakePrompts({"Re)generate": False})
         cli_setup.interactive_setup(
@@ -975,7 +997,8 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
             prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
             print_fn=lambda *_: None,
         )
-        self.assertFalse((self.static_dir / site_render.OUTPUT_NAME).exists())
+        self.assertNotEqual(prompt.asked_matching("Re)generate"), [])
+        self.assertEqual(out.read_text(), "<html>my own privacy page</html>")
 
     def test_not_prompted_when_already_matching(self):
         # Regression coverage: unlike nginx's reload prompt (which stays
@@ -1103,6 +1126,28 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual(link.resolve(), (self.static_dir / "privacy.html").resolve())
 
+    def test_symlink_for_a_page_we_generate_is_created_without_asking(self):
+        # 2026-08-27: linking a page THIS TOOL generated into an empty
+        # path displaces nothing, and the operator already said yes to the
+        # page itself. Note the test above keeps the prompt for a page we
+        # did not write -- the marker is the whole difference.
+        nginx_root = self.home / "public_html"
+        nginx_root.mkdir()
+        (self.static_dir / "privacy.html").write_text(
+            site_render.MANAGED_MARKER + "generated privacy page", encoding="utf-8"
+        )
+        raw = _raw(site={"static_site_dir": str(self.static_dir), "base_url": "https://example.org"})
+        prompt = FakePrompts({}, default=False)
+        with patch("app.cli_checks._nginx_root_for_host", return_value=str(nginx_root)):
+            cli_setup.interactive_setup(
+                raw, self.settings_path, str(self.home),
+                prompt=prompt, run=lambda cmd: None, is_root=lambda: True,
+                print_fn=lambda *_: None,
+            )
+        link = nginx_root / "privacy.html"
+        self.assertEqual(prompt.asked_matching("Symlink"), [])
+        self.assertTrue(link.is_symlink())
+
     def test_symlink_not_offered_without_root(self):
         nginx_root = self.home / "public_html"
         nginx_root.mkdir()
@@ -1210,16 +1255,48 @@ class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
         out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
         self.assertIn("On vacation from 2026-08-01.", out.read_text())
 
-    def test_declining_leaves_it_unwritten(self):
+    def test_it_is_derived_and_written_without_asking(self):
+        # 2026-08-27: this page is DERIVED from the live index.html --
+        # there is no hand-authored version of it anywhere, and enabling
+        # index_embedded_enabled already said yes to having it. So it is
+        # written, not offered.
         self._deploy_index_html()
         raw = _raw(site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True}, course=[])
-        prompt = FakePrompts({"Derive and copy": False})
+        prompt = FakePrompts({}, default=False)
         cli_setup.interactive_setup(
             raw, self.settings_path, str(self.home),
             prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
             print_fn=lambda *_: None,
         )
-        self.assertFalse((self.static_dir / site_render.EMBEDDED_OUTPUT_NAME).exists())
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
+        self.assertTrue(out.exists())
+        self.assertIn("MANAGED BY my-bt", out.read_text())
+
+    def test_a_stale_page_of_ours_is_refreshed_without_asking(self):
+        self._deploy_index_html()
+        course = {
+            "shortname": "sat-trier", "title": "Yoga", "location": "Trier", "weekday": "sat",
+            "start_time": "10:45", "duration_minutes": 120, "capacity": 10,
+            "date_override": [{"date": "2099-01-01", "start_time": "09:45"}],
+        }
+        out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
+        out.write_text(
+            site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10"),
+            encoding="utf-8",
+        )
+        raw = _raw(
+            site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True},
+            course=[course],
+        )
+        prompt = FakePrompts({}, default=False)
+        cli_setup.interactive_setup(
+            raw, self.settings_path, str(self.home),
+            prompt=prompt, run=lambda cmd: None, is_root=lambda: False,
+            print_fn=lambda *_: None,
+        )
+        self.assertEqual(prompt.asked_matching("index_embedded.html"), [])
+        self.assertIn("ATTENTION", out.read_text())
 
     def test_not_prompted_when_already_matching(self):
         self._deploy_index_html()
@@ -1251,8 +1328,12 @@ class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
         }
         out = self.static_dir / site_render.EMBEDDED_OUTPUT_NAME
         # Deployed with NO overrides baked in yet -- stale relative to what
-        # would currently derive.
+        # would currently derive -- AND with our marker stripped, so it
+        # reads as somebody's own file at that path. Since 2026-08-27 that
+        # is the only case that still offers a vimdiff: a stale page we
+        # ourselves generated is simply refreshed (see the test above).
         stale = site_render.derive_index_embedded_html(_SAMPLE_INDEX_HTML, (), "2026-07-10")
+        stale = stale.replace(site_render.EMBEDDED_MANAGED_MARKER, "")
         out.write_text(stale, encoding="utf-8")
         raw = _raw(
             site={"static_site_dir": str(self.static_dir), "index_embedded_enabled": True},
