@@ -341,3 +341,63 @@ class AdminBannerReadsTheAdminSessionTest(unittest.TestCase):
 
     def test_guest_only_is_honestly_not_an_admin(self):
         self.assertIn("Not logged in", self.app._admin_banner_html(self._cookies(guest=1)))
+
+
+class UnsavedChangesTest(unittest.TestCase):
+    """Leaving a half-edited course must not lose it silently.
+
+    The tabs are links, so clicking one is a full navigation -- an
+    unsaved description was simply gone. The page now asks (save /
+    discard / stay) for a click on a link IN the page, and carries where
+    the operator was heading in a `next` field so Save lands them there."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        secrets = self.dir / "secrets"
+        secrets.mkdir()
+        for name in ("caldav", "smtp", "admin"):
+            (secrets / name).write_text("x")
+        (secrets / "pepper").write_text("00" * 32)
+        (self.dir / "settings.toml").write_text(BASE_SETTINGS.format(secrets=secrets))
+        self.store = Store(str(self.dir / "data"))
+        self.app = App(make_settings(courses=(make_course(shortname="yoga", weekday="wed"),)),
+                       self.store, settings_path=str(self.dir / "settings.toml"))
+        self.admin = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}"}
+
+    def _save(self, **overrides):
+        form = {"old_shortname": "yoga", "shortname": "yoga", "title": "Yoga",
+                "location": "Studio", "weekday": "wed", "start_time": "18:00",
+                "duration_minutes": "60", "capacity": "10", "audience": "private",
+                "order_in_all_courses": "0", "subtitle": "", "description": ""}
+        form.update(overrides)
+        body = urlencode(form).encode()
+        env = dict(self.admin)
+        env.update({"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)})
+        return self.app.admin_settings_course("POST", env)
+
+    def test_the_page_offers_the_three_choices(self):
+        _s, _h, body = self.app.admin_settings("GET", self.admin)
+        self.assertIn('id="unsaved-dialog"', body)
+        for label in ("Yes, save and continue", "No, discard them", "Stay here"):
+            self.assertIn(label, body)
+
+    def test_save_returns_to_where_the_operator_was_heading(self):
+        _s, headers, _b = self._save(next="/admin/settings?tab=other")
+        self.assertEqual(dict(headers)["Location"], "/admin/settings?tab=other")
+
+    def test_without_a_next_it_stays_on_the_saved_course(self):
+        _s, headers, _b = self._save()
+        self.assertIn("tab=yoga", dict(headers)["Location"])
+
+    def test_a_next_outside_admin_is_refused(self):
+        # It arrives in a form field, so it is an open redirect the
+        # moment it is trusted.
+        for target in ("https://evil.example/x", "//evil.example", "/my",
+                       "javascript:alert(1)"):
+            with self.subTest(target=target):
+                _s, headers, _b = self._save(next=target)
+                self.assertNotIn("evil", dict(headers)["Location"])
+                self.assertNotIn("javascript", dict(headers)["Location"])
+                self.assertTrue(dict(headers)["Location"].startswith("/admin/settings"))

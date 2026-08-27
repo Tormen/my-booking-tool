@@ -835,6 +835,135 @@ _SETTINGS_SCRIPT = r"""<script>
   });
 
   buildTips();
+
+  // --- unsaved changes ------------------------------------------------
+  // The course tabs are LINKS, so clicking one is a full navigation and
+  // an unsaved description was simply gone -- silently, which is the
+  // worst way to lose the longest thing anyone types here.
+  //
+  // TWO mechanisms, because they cover different exits and only one of
+  // them can offer a choice:
+  //   * leaving via a link ON this page (a tab, the banner) is caught
+  //     here, and asks properly: save, discard, or stay.
+  //   * closing the tab or going Back can only raise the browser's own
+  //     generic prompt -- its wording and buttons are not ours to set.
+  var form = document.getElementById("course-form");
+  if (!form) { return; }
+  var dialog = document.getElementById("unsaved-dialog");
+  var nextField = document.getElementById("course-next");
+  var initial = new FormData(form);
+  var pendingHref = null;
+
+  function isDirty() {
+    var now = new FormData(form);
+    var keys = {};
+    initial.forEach(function (v, k) { keys[k] = true; });
+    now.forEach(function (v, k) { keys[k] = true; });
+    for (var key in keys) {
+      if (key === "next") { continue; }
+      if (String(initial.get(key)) !== String(now.get(key))) { return true; }
+    }
+    return false;
+  }
+
+  document.addEventListener("click", function (ev) {
+    if (!isDirty()) { return; }
+    var a = ev.target.closest ? ev.target.closest("a") : null;
+    if (!a || ev.defaultPrevented || ev.button !== 0) { return; }
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) { return; }
+    var href = a.getAttribute("href") || "";
+    if (!href || href.charAt(0) === "#") { return; }
+    if (/^[a-z]+:/i.test(href) && a.origin !== window.location.origin) { return; }
+    ev.preventDefault();
+    ev.stopPropagation();
+    pendingHref = href;
+    if (dialog && dialog.showModal) { dialog.showModal(); }
+    else if (window.confirm("Save your changes before leaving?")) { save(); }
+    else { leave(); }
+  }, true);
+
+  function save() {
+    if (nextField && pendingHref) { nextField.value = pendingHref; }
+    if (dialog && dialog.open) { dialog.close(); }
+    form.requestSubmit ? form.requestSubmit() : form.submit();
+  }
+
+  function leave() {
+    initial = new FormData(form);          // no longer dirty: stop warning
+    if (dialog && dialog.open) { dialog.close(); }
+    window.location.href = pendingHref;
+  }
+
+  // --- and the draft itself ------------------------------------------
+  // Asking is not enough on its own: a crash, a closed laptop, or the
+  // browser's own generic prompt answered wrongly all end the same way.
+  // The half-typed form is kept per course in sessionStorage -- which
+  // dies with the tab, so it cannot become stale config left lying
+  // around -- and offered back on return, never applied silently: it
+  // says what it did and how to drop it.
+  var KEY = "mb_course_draft:" + (form.elements.old_shortname || {}).value;
+
+  function keepDraft() {
+    if (!isDirty()) { window.sessionStorage.removeItem(KEY); return; }
+    var data = {};
+    new FormData(form).forEach(function (v, k) { if (k !== "next") { data[k] = v; } });
+    try { window.sessionStorage.setItem(KEY, JSON.stringify(data)); } catch (e) { /* full/private */ }
+  }
+
+  function restoreDraft() {
+    var raw = null;
+    try { raw = window.sessionStorage.getItem(KEY); } catch (e) { return; }
+    if (!raw) { return; }
+    var data;
+    try { data = JSON.parse(raw); } catch (e) { window.sessionStorage.removeItem(KEY); return; }
+    var changed = [];
+    Object.keys(data).forEach(function (name) {
+      var field = form.elements[name];
+      if (!field || field.type === "hidden") { return; }
+      if (String(field.value) === String(data[name])) { return; }
+      field.value = data[name];
+      changed.push(name);
+    });
+    if (!changed.length) { window.sessionStorage.removeItem(KEY); return; }
+    var note = document.createElement("p");
+    note.className = "err";
+    note.textContent = "Unsaved changes from before were put back (" +
+      changed.join(", ") + "). ";
+    var drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "link-button";
+    drop.textContent = "Discard them";
+    drop.addEventListener("click", function () {
+      window.sessionStorage.removeItem(KEY);
+      window.location.reload();
+    });
+    note.appendChild(drop);
+    form.insertBefore(note, form.firstChild);
+    form.querySelectorAll("textarea.grow, .desc-input").forEach(function (area) {
+      area.dispatchEvent(new Event("input"));      // re-grow and re-preview
+    });
+  }
+
+  restoreDraft();
+  form.addEventListener("input", keepDraft);
+  form.addEventListener("change", keepDraft);
+  window.addEventListener("pagehide", keepDraft);
+
+  var saveBtn = document.getElementById("unsaved-save");
+  var discardBtn = document.getElementById("unsaved-discard");
+  if (saveBtn) { saveBtn.addEventListener("click", save); }
+  if (discardBtn) { discardBtn.addEventListener("click", leave); }
+
+  form.addEventListener("submit", function () {
+    initial = new FormData(form);
+    try { window.sessionStorage.removeItem(KEY); } catch (e) { /* nothing to clear */ }
+  });
+
+  window.addEventListener("beforeunload", function (ev) {
+    if (!isDirty()) { return; }
+    ev.preventDefault();
+    ev.returnValue = "";      // the wording is the browser's, not ours
+  });
 })();
 </script>"""
 
@@ -5840,6 +5969,10 @@ class App:
         return f"""
       <form method="post" action="/admin/settings/course" id="course-form">
       <input type="hidden" name="old_shortname" value="{esc(course.shortname)}">
+      <!-- Where the operator was heading when they were asked to save.
+           Filled by the script only when it interrupts a click; empty
+           for an ordinary Save, which returns to this same tab. -->
+      <input type="hidden" name="next" id="course-next" value="">
       <p class="course-head">
         <span class="when"><span class="wd">{esc(course.weekday_label()[:3])}</span>
           {esc(course.time_range_label())}</span>
@@ -5896,12 +6029,21 @@ class App:
         <span class="note">(comma-separated)</span>
         <input class="big-input" name="cc" value="{esc(cc)}" readonly></label>
       <div class="submit-row">
-        <button type="submit">Save this course</button>
+        <button type="submit" id="course-save">Save this course</button>
         <span class="note">Writes <code>settings.web-editable.toml</code>; live on the next
           page load. <code>settings.toml</code>, which holds the credentials, is never
           written from here.</span>
       </div>
-      </form>"""
+      </form>
+      <dialog id="unsaved-dialog">
+        <p><b>You have unsaved changes to {esc(course.shortname)}.</b></p>
+        <p>Save them before leaving this course?</p>
+        <div class="submit-row">
+          <button type="button" id="unsaved-save">Yes, save and continue</button>
+          <button type="button" id="unsaved-discard">No, discard them</button>
+          <button type="button" class="dialog-close-btn" data-dialog="unsaved-dialog">Stay here</button>
+        </div>
+      </dialog>"""
 
     def _macro_chips_html(self, *, rich_ok: bool) -> str:
         if not self.settings.macros:
@@ -6103,6 +6245,12 @@ class App:
         if error:
             return self._settings_redirect(error, tab=old_shortname)
 
+        # Where to land afterwards. Only ever a path under /admin: this
+        # comes from the page, and a redirect target from a form field is
+        # an open redirect the moment it is trusted (the guest login's
+        # `next` has the same guard for the same reason).
+        target = form.get("next", "").strip()
+        after = target if re.fullmatch(r"/admin[a-zA-Z0-9/?=&_-]*", target or "") else ""
         note = f"{updated.shortname} saved"
         if dropped:
             note += " -- removed: " + ", ".join(dropped)
@@ -6110,6 +6258,8 @@ class App:
             moved, calendar_note = self._migrate_shortname(old_shortname, new_shortname)
             note = (f"{old_shortname} is now {new_shortname}: {moved} booking(s) moved"
                     f"{calendar_note}")
+        if after:
+            return "302 Found", [("Location", after)], ""
         return self._settings_redirect(None, note, tab=updated.shortname)
 
     @staticmethod
