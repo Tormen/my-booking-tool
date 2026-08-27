@@ -452,23 +452,71 @@ def _maintenance_bypass_allowed(client_ip: str, hostname: str | None, ip_log_pat
     return client_ip in allowed
 
 
+# Guest and admin sessions get their OWN cookie (2026-08-28, reported
+# live: logging into /admin in one tab silently logged the guest out in
+# another). One cookie for both meant the browser could only ever hold
+# one of the two, so switching roles displaced the other -- invisible
+# until a page said "not logged in" -- and left the displaced session
+# behind, counted by `my-bt admin sessions` and by the upgrade guard.
+# Two names, two independent logins, no interference.
+_COOKIE_FOR_KIND = {"guest": "session", "admin": "admin_session"}
+
+
 def _new_session(data: dict) -> str:
+    """Mints a session and DROPS the one it replaces.
+
+    A login is not "an additional session": logging in again in the same
+    browser (or as the same admin elsewhere) replaces the cookie, so the
+    previous entry could never be reached again -- it just sat in memory
+    until its 4h timeout, inflating what the console reports and what
+    %pre refuses to upgrade past. Same kind, same user, so at most one
+    live session per identity."""
+    kind = data.get("kind")
+    user_id = data.get("user_id")
+    for old_sid, old in list(SESSIONS.items()):
+        if old.get("kind") == kind and old.get("user_id") == user_id:
+            SESSIONS.pop(old_sid, None)
     sid = new_token()
     SESSIONS[sid] = {**data, "expires": time.time() + SESSION_TTL_SECONDS}
     return sid
 
 
-def _get_session(environ) -> dict | None:
+def _get_session(environ, kind: str | None = None) -> dict | None:
+    """The session this request carries, or None.
+
+    `kind` names which cookie to read; without it, either -- a page that
+    accepts both (the banner, the maintenance guard) asks once and gets
+    whichever the browser holds, preferring the guest one, since guest
+    pages far outnumber admin ones."""
     jar = cookies.SimpleCookie()
     jar.load(environ.get("HTTP_COOKIE", ""))
-    if "session" not in jar:
-        return None
-    sid = jar["session"].value
-    session = SESSIONS.get(sid)
-    if session and session["expires"] > time.time():
-        return {**session, "_sid": sid}
-    SESSIONS.pop(sid, None)
+    # Preferred cookie first, then the other one -- a session found there
+    # counts only if it is of the KIND asked for. Two reasons to look at
+    # both: a browser from before the split still carries an admin
+    # session in the guest cookie, and the cookie NAME was never the
+    # security boundary anyway -- `kind` is, and it is checked here.
+    preferred = [_COOKIE_FOR_KIND[kind]] if kind else [_COOKIE_FOR_KIND["guest"]]
+    names = preferred + [n for n in _COOKIE_FOR_KIND.values() if n not in preferred]
+    for name in names:
+        if name not in jar:
+            continue
+        sid = jar[name].value
+        session = SESSIONS.get(sid)
+        if session and session["expires"] > time.time():
+            if kind is not None and session.get("kind") != kind:
+                continue
+            return {**session, "_sid": sid}
+        if session:
+            SESSIONS.pop(sid, None)
     return None
+
+
+def _clear_all_session_cookies() -> list[tuple[str, str]]:
+    """Both cookies, cleared. Logging out means leaving, not leaving the
+    role you happened to be in -- and with two cookies a single clear
+    would silently keep the other one alive."""
+    return [("Set-Cookie", _session_cookie_header("", clear=True, kind=kind))
+            for kind in _COOKIE_FOR_KIND]
 
 
 def _login_required_redirect() -> tuple[str, list, str]:
@@ -536,8 +584,14 @@ def _invalidate_all_sessions_for_user(user_id: str) -> None:
         SESSIONS.pop(sid, None)
 
 
-def _session_cookie_header(sid: str, clear: bool = False) -> str:
-    parts = [f"session={sid if not clear else ''}", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"]
+def _session_cookie_header(sid: str, clear: bool = False, kind: str | None = None) -> str:
+    """The Set-Cookie for one session. `kind` picks the cookie NAME; left
+    out it is read off the session itself, so a caller that has just been
+    handed a sid does not have to know or repeat which sort it is."""
+    if kind is None:
+        kind = SESSIONS.get(sid, {}).get("kind", "guest")
+    name = _COOKIE_FOR_KIND.get(kind, _COOKIE_FOR_KIND["guest"])
+    parts = [f"{name}={sid if not clear else ''}", "HttpOnly", "Secure", "SameSite=Lax", "Path=/"]
     if clear:
         parts.append("Max-Age=0")
     return "; ".join(parts)
@@ -2572,8 +2626,12 @@ class App:
             # settings page itself: a link to the page you are looking at
             # is dead weight.
             + f'<span><span class="session-role">{esc(label)}</span>'
-            + ("" if on_settings else
-               ' &middot; <a href="/admin/settings">Macros &amp; Course Settings</a>')
+            # On the settings page the pair swaps: the way BACK to the
+            # overview, since a link to the page you are looking at is
+            # dead weight and being one click from the bookings is the
+            # thing you actually want from here.
+            + (' &middot; <a href="/admin">Bookings &amp; Sessions</a>' if on_settings
+               else ' &middot; <a href="/admin/settings">Macros &amp; Course Settings</a>')
             + "</span>"
             + f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
             + "</div>"
@@ -4246,7 +4304,7 @@ class App:
             SESSIONS.pop(session["_sid"], None)
         return (
             "302 Found",
-            [("Location", self.settings.base_url), ("Set-Cookie", _session_cookie_header("", clear=True))],
+            [("Location", self.settings.base_url)] + _clear_all_session_cookies(),
             "",
         )
 
@@ -4270,7 +4328,7 @@ class App:
             # can never drift apart on this.
             erase_user_by_email(self.store, self.settings, user.email, caldav=self.caldav)
         SESSIONS.pop(session["_sid"], None)
-        return "302 Found", [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))], ""
+        return "302 Found", [("Location", "/my")] + _clear_all_session_cookies(), ""
 
     def my_session_status(self, method: str, environ):
         """GET-only JSON: {"logged_in": bool, "email": str|null} for
@@ -4680,7 +4738,7 @@ class App:
             SESSIONS.pop(session["_sid"], None)
             return (
                 "302 Found",
-                [("Location", "/my"), ("Set-Cookie", _session_cookie_header("", clear=True))],
+                [("Location", "/my")] + _clear_all_session_cookies(),
                 "",
             )
         return self._my_settings_page(environ, user)
@@ -4953,7 +5011,9 @@ class App:
                 # own comment for the full incident this closes).
                 login_limiter.reset(key)
                 sid = _new_session({"kind": "admin"})
-                return "302 Found", [("Location", "/admin"), ("Set-Cookie", _session_cookie_header(sid))], ""
+                return ("302 Found",
+                        [("Location", "/admin"),
+                         ("Set-Cookie", _session_cookie_header(sid, kind="admin"))], "")
             else:
                 error = "Wrong password."
         err_html = f'<p class="err">{esc(error)}</p>' if error else ""
@@ -5243,7 +5303,7 @@ class App:
         )
 
     def admin_overview(self, method: str, environ):
-        session = _get_session(environ)
+        session = _get_session(environ, "admin")
         if not session or session.get("kind") != "admin":
             return "302 Found", [("Location", "/admin/login")], ""
         # 2026-07-14: replaced the old binary "include past"
@@ -5784,7 +5844,7 @@ class App:
                         "upcoming calendar event is rewritten to the new key.")}
         <span class="req">(required)</span>
         <input class="big-input id-input sn-input" name="shortname"
-               value="{esc(course.shortname)}" required pattern="[a-z0-9][-a-z0-9]*"></label>
+               value="{esc(course.shortname)}" required pattern="[a-z0-9][a-z0-9\\-]*"></label>
       <label>{self._lbl("Title", "title")}
         <input class="big-input" name="title" value="{esc(course.title)}" required></label>
       {chips}
@@ -5862,7 +5922,7 @@ class App:
 
     def _settings_gate(self, environ):
         """(None, response) unless this is an admin session."""
-        session = _get_session(environ)
+        session = _get_session(environ, "admin")
         if not session or session.get("kind") != "admin":
             return None, ("302 Found", [("Location", "/admin/login")], "")
         if not self.settings_path:
@@ -6113,7 +6173,7 @@ class App:
         """(course, error_response) for the three Future Sessions
         handlers. POST-only: these all change something, and a GET that
         mutates is one stray prefetch away from a cancelled session."""
-        session = _get_session(environ)
+        session = _get_session(environ, "admin")
         if not session or session.get("kind") != "admin":
             return None, ("302 Found", [("Location", "/admin/login")], "")
         if method != "POST":

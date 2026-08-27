@@ -266,24 +266,39 @@ class PatternsAreValidInBrowsersTest(unittest.TestCase):
     first. The field then validated NOTHING, silently."""
 
     def _patterns(self):
+        """From the RENDERED page, not the source: in the source these
+        live inside f-strings, where the escape is doubled -- checking
+        that text would be checking Python's view, not the browser's."""
+        import io
         import re
+        import tempfile
         from pathlib import Path
-        src = (Path(__file__).resolve().parent.parent / "app" / "webapp.py").read_text()
-        return re.findall(r'pattern="([^"]+)"', src)
+        from app import webapp
+        from app.storage import Store
+        from .helpers import make_course, make_settings
+        tmp = tempfile.mkdtemp()
+        app = webapp.App(make_settings(courses=(make_course(shortname="yoga"),)),
+                         Store(tmp), settings_path=str(Path(tmp) / "settings.toml"))
+        env = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}"}
+        _s, _h, body = app.admin_settings("GET", env)
+        return re.findall(r'pattern="([^"]+)"', body)
 
     def test_there_are_patterns_to_check(self):
         self.assertTrue(self._patterns())
 
-    def test_no_dangling_hyphen_after_a_range(self):
+    def test_every_hyphen_inside_a_class_is_escaped(self):
+        """Under the `v` flag a literal `-` is RESERVED anywhere in a
+        character class, not merely after a range -- the first fix moved
+        it to the front and Firefox still refused it ("invalid character
+        in class"). Escaped is the only form that compiles."""
         import re
         for pattern in self._patterns():
-            with self.subTest(pattern=pattern):
-                # a-z0-9- : a hyphen straight after a range, the exact
-                # shape browsers reject. Legal forms put it first or
-                # escape it.
-                self.assertIsNone(re.search(r"[a-zA-Z0-9]-[a-zA-Z0-9]-\]", pattern),
-                                  "hyphen after a range -- put it first instead")
-                self.assertNotIn("9-]", pattern)
+            for body in re.findall(r"\[([^\]]*)\]", pattern):
+                with self.subTest(pattern=pattern, cls=body):
+                    stripped = re.sub(r"\\.", "", body)          # drop escapes
+                    stripped = re.sub(r"\w-\w", "", stripped)      # keep real ranges
+                    self.assertNotIn("-", stripped,
+                                     "a literal - in a class must be written \\-")
 
     def test_they_still_compile_in_python(self):
         import re

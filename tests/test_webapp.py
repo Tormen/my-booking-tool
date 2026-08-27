@@ -2159,17 +2159,32 @@ class InternalLogoutEndpointTest(unittest.TestCase):
         self.assertNotIn(sid_target, webapp.SESSIONS)
         self.assertIn(sid_other, webapp.SESSIONS)
 
-    def test_email_with_multiple_sessions_logs_out_all_of_them(self):
-        # Every device/browser, not just one -- same guarantee
-        # _invalidate_all_sessions_for_user already gives an email change.
+    def test_a_second_login_replaces_the_first_rather_than_adding_one(self):
+        # 2026-08-28: logging in again cannot be reached from the old
+        # cookie -- it was replaced -- so the previous entry only sat in
+        # memory until its 4h timeout, inflating what the console lists
+        # and what the upgrade guard refuses to proceed past. One live
+        # session per identity now, so logging out finds exactly one.
         user = self.store.upsert_user_for_booking("multi-device@example.org", "MultiDevice")
         sid1 = self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
         sid2 = self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        self.assertNotIn(sid1, webapp.SESSIONS, "the displaced session should be gone")
         status, _headers, body = self._post({"email": "multi-device@example.org"})
         self.assertEqual(status, "200 OK")
-        self.assertEqual(json.loads(body)["logged_out"], 2)
-        self.assertNotIn(sid1, webapp.SESSIONS)
+        self.assertEqual(json.loads(body)["logged_out"], 1)
         self.assertNotIn(sid2, webapp.SESSIONS)
+
+    def test_a_guest_and_an_admin_session_coexist(self):
+        # They use SEPARATE cookies, so logging into /admin in one tab no
+        # longer logs the guest out in another (reported live).
+        user = self.store.upsert_user_for_booking("both@example.org", "Both")
+        guest = self._new_tracked_session({"kind": "guest", "user_id": user.user_id})
+        admin = self._new_tracked_session({"kind": "admin"})
+        self.assertIn(guest, webapp.SESSIONS)
+        self.assertIn(admin, webapp.SESSIONS)
+        env = {"HTTP_COOKIE": f"session={guest}; admin_session={admin}"}
+        self.assertEqual(webapp._get_session(env, "guest")["user_id"], user.user_id)
+        self.assertEqual(webapp._get_session(env, "admin")["kind"], "admin")
 
     def test_unknown_email_is_a_no_op_not_an_error(self):
         status, _headers, body = self._post({"email": "nobody-logged-in@example.org"})
