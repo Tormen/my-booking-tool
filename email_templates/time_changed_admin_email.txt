@@ -1,5 +1,5 @@
-{{intro}}
+{{$intro}}
 
-{{message_line}}{{details}}
-{{spots_taken}} / {{capacity}} spots taken.
-{{notified_line}}
+{{$message_line}}{{$details}}
+{{$spots_taken}} / {{$capacity}} spots taken.
+{{$notified_line}}

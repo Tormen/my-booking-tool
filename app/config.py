@@ -17,6 +17,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import macros
 from .atomic_io import atomic_write_text
 
 
@@ -331,6 +332,10 @@ class Settings:
     email_templates_folder: str = ""
 
     courses: tuple[Course, ...] = field(default_factory=tuple)
+    # Operator-defined text macros ([macros] in settings.web-editable.toml).
+    # Empty unless that file exists, which is what keeps every existing
+    # install and every test unchanged by their arrival.
+    macros: dict[str, str] = field(default_factory=dict)
 
     # Calendar-invite VALARM reminders (minutes before start), both under
     # [booking_calendar] since 2026-07-18 -- see
@@ -814,7 +819,8 @@ def _conflict_calendar_from_raw(
         ics_url=ics_url, caldav_url=caldav_url,
         caldav_username=caldav_username, caldav_password=caldav_password,
         calendar=calendar, use_booking_calendar=use_booking,
-        courses=courses, all_courses_but=all_courses_but,
+        courses=courses,
+        all_courses_but=all_courses_but,
         from_hm=from_hm, till_hm=till_hm,
         title_contains=str(entry.get("title_contains", "")),
         cache_minutes=int(entry.get("cache_minutes", 10)),
@@ -1013,6 +1019,89 @@ def reconcile_config_overrides(toml_path: str | Path, data_dir: str | Path) -> l
     return reconcile_config_rows(OverrideStore(data_dir), entries)
 
 
+WEB_EDITABLE_FILENAME = "settings.web-editable.toml"
+
+
+def web_editable_path(toml_path: str | Path) -> Path:
+    """The console-writable settings file that sits beside settings.toml.
+
+    Two files, split along one question: can a WEB PROCESS be trusted
+    with this? settings.toml holds a CalDAV username, three paths to
+    secret files and the admin password hash, and is never written by the
+    app. This one holds [macros] and [[course]] blocks, is owned by the
+    my-booking user, and /admin writes it. The name says WHO writes it --
+    "editable" alone would read as "the one you may edit", which is
+    backwards: both are yours to edit by hand.
+
+    Optional. Absent, everything behaves exactly as before, courses and
+    all, so an install that never opens /admin never grows a second
+    file."""
+    return Path(toml_path).parent / WEB_EDITABLE_FILENAME
+
+
+def load_web_editable(toml_path: str | Path) -> dict:
+    """Parses the web-editable file, or returns {} when there is none.
+
+    A parse error is raised, not swallowed: the caller decides whether to
+    keep the last known good config (the service does -- a typo in a file
+    /admin can write must never take the site down) or to report it (the
+    health check does)."""
+    path = web_editable_path(toml_path)
+    if not path.exists():
+        return {}
+    try:
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+
+
+def macros_from_raw(raw: dict, *, source: str = WEB_EDITABLE_FILENAME) -> dict[str, str]:
+    """The [macros] table, with every name and value checked.
+
+    Two refusals, both at load time because the console enforces them at
+    save time and a hand-edit must not slip past: a name that cannot be
+    one (see app/macros.validate_name), and a value referring to a SYSTEM
+    macro. `{{!x}}` reads settings.toml, and a value in THIS file is
+    writable through the browser -- letting it reach the locked file
+    would hand anyone with console access a way to publish a secret path
+    on a public page."""
+    table = raw.get("macros", {})
+    if not isinstance(table, dict):
+        raise ValueError(f"{source}: [macros] must be a table of name = \"text\"")
+    out: dict[str, str] = {}
+    for name, value in table.items():
+        try:
+            macros.validate_name(name)
+        except macros.MacroError as exc:
+            raise ValueError(f"{source}: {exc}") from exc
+        if not isinstance(value, str):
+            raise ValueError(f"{source}: macro {name!r} must be a string")
+        used = macros.names_used(value, macros.SYSTEM)
+        if used:
+            raise ValueError(
+                f"{source}: macro {name!r} uses {{{{!{used[0]}}}}}, which reads "
+                f"settings.toml -- system macros work only in the templates on "
+                f"disk (email_templates/, site/privacy.html.tmpl), never in a "
+                f"value this file can hold"
+            )
+        out[name] = value
+    return out
+
+
+def merge_courses(base: tuple[Course, ...], editable: tuple[Course, ...]) -> tuple[Course, ...]:
+    """Both files may define courses; the EDITABLE one wins per shortname.
+
+    Order follows the base file, then any course only the editable file
+    defines -- so turning a course over to the console does not reshuffle
+    the list. `my-bt admin health` reports a shortname defined in both,
+    because a split-brain course must not be able to hide."""
+    by_name = {c.shortname: c for c in editable}
+    merged = [by_name.pop(c.shortname, c) for c in base]
+    merged.extend(by_name.values())
+    return tuple(merged)
+
+
 def load_settings(toml_path: str | Path, data_dir: str | Path | None = None) -> Settings:
     """`data_dir`, when given, also folds in the console-managed
     exceptional dates from <data_dir>/date_overrides.csv (see
@@ -1051,6 +1140,12 @@ def load_settings(toml_path: str | Path, data_dir: str | Path | None = None) -> 
     watchdog = raw.get("watchdog", {})
 
     courses = courses_from_raw(raw)
+    # The console-writable file, when there is one: its [[course]] blocks
+    # win per shortname, and its [macros] are the operator's own.
+    editable_raw = load_web_editable(toml_path)
+    if editable_raw:
+        courses = merge_courses(courses, courses_from_raw(editable_raw))
+    macro_table = macros_from_raw(editable_raw) if editable_raw else {}
     if data_dir is not None:
         courses = merge_console_overrides(courses, data_dir)
     conflict_calendars = tuple(
@@ -1104,6 +1199,7 @@ def load_settings(toml_path: str | Path, data_dir: str | Path | None = None) -> 
             privacy.get("how_many_days_before_account_deletion_send_warning_mail", 0) or 0
         ),
         courses=courses,
+        macros=macro_table,
         log_file=log_file_from_raw(raw),
         watchdog_enabled=bool(watchdog.get("enabled", True)),
         watchdog_window_minutes=int(watchdog.get("window_minutes", 15)),

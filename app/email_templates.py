@@ -45,11 +45,17 @@ from .config import Settings
 # they don't care about).
 _BUILTIN_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "email_templates"
 
-_PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
+# DYNAMIC macros only: `{{$name}}`. The `$` marks a value the CODE
+# supplies for one send (see app/macros.py for the three kinds and why
+# they are kept apart). A template's bare `{{name}}` is an OPERATOR
+# macro and is not resolved here -- the app moved out of the bare
+# namespace so that adding a macro to a shipped template can never
+# collide with one the operator has already defined.
+_PLACEHOLDER_RE = re.compile(r"\{\{\$(\w+)\}\}")
 
 
 def render_template(template_text: str, **context: str) -> str:
-    """Replaces every `{{name}}` in `template_text` with `context[name]`,
+    """Replaces every `{{$name}}` in `template_text` with `context[name]`,
     verbatim, in one pass -- a value itself containing literal `{{...}}`
     (e.g. a guest-typed message that happens to include that text) is
     NOT re-scanned for further substitution, so this can never be tricked
@@ -57,12 +63,15 @@ def render_template(template_text: str, **context: str) -> str:
     with every valid name listed if the template references one that
     wasn't provided -- a typo'd macro name in a hand-edited template file
     should fail loudly and immediately, not silently leave `{{typo}}`
-    sitting in a real email."""
+    sitting in a real email.
+
+    The keyword arguments are unchanged by the `$`: it is part of the
+    reference in the template file, not of the name in the code."""
     def _sub(m: re.Match) -> str:
         name = m.group(1)
         if name not in context:
             raise KeyError(
-                f"email template references {{{{{name}}}}}, which isn't one of the "
+                f"email template references {{{{${name}}}}}, which isn't one of the "
                 f"available variables/macros: {sorted(context)}"
             )
         return context[name]

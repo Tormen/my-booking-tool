@@ -1,6 +1,6 @@
-{{greeting}}{{intro}}
+{{$greeting}}{{$intro}}
 
-{{details}}
-Manage your bookings: {{manage_url}}
-Cancel this booking directly: {{cancel_url}}
-{{account_line}}
+{{$details}}
+Manage your bookings: {{$manage_url}}
+Cancel this booking directly: {{$cancel_url}}
+{{$account_line}}

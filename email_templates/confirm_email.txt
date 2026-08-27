@@ -1,12 +1,12 @@
-Dear {{name}},
+Dear {{$name}},
 
-Please click below to {{verb}}:
+Please click below to {{$verb}}:
 
-{{confirm_url}}
+{{$confirm_url}}
 
-This link expires in {{ttl_hours}} hours. If you requested this more than once, only the link in this latest email will work -- any earlier one is no longer valid.
+This link expires in {{$ttl_hours}} hours. If you requested this more than once, only the link in this latest email will work -- any earlier one is no longer valid.
 
 If you didn't request this, you can safely ignore this email.
 
 Thanks,
-{{site}}
+{{$site}}

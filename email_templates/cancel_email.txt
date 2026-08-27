@@ -1,7 +1,7 @@
-Dear {{name}},
+Dear {{$name}},
 
-{{intro}}
-{{resubscribe_line}}{{message_line}}
-{{details}}
-Manage your bookings: {{manage_url}}
-{{apology_line}}
+{{$intro}}
+{{$resubscribe_line}}{{$message_line}}
+{{$details}}
+Manage your bookings: {{$manage_url}}
+{{$apology_line}}

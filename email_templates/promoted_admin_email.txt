@@ -1,4 +1,4 @@
-{{intro}}
+{{$intro}}
 
-{{details}}
-{{spots_taken}} / {{capacity}} spots taken now.
+{{$details}}
+{{$spots_taken}} / {{$capacity}} spots taken now.

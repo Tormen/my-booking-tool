@@ -1,6 +1,6 @@
-{{intro}}
-{{message_line}}
-{{details}}
-{{spots_taken}} / {{capacity}} spots taken now.
+{{$intro}}
+{{$message_line}}
+{{$details}}
+{{$spots_taken}} / {{$capacity}} spots taken now.
 
-Rebook this booking: {{reinstate_url}}
+Rebook this booking: {{$reinstate_url}}

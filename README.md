@@ -2092,6 +2092,42 @@ negative shows more. This is deliberately display-only
   booking from there would in fact still be confirmed) and capped at the
   course's real capacity.
 
+## Macros (`[macros]` in `settings.web-editable.toml`)
+
+A macro is a named piece of text you write once and use in many places --
+a studio name, an address, a standing note. There are three kinds, and a
+macro's own name tells you which it is:
+
+| LABEL | macro | DEFINED | WRITABLE in /admin | USABLE in /admin |
+|---|---|---|---|---|
+| **User macro** | `{{studio}}` | by you, in `settings.web-editable.toml` | yes | yes -- and in emails and internal templates |
+| **System macro** | `{{!retention_months}}` | in `settings.toml`, the file the console cannot write | no -- hand-edit only | no -- internal templates only |
+| **Dynamic macro** | `{{$name}}`, `{{$details}}` | in the code, computed for one send | no -- it has no stored value | no -- a course description has no recipient, so it cannot resolve |
+
+**User macros** are the ones you create and use. They are the only kind
+that takes no sigil, because they are the kind you type most.
+
+**System macros** always resolve wherever they are allowed. They are
+deliberately confined to templates on disk (`email_templates/`,
+`site/privacy.html.tmpl`): `settings.toml` also holds a CalDAV username
+and three paths to secret files, and a macro that could read it from a
+console-editable description would hand anyone with `/admin` access a way
+to publish those on a public page.
+
+**Dynamic macros** are computed for one send -- a different value in
+every email, which is what the `$` says: it is a variable, in the sense
+every scripting language uses the symbol -- which is why they carry their own sigil rather than
+sharing the system one: `{{$recap}}` in a template that is never given a
+recap is an error at send time, not a blank. When editing a template,
+check the macro is supplied where you are putting it -- that template's
+call site in `app/emailer.py` is the list.
+
+A name is at most 20 characters, letters/digits/underscore, and never
+starts with a digit. Renaming a user macro rewrites every use of it in
+the web-editable file, and refuses if the old name still appears in a
+file the console cannot write (`settings.toml`, `email_templates/`) --
+those are yours to update by hand.
+
 ## Course overview page (`/courses`)
 
 `/courses` (2026-07-06) lists every `[[course]]` configured in
@@ -2525,8 +2561,8 @@ Everything above is template-driven: each host email is one file under
 `email_templates/` (`new_booking_admin_email.txt`,
 `new_booking_party_admin_email.txt`, `cancel_email_admin.txt`,
 `reinstate_email_admin.txt`, `promoted_admin_email.txt`), all built from
-the same macros -- `{{intro}}`, `{{message_line}}`, `{{details}}`,
-`{{spots_taken}}`, `{{capacity}}`, plus each one's own links. Reorder
+the same macros -- `{{$intro}}`, `{{$message_line}}`, `{{$details}}`,
+`{{$spots_taken}}`, `{{$capacity}}`, plus each one's own links. Reorder
 them, reword the occupancy line, drop a section: override the file via
 `[site].email_templates_folder` (see "Email templates") without touching
 any code. Note a template referencing a macro that isn't passed to it

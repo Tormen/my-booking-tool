@@ -1,7 +1,7 @@
-{{intro}}
+{{$intro}}
 
-{{details}}
-{{spots_taken}} / {{capacity}} spots taken now.
+{{$details}}
+{{$spots_taken}} / {{$capacity}} spots taken now.
 
-{{cancel_links}}
-Cancel the entire session (all participants): {{cancel_session_url}}
+{{$cancel_links}}
+Cancel the entire session (all participants): {{$cancel_session_url}}
