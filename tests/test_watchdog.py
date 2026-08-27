@@ -1,8 +1,10 @@
 import tempfile
 import unittest
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+from app import watchdog
 from app.storage import STATUS_PENDING_CONFIRMATION, Store
 from app.watchdog import (
     check_app_log_rate_limit_blocks,
@@ -343,6 +345,37 @@ class CheckNowTest(unittest.TestCase):
         ):
             check_now(self.store, settings)
         mock_sshd.assert_not_called()
+
+
+
+class TimedLogFormatTest(unittest.TestCase):
+    """The shipped nginx conf logs rt=/urt= as of 2026-08-27. The parser
+    here anchors on the COMBINED prefix and ignores the rest, which is
+    what makes appending safe -- assert that, so a future field added in
+    the middle is caught here rather than by the watchdog silently
+    reading nothing."""
+
+    LINE = ('89.246.60.85 - - [27/Aug/2026:17:37:39 +0200] '
+            '"GET /book/lux-fri-yoga HTTP/2.0" 200 29713 '
+            '"https://yoga.kp.mt/my" "Mozilla/5.0"')
+
+    def test_the_timed_format_still_parses(self):
+        m = watchdog._NGINX_LINE_RE.match(self.LINE + " rt=0.544 urt=0.541")
+        self.assertIsNotNone(m)
+        self.assertEqual(m.group("status"), "200")
+        self.assertEqual(m.group("ip"), "89.246.60.85")
+
+    def test_plain_combined_still_parses(self):
+        # Anyone running the stock format must keep working.
+        self.assertIsNotNone(watchdog._NGINX_LINE_RE.match(self.LINE))
+
+    def test_the_shipped_conf_defines_and_uses_it(self):
+        conf = (Path(__file__).resolve().parent.parent
+                / "site" / "nginx-locations.conf.example").read_text(encoding="utf-8")
+        self.assertIn("log_format timed", conf)
+        self.assertIn("rt=$request_time", conf)
+        self.assertIn("urt=$upstream_response_time", conf)
+        self.assertRegex(conf, r"access_log\s+\S+\s+timed;")
 
 
 if __name__ == "__main__":

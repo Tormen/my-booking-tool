@@ -45,11 +45,41 @@ map $http_sec_fetch_dest $index_variant {
     iframe   /index_embedded.html;
 }
 
+# Request timing in the access log (2026-08-27). nginx's `combined`
+# format records no duration at all, so "the page felt slow" could only
+# ever be measured from a browser -- which mixes in extension overhead
+# and rendering. rt is the time nginx spent on the whole request; urt is
+# what the booking app itself took, so the two separate "our code is
+# slow" from "the network is slow".
+#
+# The two fields are APPENDED, never inserted: app/watchdog.py's parser
+# anchors on the combined prefix ($remote_addr ... "$request" $status)
+# and ignores whatever follows, so adding to the end cannot break it.
+# RATE-LIMIT ZONES THIS FILE REFERENCES -- they are defined in
+# nginx.conf (the operator's own hardening config, not shipped by this
+# package), and `nginx -t` will refuse to load this file if any is
+# missing:
+#
+#     limit_req_zone $binary_remote_addr zone=booking:10m  rate=30r/m;
+#     limit_req_zone $binary_remote_addr zone=homepage:10m rate=60r/m;
+#     limit_req_zone $binary_remote_addr zone=admin:10m    rate=120r/m;
+#     limit_req_status 429;
+#
+# booking was 10r/m until 2026-08-27, when ordinary console work tripped
+# it: /admin's tabs and "show more dates" are links now, so a minute of
+# it is ~8 requests. A guest booking is ~3. limit_req_status 429 says
+# "too many requests" instead of nginx's default 503, which is both
+# accurate and distinguishable from a real outage in the logs.
+
+log_format timed '$remote_addr - $remote_user [$time_local] "$request" '
+                 '$status $body_bytes_sent "$http_referer" "$http_user_agent" '
+                 'rt=$request_time urt=$upstream_response_time';
+
 server {
     server_name REPLACE-ME-YOUR-DOMAIN;
     root /var/www/REPLACE-ME-YOUR-DOMAIN/public_html;
 
-    access_log /var/log/nginx/REPLACE-ME-YOUR-DOMAIN.access.log;
+    access_log /var/log/nginx/REPLACE-ME-YOUR-DOMAIN.access.log timed;
     error_log  /var/log/nginx/REPLACE-ME-YOUR-DOMAIN.error.log;
 
     # HARDENING: cap request bodies at the same 64 KiB the app itself now
@@ -236,7 +266,7 @@ server {
     #     embed from anywhere OTHER than what frame-ancestors allows,
     #     instead of it silently vanishing into the visitor's own browser
     #     console.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Up7w8LL73i74LaziJCPbsJtTkpxiM213e4rrAYxJ6Eg=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U=' 'sha256-4fhOi4IWLR6Of8C4WDGKPRRA/13iDwHcdyYyfYhM4gk=' 'sha256-Nojvq9TThxA2tKREcDyA328Xu3hauXMOQeg3fAoSJhU=' 'sha256-ZZwnrKhKA0ZRtYiEbx4DVIEwKvKJmKGVCb3651zfzWU=' 'sha256-OzxBwiOrVtkkygYzETVZ0IeW1pv4XAQX4IYQ0lhnni8=' 'sha256-d1Afot0vOVf6GWkmy0u8ygfsTmI7G55s8KhyTs1yUck=' 'sha256-utC/goPBYUr8M36sSuJkWW4tqsGZHtL1jgaOoCMTtzc=' 'sha256-K2hZWmwaQRVjZW8AubUIKZFvh7dRx3tweo3EJLOUHJI='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; report-uri /csp-report;" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Pnh4gP33m9xwjHG157wH+PykNdbH0fonNRCRjKGqpe8=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U=' 'sha256-4fhOi4IWLR6Of8C4WDGKPRRA/13iDwHcdyYyfYhM4gk=' 'sha256-Nojvq9TThxA2tKREcDyA328Xu3hauXMOQeg3fAoSJhU=' 'sha256-ZZwnrKhKA0ZRtYiEbx4DVIEwKvKJmKGVCb3651zfzWU=' 'sha256-OzxBwiOrVtkkygYzETVZ0IeW1pv4XAQX4IYQ0lhnni8=' 'sha256-d1Afot0vOVf6GWkmy0u8ygfsTmI7G55s8KhyTs1yUck=' 'sha256-utC/goPBYUr8M36sSuJkWW4tqsGZHtL1jgaOoCMTtzc=' 'sha256-K2hZWmwaQRVjZW8AubUIKZFvh7dRx3tweo3EJLOUHJI='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; report-uri /csp-report;" always;
 
     # HARDENING: modern security headers, same low-risk defense-in-depth as
     # the four above. This app never needs camera/mic/geolocation/payment
@@ -287,7 +317,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -297,7 +327,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -315,7 +345,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -331,7 +361,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -341,7 +371,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -358,7 +388,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -375,7 +405,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -393,7 +423,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -408,7 +438,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -418,7 +448,7 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        limit_req zone=booking burst=10 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
     }
 
@@ -428,7 +458,14 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        limit_req zone=booking burst=5 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
+        # /admin has its own, looser zone (2026-08-27): it sits behind a
+        # password AND the IP allowlist below, so per-IP flood limiting
+        # buys little here -- while this is where the link-based
+        # navigation is heaviest (each tab and "show more dates" is a page
+        # load). REQUIRES the zone to exist in nginx.conf; without it
+        # `nginx -t` refuses to load, which is the right failure: loud and
+        # before the reload, not silent afterwards.
+        limit_req zone=admin burst=30 nodelay;  # HARDENING: see nginx.conf for the zone definition/rationale
         limit_conn perip 10;  # HARDENING: caps simultaneous connections per IP, see nginx.conf
 
         # HARDENING (optional but recommended): restrict /admin to your own
