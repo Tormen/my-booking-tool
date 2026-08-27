@@ -99,7 +99,7 @@ class IdInputWidthTest(unittest.TestCase):
         # own width:100%, not a replacement for its font-size/padding.
         html = page("Some title", "<p>body</p>")
         self.assertIn(
-            '.big-input{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em;display:block}',
+            '.big-input{font-size:1.25em;width:100%;box-sizing:border-box;padding:.1em .5em;display:block}',
             html,
         )
 

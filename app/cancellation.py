@@ -84,6 +84,7 @@ _WHERE_EMOJI = "\U0001F4CD"  # round pushpin
 def booking_details_text(
     course: Course, occ_date: str, message: str = "",
     *, emoji: bool = True, include_description: bool = True,
+    include_attention: bool = True,
 ) -> str:
     """Shared What/When/Where(+message)(+description) block (this
     layout, 2026-07-05) for every guest email that tells them
@@ -121,14 +122,19 @@ def booking_details_text(
     # reinstate) shows it for free, with no per-call-site plumbing.
     # Deliberately a SEPARATE line from the `message` param above (a
     # human-typed cancel/reinstate reason) -- the two can coexist.
-    attention = course.override_message_for(occ_date)
+    # include_attention=False (2026-08-27) is for a mail whose SUBJECT is
+    # that very note -- the time-changed/note-changed notice puts it above
+    # the block, where the reader meets it first, so repeating it below
+    # would say the same thing twice in one short email.
+    attention = course.override_message_for(occ_date) if include_attention else ""
     attention_block = f"\nATTENTION: {attention}\n" if attention else ""
     message_block = f"\nMessage: {message}\n" if message else ""
     description_text = html_to_text(course.description) if include_description and course.description else ""
     return details + attention_block + message_block + (f"\n{description_text}\n" if description_text else "")
 
 
-def host_details_text(course: Course, occ_date: str) -> str:
+def host_details_text(course: Course, occ_date: str, *,
+                      include_attention: bool = True) -> str:
     """booking_details_text()'s HOST-ONLY variant (2026-08-19): the same
     What/When/Where(+ATTENTION) block, but ASCII (no emoji) and WITHOUT
     the course description.
@@ -145,7 +151,8 @@ def host_details_text(course: Course, occ_date: str) -> str:
 
     Note there is no host twin of course_recap_html(): host-only emails
     are plain-text only now (see send_cancellation_emails)."""
-    return booking_details_text(course, occ_date, emoji=False, include_description=False)
+    return booking_details_text(course, occ_date, emoji=False, include_description=False,
+                                include_attention=include_attention)
 
 
 def host_subject(prefix: str, course: Course, occ_date: str, spots_taken: int) -> str:

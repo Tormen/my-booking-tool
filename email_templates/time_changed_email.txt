@@ -1,6 +1,6 @@
 Dear {{name}},
 
 {{intro}}
-{{message_line}}
-{{details}}
+
+{{message_line}}{{details}}
 Manage your bookings: {{manage_url}}

@@ -308,6 +308,28 @@ def _keep_settings_draft(environ, **fields) -> None:
         stored["settings_draft"] = kept
 
 
+# Schemes a browser extension's own code is served from. A violation
+# whose source-file (or blocked-uri) is one of these was caused by
+# something the VISITOR installed, not by anything this site serves.
+_EXTENSION_SCHEMES = ("moz-extension://", "chrome-extension://",
+                      "safari-web-extension://", "safari-extension://",
+                      "ms-browser-extension://")
+
+
+def _is_extension_violation(report: dict) -> bool:
+    """True when a CSP report was caused by a browser extension.
+
+    Kept deliberately narrow: only the fields naming WHERE THE CODE CAME
+    FROM count. document-uri is the page itself and is always this site,
+    so it is not consulted -- treating a violation as noise because of
+    the page it happened on would hide real ones."""
+    for field in ("source-file", "blocked-uri"):
+        value = report.get(field)
+        if isinstance(value, str) and value.startswith(_EXTENSION_SCHEMES):
+            return True
+    return False
+
+
 def _client_ip(environ: dict) -> str:
     """Best-effort real client IP, for per-source rate limiting -- NOT for
     anything security-critical beyond that (trivially spoofable if this app
@@ -659,6 +681,27 @@ _DIALOG_WIRING_SCRIPT = """<script>
     btn.addEventListener("click", function() {
       var dlg = document.getElementById(btn.dataset.dialog);
       if (dlg) dlg.close();
+    });
+  });
+  // 2026-08-27: every overlay on the site closes the same three ways --
+  // the X, its own button, or a click outside. Done HERE rather than in
+  // each dialog's markup so a dialog added later cannot forget: these
+  // only ever open via showModal() anyway, so the script that opens them
+  // is the honest place to furnish them.
+  document.querySelectorAll("dialog").forEach(function(dlg) {
+    if (!dlg.querySelector(".dialog-x")) {
+      var x = document.createElement("button");
+      x.type = "button";
+      x.className = "dialog-x";
+      x.setAttribute("aria-label", "Close");
+      x.innerHTML = "&times;";
+      x.addEventListener("click", function() { dlg.close(); });
+      dlg.insertBefore(x, dlg.firstChild);
+    }
+    // A modal <dialog> fills its own box; a click landing on the dialog
+    // ELEMENT itself is therefore a click on the backdrop around it.
+    dlg.addEventListener("click", function(ev) {
+      if (ev.target === dlg) dlg.close();
     });
   });
 })();
@@ -1436,16 +1479,36 @@ class App:
         if not self.settings.courses:
             body = "<p>No courses are configured yet.</p>"
         else:
+            # 2026-08-27: brought into line with /my and /admin -- each
+            # course is a framed card led by the same green weekday+time
+            # chip, with Book on the title row where it is reachable
+            # without reading past a long description first. The
+            # description is operator-authored rich HTML (see
+            # _book_page's own note on why it is not esc()'d) and can run
+            # to a screenful, which is why the action no longer sits
+            # underneath it.
             cards = []
             for course in self.settings.courses:
-                subtitle = _course_subtitle_html(course)
-                desc_html = f'<div class="description">{course.description}</div>' if course.description else ""
+                desc_html = (f'<div class="description">{course.description}</div>'
+                             if course.description else "")
                 cards.append(
-                    '<div class="course-card">'
-                    f"<h2>{esc(course.title)}</h2>{subtitle}{desc_html}"
-                    '<div class="submit-row">'
-                    f'<a href="/book/{esc(course.shortname)}"><button type="button">View &amp; book</button></a>'
-                    "</div></div>"
+                    '<div class="card">'
+                    '<div class="card-head">'
+                    f'<h2><span class="when"><span class="wd">'
+                    f'{esc(course.weekday_label()[:3])}</span> '
+                    f'{esc(course.time_range_label())}</span> {esc(course.title)}</h2>'
+                    # ONE action per card, and it is the button: the
+                    # title row had a text link and the foot of the card
+                    # had a button, both saying the same thing. The
+                    # button goes up top, where it is reachable without
+                    # scrolling past a description that can run to a
+                    # screenful -- and the card gets shorter for it.
+                    f'<a href="/book/{esc(course.shortname)}">'
+                    '<button type="button">View &amp; book</button></a></div>'
+                    f'<p class="note">{esc(course.location)} -- {course.capacity} '
+                    f'place{"" if course.capacity == 1 else "s"}</p>'
+                    f'{desc_html}'
+                    "</div>"
                 )
             body = "".join(cards)
         return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page("Courses", body, banner=banner)
@@ -1546,10 +1609,21 @@ class App:
         try:
             payload = json.loads(raw) if raw else {}
             report = payload.get("csp-report", payload)
-            log.warning(
-                "CSP violation report from %s: blocked-uri=%r violated-directive=%r document-uri=%r",
+            # A violation caused by a BROWSER EXTENSION injecting its own
+            # inline script is not this site's problem, and it must not
+            # look like one: these are logged at DEBUG so `my-bt admin
+            # health` and the watchdog -- both of which count the WARNING
+            # lines -- do not raise an alert about somebody's ad blocker.
+            # The policy still blocks it, which is correct; whitelisting
+            # the hash would permit an extension's script for EVERY
+            # visitor. Seen in practice 2026-08-27 with several
+            # extensions on the operator's own browser.
+            level = log.debug if _is_extension_violation(report) else log.warning
+            level(
+                "CSP violation report from %s: blocked-uri=%r violated-directive=%r "
+                "document-uri=%r source-file=%r",
                 client_ip, report.get("blocked-uri"), report.get("violated-directive"),
-                report.get("document-uri"),
+                report.get("document-uri"), report.get("source-file"),
             )
         except (ValueError, AttributeError):
             log.warning("CSP violation report from %s: unparseable body: %r", client_ip, raw[:500])
@@ -2285,7 +2359,7 @@ class App:
         label = "Admin" if session and session.get("kind") == "admin" else "Not logged in"
         return (
             '<div class="session-banner">'
-            f"<span>{label}</span>"
+            f'<span class="session-role">{esc(label)}</span>'
             f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
             "</div>"
         )
@@ -2532,7 +2606,12 @@ class App:
     def _book_body(
         self, course, occurrences, error: str | None = None, logged_in_user=None,
         login_error: str | None = None, login_lockout_seconds: float = 0.0,
+        extra_action_html: str = "",
     ):
+        """`extra_action_html` is rendered INSIDE the submit row, beside
+        the Book button -- /my's overlay puts its "Never mind" there, so
+        the two choices sit together on one line instead of the dismiss
+        hanging in a row of its own underneath."""
         subtitle = _course_subtitle_html(course)
         # course.description is operator-authored (settings.toml, edited by
         # whoever runs this install), not guest-submitted -- unlike every
@@ -2781,7 +2860,8 @@ class App:
             {desc_html}
             {note_html}
             {err_html}
-            <form method="post" class="card" id="book-form" autocomplete="off" target="_top"
+            <form method="post" action="/book/{esc(course.shortname)}" class="card"
+              id="book-form" autocomplete="off" target="_top"
               data-book-label="{esc(self.settings.book_button_label)}"
               data-max-guests="{self.settings.max_participants}">
               <label>Dates available
@@ -2805,6 +2885,7 @@ class App:
                 <span class="req">(required)</span>.</label>
               <div class="submit-row">
                 <button type="submit" id="book-submit" form="book-form">{esc(first_label)}</button>
+                {extra_action_html}
               </div>
             </div>
             {_BOOKING_FORM_SCRIPT}"""
@@ -3110,13 +3191,20 @@ class App:
                 # needing showModal().
                 '<a class="overlay-backdrop" href="/my" aria-label="Close"></a>'
                 '<dialog class="book-dialog" open>'
-                f'<a class="x" href="/my" aria-label="Close">&times;</a>'
+                # class="dialog-x", the same name the wiring script
+                # looks for before injecting one -- otherwise this
+                # overlay ends up with TWO X's, its own and an
+                # injected one (2026-08-27, seen live).
+                f'<a class="dialog-x" href="/my" aria-label="Close">&times;</a>'
                 f'<h3>{esc(course.title)}</h3>'
-                + self._book_body(course, occurrences, logged_in_user=user)
+                + self._book_body(
+                    course, occurrences, logged_in_user=user,
+                    extra_action_html='<a href="/my">'
+                                      '<button type="button">Never mind</button></a>',
+                )
                 # Which page this booking was made FROM. The fields in
                 # _book_body reach the form by id, so this one does too.
                 + '<input type="hidden" name="from" value="my" form="book-form">' 
-                + '<p><a href="/my">Close without booking</a></p>'
                 + "</dialog>"
             )
 
@@ -3345,7 +3433,7 @@ class App:
             <div class="card">
               <input class="tab-radio" type="radio" name="my-tab" id="my-tab-upcoming" checked>
               <input class="tab-radio" type="radio" name="my-tab" id="my-tab-past">
-              <div class="tab-labels">
+              <div class="tab-labels tab-title">
                 <label class="tab-label" for="my-tab-upcoming">Upcoming</label>
                 <label class="tab-label" for="my-tab-past">Past (most recent {MY_PAST_BOOKINGS_LIMIT})</label>
               </div>
@@ -4789,8 +4877,8 @@ class App:
             <div class="submit-row">
               <button type="submit" name="action" value="set">Save</button>
               {'<button type="submit" name="action" value="remove" class="danger">Remove override</button>' if override else ''}
-              <button type="button" class="link-button dialog-close-btn"
-                      data-dialog="time-{esc(row_id)}">Close</button>
+              <button type="button" class="dialog-close-btn"
+                      data-dialog="time-{esc(row_id)}">Never mind</button>
             </div>
           </form>
         </dialog>"""
@@ -4809,8 +4897,8 @@ class App:
             <div class="submit-row">
               <button type="submit" name="action" value="{'unhide' if unhide else 'hide'}">
                 {"Unhide" if unhide else "Hide this date"}</button>
-              <button type="button" class="link-button dialog-close-btn"
-                      data-dialog="hide-{esc(row_id)}">Leave it</button>
+              <button type="button" class="dialog-close-btn"
+                      data-dialog="hide-{esc(row_id)}">Never mind</button>
             </div>
           </form>
         </dialog>"""
@@ -4826,8 +4914,8 @@ class App:
               <textarea name="message" class="big-input" rows="2"></textarea></label>
             <div class="submit-row">
               <button type="submit" class="danger">Cancel this session</button>
-              <button type="button" class="link-button dialog-close-btn"
-                      data-dialog="cancel-{esc(row_id)}">Keep it</button>
+              <button type="button" class="dialog-close-btn"
+                      data-dialog="cancel-{esc(row_id)}">Never mind</button>
             </div>
           </form>
         </dialog>"""
@@ -4926,7 +5014,7 @@ class App:
             course, shown, blocker_kinds, hidden, users_by_id, regs_by_occ)
         return (
             '<div class="card"><h2>Future Sessions</h2>'
-            + '<div class="tab-labels">' + "".join(labels) + "</div>"
+            + '<div class="tab-labels tab-courses">' + "".join(labels) + "</div>"
             + course_head
             + f'<table class="sessions">{head}{rows}</table>'
             + more
@@ -5311,7 +5399,10 @@ class App:
         # 2026-07-14: /admin also gets the same boxed
         # banner, basically all pages except for index.html.
         return "200 OK", [("Content-Type", "text/html")], page(
-            "Admin overview", body, banner=self._admin_banner_html(environ)
+            # No <h1>: the banner right above says "Admin" in red, and the
+            # two boxed frames name themselves (Bookings, Future
+            # Sessions). The browser tab keeps the full title.
+            "Admin overview", body, banner=self._admin_banner_html(environ), heading="",
         )
 
     def _admin_gate(self, method: str, environ, course_shortname: str):
@@ -5435,11 +5526,19 @@ class App:
         elif time_changed:
             intro = f"The time of your session on {occ_date} has changed. It now runs {when}."
         else:
-            intro = (f"There is a new note about your session on {occ_date}. "
-                     f"The time is unchanged ({when}).")
+            # Ends with a colon: what follows IS the note, and the When
+            # line below states the (unchanged) time anyway -- saying so
+            # twice made the reader hunt for a change that was not there.
+            intro = f"There is a new note about your session on {occ_date}:"
         override = course.override_for(occ_date)
-        message_line = f"{override.message}\n" if (override and override.message) else ""
-        details = self._booking_details_text(course, occ_date)
+        # The same ATTENTION: prefix this note carries everywhere else it
+        # is shown (the booking page banner, every booking email), so a
+        # reader meets one label for one thing.
+        message_line = (f"ATTENTION: {override.message}\n\n"
+                        if (override and override.message) else "")
+        # The note is rendered above the block by the templates, so the
+        # block itself must not repeat it.
+        details = booking_details_text(course, occ_date, include_attention=False)
 
         notified = 0
         for reg in booked:
@@ -5449,7 +5548,9 @@ class App:
             try:
                 send_mail(
                     self.settings, user.email,
-                    f"Time changed: {course.title} on {occ_date}",
+                    ("Time restored" if removed
+                     else ("Time changed" if time_changed else "Note changed"))
+                    + f": {course.title} on {occ_date}",
                     render_template(
                         load_email_template(self.settings, "time_changed_email.txt"),
                         name=user.name or "guest", intro=intro, message_line=message_line,
@@ -5477,8 +5578,8 @@ class App:
                 ),
                 render_template(
                     load_email_template(self.settings, "time_changed_admin_email.txt"),
-                    intro=intro,
-                    details=host_details_text(course, occ_date),
+                    intro=intro, message_line=message_line,
+                    details=host_details_text(course, occ_date, include_attention=False),
                     spots_taken=str(taken), capacity=str(capacity),
                     notified_line=(
                         f"{notified} participant(s) notified."

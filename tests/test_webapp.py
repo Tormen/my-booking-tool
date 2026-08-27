@@ -1093,7 +1093,7 @@ class SessionBannerTest(unittest.TestCase):
         # (never was smaller) with font-style:normal instead.
         _status, _headers, body = self.app.courses("GET", {})
         style = body[body.index("<style>") : body.index("</style>")]
-        self.assertIn("input,button,textarea{font-size:1em", style)
+        self.assertIn("input,button,select,textarea{font-size:1em", style)
         for match in re.finditer(r"font-size:\s*(\.\d+)em", style):
             self.fail(f"found a font-size below 1em: {match.group(0)!r}")
         for selector in (
@@ -1402,7 +1402,10 @@ class AlwaysVisibleBannerRolloutTest(unittest.TestCase):
         environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
         self.assertIn('class="session-banner"', body)
-        self.assertIn("<span>Admin</span>", body)
+        # 2026-08-27: the role carries a class now, so it can be red,
+        # bold and upright against the banner's italic -- /admin dropped
+        # its <h1>, and this is the only place the role is stated.
+        self.assertIn('<span class="session-role">Admin</span>', body)
 
 
 class MySettingsTest(unittest.TestCase):
@@ -5636,7 +5639,9 @@ class MyPageNewBookingFrameTest(unittest.TestCase):
 
     def test_the_overlay_can_be_closed_without_script(self):
         body = self._page("book=yoga-class-1")
-        self.assertIn('href="/my" aria-label="Close"', body)
+        # The SAME class the wiring script checks for, so this overlay
+        # (server-rendered, no script) does not also get an injected X.
+        self.assertIn('<a class="dialog-x" href="/my" aria-label="Close">', body)
 
     def test_the_overlay_actually_floats(self):
         # 2026-08-27, from a live screenshot: the panel rendered INLINE,
@@ -5652,6 +5657,20 @@ class MyPageNewBookingFrameTest(unittest.TestCase):
     def test_no_backdrop_element_without_an_open_overlay(self):
         body = self._page()
         self.assertNotIn('<a class="overlay-backdrop"', body)
+
+    def test_the_overlay_posts_to_the_booking_route(self):
+        # 2026-08-27, from a live report: Book appeared to do nothing --
+        # it greyed out, then came back with the acknowledgement cleared
+        # and the first date reselected, and the console showed NOTHING.
+        # The form had no `action`, so it posted to the current URL; in
+        # the overlay that is /my, whose POST handler is the LOGIN form.
+        # An explicit action is the fix, and this is the assertion that
+        # would have caught it: the form must name where it posts.
+        import re
+        body = self._page("book=yoga-class-1")
+        m = re.search(r'<form method="post" action="([^"]+)"[^>]*id="book-form"', body, re.S)
+        self.assertIsNotNone(m, "the booking form must declare an action")
+        self.assertEqual(m.group(1), "/book/yoga-class-1")
 
     def test_the_overlay_form_says_where_it_came_from(self):
         body = self._page("book=yoga-class-1")
@@ -5712,6 +5731,104 @@ class MyPageNewBookingFrameTest(unittest.TestCase):
         self.assertIn('id="my-tab-past"', body)
         # The tabs ARE the frame's title: no separate heading above them.
         self.assertNotIn("<h2>My bookings</h2>", body)
+
+
+class OverlaysAreHarmonisedTest(unittest.TestCase):
+    """Every overlay on the site looks and behaves the same (2026-08-27,
+    the operator, after finding four variants in a row): centred, an X in
+    the top-right, a click outside closes it, and one dismiss button with
+    one label.
+
+    The X and the click-outside are furnished by _DIALOG_WIRING_SCRIPT
+    rather than written into each dialog's markup -- a dialog added later
+    cannot forget them that way. The one exception is /my's booking
+    overlay, which is server-rendered with no script at all, so it
+    carries its own X and a link rendered AS a button."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings(courses=(make_course(shortname="yoga-class-1"),),
+                                      booking_calendar="Calendar")
+        self.app = App(self.settings, self.store)
+        self.app._conflict_checker = lambda course, exclude_own: (lambda s, e: False)
+
+    def _admin(self):
+        sid = webapp._new_session({"kind": "admin"})
+        return self.app.admin_overview("GET", {"HTTP_COOKIE": f"session={sid}"})[2]
+
+    def test_the_script_gives_every_dialog_an_x_and_a_click_outside(self):
+        body = self._admin()
+        self.assertIn('x.className = "dialog-x"', body)
+        self.assertIn("if (ev.target === dlg) dlg.close();", body)
+
+    def test_one_dismiss_label_everywhere(self):
+        body = self._admin()
+        for gone in ("Leave it</button>", "Keep it</button>", ">Close</button>"):
+            self.assertNotIn(gone, body)
+        self.assertIn("Never mind</button>", body)
+
+    def test_dismiss_is_a_button_not_a_text_link(self):
+        self.assertNotIn("link-button dialog-close-btn", self._admin())
+
+    def test_every_dialog_is_centred_and_capped_by_one_rule(self):
+        body = self._admin()
+        self.assertIn("dialog{margin:auto", body)
+        self.assertIn("max-height:88vh", body)
+        self.assertIn("dialog .dialog-x{position:absolute", body)
+
+
+class CspReportExtensionNoiseTest(unittest.TestCase):
+    """A CSP violation caused by a browser EXTENSION is not this site's
+    problem and must not look like one: `my-bt admin health` and the
+    watchdog both count the WARNING lines, so extension noise would raise
+    alerts about somebody's ad blocker (2026-08-27, seen on the
+    operator's own browser -- several extensions inject inline scripts,
+    and the policy correctly blocks every one)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.app = App(make_settings(courses=(make_course(),)), Store(self._tmp.name))
+        # tests/helpers.py disables logging globally at import (it keeps
+        # deliberately-WARNING app logs out of test output). This test is
+        # ABOUT the level a record is emitted at, so it has to look.
+        import logging
+        logging.disable(logging.NOTSET)
+        self.addCleanup(logging.disable, logging.CRITICAL)
+
+    def _post(self, report):
+        body = json.dumps({"csp-report": report}).encode()
+        environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+        with self.assertLogs("my_booking.webapp", level="DEBUG") as captured:
+            status, _h, _b = self.app.csp_report("POST", environ)
+        self.assertTrue(status.startswith("204"))
+        return captured.records[0]
+
+    def test_an_extension_violation_is_not_a_warning(self):
+        record = self._post({
+            "document-uri": "https://example.org/my",
+            "blocked-uri": "inline",
+            "violated-directive": "script-src-elem",
+            "source-file": "moz-extension://b68e78f8/background.js",
+        })
+        self.assertEqual(record.levelname, "DEBUG")
+
+    def test_a_real_violation_still_warns(self):
+        record = self._post({
+            "document-uri": "https://example.org/my",
+            "blocked-uri": "inline",
+            "violated-directive": "script-src-elem",
+            "source-file": "https://example.org/my",
+        })
+        self.assertEqual(record.levelname, "WARNING")
+
+    def test_the_page_it_happened_on_is_never_what_makes_it_noise(self):
+        # Only WHERE THE CODE CAME FROM counts. Treating a violation as
+        # noise because of the page would hide real ones.
+        from app.webapp import _is_extension_violation
+        self.assertFalse(_is_extension_violation({"document-uri": "moz-extension://x"}))
 
 
 class AccountSettingsDraftTest(unittest.TestCase):
@@ -5967,9 +6084,57 @@ class FutureSessionsBoxTest(unittest.TestCase):
         self.assertTrue(guest)
         self.assertNotIn("has changed. It now runs", guest[0][2])
         self.assertIn("new note", guest[0][2])
-        self.assertIn("time is unchanged", guest[0][2])
+        # 2026-08-27: the "the time is unchanged (...)" clause is gone --
+        # the intro ends in a colon and the When: line below states the
+        # time anyway, so saying it twice made the reader hunt for a
+        # change that had not happened.
+        self.assertIn("When:", guest[0][2])
         host = [e for e in self.sent if e[0] == self.settings.admin_email]
         self.assertTrue(host[0][1].startswith("Note changed:"), host[0][1])
+
+    def test_the_note_email_has_the_operators_layout(self):
+        # 2026-08-27, the operator's own wording and order: intro ending
+        # in a colon, the note as its own ATTENTION line ABOVE the block,
+        # then What/When/Where, then occupancy and how many were told.
+        occ = self._next_wednesday()
+        u = self.store.upsert_user_for_booking("g@example.org", "Guest")
+        self.store.add_registration_checking_capacity("yoga-class-1", occ, u.user_id, "h", 4)
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45", "message": "first"})
+        self.sent.clear()
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45", "message": "in Kaiserslautern"})
+
+        host = [e for e in self.sent if e[0] == self.settings.admin_email]
+        # The host copy MUST arrive. It went missing once because the
+        # template gained a macro the code did not pass, render_template
+        # raised KeyError, and this method's own except swallowed it --
+        # a silent loss that only a test for the email's PRESENCE catches.
+        self.assertTrue(host, "the host copy was not sent")
+        body = host[0][2]
+        self.assertTrue(host[0][1].startswith("Note changed:"), host[0][1])
+        self.assertIn("There is a new note about your session on %s:" % occ, body)
+        self.assertIn("ATTENTION: in Kaiserslautern", body)
+        self.assertIn("1 / 4 spots taken.", body)
+        self.assertIn("1 participant(s) notified.", body)
+        # Said once, not twice: the block below must not repeat the note.
+        self.assertEqual(body.count("in Kaiserslautern"), 1)
+        # And it comes BEFORE What/When/Where.
+        self.assertLess(body.index("ATTENTION:"), body.index("What:"))
+
+    def test_the_guest_note_email_matches_and_says_note_changed(self):
+        occ = self._next_wednesday()
+        u = self.store.upsert_user_for_booking("g@example.org", "Guest")
+        self.store.add_registration_checking_capacity("yoga-class-1", occ, u.user_id, "h", 4)
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45", "message": "first"})
+        self.sent.clear()
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45", "message": "in Kaiserslautern"})
+        guest = [e for e in self.sent if e[0] == "g@example.org"]
+        self.assertTrue(guest)
+        self.assertTrue(guest[0][1].startswith("Note changed:"), guest[0][1])
+        self.assertEqual(guest[0][2].count("in Kaiserslautern"), 1)
 
     def test_a_real_time_change_still_says_so(self):
         occ = self._next_wednesday()

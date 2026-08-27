@@ -53,11 +53,18 @@ _SUBMIT_FEEDBACK_SCRIPT = """<script>
 </script>"""
 
 
-def page(title: str, body: str, banner: str = "", head_extra: str = "") -> str:
+def page(title: str, body: str, banner: str = "", head_extra: str = "",
+         heading: str | None = None) -> str:
     """Every page in the app gets `_SUBMIT_FEEDBACK_SCRIPT` appended
     automatically (2026-07-11) -- see that constant's own docstring/comment
     above for why (submissions with no feedback, buttons stayed
     clickable during a slow one). No per-page opt-in needed or possible.
+
+    `heading` overrides the visible <h1>; pass "" for a page that needs
+    no heading at all. /admin is the case: its banner already says
+    "Admin" in red, so a second "Admin overview" underneath it was one
+    label too many for the same fact. `title` still names the browser
+    tab either way -- a tab must always be identifiable.
 
     `head_extra` is raw markup for the <head> -- currently only the
     <meta http-equiv="refresh"> that carries someone back to /my after a
@@ -136,6 +143,8 @@ def page(title: str, body: str, banner: str = "", head_extra: str = "") -> str:
     deliberately NOT applied to `.big-input` textareas (the Cancel/
     Reinstate reason/message boxes -- free text benefits from the full
     width)."""
+    shown = title if heading is None else heading
+    heading_html = f"<h1>{esc(shown)}</h1>" if shown else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -152,8 +161,22 @@ body{{font-family:sans-serif;max-width:1000px;margin:2em auto;padding:0 1em;colo
   gap:.3em 1em;background:#f4f7f4;border:1px solid #ddd;border-radius:8px;padding:.5em 1em;
   margin-bottom:1em;overflow-wrap:anywhere;font-style:italic}}
 .session-banner form{{display:inline}}
+/* The role this session is in, in the one place it needs saying. Red,
+   bold and UPRIGHT against the banner's italic, at the same size --
+   loud enough to notice on every admin page, quiet enough not to shout. */
+.session-role{{color:#b00020;font-weight:bold;font-style:normal}}
 a{{color:#196B24}} .err{{color:#b00020}} .note{{color:#555;font-style:italic}} .card{{border:1px solid #ddd;border-radius:8px;padding:1em;margin:1em 0}}
-input,button,textarea{{font-size:1em;padding:.4em;margin:.2em 0}} button{{cursor:pointer}}
+input,button,select,textarea{{font-size:1em;padding:.25em .5em;margin:.2em 0}} button{{cursor:pointer}}
+/* ONE height for every single-line control, expressed in rem so it does
+   NOT scale with the control's own font-size: a .big-input (1.25em) and
+   the plain button next to it then line up, which matching paddings by
+   hand never achieves. `height`, not `min-height`: a floor does not
+   equalise anything -- the 1.25em field's own box came out ~1.5px above
+   it, so the floor never bound and the pair drifted 2px apart again
+   (measured). Checkboxes/radios keep their native size; the dialog X
+   and .link-button opt out below. */
+input:not([type=checkbox]):not([type=radio]),button,select{{
+  height:2.05rem;box-sizing:border-box;line-height:1.2}}
 input[readonly]{{background:#eee;color:#777;cursor:not-allowed}}
 label{{display:block;margin-top:.6em}}
 .subtitle{{color:#444;margin:-.4em 0 1em;font-size:1.2em;font-weight:500}}
@@ -161,7 +184,11 @@ label{{display:block;margin-top:.6em}}
 .hint{{color:#555;margin:.1em 0 0;font-style:italic}}
 .th-note{{display:block;font-weight:normal;font-style:italic;color:#666}}
 .scope-active{{font-weight:bold}}
-.big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.35em .5em;display:block}}
+/* Vertical padding trimmed to fit the shared height above (32.8px): at
+   1.25em this field's own text needs 24px, so the padding is what had to
+   give. Lowering the height alone would have shrunk the buttons beside
+   it and NOTHING else -- reopening the mismatch it was meant to close. */
+.big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.1em .5em;display:block}}
 .id-input{{max-width:50ch}}
 .dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5em;margin:.4em 0}}
 /* margin-top:0 (2026-07-14): a bookable box is a <label>, and the generic
@@ -216,7 +243,7 @@ label{{display:block;margin-top:.6em}}
 #add-guest-btn{{display:inline-block;margin-top:.2em}}
 .submit-row{{margin-top:1.4em;display:flex;flex-wrap:wrap;align-items:center;gap:.6em}}
 button:disabled{{opacity:.5;cursor:not-allowed}}
-.link-button{{background:none;border:none;padding:0;margin:0;color:#196B24;text-decoration:underline;font:inherit;cursor:pointer}}
+.link-button{{background:none;border:none;height:auto;padding:0;margin:0;color:#196B24;text-decoration:underline;font:inherit;cursor:pointer}}
 .link-button:disabled{{color:#888;text-decoration:none;opacity:1}}
 .table-tools{{margin-bottom:.6em}}
 table{{border-collapse:collapse;width:100%}}
@@ -287,7 +314,12 @@ td.actions .btn-row{{display:flex;flex-wrap:wrap;gap:.4em;align-items:flex-start
    itself. Italic + grey rather than smaller: nothing here renders below
    the 1em button baseline (see the .note/.hint rules above). */
 .version{{margin:2.5em 0 0;text-align:right;font-style:italic;color:#999}}
-td.actions .btn-row button{{margin-top:0}}
+/* Controls in a table cell take their spacing from the cell's padding,
+   never from their own margin. Zeroing it for buttons ALONE (which this
+   rule used to do) left them sitting .2em higher than the fields beside
+   them -- and at a 1.25em field that is 4px, plainly visible in a
+   screenshot. Same rule for all of them, so they share one top edge. */
+table td input,table td select,table td button,table td textarea{{margin-top:0;margin-bottom:0}}
 /* EVERY overlay on every page, in one rule (2026-08-27, the operator:
    "ALL are now centered please"). There was no `dialog` rule at all
    before this, so each one sat wherever the browser put it -- typically
@@ -342,16 +374,55 @@ dialog .x{{position:absolute;top:.4em;right:.5em;font-size:1.6em;line-height:1;
 #my-tab-upcoming:checked ~ .tab-labels label[for="my-tab-upcoming"],
 #my-tab-past:checked ~ .tab-labels label[for="my-tab-past"]{{color:#196B24;
   border-bottom-color:#196B24}}
-.card .tab-label{{font-size:1.3em;font-weight:bold}}
+/* Tabs that ARE a frame's title (/my): heading size and weight, sitting
+   at the frame's own padding exactly where an <h2> would. Opt-in via
+   .tab-title -- /admin's Future Sessions tabs sit UNDER an <h2> and must
+   keep the ordinary tab look, or nothing distinguishes the selected one
+   from a row of equally-bold headings. */
+.tab-labels.tab-title{{margin-top:0}}
+.tab-labels.tab-title .tab-label{{font-size:1.3em;font-weight:bold}}
+
+/* Tabs rendered as LINKS (/admin, since 2026-08-27 -- CSS-radio tabs
+   needed every course's panel in the DOM). Without this they inherit
+   a{{color:#196B24}} and every tab is green, so the selected one is
+   indistinguishable from the rest. Inactive is the same grey the
+   radio-based tabs use; only the active one is green, bold and
+   underlined. */
+/* /admin's course tabs read as titles too, so they carry the same size
+   and weight as /my's (.tab-title). They differ only in that they are
+   links: colour and the underline mark the selected one. */
+.tab-labels.tab-courses .tab-label{{font-size:1.3em;font-weight:bold}}
+a.tab-label{{text-decoration:none;color:#555}}
+a.tab-label:hover{{color:#196B24}}
+.tab-label.tab-active{{color:#196B24;border-bottom-color:#196B24;font-weight:bold}}
 .card > h2:first-child,.card-head h2{{margin:0 0 .6em;font-size:1.3em;
   border-bottom:2px solid #196B24;padding-bottom:.25em;display:inline-block}}
 /* A frame's title row when it also carries a link on the right. */
 .card-head{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;
   gap:1em}}
-.tab-active{{color:#196B24;border-bottom-color:#196B24}}
-dialog{{margin:auto;max-width:640px;width:92%;max-height:88vh;overflow:auto;
-  position:relative}}
+/* The chip inside a heading keeps its own box: no underline bleed from
+   the h2 rule above, and the same tabular digits + fixed weekday width
+   that make every chip on the site come out the same size. */
+.card-head h2 .when{{border-bottom:none;font-variant-numeric:tabular-nums}}
+.card-head h2 .wd{{display:inline-block;min-width:2.4em}}
+dialog{{margin:auto;max-width:640px;width:92%;max-height:88vh;overflow:auto}}
+/* NOT position:relative here. A modal <dialog> is centred by the browser
+   itself with position:fixed + inset:0 + margin:auto; overriding
+   `position` drops it out of that and it renders at the top of the flow
+   instead -- which is exactly what happened (2026-08-27). The X inside
+   does not need it either: a modal dialog is itself a positioned
+   ancestor, so an absolutely-positioned child anchors to it. */
 dialog::backdrop{{background:rgba(0,0,0,.45)}}
+/* The X every overlay carries, in the same corner on every one of them.
+   Added by _DIALOG_WIRING_SCRIPT for script-opened dialogs and written
+   into the markup for the server-rendered booking overlay, which has no
+   script at all -- one look, two ways of getting there. */
+dialog .dialog-x{{position:absolute;top:.35em;right:.5em;background:none;
+  border:none;height:auto;font-size:1.6em;line-height:1;color:#666;cursor:pointer;padding:0 .25em;
+  text-decoration:none}}
+dialog .dialog-x:hover{{color:#b00020}}
+/* Room for it, so a heading cannot run under the X. */
+dialog>h2:first-of-type,dialog>h3:first-of-type,dialog>p:first-of-type{{padding-right:1.6em}}
 details summary{{cursor:pointer;margin:.8em 0;color:#196B24}}
 button.danger{{background:#b00020;color:#fff;border:1px solid #b00020;border-radius:6px}}
 .tab-labels{{display:flex;border-bottom:1px solid #ddd;margin-top:.6em}}
@@ -362,7 +433,7 @@ button.danger{{background:#b00020;color:#fff;border:1px solid #b00020;border-rad
 #book-tab-signup:checked ~ .tab-labels label[for="book-tab-signup"]{{color:#196B24;border-bottom-color:#196B24;font-weight:bold}}
 </style></head><body>
 {banner}
-<h1>{esc(title)}</h1>
+{heading_html}
 {body}
 <p class="version">{esc(short_version())}</p>
 {_SUBMIT_FEEDBACK_SCRIPT}
