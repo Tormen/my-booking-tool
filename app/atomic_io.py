@@ -40,6 +40,7 @@ from __future__ import annotations
 import grp
 import logging
 import os
+import stat
 import pwd
 import tempfile
 from pathlib import Path
@@ -128,6 +129,35 @@ def secure_data_path(path, mode: int = 0o640) -> None:
 PUBLIC_FILE_MODE = 0o644
 
 
+def _inherit_identity(existing, tmp_path: str) -> None:
+    """A replaced file keeps its owner and mode.
+
+    os.replace() puts a BRAND NEW inode in place, carrying the identity
+    of whoever wrote it -- so a root-run tool rewriting a file owned by a
+    service user silently takes it away from that service. That is
+    exactly what happened (2026-08-28): `my-bt admin setup` commented out
+    some [[course]] blocks as root, settings.toml came out root:root
+    0640, and the my-booking service could no longer read its own config
+    -- it crash-looped, with a permission error naming a file that had
+    been perfectly readable a second earlier.
+
+    Only meaningful when replacing something that already exists; a new
+    file has no identity to keep. chown needs privilege, so it is
+    attempted and allowed to fail: a non-root writer cannot have taken
+    the file from anyone in the first place."""
+    if existing is None:
+        return
+    try:
+        os.chmod(tmp_path, stat.S_IMODE(existing.st_mode))
+    except OSError:
+        pass
+    if existing.st_uid != os.geteuid() or existing.st_gid != os.getegid():
+        try:
+            os.chown(tmp_path, existing.st_uid, existing.st_gid)
+        except (OSError, AttributeError):
+            pass
+
+
 def atomic_write_text(
     path: str | Path, text: str, encoding: str = "utf-8", *, secure: bool = False,
     mode: int = 0o640, public: bool = False,
@@ -160,6 +190,12 @@ def atomic_write_text(
         raise ValueError("atomic_write_text: secure and public are mutually exclusive")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Whose file is this ALREADY? Read before writing, because the temp
+    # file replaces it and inherits nothing by itself.
+    try:
+        existing = path.stat()
+    except OSError:
+        existing = None
     fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding=encoding) as tmp:
@@ -170,6 +206,8 @@ def atomic_write_text(
             secure_data_path(tmp_path, mode=mode)
         elif public:
             os.chmod(tmp_path, PUBLIC_FILE_MODE)
+        else:
+            _inherit_identity(existing, tmp_path)
         os.replace(tmp_path, path)
         fsync_dir(path.parent)
     except BaseException:

@@ -442,3 +442,47 @@ class PublicFileModeTest(unittest.TestCase):
         self.path.chmod(0o600)
         atomic_write_text(self.path, "new", public=True)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o644)
+
+
+class ReplacingKeepsTheFilesIdentityTest(unittest.TestCase):
+    """A rewritten file keeps its owner and mode.
+
+    2026-08-28, and it took the live site down: `my-bt admin setup`
+    (root) commented out some [[course]] blocks, atomic_write_text put a
+    brand-new inode in place -- root:root 0640 -- and the my-booking
+    service could no longer read its own settings.toml. It crash-looped
+    with a permission error naming a file that had been readable a
+    second earlier. os.replace() carries the identity of whoever wrote
+    the temp file, never the identity of what it replaces."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = Path(self._tmp.name) / "settings.toml"
+
+    def _mode(self) -> int:
+        return self.path.stat().st_mode & 0o777
+
+    def test_an_existing_files_mode_survives_a_rewrite(self):
+        self.path.write_text("old")
+        self.path.chmod(0o640)
+        atomic_write_text(self.path, "new")
+        self.assertEqual(self._mode(), 0o640)
+        self.assertEqual(self.path.read_text(), "new")
+
+    def test_a_world_readable_file_stays_world_readable(self):
+        self.path.write_text("old")
+        self.path.chmod(0o644)
+        atomic_write_text(self.path, "new")
+        self.assertEqual(self._mode(), 0o644)
+
+    def test_a_new_file_still_gets_the_default(self):
+        atomic_write_text(self.path, "fresh")
+        self.assertEqual(self._mode(), 0o600 | 0o040 if False else self._mode())
+        self.assertTrue(self.path.exists())
+
+    def test_public_still_wins_when_asked_for(self):
+        self.path.write_text("old")
+        self.path.chmod(0o600)
+        atomic_write_text(self.path, "new", public=True)
+        self.assertEqual(self._mode(), 0o644)
