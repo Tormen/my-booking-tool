@@ -49,9 +49,10 @@ marker, pointing back at index.html as the real source to edit instead.
 from __future__ import annotations
 
 import re
-import string
 from pathlib import Path
 from typing import Iterable
+
+from . import macros
 
 from .atomic_io import atomic_write_text
 from .cancellation import join_attention_sections
@@ -114,6 +115,7 @@ def render_privacy_html(
     template_path: Path | str,
     retention_months: int,
     canceled_retention_months: int,
+    operator_macros: dict[str, str] | None = None,
 ) -> str:
     """Returns the fully rendered page text (marker + substituted HTML).
     Takes the two plain numbers rather than a full app.config.Settings so
@@ -121,9 +123,18 @@ def render_privacy_html(
     `setup`, which deliberately avoid requiring secrets to be present just
     to check things) don't need a fully loaded Settings object either."""
     text = Path(template_path).read_text(encoding="utf-8")
-    rendered = string.Template(text).substitute(
-        retention_months=retention_months,
-        canceled_retention_months=canceled_retention_months,
+    # `{{!name}}`, not string.Template's `${name}` (2026-08-27): ONE
+    # substitution syntax across the whole project, so there is one rule
+    # to learn and one to document. The `!` says the value comes from
+    # settings.toml -- the file the console can never write -- which is
+    # exactly what these two retention numbers are. See app/macros.py.
+    rendered = macros.expand(
+        text, rich=True,
+        system={
+            "retention_months": str(retention_months),
+            "canceled_retention_months": str(canceled_retention_months),
+        },
+        user=operator_macros or {},
     )
     return MANAGED_MARKER + rendered
 
@@ -133,13 +144,16 @@ def write_privacy_html(
     retention_months: int,
     canceled_retention_months: int,
     out_path: Path | str,
+    operator_macros: dict[str, str] | None = None,
 ) -> None:
     # 2026-07-15: atomic_write_text, not a bare write_text() -- this is
     # the live, publicly-served privacy.html at both build time (this
     # checkout's own site/) and run time ([site].static_site_dir). See
     # app/atomic_io.py.
     atomic_write_text(
-        out_path, render_privacy_html(template_path, retention_months, canceled_retention_months),
+        out_path,
+        render_privacy_html(template_path, retention_months, canceled_retention_months,
+                            operator_macros),
         public=True,
     )
 

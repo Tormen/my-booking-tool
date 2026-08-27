@@ -225,7 +225,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "nginx_conf_repo_file": cli_checks.check_nginx_conf_repo_file(home),
         "local_overlay": cli_checks.check_local_overlay(home),
         "nginx_conf_deployed": cli_checks.check_nginx_conf_deployed(raw),
-        "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home)),
+        "static_site": cli_checks.check_static_site_drift(raw, tmpl_path(home), settings_path),
         "index_embedded_drift": cli_checks.check_index_embedded_drift(raw),
         "static_site_compliance": cli_checks.check_static_site_compliance(raw),
         "static_pages_deployed": cli_checks.check_static_pages_deployed(raw, home),
@@ -879,7 +879,7 @@ def interactive_setup(
     else:
         t = tmpl_path(home)
         out_path = Path(static_site_dir) / site_render.OUTPUT_NAME
-        drift_checks = cli_checks.check_static_site_drift(raw, t)
+        drift_checks = cli_checks.check_static_site_drift(raw, t, settings_path)
         for label, level, detail in drift_checks:
             print_fn(f"[{level}] {label}: {detail}")
         # Compliance (leftover REPLACE-ME/${...} placeholders) is

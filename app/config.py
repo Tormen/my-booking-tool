@@ -1089,6 +1089,22 @@ def macros_from_raw(raw: dict, *, source: str = WEB_EDITABLE_FILENAME) -> dict[s
     return out
 
 
+def operator_macros(toml_path: str | Path) -> dict[str, str]:
+    """The operator's own macros, for the callers that render a template
+    without loading a full Settings -- `my-bt status`/`setup` and
+    scripts/render-site.py, which deliberately avoid requiring every
+    secret file to exist just to check or build a page.
+
+    Never raises: a broken or invalid web-editable file leaves these
+    callers with no macros rather than a traceback. Reporting that file
+    is the health check's job (it goes through load_settings, which does
+    raise), and rendering a page is not the place to discover it."""
+    try:
+        return macros_from_raw(load_web_editable(toml_path))
+    except (OSError, ValueError):
+        return {}
+
+
 def merge_courses(base: tuple[Course, ...], editable: tuple[Course, ...]) -> tuple[Course, ...]:
     """Both files may define courses; the EDITABLE one wins per shortname.
 

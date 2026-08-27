@@ -1526,7 +1526,8 @@ def check_rpm_verify(package_name: str = "my-booking-tool") -> list[Check]:
     return checks
 
 
-def check_static_site_drift(raw: dict, template_path: str | Path) -> list[Check]:
+def check_static_site_drift(raw: dict, template_path: str | Path,
+                           settings_path: str | Path | None = None) -> list[Check]:
     """If `[site].static_site_dir` is configured, compares the LIVE
     deployed privacy.html there against what the current settings.toml
     would actually render -- catches the case this whole mechanism exists
@@ -1544,7 +1545,14 @@ def check_static_site_drift(raw: dict, template_path: str | Path) -> list[Check]
     privacy = raw.get("privacy", {})
     retention_months = privacy.get("retention_months", 24)
     canceled_retention_months = privacy.get("canceled_retention_months", 6)
-    expected = site_render.render_privacy_html(template_path, retention_months, canceled_retention_months)
+    expected = site_render.render_privacy_html(
+        template_path, retention_months, canceled_retention_months,
+        # The operator's own macros resolve in privacy.html.tmpl too --
+        # a studio name belongs in a privacy policy, and typing it in a
+        # second place is how the two come to disagree. Absent a settings
+        # path (older callers), there are simply none.
+        config.operator_macros(settings_path) if settings_path else {},
+    )
 
     deployed_path = Path(static_site_dir) / site_render.OUTPUT_NAME
     if not deployed_path.exists():

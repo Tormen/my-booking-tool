@@ -1660,7 +1660,7 @@ def cmd_admin_health(args) -> None:
             checks.append(("courses configured", "warn", "no [[course]] blocks found"))
         tmpl = cli_setup.tmpl_path(HOME)
         checks.extend(cli_checks.check_rpmnew([args.settings, str(tmpl)]))
-        checks.extend(cli_checks.check_static_site_drift(raw, tmpl))
+        checks.extend(cli_checks.check_static_site_drift(raw, tmpl, settings_path))
         checks.extend(cli_checks.check_static_site_compliance(raw))
 
     # -- secrets --------------------------------------------------------------

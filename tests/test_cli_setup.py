@@ -147,7 +147,7 @@ class PrintReportTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
@@ -419,7 +419,7 @@ class NginxLocationsHintTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
@@ -485,7 +485,7 @@ class InteractiveSetupSecretsTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.secrets_dir = self.home / "secrets"
@@ -562,7 +562,7 @@ class InteractiveSetupRpmnewTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
@@ -604,7 +604,7 @@ class InteractiveSetupPrivilegedStepsTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
@@ -714,7 +714,7 @@ class InteractiveSetupPathGroupSelinuxTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.data_dir = Path(self._tmp.name) / "data"
@@ -795,7 +795,7 @@ class InteractiveSetupActiveSessionGateTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
@@ -858,7 +858,7 @@ class InteractiveSetupRestartSessionGuardTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
@@ -924,7 +924,7 @@ class InteractiveSetupStaticSiteTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.static_dir = self.home / "live"
@@ -1185,7 +1185,7 @@ class InteractiveSetupIndexEmbeddedTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.static_dir = self.home / "live"
@@ -1412,7 +1412,7 @@ class InteractiveSetupNginxConfDeployedTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.deployed = self.home / "deployed" / "booking.example.org.conf"
@@ -1695,7 +1695,7 @@ class InteractiveSetupCspSelfHealTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.deployed = self.home / "deployed" / "nginx-locations.conf"
@@ -1815,7 +1815,7 @@ class InteractiveSetupCaldavTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 
@@ -1875,7 +1875,7 @@ class InteractiveSetupCalendarInviteFormatTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         secrets = self.home / "secrets"
         secrets.mkdir()
         for name in ("caldav_password", "smtp_password", "admin_password_hash"):
@@ -1993,7 +1993,7 @@ class InteractiveSetupWatchdogTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.log_path = self.home / "access.log"
@@ -2180,7 +2180,7 @@ class InteractiveSetupDataDirGitTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name) / "checkout"
         (self.home / "site").mkdir(parents=True)
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
         self.data_dir = Path(self._tmp.name) / "data"
@@ -2255,7 +2255,7 @@ class InteractiveSetupFinalSummaryTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.home = Path(self._tmp.name)
         (self.home / "site").mkdir()
-        (self.home / "site" / "privacy.html.tmpl").write_text("kept ${retention_months}m")
+        (self.home / "site" / "privacy.html.tmpl").write_text("kept {{!retention_months}}m")
         self.settings_path = str(self.home / "settings.toml")
         Path(self.settings_path).write_text("x")
 

@@ -105,7 +105,7 @@ class RenderTest(unittest.TestCase):
             encoding="utf-8",
         )
         (self.dir / "site" / "privacy.html.tmpl").write_text(
-            "kept for ${retention_months} months", encoding="utf-8",
+            "kept for {{!retention_months}} months", encoding="utf-8",
         )
         (self.dir / "site" / "index.html").write_text(_SAMPLE_INDEX_HTML, encoding="utf-8")
 

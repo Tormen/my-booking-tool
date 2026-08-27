@@ -50,7 +50,7 @@ provider, calendar provider, hosting provider, ...) and whether each has
 a signed data-processing agreement with you.</p>
 
 <p><b>How long it's kept:</b> booking records are kept for up to
-${retention_months} months after the session date (${canceled_retention_months} months if canceled), then
+{{!retention_months}} months after the session date ({{!canceled_retention_months}} months if canceled), then
 automatically deleted. You can delete your own account and booking
 history at any time from the booking tool's "my bookings" page, or by
 emailing <a href="mailto:REPLACE-ME@example.org">REPLACE-ME@example.org</a>

@@ -1541,7 +1541,7 @@ class CheckStaticSiteDriftTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
         self.tmpl_path = self.dir / "privacy.html.tmpl"
-        self.tmpl_path.write_text("kept for ${retention_months} months", encoding="utf-8")
+        self.tmpl_path.write_text("kept for {{!retention_months}} months", encoding="utf-8")
         self.static_dir = self.dir / "live"
         self.static_dir.mkdir()
 

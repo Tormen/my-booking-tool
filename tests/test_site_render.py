@@ -62,8 +62,8 @@ class RenderPrivacyHtmlTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.tmpl_path = Path(self._tmp.name) / "privacy.html.tmpl"
         self.tmpl_path.write_text(
-            "<html><body>kept for ${retention_months} months "
-            "(${canceled_retention_months} if canceled)</body></html>",
+            "<html><body>kept for {{!retention_months}} months "
+            "({{!canceled_retention_months}} if canceled)</body></html>",
             encoding="utf-8",
         )
 
