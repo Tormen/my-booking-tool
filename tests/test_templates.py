@@ -205,3 +205,41 @@ class StylesheetIsWellFormedTest(unittest.TestCase):
         html = page("t", "<p>x</p>")
         style = html[html.index("<style>"):html.index("</style>")]
         self.assertNotIn("/*", style)
+
+
+class EscapeClosesWithoutNavigatingTest(unittest.TestCase):
+    """Escape must CLOSE the server-rendered overlay, not navigate away.
+
+    2026-08-28, from the live site: the first version set
+    window.location.href, and nothing happened -- Escape is also "Stop"
+    in a browser, so the navigation started by that keypress is cancelled
+    by the same keypress. Closing needs no navigation at all."""
+
+    def _script(self) -> str:
+        from app.templates import _SUBMIT_FEEDBACK_SCRIPT
+        return _SUBMIT_FEEDBACK_SCRIPT
+
+    def test_escape_closes_the_panel(self):
+        script = self._script()
+        esc = script[script.index('ev.key !== "Escape"'):]
+        esc = esc[:esc.index("});")]
+        self.assertIn("panel.close()", esc)
+        self.assertIn("removeAttribute(\"open\")", esc)
+
+    def test_escape_never_starts_a_navigation(self):
+        script = self._script()
+        esc = script[script.index('ev.key !== "Escape"'):]
+        esc = esc[:esc.index("});")]
+        self.assertNotIn("location.href", esc)
+
+    def test_the_address_is_corrected_so_a_reload_does_not_reopen_it(self):
+        script = self._script()
+        esc = script[script.index('ev.key !== "Escape"'):]
+        esc = esc[:esc.index("});")]
+        self.assertIn("replaceState", esc)
+
+    def test_the_backdrop_goes_with_it(self):
+        script = self._script()
+        esc = script[script.index('ev.key !== "Escape"'):]
+        esc = esc[:esc.index("});")]
+        self.assertIn("overlay-backdrop", esc)

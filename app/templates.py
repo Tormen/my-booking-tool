@@ -127,7 +127,19 @@ _SUBMIT_FEEDBACK_SCRIPT = """<script>
     var panel = document.querySelector("dialog[open]");
     if (!panel) return;
     var close = panel.querySelector(".dialog-x");
-    if (close && close.getAttribute("href")) { window.location.href = close.getAttribute("href"); }
+    if (!close || !close.getAttribute("href")) return;
+    // CLOSE it, do not navigate. Escape is also "Stop" in a browser, so
+    // a location change started from this very keypress is cancelled by
+    // the same keypress -- the overlay just sat there (2026-08-28, live).
+    // Closing needs no navigation at all, and the address is corrected
+    // in place so a reload does not reopen what was just dismissed.
+    panel.close();
+    panel.removeAttribute("open");
+    var backdrop = document.querySelector(".overlay-backdrop");
+    if (backdrop) backdrop.remove();
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState({}, "", close.getAttribute("href"));
+    }
   });
 
   // Coming BACK to a cached page (the back button) must not leave the
