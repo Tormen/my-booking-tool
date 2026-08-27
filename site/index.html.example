@@ -83,6 +83,34 @@
     BETWEEN bullets is put back on the next line. */
  .attention ul li { margin-bottom: 0; }
  .attention ul li + li { margin-top: 0.2em; }
+
+/* Booking links lead to a page that consults the calendar before it can
+   render -- seconds when the conflict feed is cold -- and until it
+   arrives the browser keeps showing THIS page, so the click looks
+   ignored. Same shape and same 250ms rule as the app's own pages.
+   NOTE: index_embedded.html is script-free by design, so it does not get
+   this; a CSS-only version would need :focus, which Safari does not give
+   a clicked link. */
+.loading-overlay { position: fixed; inset: 0; z-index: 1200;
+  background: rgba(255,255,255,.8); display: flex; align-items: center;
+  justify-content: center; }
+.skeleton { background: #fff; border: 1px solid #ddd; border-radius: 8px;
+  padding: 1.4em 1.6em; box-shadow: 0 8px 30px rgba(0,0,0,.18);
+  width: min(92%, 520px); }
+.sk { display: block; border-radius: 6px; background: #ececec; margin: 0 0 .7em;
+  background-image: linear-gradient(90deg,#ececec 0%,#f7f7f7 40%,#ececec 80%);
+  background-size: 300% 100%; animation: sk-sweep 1.2s linear infinite; }
+.sk-title { height: 1.5em; width: 55%; margin-bottom: 1.1em; }
+.sk-line { height: .9em; }
+.sk-line.short { width: 70%; }
+.sk-grid { background: none; animation: none; display: grid;
+  grid-template-columns: repeat(3,1fr); gap: .5em; margin: 1em 0; }
+.sk-grid i { display: block; height: 3.2em; border-radius: 6px; background: #ececec;
+  background-image: linear-gradient(90deg,#ececec 0%,#f7f7f7 40%,#ececec 80%);
+  background-size: 300% 100%; animation: sk-sweep 1.2s linear infinite; }
+.sk-btn { height: 2.2em; width: 9em; margin-top: 1.2em; }
+@keyframes sk-sweep { from { background-position: 150% 0 } to { background-position: -150% 0 } }
+@media (prefers-reduced-motion: reduce) { .sk, .sk-grid i { animation: none } }
 </style>
 </head>
 <body>
@@ -162,5 +190,38 @@
 })();
 </script>
 
+<script>
+// A click on any link to this site starts a timer; the panel appears
+// only if the page has not been replaced 250ms later, so a fast
+// navigation never flashes it. Nothing here runs for an external link,
+// a fragment, or a click that opens a new tab.
+(function () {
+  var timer = null;
+  document.addEventListener('click', function (ev) {
+    var a = ev.target.closest ? ev.target.closest('a') : null;
+    if (!a || ev.defaultPrevented || ev.button !== 0) return;
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+    var href = a.getAttribute('href') || '';
+    if (!href || href.charAt(0) === '#') return;
+    if (/^[a-z]+:/i.test(href) && a.origin !== window.location.origin) return;
+    if (timer) return;
+    timer = setTimeout(function () {
+      var back = document.createElement('div');
+      back.className = 'loading-overlay';
+      back.innerHTML = "<div class='skeleton' role='status' aria-label='Loading'>" +
+        "<span class='sk sk-title'></span>" +
+        "<span class='sk sk-line'></span><span class='sk sk-line short'></span>" +
+        "<span class='sk sk-grid'><i></i><i></i><i></i><i></i><i></i><i></i></span>" +
+        "<span class='sk sk-line'></span><span class='sk sk-btn'></span></div>";
+      document.body.appendChild(back);
+    }, 250);
+  });
+  window.addEventListener('pageshow', function () {
+    if (timer) { clearTimeout(timer); timer = null; }
+    var panel = document.querySelector('.loading-overlay');
+    if (panel) panel.remove();
+  });
+})();
+</script>
 </body>
 </html>
