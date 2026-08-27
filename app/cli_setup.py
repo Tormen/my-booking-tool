@@ -199,8 +199,27 @@ def tmpl_path(home: str) -> Path:
     return Path(home) / "site" / site_render.TEMPLATE_NAME
 
 
-def _course_summary(raw: dict) -> str:
-    return ", ".join(c.get("shortname", "?") for c in raw.get("course", [])) or "(none configured)"
+def _course_summary(raw: dict, settings_path: str | Path | None = None) -> str:
+    """Every course, from BOTH settings files.
+
+    settings.toml legitimately holds none once they are managed in the
+    console, and printing "(none configured)" there reads as "your
+    courses are gone" while the site serves all of them -- the same
+    misreport `my-bt admin health` used to make."""
+    names = [c.get("shortname", "?") for c in raw.get("course", [])]
+    from_console: list[str] = []
+    if settings_path:
+        try:
+            from_console = [c.get("shortname", "?") for c in
+                            config.load_web_editable(settings_path).get("course", [])]
+        except (OSError, ValueError):
+            from_console = []
+    if not names and not from_console:
+        return "(none configured)"
+    line = ", ".join(names + from_console)
+    if from_console:
+        line += f" ({len(from_console)} managed under /admin)"
+    return line
 
 
 def _privacy_summary(raw: dict) -> str:
@@ -318,7 +337,7 @@ def print_report(
     show(report["rpmnew"])
 
     print_fn(f"\n3. Review {settings_path}:")
-    print_fn(f"   courses: {_course_summary(raw)}")
+    print_fn(f"   courses: {_course_summary(raw, settings_path)}")
     print_fn(f"   {_privacy_summary(raw)}")
 
     print_fn("\n4. nginx location blocks (checked live via `nginx -T`):")
@@ -571,7 +590,7 @@ def interactive_setup(
 
     # 3. settings.toml review
     print_fn(f"\n-- 3. {settings_path} current values (review, edit by hand if needed) --")
-    print_fn(f"   courses: {_course_summary(raw)}")
+    print_fn(f"   courses: {_course_summary(raw, settings_path)}")
     print_fn(f"   {_privacy_summary(raw)}")
 
     # 4. nginx -- checked live via `nginx -T` (the fully merged config, not
