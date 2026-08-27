@@ -166,8 +166,18 @@ def message_html(admin_email: str, custom_message: str = "") -> str:
 
 
 def banner_html(admin_email: str, custom_message: str = "") -> str:
+    """The banner, plus the one thing it must hide.
+
+    Every booking route is closed while maintenance is on, so a Login
+    button on the page is an invitation to a page that will not serve
+    them -- a maintenance page and a working-looking login sitting
+    together is a contradiction the reader has to resolve. It is hidden
+    with the banner and comes back with it, so the two can never fall out
+    of step. Inline <style> is allowed by this site's CSP (style-src
+    carries 'unsafe-inline'; script-src deliberately does not)."""
     return (
         f"{_BANNER_START}\n"
+        "<style>.top-bar,.login-btn{display:none}</style>\n"
         '<div style="background:#fff3cd;border-bottom:2px solid #f0ad4e;color:#7a5b00;'
         'padding:10px 20px;text-align:center;font-family:sans-serif;font-size:0.95em;">'
         f"{message_html(admin_email, custom_message)}"

@@ -230,3 +230,24 @@ class MaintenanceKeepsThePageReadableTest(unittest.TestCase):
         maintenance.apply_banner_to_file(self.page, True, "a@example.org")
         maintenance.apply_banner_to_file(self.page, False, "a@example.org")
         self.assertEqual(self._mode(), 0o644)
+
+    def test_the_login_button_is_hidden_while_maintenance_is_on(self):
+        # A maintenance page next to a working-looking Login is a
+        # contradiction: every booking route is closed.
+        self.page.write_text(
+            '<html><body><div class="top-bar" id="top-bar">'
+            '<a class="login-btn" href="/my">Login</a></div><h1>Hi</h1></body></html>',
+            encoding="utf-8")
+        maintenance.apply_banner_to_file(self.page, True, "a@example.org")
+        self.assertIn(".top-bar,.login-btn{display:none}", self.page.read_text())
+
+    def test_and_comes_back_when_it_is_turned_off(self):
+        self.page.write_text(
+            '<html><body><div class="top-bar" id="top-bar">'
+            '<a class="login-btn" href="/my">Login</a></div><h1>Hi</h1></body></html>',
+            encoding="utf-8")
+        maintenance.apply_banner_to_file(self.page, True, "a@example.org")
+        maintenance.apply_banner_to_file(self.page, False, "a@example.org")
+        text = self.page.read_text()
+        self.assertNotIn("display:none", text)
+        self.assertIn('class="login-btn"', text)
