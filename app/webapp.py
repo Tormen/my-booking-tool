@@ -2328,9 +2328,14 @@ class App:
         if user is None:
             return self._anonymous_banner_html(next_path)
         my_bookings_link = "" if on_my_page else '<a href="/my">My bookings</a> &middot; '
+        # The account link sits BEHIND the identity it belongs to, not in
+        # the page body: the banner is where a reader looks to see who
+        # they are, so it is where they look to change it. Same shape the
+        # admin banner uses for its own settings link.
         return (
             '<div class="session-banner">'
-            f"<span>Logged in as <b>{esc(user.email)}</b></span>"
+            f"<span>Logged in as <b>{esc(user.email)}</b> &middot; "
+            f'<a href="/my/settings">Account settings</a></span>' 
             f'<span>{my_bookings_link}'
             f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a> &middot; '
             '<form method="post" action="/my/logout">'
@@ -3327,7 +3332,7 @@ class App:
                     f'<button type="submit" class="confirm-dialog-btn" data-dialog="{cancel_id}-dialog" '
                     f'{"disabled" if disabled else ""}>Cancel</button>'
                     "</form>"
-                    f'<dialog id="{cancel_id}-dialog" class="card">'
+                    f'<dialog id="{cancel_id}-dialog">'
                     f"<p><b>Are you sure?</b></p>"
                     f"<p>Cancel your booking for <b>{esc(title)}</b> on {esc(r.occurrence_date)}?</p>"
                     f'<label>Optional reason <textarea name="message" rows="2" class="big-input" '
@@ -3370,7 +3375,7 @@ class App:
                         f'<button type="submit" class="confirm-dialog-btn" data-dialog="{reinstate_id}-dialog">'
                         "Rebook</button>"
                         "</form>"
-                        f'<dialog id="{reinstate_id}-dialog" class="card">'
+                        f'<dialog id="{reinstate_id}-dialog">'
                         f"<p><b>Are you sure?</b></p>"
                         f"<p>Rebook your booking for <b>{esc(title)}</b> on {esc(r.occurrence_date)}?</p>"
                         f'<label>Optional message <textarea name="message" rows="2" class="big-input" '
@@ -3440,9 +3445,7 @@ class App:
               <div class="tab-panel" id="my-panel-upcoming">{upcoming_html}</div>
               <div class="tab-panel" id="my-panel-past">{past_html}</div>
             </div>
-            <div class="submit-row">
-              <a href="/my/settings"><button type="button">Account settings</button></a>
-            </div>""" + _DIALOG_WIRING_SCRIPT
+            """ + _DIALOG_WIRING_SCRIPT
             # 2026-07-14: the delete button moved under
             # 'Account settings' and was renamed to 'DELETE this account' --
             # the delete-account form/dialog used to live at the bottom of
@@ -4357,23 +4360,30 @@ class App:
         self, environ, user, *, name_error: str | None = None,
         email_error: str | None = None,
     ):
-        banner = self._session_banner_html(environ, on_my_page=True)
-        # 2026-08-27: saving one of these used to discard whatever had been
-        # typed into the OTHER -- type a new address, hit Save name, and the
-        # address was gone with no warning. Both fields now live in ONE form
-        # (two submit buttons, the second using formaction=), so BOTH are
-        # always submitted whichever button is pressed, and the half that
-        # was not acted on is handed back through the session and re-filled
-        # below. Nothing is carried in the URL: an email address has no
-        # business in a query string, a browser history or an access log.
+        banner = self._session_banner_html(environ)
+        # Two INDEPENDENT forms, one per action. They shared a single form
+        # for a while (two buttons, the second using formaction=) so that
+        # saving one would not discard what had been typed into the other
+        # -- but a shared form is validated as a whole, so a half-typed
+        # address made the browser refuse "Save name" and complain about a
+        # field that button does not touch.
+        #
+        # Each form now carries a HIDDEN mirror of the other's field
+        # (data-mirror, filled from the live input by the page script in
+        # templates.py), so the draft still survives while validation stays
+        # per form: a hidden input is never constraint-validated. With no
+        # JS the mirror still holds the last rendered value, so nothing
+        # breaks, it just carries less. Nothing goes in the URL: an email
+        # address has no business in a query string, a history or a log.
         draft = _take_settings_draft(environ)
         name_err_html = f'<p class="err">{esc(name_error)}</p>' if name_error else ""
         name_value = draft.get("name") or user.name
         name_body = f"""{name_err_html}<div class="card">
-          <label>Name <input class="big-input id-input" name="name" type="text" form="settings-form"
-                 value="{esc(name_value)}" required></label>
+          <input class="big-input id-input" name="name" type="text" id="settings-name"
+                 form="name-form" value="{esc(name_value)}" required
+                 aria-label="Your name">
           <div class="submit-row">
-            <button type="submit" form="settings-form" formaction="/my/settings/name">Save name</button>
+            <button type="submit" form="name-form">Save name</button>
           </div>
         </div>"""
 
@@ -4403,31 +4413,35 @@ class App:
             </div>"""
         else:
             email_body = f"""{email_err_html}<div class="card">
-              <label>Current email <input class="big-input id-input" value="{esc(user.email)}" disabled></label>
-              <label>New email <input class="big-input id-input" name="email" type="email" required
-                     form="settings-form" value="{esc(draft.get("email", ""))}"></label>
+              <label>Current <input class="big-input id-input" value="{esc(user.email)}" disabled></label>
+              <label>New <input class="big-input id-input" name="email" type="email" required
+                     id="settings-email" form="email-form"
+                     value="{esc(draft.get("email", ""))}"></label>
               <p class="hint">We'll email a confirmation link to the new address -- your login
                 email only changes once that link is clicked.</p>
               <div class="submit-row">
-                <button type="submit" form="settings-form"
-                        formaction="/my/settings/email">Change email</button>
+                <button type="submit" form="email-form">Change email</button>
               </div>
             </div>"""
 
         body = f"""
-        <form method="post" action="/my/settings/name" id="settings-form"></form>
+        <form method="post" action="/my/settings/name" id="name-form">
+          <input type="hidden" name="email" data-mirror="settings-email"
+                 value="{esc(draft.get("email", ""))}"></form>
+        <form method="post" action="/my/settings/email" id="email-form">
+          <input type="hidden" name="name" data-mirror="settings-name"
+                 value="{esc(name_value)}"></form>
         <h3>Name</h3>
         {name_body}
         <h3>Email</h3>
         {email_body}
-        <p><a href="/my">Back to my bookings</a></p>
         <div class="submit-row">
           <form method="post" action="/my/delete-account" style="display:inline" id="delete-account-form"
             onsubmit="return confirm('Delete your account and all related data? This will cancel any booking you still have!');">
             <button type="submit" class="confirm-dialog-btn" data-dialog="delete-account-dialog">DELETE this account</button>
           </form>
         </div>
-        <dialog id="delete-account-dialog" class="card">
+        <dialog id="delete-account-dialog">
           <p><b>Are you sure?</b></p>
           <p>Delete your account and all related data? This will cancel any booking you still have!</p>
           <div class="submit-row">
@@ -4860,7 +4874,7 @@ class App:
             for r in booked
         ) or '<li class="note">Nobody is booked -- nothing to notify.</li>'
 
-        time_dialog = f"""<dialog id="time-{esc(row_id)}" class="card">
+        time_dialog = f"""<dialog id="time-{esc(row_id)}">
           <h3>Edit {esc(iso)}</h3>
           <p class="note">{esc(course.title)} -- normally {esc(course.time_range_label())}.
              The time and the message below apply to THIS date only.</p>
@@ -4884,7 +4898,7 @@ class App:
         </dialog>"""
 
         unhide = kind == BLOCKER_HIDDEN
-        hide_dialog = f"""<dialog id="hide-{esc(row_id)}" class="card">
+        hide_dialog = f"""<dialog id="hide-{esc(row_id)}">
           <h3>{"Offer " + esc(iso) + " again?" if unhide else "Stop offering " + esc(iso) + "?"}</h3>
           <p class="note">{
             "Deletes the blocker event from your calendar; the date is bookable again."
@@ -4903,7 +4917,7 @@ class App:
           </form>
         </dialog>"""
 
-        cancel_dialog = f"""<dialog id="cancel-{esc(row_id)}" class="card">
+        cancel_dialog = f"""<dialog id="cancel-{esc(row_id)}">
           <h3>Cancel the entire session on {esc(iso)}?</h3>
           <p class="note">{esc(course.title)}, {esc(time_label)}. Everyone below is canceled and
              notified, and you get a copy. A CANCELED blocker event is written to your calendar
@@ -5279,7 +5293,7 @@ class App:
                     f'<button type="submit" class="confirm-dialog-btn cancel-btn" data-dialog="{cancel_id}-dialog" '
                     f'data-occurrence="{esc(occurrence_key)}" {"disabled" if disabled else ""}>Cancel</button>'
                     "</form>"
-                    f'<dialog id="{cancel_id}-dialog" class="card">'
+                    f'<dialog id="{cancel_id}-dialog">'
                     f"<p><b>Are you sure?</b></p>"
                     f"<p>Cancel <b>{esc(user.name)}</b> ({esc(user.email)})'s booking for <b>{esc(title)}</b> "
                     f"on {esc(r.occurrence_date)}? They'll be notified by email.</p>"
@@ -5308,7 +5322,7 @@ class App:
                         f'<button type="submit" class="confirm-dialog-btn" data-dialog="{reinstate_id}-dialog">'
                         "Rebook</button>"
                         "</form>"
-                        f'<dialog id="{reinstate_id}-dialog" class="card">'
+                        f'<dialog id="{reinstate_id}-dialog">'
                         f"<p><b>Are you sure?</b></p>"
                         f"<p>Rebook <b>{esc(user.name)}</b> ({esc(user.email)})'s booking for <b>{esc(title)}</b> "
                         f"on {esc(r.occurrence_date)}? They'll be notified by email.</p>"

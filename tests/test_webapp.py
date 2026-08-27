@@ -3469,7 +3469,7 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self.app.my("GET", environ)
         reg = self.store.registrations_for_user(user.user_id)[0]
         cancel_id = f"cancel-{reg.registration_id}"
-        self.assertIn(f'<dialog id="{cancel_id}-dialog" class="card">', body)
+        self.assertIn(f'<dialog id="{cancel_id}-dialog">', body)
         self.assertIn("Are you sure?", body)
         self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{cancel_id}-form">', body)
         self.assertIn("Confirm cancellation", body)
@@ -3535,7 +3535,7 @@ class BookingFlowTest(unittest.TestCase):
         # (Account settings) now instead.
         _user, environ = self._login_as_guest("regular@example.org")
         _status, _headers, body = self.app.my_settings("GET", environ)
-        self.assertIn('<dialog id="delete-account-dialog" class="card">', body)
+        self.assertIn('<dialog id="delete-account-dialog">', body)
         self.assertIn("DELETE this account", body)
         self.assertIn(
             "Delete your account and all related data? This will cancel any booking you still have!",
@@ -4522,7 +4522,7 @@ class BookingFlowTest(unittest.TestCase):
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         cancel_id = f"admin-cancel-{reg.registration_id}"
-        self.assertIn(f'<dialog id="{cancel_id}-dialog" class="card">', body)
+        self.assertIn(f'<dialog id="{cancel_id}-dialog">', body)
         self.assertIn("Are you sure?", body)
         self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{cancel_id}-form">', body)
         self.assertIn("Confirm cancellation", body)
@@ -4709,7 +4709,7 @@ class BookingFlowTest(unittest.TestCase):
         self._post_with_session(self.app.my_cancel, (reg.registration_id,), {"message": ""}, environ)
         _status, _headers, body = self.app.my("GET", environ)
         reinstate_id = f"reinstate-{reg.registration_id}"
-        self.assertIn(f'<dialog id="{reinstate_id}-dialog" class="card">', body)
+        self.assertIn(f'<dialog id="{reinstate_id}-dialog">', body)
         self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{reinstate_id}-form">', body)
         self.assertIn("Confirm rebooking", body)
 
@@ -4866,7 +4866,7 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
         self.assertIn(f'<form method="post" action="/admin/reinstate/{reg.registration_id}"', body)
         reinstate_id = f"admin-reinstate-{reg.registration_id}"
-        self.assertIn(f'<dialog id="{reinstate_id}-dialog" class="card">', body)
+        self.assertIn(f'<dialog id="{reinstate_id}-dialog">', body)
         self.assertIn(f'<textarea name="message" rows="2" class="big-input" form="{reinstate_id}-form">', body)
         self.assertIn("Regular</b> (regular@example.org)", body)
 
@@ -5837,10 +5837,12 @@ class AccountSettingsDraftTest(unittest.TestCase):
     the other (2026-08-27, reported from the live site: type a new
     address, press Save name, address gone).
 
-    Both fields now belong to ONE form with two submit buttons, so both
-    are always submitted, and the half that was not acted on is handed
-    back through the SESSION -- never the URL, where an email address
-    would end up in browser history, the next Referer and nginx's log."""
+    Each field has its OWN form (a shared one was validated as a whole,
+    so a half-typed address blocked "Save name"); the draft survives
+    because each form carries a hidden mirror of the other's field, and
+    the half that was not acted on is handed back through the SESSION --
+    never the URL, where an email address would end up in browser
+    history, the next Referer and nginx's log."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -5888,20 +5890,27 @@ class AccountSettingsDraftTest(unittest.TestCase):
         self.assertIn("typed@example.org", self._page())
         self.assertNotIn("typed@example.org", self._page())
 
-    def test_both_fields_post_to_one_form(self):
-        # The mechanism itself: two <form>s cannot submit each other's
-        # fields, so if this ever goes back to separate forms the drafts
-        # above stop being possible at all.
+    def test_each_field_has_its_own_form_and_mirrors_the_other(self):
+        """Separate forms so the browser validates only the one being
+        submitted: a half-typed address must not make "Save name" refuse
+        (reported 2026-08-27). The draft still survives because each form
+        carries a HIDDEN mirror of the other's field -- and a hidden input
+        is never constraint-validated, which is what makes both true at
+        once."""
         body = self._page()
-        self.assertIn('id="settings-form"', body)
-        self.assertIn('form="settings-form"', body)
-        self.assertIn('formaction="/my/settings/email"', body)
+        self.assertIn('action="/my/settings/name" id="name-form"', body)
+        self.assertIn('action="/my/settings/email" id="email-form"', body)
+        self.assertIn('name="email" data-mirror="settings-email"', body)
+        self.assertIn('name="name" data-mirror="settings-name"', body)
+        # No button may carry a formaction now: that was the shared-form
+        # mechanism, and with it the cross-field validation.
+        self.assertNotIn("formaction=", body)
 
 
 class FutureSessionsBoxTest(unittest.TestCase):
     """/admin's Future Sessions box (2026-08-27): managing exceptional
-    dates, hiding a date, and cancelling a session from the console
-    instead of from settings.toml plus a calendar app."""
+    dates from the console -- shifting a time, hiding or cancelling a
+    date -- instead of from settings.toml plus a calendar app."""
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

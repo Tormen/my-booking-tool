@@ -130,7 +130,7 @@ server {
     #     default-src 'self' is safe as the baseline for everything not
     #     called out below.
     #   - TEN distinct inline <script> blocks exist site-wide as of this
-    #     app version (FIFTEEN hashes are allow-listed below: one per
+    #     app version (EIGHTEEN hashes are allow-listed below: one per
     #     current script plus superseded versions' hashes, deliberately
     #     kept per the "ADD, never replace" rule -- rollback safety;
     #     counts corrected 2026-07-14, the notes below used to conflate
@@ -233,8 +233,8 @@ server {
     #     body changing without its hash landing here -- fails at
     #     `python3 -m unittest` time going forward, same as
     #     check_csp_hashes_deployed() already does for the live server. Now
-    #     FIFTEEN hashes total for the TEN distinct scripts currently in
-    #     use -- the extra five are superseded versions' hashes, kept per
+    #     EIGHTEEN hashes total for the TEN distinct scripts currently in
+    #     use -- the extra eight are superseded versions' hashes, kept per
     #     the "ADD, never replace" rule.
     #   - 2026-07-08: the sortable/filterable-table script's hash changed
     #     again (still the same one shared by /my and /admin) -- added the
@@ -266,7 +266,7 @@ server {
     #     embed from anywhere OTHER than what frame-ancestors allows,
     #     instead of it silently vanishing into the visitor's own browser
     #     console.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Pnh4gP33m9xwjHG157wH+PykNdbH0fonNRCRjKGqpe8=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U=' 'sha256-4fhOi4IWLR6Of8C4WDGKPRRA/13iDwHcdyYyfYhM4gk=' 'sha256-Nojvq9TThxA2tKREcDyA328Xu3hauXMOQeg3fAoSJhU=' 'sha256-ZZwnrKhKA0ZRtYiEbx4DVIEwKvKJmKGVCb3651zfzWU=' 'sha256-OzxBwiOrVtkkygYzETVZ0IeW1pv4XAQX4IYQ0lhnni8=' 'sha256-d1Afot0vOVf6GWkmy0u8ygfsTmI7G55s8KhyTs1yUck=' 'sha256-utC/goPBYUr8M36sSuJkWW4tqsGZHtL1jgaOoCMTtzc=' 'sha256-K2hZWmwaQRVjZW8AubUIKZFvh7dRx3tweo3EJLOUHJI='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; report-uri /csp-report;" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-Ver5FwEPiXIWU5oQdhCchVlL36wbDj3koRs3pyoKuFY=' 'sha256-ji+DXtYyF5mfZxKrAIka836Kh7UjtO1Qf3WcYFVC+y4=' 'sha256-at+MMlKeVdXjzVWo/1L1cwH1kZ76tB0ZldsC9Hzd9hk=' 'sha256-cmqV8a8IsyPUB5rofb3Xu3LQ/HFchfg3MyNHs+pm0jo=' 'sha256-gSX3W6JYZGwF4pdC9t4ZGGMUJqgSoL96xZI1mzRZb0Q=' 'sha256-/muiZroop/5PvlS9Zmnmo9mtOp8vTmBd3bkkD8CHL4s=' 'sha256-Pnh4gP33m9xwjHG157wH+PykNdbH0fonNRCRjKGqpe8=' 'sha256-IOSFaoadAQ+Di8VPYj3XAM7+UGTO7LL9xRUxiV0USWw=' 'sha256-RsFfe1cB5CoithqqCMWB6TkkhVy5LrPmoWZKEMnZwRg=' 'sha256-Kwex94XzLTST9G9mLForb+ndWB6SVRaMl6nKKoTLCFw=' 'sha256-garHAUeDcyTl2xo16BQPESvzqY36y/Tl3R/x+dUZa0U=' 'sha256-4fhOi4IWLR6Of8C4WDGKPRRA/13iDwHcdyYyfYhM4gk=' 'sha256-Nojvq9TThxA2tKREcDyA328Xu3hauXMOQeg3fAoSJhU=' 'sha256-ZZwnrKhKA0ZRtYiEbx4DVIEwKvKJmKGVCb3651zfzWU=' 'sha256-OzxBwiOrVtkkygYzETVZ0IeW1pv4XAQX4IYQ0lhnni8=' 'sha256-d1Afot0vOVf6GWkmy0u8ygfsTmI7G55s8KhyTs1yUck=' 'sha256-utC/goPBYUr8M36sSuJkWW4tqsGZHtL1jgaOoCMTtzc=' 'sha256-K2hZWmwaQRVjZW8AubUIKZFvh7dRx3tweo3EJLOUHJI='; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'; object-src 'none'; report-uri /csp-report;" always;
 
     # HARDENING: modern security headers, same low-risk defense-in-depth as
     # the four above. This app never needs camera/mic/geolocation/payment

@@ -47,7 +47,78 @@ _SUBMIT_FEEDBACK_SCRIPT = """<script>
       if (ev.defaultPrevented) return;
       document.querySelectorAll("button").forEach(function(b) { b.disabled = true; });
       if (ev.submitter) ev.submitter.textContent = "Please wait...";
+      waitFor("submit");
     }, 0);
+  });
+
+  // Any same-page navigation can be slow -- /book and /my's booking
+  // overlay both consult the calendar before they can render, and a cold
+  // conflict feed turns that into seconds. Until the new document
+  // arrives the browser keeps showing THIS page, so a click looks
+  // ignored. One rule for every link rather than a list of the slow
+  // ones: a click starts a timer, and the loading panel appears only if
+  // the page has not been replaced by then -- fast navigations never
+  // flash it.
+  // A form can carry a hidden mirror of a field that lives in ANOTHER
+  // form (data-mirror="<id>"): filled from that field the moment this
+  // one is submitted, so two independent forms on a page can preserve
+  // each other's drafts without sharing a form -- sharing one makes the
+  // browser validate both, which is how a half-typed address came to
+  // block a name from being saved (the account page, 2026-08-27).
+  // NOTE: this script ships on EVERY page, so a comment here must not
+  // quote a route or a UI string verbatim -- a test grepping the page
+  // text finds the comment and reads it as markup that is present.
+  document.addEventListener("submit", function(ev) {
+    var form = ev.target;
+    if (!form || !form.querySelectorAll) return;
+    form.querySelectorAll("input[data-mirror]").forEach(function(hidden) {
+      var live = document.getElementById(hidden.getAttribute("data-mirror"));
+      if (live) hidden.value = live.value;
+    });
+  }, true);
+
+  var DELAY_MS = 250;
+  var timer = null;
+
+  function waitFor(_why) {
+    if (timer) return;
+    timer = setTimeout(show, DELAY_MS);
+  }
+
+  function show() {
+    if (document.querySelector(".loading-overlay")) return;
+    var back = document.createElement("div");
+    back.className = "loading-overlay";
+    // A shape, not a spinner: the bars stand where the heading, the
+    // date grid and the fields of the page being fetched will be, so
+    // the wait reads as "this is coming" rather than "something is
+    // happening somewhere".
+    back.innerHTML = "<div class='skeleton' role='status' aria-label='Loading'>" +
+      "<span class='sk sk-title'></span>" +
+      "<span class='sk sk-line'></span><span class='sk sk-line short'></span>" +
+      "<span class='sk sk-grid'><i></i><i></i><i></i><i></i><i></i><i></i></span>" +
+      "<span class='sk sk-line'></span><span class='sk sk-btn'></span></div>";
+    document.body.appendChild(back);
+  }
+
+  document.addEventListener("click", function(ev) {
+    var a = ev.target.closest ? ev.target.closest("a") : null;
+    if (!a || ev.defaultPrevented || ev.button !== 0) return;
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;   // opens a tab
+    if (a.target && a.target !== "_self" && a.target !== "_top") return;
+    var href = a.getAttribute("href") || "";
+    // A fragment, a mailto:/tel:, or a download navigates nowhere.
+    if (!href || href.charAt(0) === "#" || a.hasAttribute("download")) return;
+    if (/^[a-z]+:/i.test(href) && a.origin !== window.location.origin) return;
+    waitFor("link");
+  });
+
+  // Coming BACK to a cached page (the back button) must not leave the
+  // panel sitting on top of it.
+  window.addEventListener("pageshow", function() {
+    if (timer) { clearTimeout(timer); timer = null; }
+    var panel = document.querySelector(".loading-overlay");
+    if (panel) panel.remove();
   });
 })();
 </script>"""
@@ -310,6 +381,33 @@ td.actions .btn-row{{display:flex;flex-wrap:wrap;gap:.4em;align-items:flex-start
    words a test or a grep might look for in the page TEXT -- see the
    .booking-as comment above for the same warning. */
 .guests-intro{{margin:0 0 .8em;color:#444}}
+/* The loading panel: shown by the script above only when a navigation
+   has taken longer than a moment. A SHAPE of the page being fetched --
+   heading, two lines, a date grid, a button -- rather than a spinner,
+   because the shape says what is coming. The sweep is a background
+   gradient in motion, which costs no layout and no script tick.
+   prefers-reduced-motion gets a still panel: the shape by itself
+   conveys waiting, and the movement is only reassurance.
+   NOTE: this <style> ships on every page, so no ordinary English word a
+   test might grep for in the page TEXT belongs in these comments. */
+.loading-overlay{{position:fixed;inset:0;z-index:1200;background:rgba(255,255,255,.75);
+  display:flex;align-items:center;justify-content:center}}
+.skeleton{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:1.4em 1.6em;
+  box-shadow:0 8px 30px rgba(0,0,0,.18);width:min(92%,520px);display:block}}
+.sk{{display:block;border-radius:6px;background:#ececec;margin:0 0 .7em;
+  background-image:linear-gradient(90deg,#ececec 0%,#f7f7f7 40%,#ececec 80%);
+  background-size:300% 100%;animation:sk-sweep 1.2s linear infinite}}
+.sk-title{{height:1.5em;width:55%;margin-bottom:1.1em}}
+.sk-line{{height:.9em}}
+.sk-line.short{{width:70%}}
+.sk-grid{{background:none;animation:none;display:grid;
+  grid-template-columns:repeat(3,1fr);gap:.5em;margin:1em 0}}
+.sk-grid i{{display:block;height:3.2em;border-radius:6px;background:#ececec;
+  background-image:linear-gradient(90deg,#ececec 0%,#f7f7f7 40%,#ececec 80%);
+  background-size:300% 100%;animation:sk-sweep 1.2s linear infinite}}
+.sk-btn{{height:2.2em;width:9em;margin-top:1.2em}}
+@keyframes sk-sweep{{from{{background-position:150% 0}}to{{background-position:-150% 0}}}}
+@media (prefers-reduced-motion:reduce){{.sk,.sk-grid i{{animation:none}}}}
 /* Which build this page came from, so a screenshot of it identifies
    itself. Italic + grey rather than smaller: nothing here renders below
    the 1em button baseline (see the .note/.hint rules above). */
@@ -405,7 +503,14 @@ a.tab-label:hover{{color:#196B24}}
    that make every chip on the site come out the same size. */
 .card-head h2 .when{{border-bottom:none;font-variant-numeric:tabular-nums}}
 .card-head h2 .wd{{display:inline-block;min-width:2.4em}}
-dialog{{margin:auto;max-width:640px;width:92%;max-height:88vh;overflow:auto}}
+/* A dialog carries its own look -- border, radius, padding, ground --
+   instead of borrowing class="card" for it. A CLASS beats an ELEMENT
+   selector at equal weight whatever the order, so .card{{margin:1em 0}}
+   silently overrode margin:auto here and every card-classed dialog was
+   pinned to the top of the viewport rather than centred. Nothing a
+   dialog needs should be reachable by a class that can fight it. */
+dialog{{margin:auto;max-width:640px;width:92%;max-height:88vh;overflow:auto;
+  background:#fff;border:1px solid #ddd;border-radius:8px;padding:1em}}
 /* NOT position:relative here. A modal <dialog> is centred by the browser
    itself with position:fixed + inset:0 + margin:auto; overriding
    `position` drops it out of that and it renders at the top of the flow
