@@ -305,3 +305,39 @@ class PatternsAreValidInBrowsersTest(unittest.TestCase):
         for pattern in self._patterns():
             with self.subTest(pattern=pattern):
                 re.compile(pattern)
+
+
+class AdminBannerReadsTheAdminSessionTest(unittest.TestCase):
+    """The banner must look at the ADMIN cookie.
+
+    2026-08-28, from the live site: with both cookies present -- which is
+    the whole point of separating them -- the banner found the GUEST
+    session first and announced "Not logged in" on a page that was
+    plainly serving admin content."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.app = App(make_settings(courses=(make_course(shortname="yoga"),)), self.store)
+        self.user = self.store.upsert_user_for_booking("g@example.org", "G")
+
+    def _cookies(self, **kinds) -> dict:
+        parts = []
+        if "guest" in kinds:
+            parts.append("session=" + webapp._new_session(
+                {"kind": "guest", "user_id": self.user.user_id}))
+        if "admin" in kinds:
+            parts.append("admin_session=" + webapp._new_session({"kind": "admin"}))
+        return {"HTTP_COOKIE": "; ".join(parts)}
+
+    def test_admin_only(self):
+        self.assertIn("Admin", self.app._admin_banner_html(self._cookies(admin=1)))
+
+    def test_both_cookies_still_says_admin(self):
+        banner = self.app._admin_banner_html(self._cookies(guest=1, admin=1))
+        self.assertIn(">Admin<", banner)
+        self.assertNotIn("Not logged in", banner)
+
+    def test_guest_only_is_honestly_not_an_admin(self):
+        self.assertIn("Not logged in", self.app._admin_banner_html(self._cookies(guest=1)))

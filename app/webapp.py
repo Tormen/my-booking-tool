@@ -2614,8 +2614,13 @@ class App:
         in-memory SESSIONS dict until the process restarts or it's
         overwritten by a fresh login. Just "Admin" + the homepage link,
         boxed the same way everywhere else is."""
-        session = _get_session(environ)
-        label = "Admin" if session and session.get("kind") == "admin" else "Not logged in"
+        # Ask for the ADMIN session by name. Without that, the lookup
+        # prefers the guest cookie -- and a browser holding both (which
+        # is the point of splitting them) made every admin page announce
+        # "Not logged in" while showing admin content, because the
+        # session it found was the guest one (2026-08-28, seen live).
+        session = _get_session(environ, "admin")
+        label = "Admin" if session else "Not logged in"
         return (
             '<div class="session-banner">'
             # Behind the role, IN THE SAME span -- the banner is
