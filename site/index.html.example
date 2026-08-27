@@ -54,7 +54,10 @@
 <style>
  body { max-width: 760px; margin: 2em auto; padding: 0 1em; font-family: sans-serif; }
  footer { margin-top: 3em; font-size: 0.85em; color: #666; }
- .top-bar { display: flex; justify-content: flex-end; margin-bottom: 0.5em; }
+ /* A float, not a flex row: it sits under the exceptions banner and
+    still costs no height, so the heading below does not move down
+    when either is present. */
+ .top-bar { float: right; margin-left: 1em; }
  .login-btn { font-size: 0.85em; padding: 0.3em 0.9em; border: 1px solid #ccc; border-radius: 4px;
               text-decoration: none; color: #222; }
  .login-btn:hover { background: #f4f7f4; }
@@ -84,7 +87,6 @@
 </head>
 <body>
 
-<div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
 
 <!-- 2026-07-16: exceptional per-date schedule changes (settings.toml's
      [[course.date_override]], see app/config.py::CourseDateOverride) --
@@ -93,6 +95,7 @@
      (no banner at all) whenever nothing's coming up. Keep this div -- move
      it if you like, but don't remove the id. -->
 <div id="schedule-exceptions"></div>
+<div class="top-bar" id="top-bar"><a class="login-btn" href="/my" target="_top">Login</a></div>
 
 <h1>REPLACE-ME-YOUR-SITE-NAME</h1>
 
