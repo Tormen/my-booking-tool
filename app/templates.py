@@ -261,7 +261,14 @@ label{{display:block;margin-top:.6em}}
    it and NOTHING else -- reopening the mismatch it was meant to close. */
 .big-input{{font-size:1.25em;width:100%;box-sizing:border-box;padding:.1em .5em;display:block}}
 .id-input{{max-width:50ch}}
-.dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:.5em;margin:.4em 0}}
+/* grid-auto-rows:1fr -- EVERY row the same height, not just every box
+   within a row. height:100% on the boxes below equalises them against
+   their own row, so a first row holding a three-line box (date, spots
+   and a changed time) left the lone box on the second row visibly
+   shorter (reported 2026-08-27). Rows are equal to each other now, so a
+   date looks the same wherever it falls in the grid. */
+.dates{{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+  grid-auto-rows:1fr;gap:.5em;margin:.4em 0}}
 /* margin-top:0 (2026-07-14): a bookable box is a <label>, and the generic
    label{{margin-top:.6em}} rule above gave it a top margin INSIDE the grid
    cell -- so it stretched to the row height MINUS that margin, rendering
