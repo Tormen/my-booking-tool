@@ -1652,12 +1652,27 @@ def cmd_admin_health(args) -> None:
         checks.append((f"settings.toml ({args.settings})", "fail", "file does not exist"))
     elif raw is not None:
         checks.append((f"settings.toml ({args.settings})", "ok", "parses OK"))
-        courses = raw.get("course", [])
-        if courses:
-            checks.append((f"{len(courses)} course(s) configured", "ok",
-                            ", ".join(c.get("shortname", "?") for c in courses)))
+        # Courses can live in EITHER file, and after moving them to the
+        # console settings.toml legitimately has none -- reporting that
+        # as a warning told the operator their courses were gone while
+        # the site was happily serving all four (2026-08-28).
+        courses = list(raw.get("course", []))
+        try:
+            editable = list(app_config.load_web_editable(args.settings).get("course", []))
+        except Exception:  # noqa: BLE001 -- its own check reports why
+            editable = []
+        names = [c.get("shortname", "?") for c in courses + editable]
+        if names:
+            where = []
+            if courses:
+                where.append(f"{len(courses)} in settings.toml")
+            if editable:
+                where.append(f"{len(editable)} in {app_config.WEB_EDITABLE_FILENAME}")
+            checks.append((f"{len(names)} course(s) configured", "ok",
+                           ", ".join(names) + f" ({'; '.join(where)})"))
         else:
-            checks.append(("courses configured", "warn", "no [[course]] blocks found"))
+            checks.append(("courses configured", "warn",
+                           "no [[course]] blocks in either settings file"))
         tmpl = cli_setup.tmpl_path(HOME)
         checks.extend(cli_checks.check_rpmnew([args.settings, str(tmpl)]))
         checks.extend(cli_checks.check_static_site_drift(raw, tmpl, args.settings))
