@@ -243,6 +243,7 @@ install -m 644 settings.toml %{buildroot}/etc/my-booking/settings.toml
 # exists (it's a tracked file) regardless of who's building.
 install -m 644 settings.toml.example %{buildroot}/etc/my-booking/settings.toml.example
 install -d %{buildroot}/etc/my-booking/secrets
+install -d %{buildroot}/etc/my-booking/web-editable
 
 # The live template my-bt actually reads/writes at runtime (`my-bt setup
 # -i`, app/site_render.py) -- a REAL resource, not just documentation, and
@@ -496,6 +497,10 @@ exit 0
 %config(noreplace) /etc/my-booking/settings.toml
 /etc/my-booking/settings.toml.example
 %dir %attr(700,my-booking,my-booking) /etc/my-booking/secrets
+# The ONE writable directory under /etc for this service: the admin
+# console's settings file lives here, and nothing else does. Everything
+# around it (settings.toml, secrets/) stays read-only to the service.
+%dir %attr(750,my-booking,my-booking) /etc/my-booking/web-editable
 %dir %attr(750,my-booking,my-booking) %{_sharedstatedir}/my-booking
 %{_unitdir}/my-booking.service
 %{_unitdir}/my-booking-retention.service

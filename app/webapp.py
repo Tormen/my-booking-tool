@@ -2564,15 +2564,17 @@ class App:
         label = "Admin" if session and session.get("kind") == "admin" else "Not logged in"
         return (
             '<div class="session-banner">'
-            f'<span class="session-role">{esc(label)}</span>'
-            # Behind the role, the way to the settings console: the banner
-            # is where a reader looks to see which role they are in, so it
-            # is where they look for what that role can do. Dropped on the
-            # settings page itself -- a link to the page you are looking
-            # at is dead weight (the guest banner's `current` does the
-            # same for its own links).
+            # Behind the role, IN THE SAME span -- the banner is
+            # justify-content:space-between, so a link in a span of its
+            # own is pushed to the middle instead of sitting next to what
+            # it belongs to. Exactly the shape the guest banner uses for
+            # "Logged in as x -- Account settings". Dropped on the
+            # settings page itself: a link to the page you are looking at
+            # is dead weight.
+            + f'<span><span class="session-role">{esc(label)}</span>'
             + ("" if on_settings else
-               '<span><a href="/admin/settings">Macros &amp; Course Settings</a></span>')
+               ' &middot; <a href="/admin/settings">Macros &amp; Course Settings</a>')
+            + "</span>"
             + f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
             + "</div>"
         )
@@ -5574,18 +5576,21 @@ class App:
         # there's no point linking to the
         # view you're already on); the other two are plain links to the
         # same page with a different ?scope=.
+        # The SAME tab component every other row of tabs on the site uses
+        # (2026-08-28: these were plain small links, so one page had two
+        # different-looking ways of switching what a frame shows). A row
+        # of tabs means the same thing everywhere or it means nothing.
         def _scope_selector(value: str, label: str) -> str:
-            if value == scope:
-                return f'<span class="scope-active">{esc(label)}</span>'
             href = "/admin" if value == "future" else f"/admin?scope={value}"
-            return f'<a href="{href}">{esc(label)}</a>'
+            active = " tab-active" if value == scope else ""
+            return f'<a class="tab-label{active}" href="{esc(href)}">{esc(label)}</a>'
 
-        scope_selectors = " &middot; ".join(
+        scope_selectors = "".join(
             _scope_selector(value, label)
             for value, label in (("all", "All"), ("past", "Only Past"), ("future", "Only Future"))
         )
         table_id = "admin-overview-table"
-        body = f"""<p class="scope-selector">{scope_selectors}</p>
+        body = f"""<div class="tab-labels tab-courses">{scope_selectors}</div>
         <div class="table-tools">
           <input type="search" id="{table_id}-filter" class="big-input id-input" placeholder="Filter...">
         </div>
@@ -5779,7 +5784,7 @@ class App:
                         "upcoming calendar event is rewritten to the new key.")}
         <span class="req">(required)</span>
         <input class="big-input id-input sn-input" name="shortname"
-               value="{esc(course.shortname)}" required pattern="[a-z0-9][a-z0-9-]*"></label>
+               value="{esc(course.shortname)}" required pattern="[a-z0-9][-a-z0-9]*"></label>
       <label>{self._lbl("Title", "title")}
         <input class="big-input" name="title" value="{esc(course.title)}" required></label>
       {chips}
@@ -5835,7 +5840,12 @@ class App:
 
     def _macro_chips_html(self, *, rich_ok: bool) -> str:
         if not self.settings.macros:
-            return ""
+            # Silence would say the field does not take macros at all.
+            # The line goes away by itself as soon as one exists, replaced
+            # by the chips -- so it teaches the feature exactly once, to
+            # someone who has not used it yet.
+            return ('<p class="hint">Macros work here. Define one above and it '
+                    "can be used in this field.</p>")
         chips = []
         for name in sorted(self.settings.macros):
             value = self.settings.macros[name]

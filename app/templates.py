@@ -410,8 +410,16 @@ td.actions .btn-row{display:flex;flex-wrap:wrap;gap:.4em;align-items:flex-start}
 /* ONE shape for every field: name (and its note) on its own line, the
    control beneath it. In front, each control starts at a different x
    depending on how long its name is, so a row of four can never line up
-   -- above, every field shares one left edge whatever it is called. */
-label > input,label > select,label > textarea{display:block}
+   -- above, every field shares one left edge whatever it is called.
+
+   NOT checkboxes and radios: those belong INSIDE their label, before
+   the words, and a block one drops the tick onto a line of its own with
+   the sentence orphaned beneath it (2026-08-28, seen on the cancel
+   dialog and the booking page's acknowledgement). Same exclusion the
+   shared control height uses, for the same reason: a tick is not a
+   field you fill in. */
+label > input:not([type=checkbox]):not([type=radio]),
+label > select,label > textarea{display:block}
 /* The name reads as a small header rather than as running text: a slight
    grey, hugging the words (width:fit-content, so the shade and the dotted
    hover underline stop where the text does, not at the far edge of a

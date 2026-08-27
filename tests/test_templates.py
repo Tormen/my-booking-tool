@@ -243,3 +243,28 @@ class EscapeClosesWithoutNavigatingTest(unittest.TestCase):
         esc = script[script.index('ev.key !== "Escape"'):]
         esc = esc[:esc.index("});")]
         self.assertIn("overlay-backdrop", esc)
+
+
+class CheckboxesStayInlineTest(unittest.TestCase):
+    """A tick belongs INSIDE its label, before the words.
+
+    2026-08-28, from the live site: the settings page needed every field
+    NAME above its control, and the rule for that (`label > input
+    {display:block}`) applied to every label on the site -- so the cancel
+    dialog's "cancel the entire session" tick, and the booking page's
+    acknowledgement, each dropped onto a line of their own with the
+    sentence orphaned underneath."""
+
+    def _css(self) -> str:
+        from app.templates import _CSS
+        return _CSS
+
+    def test_the_block_rule_excludes_checkboxes_and_radios(self):
+        rule = [l for l in self._css().splitlines() if l.startswith("label > input")]
+        self.assertTrue(rule, "the field-shape rule is gone entirely")
+        self.assertIn("not([type=checkbox])", rule[0])
+        self.assertIn("not([type=radio])", rule[0])
+
+    def test_ordinary_fields_still_get_their_own_line(self):
+        css = self._css()
+        self.assertIn("label > select,label > textarea{display:block}", css)

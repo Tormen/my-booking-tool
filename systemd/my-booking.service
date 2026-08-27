@@ -20,7 +20,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/my-booking
+# /etc/my-booking stays READ-ONLY: the secrets are in it, and the
+# package chowns that tree to this very user, so this mount is what
+# actually keeps a web process away from its own credentials. Only
+# the one sub-directory the admin console writes is opened up.
+ReadWritePaths=/var/lib/my-booking /etc/my-booking/web-editable
 ReadOnlyPaths=/opt/my-booking /etc/my-booking
 
 [Install]

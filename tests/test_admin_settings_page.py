@@ -254,3 +254,39 @@ class AdminSettingsCourseTest(unittest.TestCase):
         rows = self.store.read_registrations(scope="all")
         self.assertEqual([r["course_shortname"] for r in rows], ["pilates-fri"])
         self.assertIn("CALENDAR", dict(headers)["Location"])
+
+
+class PatternsAreValidInBrowsersTest(unittest.TestCase):
+    """Every pattern= must compile under the `v` flag.
+
+    2026-08-28, from the live console: Firefox refused
+    pattern="[a-z0-9][a-z0-9-]*" with "character class escape cannot be
+    used in class range" -- browsers now compile pattern= as a unicode-
+    sets regex, where a `-` following a range must be escaped or come
+    first. The field then validated NOTHING, silently."""
+
+    def _patterns(self):
+        import re
+        from pathlib import Path
+        src = (Path(__file__).resolve().parent.parent / "app" / "webapp.py").read_text()
+        return re.findall(r'pattern="([^"]+)"', src)
+
+    def test_there_are_patterns_to_check(self):
+        self.assertTrue(self._patterns())
+
+    def test_no_dangling_hyphen_after_a_range(self):
+        import re
+        for pattern in self._patterns():
+            with self.subTest(pattern=pattern):
+                # a-z0-9- : a hyphen straight after a range, the exact
+                # shape browsers reject. Legal forms put it first or
+                # escape it.
+                self.assertIsNone(re.search(r"[a-zA-Z0-9]-[a-zA-Z0-9]-\]", pattern),
+                                  "hyphen after a range -- put it first instead")
+                self.assertNotIn("9-]", pattern)
+
+    def test_they_still_compile_in_python(self):
+        import re
+        for pattern in self._patterns():
+            with self.subTest(pattern=pattern):
+                re.compile(pattern)

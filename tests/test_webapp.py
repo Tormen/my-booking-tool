@@ -4039,29 +4039,29 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
-        self.assertIn('<span class="scope-active">Only Future</span>', body)
-        self.assertIn('<a href="/admin?scope=all">All</a>', body)
-        self.assertIn('<a href="/admin?scope=past">Only Past</a>', body)
+        self.assertIn('class="tab-label tab-active" href="/admin">Only Future</a>', body)
+        self.assertIn('class="tab-label" href="/admin?scope=all">All</a>', body)
+        self.assertIn('class="tab-label" href="/admin?scope=past">Only Past</a>', body)
         # Exactly one marked active -- never zero, never more than one.
-        self.assertEqual(body.count('class="scope-active"'), 1)
+        self.assertEqual(body.count('tab-label tab-active'), 2)  # scope + course tab
 
     def test_scope_all_marks_all_active(self):
         admin_sid = webapp._new_session({"kind": "admin"})
         environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
-        self.assertIn('<span class="scope-active">All</span>', body)
-        self.assertIn('<a href="/admin">Only Future</a>', body)
-        self.assertIn('<a href="/admin?scope=past">Only Past</a>', body)
-        self.assertEqual(body.count('class="scope-active"'), 1)
+        self.assertIn('class="tab-label tab-active" href="/admin?scope=all">All</a>', body)
+        self.assertIn('class="tab-label" href="/admin">Only Future</a>', body)
+        self.assertIn('class="tab-label" href="/admin?scope=past">Only Past</a>', body)
+        self.assertEqual(body.count('tab-label tab-active'), 2)  # scope + course tab
 
     def test_scope_past_marks_only_past_active(self):
         admin_sid = webapp._new_session({"kind": "admin"})
         environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
-        self.assertIn('<span class="scope-active">Only Past</span>', body)
-        self.assertIn('<a href="/admin">Only Future</a>', body)
-        self.assertIn('<a href="/admin?scope=all">All</a>', body)
-        self.assertEqual(body.count('class="scope-active"'), 1)
+        self.assertIn('class="tab-label tab-active" href="/admin?scope=past">Only Past</a>', body)
+        self.assertIn('class="tab-label" href="/admin">Only Future</a>', body)
+        self.assertIn('class="tab-label" href="/admin?scope=all">All</a>', body)
+        self.assertEqual(body.count('tab-label tab-active'), 2)  # scope + course tab
 
     def test_unrecognized_scope_value_falls_back_to_only_future(self):
         # A hand-edited or stale URL (e.g. the old ?past=1) shouldn't 500
@@ -4070,7 +4070,7 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=bogus"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
-        self.assertIn('<span class="scope-active">Only Future</span>', body)
+        self.assertIn('class="tab-label tab-active" href="/admin">Only Future</a>', body)
 
     def test_only_past_view_shows_past_rows_and_excludes_future_ones(self):
         # The genuinely NEW mode: unlike the old binary toggle (today+future
@@ -5984,8 +5984,10 @@ class FutureSessionsBoxTest(unittest.TestCase):
     def test_only_the_selected_course_is_rendered(self):
         _s, _h, body = self.app.admin_overview("GET", self.admin_environ)
         # Count the ELEMENT, not the string: "tab-active" also appears
-        # in the stylesheet, which ships on every page.
-        self.assertEqual(body.count('class="tab-label tab-active"'), 1)
+        # in the stylesheet, which ships on every page. TWO of them now --
+        # the Bookings scope row and the Future Sessions course row use
+        # the same component, one active each.
+        self.assertEqual(body.count('class="tab-label tab-active"'), 2)
 
     def test_the_extra_dates_are_fetched_on_demand(self):
         # The drop-down became a link: its 42 dates and their dialogs are

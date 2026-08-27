@@ -2124,8 +2124,14 @@ call site in `app/emailer.py` is the list.
 
 ### Where macros are defined
 
-`settings.web-editable.toml`, beside `settings.toml` and optional -- an
-install that never opens `/admin` never grows one. The split is drawn
+`/etc/my-booking/web-editable/settings.web-editable.toml`, optional --
+an install that never opens `/admin` never grows one.
+
+It sits in a sub-directory of its own for a reason: the service mounts
+`/etc/my-booking` **read-only**, because the secrets are in there and the
+package chowns that tree to the `my-booking` user, so that mount is the
+only thing between a web process and its own credentials. Exactly one
+directory under it is writable, and only this file lives there. The split is drawn
 along one question: **can a web process be trusted with this?**
 
 | file | holds | written by |

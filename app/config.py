@@ -1027,6 +1027,8 @@ def reconcile_config_overrides(toml_path: str | Path, data_dir: str | Path) -> l
 
 
 WEB_EDITABLE_FILENAME = "settings.web-editable.toml"
+# The one directory under /etc/my-booking the service may write.
+WEB_EDITABLE_DIRNAME = "web-editable"
 
 
 def web_editable_path(toml_path: str | Path) -> Path:
@@ -1040,10 +1042,20 @@ def web_editable_path(toml_path: str | Path) -> Path:
     "editable" alone would read as "the one you may edit", which is
     backwards: both are yours to edit by hand.
 
+    It lives in a `web-editable/` directory BESIDE settings.toml rather
+    than next to it (2026-08-28, from the live server: "[Errno 30]
+    Read-only file system"). The service mounts /etc/my-booking
+    read-only on purpose -- the secrets are in there, and the package
+    chowns that tree to the my-booking user, so the read-only mount is
+    the only thing standing between a web process and its own
+    credentials. Granting write to the whole directory to save one level
+    of nesting would have undone the split this file exists to create.
+    One sub-directory is writable; nothing else in /etc is.
+
     Optional. Absent, everything behaves exactly as before, courses and
     all, so an install that never opens /admin never grows a second
     file."""
-    return Path(toml_path).parent / WEB_EDITABLE_FILENAME
+    return Path(toml_path).parent / WEB_EDITABLE_DIRNAME / WEB_EDITABLE_FILENAME
 
 
 def load_web_editable(toml_path: str | Path) -> dict:
@@ -1188,6 +1200,7 @@ def write_web_editable(toml_path: str | Path, macro_table: dict[str, str],
     last known good config with no idea why. Better to fail HERE, where
     a person is watching, than in a request nobody is looking at."""
     path = web_editable_path(toml_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     text = dump_web_editable(macro_table, courses)
     tomllib.loads(text)          # raises before anything is written
     atomic_write_text(path, text)

@@ -61,7 +61,9 @@ class WebEditableSettingsTest(unittest.TestCase):
         self.toml.write_text(BASE.format(secrets=secrets))
 
     def _editable(self, text: str) -> None:
-        (self.dir / config.WEB_EDITABLE_FILENAME).write_text(text)
+        path = config.web_editable_path(self.toml)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
 
     # -- absent ----------------------------------------------------------
     def test_without_the_file_nothing_changes(self):
@@ -70,7 +72,10 @@ class WebEditableSettingsTest(unittest.TestCase):
         self.assertEqual(settings.macros, {})
 
     def test_the_path_sits_beside_settings_toml(self):
-        self.assertEqual(config.web_editable_path(self.toml).parent, self.dir)
+        # In its own writable sub-directory: /etc/my-booking itself stays
+        # read-only to the service, because the secrets are in there.
+        self.assertEqual(config.web_editable_path(self.toml).parent,
+                         self.dir / "web-editable")
         self.assertEqual(config.web_editable_path(self.toml).name,
                          "settings.web-editable.toml")
 
@@ -174,22 +179,22 @@ class WriteWebEditableTest(unittest.TestCase):
 
     def test_it_writes_beside_settings_toml(self):
         path = config.write_web_editable(self.toml, {}, (self.course,))
-        self.assertEqual(path, self.dir / "settings.web-editable.toml")
+        self.assertEqual(path, self.dir / "web-editable" / "settings.web-editable.toml")
 
     def test_the_header_says_the_file_is_rewritten(self):
         config.write_web_editable(self.toml, {}, (self.course,))
-        text = (self.dir / "settings.web-editable.toml").read_text()
+        text = config.web_editable_path(self.toml).read_text()
         self.assertIn("WRITTEN BY /admin", text)
         self.assertIn("REWRITES IT WHOLE", text)
 
     def test_a_value_that_cannot_be_serialised_raises_before_writing(self):
         with self.assertRaises(TypeError):
             config.write_web_editable(self.toml, {"bad": 3.5}, ())
-        self.assertFalse((self.dir / "settings.web-editable.toml").exists())
+        self.assertFalse(config.web_editable_path(self.toml).exists())
 
     def test_an_empty_macro_table_writes_no_section(self):
         config.write_web_editable(self.toml, {}, (self.course,))
-        self.assertNotIn("[macros]", (self.dir / "settings.web-editable.toml").read_text())
+        self.assertNotIn("[macros]", config.web_editable_path(self.toml).read_text())
 
 
 class HealthCheckTest(unittest.TestCase):
@@ -214,7 +219,9 @@ class HealthCheckTest(unittest.TestCase):
         return cli_checks.check_web_editable_settings(self.toml)
 
     def _editable(self, text: str) -> None:
-        (self.dir / config.WEB_EDITABLE_FILENAME).write_text(text)
+        path = config.web_editable_path(self.toml)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
 
     def test_no_file_is_not_a_finding(self):
         self.assertEqual(self._check(), [])
