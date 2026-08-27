@@ -610,6 +610,55 @@ def _service_active_since(unit: str) -> float | None:
         return None
 
 
+def check_web_editable_settings(settings_path: str | Path) -> list[Check]:
+    """The console-writable settings file: does it load, and does it
+    quietly shadow a course from settings.toml?
+
+    Both questions matter for the same reason -- this file is written
+    through a browser, and the service keeps its LAST KNOWN GOOD config
+    when it will not load. That is the right behaviour (a typo must not
+    take the site down) and it is also silent: the site goes on serving
+    yesterday's courses while the file on disk says something else. This
+    check is where that becomes visible.
+
+    A shortname defined in BOTH files is legal -- the editable one wins,
+    by design -- but a split-brain course must never be able to hide, so
+    it is reported with the winner named."""
+    path = config.web_editable_path(settings_path)
+    if not path.exists():
+        return []
+    try:
+        raw = config.load_web_editable(settings_path)
+    except (OSError, ValueError) as exc:
+        return [(f"web-editable settings ({path})", "fail",
+                 f"does not load, so the service is running on its last good config: {exc}")]
+
+    checks: list[Check] = []
+    try:
+        macro_table = config.macros_from_raw(raw)
+        courses = config.courses_from_raw(raw)
+    except (ValueError, KeyError) as exc:
+        return [(f"web-editable settings ({path})", "fail",
+                 f"loads but is not valid, so the service kept its last good config: {exc}")]
+
+    summary = f"{len(macro_table)} macro(s), {len(courses)} course(s)"
+    checks.append((f"web-editable settings ({path})", "ok", f"parses OK -- {summary}"))
+
+    try:
+        base = config.load_raw_toml(settings_path) or {}
+    except (OSError, ValueError):
+        base = {}
+    base_names = {c.get("shortname") for c in base.get("course", [])}
+    both = sorted(base_names & {c.shortname for c in courses})
+    if both:
+        checks.append((
+            "course defined in both settings files", "warn",
+            f"{', '.join(both)} -- the {path.name} copy wins; the settings.toml block is "
+            f"dead config, and its shortname cannot be renamed from /admin",
+        ))
+    return checks
+
+
 def check_settings_fresh(settings_path: str, unit: str = "my-booking.service") -> list[Check]:
     """settings.toml is read exactly once, at app/serve.py's startup -- see
     that module's main(). There's no file-watching or SIGHUP-triggered

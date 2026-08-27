@@ -220,6 +220,7 @@ def build_report(raw: dict, settings_path: str, home: str, data_dir: str = "/var
         "group": cli_checks.check_group_membership(),
         "systemd": cli_checks.check_systemd(),
         "settings_fresh": cli_checks.check_settings_fresh(settings_path),
+        "web_editable": cli_checks.check_web_editable_settings(settings_path),
         "selinux": cli_checks.check_selinux(),
         "nginx_locations": cli_checks.check_nginx_locations(),
         "nginx_conf_repo_file": cli_checks.check_nginx_conf_repo_file(home),
@@ -359,6 +360,7 @@ def print_report(
     print_fn("\n6. Service + retention timer:")
     show(report["systemd"])
     show(report["settings_fresh"])
+    show(report["web_editable"])
 
     print_fn("\n7. SELinux:")
     show(report["selinux"])

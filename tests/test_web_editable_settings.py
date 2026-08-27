@@ -190,3 +190,67 @@ class WriteWebEditableTest(unittest.TestCase):
     def test_an_empty_macro_table_writes_no_section(self):
         config.write_web_editable(self.toml, {}, (self.course,))
         self.assertNotIn("[macros]", (self.dir / "settings.web-editable.toml").read_text())
+
+
+class HealthCheckTest(unittest.TestCase):
+    """`my-bt admin health` on the console-writable file. The service
+    keeps its last known good config when this file will not load --
+    correct, and silent, so the check is where that becomes visible."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        secrets = self.dir / "secrets"
+        secrets.mkdir()
+        for name in ("caldav", "smtp", "admin"):
+            (secrets / name).write_text("x")
+        (secrets / "pepper").write_text("00" * 32)
+        self.toml = self.dir / "settings.toml"
+        self.toml.write_text(BASE.format(secrets=secrets))
+
+    def _check(self):
+        from app import cli_checks
+        return cli_checks.check_web_editable_settings(self.toml)
+
+    def _editable(self, text: str) -> None:
+        (self.dir / config.WEB_EDITABLE_FILENAME).write_text(text)
+
+    def test_no_file_is_not_a_finding(self):
+        self.assertEqual(self._check(), [])
+
+    def test_a_good_file_reports_what_it_holds(self):
+        self._editable('[macros]\nstudio = "S"\n')
+        (label, level, detail), = self._check()
+        self.assertEqual(level, "ok")
+        self.assertIn("1 macro(s)", detail)
+
+    def test_a_file_that_does_not_parse_fails_loudly(self):
+        self._editable("[macros\nbroken")
+        (_label, level, detail), = self._check()
+        self.assertEqual(level, "fail")
+        self.assertIn("last good config", detail)
+
+    def test_an_invalid_value_fails_too(self):
+        # Parses as TOML, refused by the loader: the service is equally
+        # running on old config, so it is equally a failure.
+        self._editable('[macros]\n"2nd" = "x"\n')
+        (_label, level, _detail), = self._check()
+        self.assertEqual(level, "fail")
+
+    def test_a_course_defined_in_both_files_is_reported(self):
+        self._editable('''
+[[course]]
+shortname = "yoga"
+title = "Yoga, from the console"
+location = "Studio"
+weekday = "wed"
+start_time = "18:00"
+duration_minutes = 60
+capacity = 10
+''')
+        levels = {level for _l, level, _d in self._check()}
+        self.assertIn("warn", levels)
+        detail = [d for _l, level, d in self._check() if level == "warn"][0]
+        self.assertIn("yoga", detail)
+        self.assertIn("wins", detail)

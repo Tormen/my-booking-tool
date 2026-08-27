@@ -1757,6 +1757,7 @@ def cmd_admin_health(args) -> None:
     checks.extend(cli_checks.check_group_membership())
     checks.extend(cli_checks.check_systemd())
     checks.extend(cli_checks.check_settings_fresh(args.settings))
+    checks.extend(cli_checks.check_web_editable_settings(args.settings))
     checks.extend(cli_checks.check_selinux())
     checks.extend(cli_checks.check_rpm_verify())
 
