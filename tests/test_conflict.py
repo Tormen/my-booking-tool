@@ -51,7 +51,7 @@ class EngineFixture(unittest.TestCase):
         self.fetch_result: str | Exception = ics_with()
         self.now = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
 
-    def engine(self, *entries, caldav_events=None) -> ConflictEngine:
+    def engine(self, *entries, caldav_events=None, on_booking_query=None) -> ConflictEngine:
         settings = make_settings(courses=(self.course,), conflict_calendars=tuple(entries))
 
         def fetch(url):
@@ -62,11 +62,17 @@ class EngineFixture(unittest.TestCase):
         class FakeClient:
             def __init__(self, events):
                 self.events = events or []
+                # on_booking_query lets a test COUNT queries -- the point
+                # of the batched blocker lookup is that a 52-date window
+                # costs one, not 52.
+                self.on_query = on_booking_query
 
             def list_calendars(self):
                 return {"Bookings": "/caldav/Bookings/", "Work": "/caldav/Work/"}
 
             def query_events(self, href, start, end):
+                if self.on_query is not None:
+                    self.on_query()
                 out = []
                 for text in self.events:
                     win = None
@@ -191,6 +197,144 @@ class BlocksModeTest(EngineFixture):
         entry = self.entry(use_booking_calendar=False, ics_url="https://x/feed.ics",
                            name="feed", all_day_non_blocking_title_marker="#yoga-ok")
         self.assertFalse(self.hidden(self.engine(entry)))
+
+
+class HiddenDatesBatchTest(EngineFixture):
+    """hidden_dates() must give the SAME verdict as occurrence_is_hidden()
+    per date, at one read per source instead of one per date."""
+
+    def _occs(self, *days):
+        from datetime import date, datetime, timedelta, timezone as tzmod
+        out = []
+        for day in days:
+            d = date(2026, 7, day)
+            start = datetime.combine(d, OCC_START.timetz())
+            out.append((d, start, start + timedelta(hours=2)))
+        return out
+
+    def test_matches_the_per_date_verdict(self):
+        entry = make_conflict_calendar(name="own-calendar", mode="blocks",
+                                       show_as="any", use_booking_calendar=True)
+        engine = self.engine(
+            entry,
+            caldav_events=[ics_with(timed_event(busy="BUSY", uid="personal@x"))],
+        )
+        occs = self._occs(8, 15, 22)
+        batched = engine.hidden_dates(self.course, occs)
+        for occ_date, start, end in occs:
+            with self.subTest(date=occ_date):
+                self.assertEqual(
+                    batched[occ_date],
+                    engine.occurrence_is_hidden(self.course, start, end),
+                )
+
+    def test_one_read_per_source_not_one_per_date(self):
+        calls = []
+        entry = make_conflict_calendar(name="own-calendar", mode="blocks",
+                                       show_as="any", use_booking_calendar=True)
+        engine = self.engine(entry, caldav_events=[], on_booking_query=lambda: calls.append(1))
+        engine.hidden_dates(self.course, self._occs(8, 15, 22, 29))
+        self.assertEqual(len(calls), 1, "four dates must not cost four queries")
+
+    def test_an_unreadable_source_hides_every_date(self):
+        # Fail-closed, same policy as the per-date path: "we don't know"
+        # must never render as bookable.
+        from app.caldav_client import CalDAVError
+        entry = make_conflict_calendar(name="own-calendar", mode="blocks",
+                                       show_as="any", use_booking_calendar=True)
+        engine = self.engine(entry, caldav_events=[])
+
+        class Broken:
+            def query_events(self, *a, **k):
+                raise CalDAVError("boom")
+
+        engine._booking_client_fn = lambda: Broken()
+        result = engine.hidden_dates(self.course, self._occs(8, 15))
+        self.assertTrue(all(result.values()))
+
+    def test_no_occurrences_is_empty(self):
+        engine = self.engine()
+        self.assertEqual(engine.hidden_dates(self.course, []), {})
+
+
+class HideBlockerTest(EngineFixture):
+    """The HIDE blocker (2026-08-27): same always-on, UID-keyed mechanism
+    as the cancellation blocker, but a different meaning -- the session
+    still happens, the date just stops being offered. /admin has to tell
+    the two apart; the booking page only needs "either"."""
+
+    def scoped_out_entry(self, **overrides):
+        defaults = dict(name="own-calendar", mode="blocks", show_as="any",
+                        use_booking_calendar=True,
+                        all_courses_but=(self.course.shortname,))
+        defaults.update(overrides)
+        return make_conflict_calendar(**defaults)
+
+    def _uid(self, kind):
+        from datetime import date
+
+        from app import calendar_sync
+        fn = (calendar_sync.hide_blocker_uid if kind == "hidden"
+              else calendar_sync.cancellation_blocker_uid)
+        return fn(make_settings(), self.course.shortname, date(2026, 7, 8))
+
+    def test_a_hidden_date_is_hidden_even_for_a_scoped_out_course(self):
+        engine = self.engine(
+            self.scoped_out_entry(),
+            caldav_events=[ics_with(timed_event(uid=self._uid("hidden"), busy="BUSY",
+                                                summary="NOT OFFERED: yoga"))],
+        )
+        self.assertTrue(self.hidden(engine))
+
+    def test_blocker_kind_distinguishes_hidden_from_canceled(self):
+        from datetime import date
+
+        from app import conflict
+        for kind in (conflict.BLOCKER_HIDDEN, conflict.BLOCKER_CANCELED):
+            with self.subTest(kind=kind):
+                engine = self.engine(
+                    self.scoped_out_entry(),
+                    caldav_events=[ics_with(timed_event(uid=self._uid(kind), busy="BUSY"))],
+                )
+                self.assertEqual(
+                    engine.blocker_kind(self.course, date(2026, 7, 8)), kind
+                )
+
+    def test_cancellation_wins_when_both_blockers_somehow_exist(self):
+        from datetime import date
+
+        from app import conflict
+        engine = self.engine(
+            self.scoped_out_entry(),
+            caldav_events=[
+                ics_with(timed_event(uid=self._uid("hidden"), busy="BUSY")),
+                ics_with(timed_event(uid=self._uid("canceled"), busy="BUSY")),
+            ],
+        )
+        self.assertEqual(
+            engine.blocker_kind(self.course, date(2026, 7, 8)), conflict.BLOCKER_CANCELED
+        )
+
+    def test_no_blocker_at_all_is_none(self):
+        from datetime import date
+        engine = self.engine(self.scoped_out_entry(), caldav_events=[])
+        self.assertIsNone(engine.blocker_kind(self.course, date(2026, 7, 8)))
+
+    def test_a_whole_window_costs_one_query_not_one_per_date(self):
+        # The reason this method exists: /admin shows 52 dates per course,
+        # and a query per date would be 52 round-trips per tab.
+        from datetime import date
+        calls = []
+        engine = self.engine(
+            self.scoped_out_entry(),
+            caldav_events=[ics_with(timed_event(uid=self._uid("hidden"), busy="BUSY"))],
+            on_booking_query=lambda: calls.append(1),
+        )
+        kinds = engine.blocker_kinds_in_window(
+            self.course, date(2026, 7, 1), date(2026, 8, 31)
+        )
+        self.assertEqual(kinds, {date(2026, 7, 8): "hidden"})
+        self.assertEqual(len(calls), 1)
 
 
 class CancellationBlockerAlwaysOnTest(EngineFixture):

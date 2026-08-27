@@ -786,5 +786,23 @@ class UpcomingDateOverridesTest(unittest.TestCase):
         self.assertEqual(upcoming_date_overrides([make_course()], "2026-07-10"), [])
 
 
+class LoadRawTomlErrorTest(unittest.TestCase):
+    """A malformed settings.toml is a real, fatal problem -- but the
+    operator has to be told WHICH file to go and fix. tomllib's own
+    message names only a line and column."""
+
+    def test_syntax_error_is_reported_as_a_value_error_naming_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.toml"
+            path.write_text('[a]\nx = 1\nx = 2\n', encoding="utf-8")
+            with self.assertRaises(ValueError) as ctx:
+                app_config.load_raw_toml(path)
+            self.assertIn(str(path), str(ctx.exception))
+
+    def test_a_missing_file_is_still_just_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(app_config.load_raw_toml(Path(tmp) / "nope.toml"))
+
+
 if __name__ == "__main__":
     unittest.main()

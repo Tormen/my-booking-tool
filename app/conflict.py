@@ -51,6 +51,13 @@ _FETCH_TIMEOUT_SECONDS = 10
 _ALERT_MIN_INTERVAL = timedelta(days=1)
 
 
+# What blocker_kind() reports. Kept as constants rather than bare strings
+# so /admin's status rendering and this module can never disagree by a
+# typo.
+BLOCKER_CANCELED = "canceled"
+BLOCKER_HIDDEN = "hidden"
+
+
 class ConflictSourceError(Exception):
     """A conflict source could not be consulted (and, for ICS, no cached
     copy exists) -- callers hide the affected dates."""
@@ -549,6 +556,73 @@ class ConflictEngine:
                     return True
         return False
 
+    def hidden_dates(
+        self, course: Course, occurrences: list[tuple[date, datetime, datetime]]
+    ) -> dict[date, bool]:
+        """{date: is-it-hidden} for MANY occurrences of one course, with
+        each source read ONCE for the whole span instead of once per date.
+
+        Same verdict as calling occurrence_is_hidden() per date -- this is
+        purely about the number of round-trips. /admin's Future Sessions
+        box lists 52 dates per course; per-date reads would mean 52 CalDAV
+        queries per conflict source per tab, which is the difference
+        between a page that opens and one that does not.
+
+        Fails closed exactly like the per-date path: a source that cannot
+        be read hides every date it applies to, because "we do not know"
+        must never render as "bookable"."""
+        if not occurrences:
+            return {}
+        tz = ZoneInfo(self.settings.timezone)
+        span_start = min(o[1] for o in occurrences)
+        span_end = max(o[2] for o in occurrences)
+        first_date, last_date = occurrences[0][0], occurrences[-1][0]
+        hidden = {occ_date: False for occ_date, _s, _e in occurrences}
+
+        if not self._booking_calendar_blocks_cover(course.shortname):
+            try:
+                kinds = self.blocker_kinds_in_window(course, first_date, last_date)
+            except ConflictSourceError:
+                return {d: True for d in hidden}
+            for occ_date in kinds:
+                if occ_date in hidden:
+                    hidden[occ_date] = True
+
+        for entry in self.settings.conflict_calendars:
+            if not entry.applies_to(course.shortname):
+                continue
+            # ONE read per source for the whole span. The window is padded
+            # to whole local days so all-day events at either end are in
+            # scope, matching what the per-date path asks for.
+            day_start = datetime.combine(first_date, time(0, 0), tzinfo=tz)
+            day_end = datetime.combine(last_date, time(0, 0), tzinfo=tz) + timedelta(days=1)
+            try:
+                if entry.ics_url:
+                    feed = self._ics_feed(entry)
+                    fetched = ics_feed.expand(feed, day_start, day_end, tz)
+                else:
+                    fetched = self._caldav_occurrences(
+                        entry, min(span_start, day_start), max(span_end, day_end)
+                    )
+            except ConflictSourceError:
+                return {d: True for d in hidden}
+            fetched = [o for o in fetched if _matches_entry(entry, o)]
+            fetched = [
+                o for o in fetched
+                if not calendar_sync.is_own_event(o.uid, self.settings)
+            ]
+            for occ_date, occ_start, occ_end in occurrences:
+                if hidden[occ_date]:
+                    continue
+                win_start, win_end = self._entry_window(entry, occ_date, occ_start, occ_end, tz)
+                if entry.mode == "blocks":
+                    if any(self._overlaps(o, occ_date, win_start, win_end) for o in fetched):
+                        hidden[occ_date] = True
+                else:  # requires
+                    if not any(self._spans(o, occ_date, win_start, win_end) for o in fetched):
+                        hidden[occ_date] = True
+        return hidden
+
     def _booking_calendar_blocks_cover(self, course_shortname: str) -> bool:
         """Does some blocks-mode [[conflict_calendar]] entry ON THE BOOKING
         CALENDAR already apply to this course? If so, its normal overlap
@@ -568,25 +642,72 @@ class ConflictEngine:
         return False
 
     def _cancellation_blocker_present(self, course: Course, occ_date: date, tz) -> bool:
-        """True iff THIS occurrence's deterministic 'cancel entire session'
-        blocker event exists on the booking calendar. Keyed on the exact
-        blocker UID (calendar_sync.cancellation_blocker_uid), so a genuine
-        personal event on the same calendar is NOT what triggers it -- that
-        stays governed by the scoped [[conflict_calendar]] entries. Raises
+        """True iff one of THIS occurrence's own blocker events exists on
+        the booking calendar -- either the 'cancel entire session' one or
+        (since 2026-08-27) the 'hide this date' one. Both keep the date
+        off the booking page; they differ only in what they mean to the
+        operator, which blocker_kind() below reports.
+
+        Keyed on the exact blocker UIDs, so a genuine personal event on
+        the same calendar is NOT what triggers it -- that stays governed
+        by the scoped [[conflict_calendar]] entries. Raises
         ConflictSourceError if the booking calendar can't be read, so the
         caller fails closed."""
-        uid = calendar_sync.cancellation_blocker_uid(self.settings, course.shortname, occ_date)
-        day_start = datetime.combine(occ_date, time(0, 0), tzinfo=tz)
+        return self.blocker_kind(course, occ_date, tz) is not None
+
+    def blocker_kind(self, course: Course, occ_date: date, tz=None) -> str | None:
+        """Which of this tool's own blockers sits on `occ_date`:
+        BLOCKER_CANCELED, BLOCKER_HIDDEN, or None. One query, both UIDs --
+        /admin needs to tell the two apart (a canceled date is reopened by
+        rebooking someone, a hidden one by Unhide), and the booking page
+        only needs "either"."""
+        tz = tz or ZoneInfo(self.settings.timezone)
+        kinds = self.blocker_kinds_in_window(course, occ_date, occ_date)
+        return kinds.get(occ_date)
+
+    def blocker_kinds_in_window(
+        self, course: Course, first_date: date, last_date: date
+    ) -> dict[date, str]:
+        """{date: BLOCKER_*} for every one of this course's blockers
+        between the two dates inclusive -- in ONE booking-calendar query.
+
+        This is the batched form /admin's Future Sessions box needs: it
+        shows 52 dates per course, and asking the CalDAV server once per
+        date would be 52 round-trips per tab. The UIDs are deterministic,
+        so a single windowed query answers all of them."""
+        tz = ZoneInfo(self.settings.timezone)
+        win_start = datetime.combine(first_date, time(0, 0), tzinfo=tz)
+        win_end = datetime.combine(last_date, time(0, 0), tzinfo=tz) + timedelta(days=1)
         try:
             client, href = self._booking_client_fn(), self._booking_href_fn()
-            events = client.query_events(href, day_start, day_start + timedelta(days=1))
+            events = client.query_events(href, win_start, win_end)
         except (CalDAVError, OSError) as exc:
             log.error(
-                "cancellation-blocker check for %r on %s: booking calendar error: %s",
-                course.shortname, occ_date.isoformat(), exc,
+                "blocker check for %r %s..%s: booking calendar error: %s",
+                course.shortname, first_date.isoformat(), last_date.isoformat(), exc,
             )
             raise ConflictSourceError(str(exc)) from None
-        return any(u == uid for u, _ics, _etag in events)
+
+        wanted: dict[str, tuple[date, str]] = {}
+        d = first_date
+        while d <= last_date:
+            wanted[calendar_sync.cancellation_blocker_uid(self.settings, course.shortname, d)] = \
+                (d, BLOCKER_CANCELED)
+            wanted[calendar_sync.hide_blocker_uid(self.settings, course.shortname, d)] = \
+                (d, BLOCKER_HIDDEN)
+            d += timedelta(days=1)
+
+        found: dict[date, str] = {}
+        for uid, _ics, _etag in events:
+            hit = wanted.get(uid)
+            if hit is None:
+                continue
+            occ_date, kind = hit
+            # A canceled date is canceled even if a stale hide blocker is
+            # also lying around: cancellation is the stronger statement.
+            if found.get(occ_date) != BLOCKER_CANCELED:
+                found[occ_date] = kind
+        return found
 
     @staticmethod
     def _entry_window(

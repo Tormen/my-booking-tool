@@ -11,7 +11,7 @@ from typing import Callable
 from wsgiref.simple_server import make_server
 
 from .atomic_io import probe_dir_fsync_support
-from .config import Settings, load_settings
+from .config import Settings, load_settings, reconcile_config_overrides
 from .emailer import send_mail
 from .logutil import configure_logging
 from .storage import Store
@@ -96,11 +96,29 @@ def main() -> None:
     # (not gated behind the log level) so a manual run confirms it's
     # actually listening; journalctl shows it too either way since it's
     # still going to stdout.
+    # NOT load_settings(..., data_dir): App does the console-override
+    # merge itself, and needs the un-merged settings.toml view as its
+    # base so a REMOVED console entry can actually disappear on reload
+    # (merging onto an already-merged tuple could only ever add). See
+    # App.__init__ / App._reload_overrides.
     settings = load_settings(args.settings)
+    # Keep the exceptional-dates HISTORY in step with settings.toml. Only
+    # the history: what guests see is computed from settings.toml + the
+    # console's own entries either way, so a failure here is worth a log
+    # line and nothing more -- it must never stop the service starting.
+    try:
+        appended = reconcile_config_overrides(args.settings, args.data_dir)
+        if appended:
+            log.info("date_overrides: recorded %d settings.toml change(s)", len(appended))
+    except Exception:  # noqa: BLE001 - history bookkeeping is never fatal
+        log.exception("date_overrides: could not record settings.toml state")
     configure_logging(settings.log_file)
     check_directory_fsync_support_at_startup(args.data_dir, settings)
     store = Store(args.data_dir)
-    app = App(settings, store)
+    # settings_path: the console annotates the superseded
+    # [[course.date_override]] block in settings.toml when it takes a
+    # date over -- see config.annotate_superseded_override.
+    app = App(settings, store, settings_path=args.settings)
 
     with make_server(args.host, args.port, app) as httpd:
         print(f"my-booking-tool: serving on {args.host}:{args.port}")

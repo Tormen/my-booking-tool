@@ -184,7 +184,7 @@ def cmd_list(args) -> None:
     from the clean view's "Guests" column, left unchanged for anyone
     already scripting against -r's output)."""
     store = _store(args)
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     live_regs = store.read_registrations(scope="live")
     users = {u["user_id"]: u for u in store.read_users(scope="all")}
 
@@ -427,7 +427,7 @@ def cmd_show(args) -> None:
     lookup, not a mutating action (unlike `my-bt cancel`, which stays
     live-only on purpose)."""
     store = _store(args)
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     users_by_id = {u["user_id"]: u for u in store.read_users(scope="all")}
     all_rows = store.read_registrations(scope="all")
 
@@ -618,7 +618,7 @@ def cmd_erase(args) -> None:
         if confirm.strip().lower() != "yes":
             print("aborted")
             return
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     store = _store(args)
     caldav = app_cancel_flow.build_caldav_client(settings)
     ok = app_erasure.erase_user_by_email(store, settings, email, today=date.today(), caldav=caldav)
@@ -667,7 +667,7 @@ def cmd_admin_rename_course(args) -> None:
     migration) has already completed by that point regardless, so a
     step-2 failure is safe to just retry (Store.rename_course_shortname
     is a no-op the second time, since no rows are left under --from)."""
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     if settings.course(args.to) is None:
         print(
             f"error: no course with shortname {args.to!r} in settings.toml -- "
@@ -711,7 +711,7 @@ def cmd_admin_resync_calendar(args) -> None:
     .ics attachment can't be retroactively edited; see
     app.calendar_sync.resync_all_future_calendar_events's own
     docstring."""
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     caldav = app_cancel_flow.build_caldav_client(settings)
     href = app_cancel_flow.calendar_href(caldav, settings)
     result = app_calendar_sync.resync_all_future_calendar_events(
@@ -828,7 +828,7 @@ def cmd_cancel(args) -> None:
     without a date) gets a helpful explanation instead of a confusing
     failure. --id/--date/--course still FORCE a specific type directly,
     bypassing auto-detection entirely, same as show's --course/--user."""
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     store = _store(args)
 
     if args.query:
@@ -944,7 +944,7 @@ def cmd_admin_gdpr(args) -> None:
     group the same day, same reasoning -- it's GDPR machinery too, no
     reason for it to sit apart
     from `bookings`/`accounts`."""
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     store = _store(args)
     today = date.today()
     print(
@@ -993,7 +993,7 @@ def cmd_admin_gdpr_bookings(args) -> None:
     actually delete rows past their window now -- the same job the
     nightly systemd timer runs (systemd/my-booking-retention.timer), just
     on demand. Read-only without --purge."""
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     store = _store(args)
     if args.purge:
         purged = app_retention.run_purge(store, settings)
@@ -1024,7 +1024,7 @@ def cmd_admin_gdpr_accounts(args) -> None:
     happen regardless, and tied exactly to retention_months, since that is
     the GDPR-mandated deadline).
     Read-only without --purge."""
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     store = _store(args)
     if args.purge:
         warned = app_retention.send_account_deletion_warnings(store, settings)
@@ -1406,6 +1406,28 @@ def _print_activity_summary(args) -> None:
     print("--last 24h` (the actual problem lines) or `admin log-report --last 24h` (everything).")
 
 
+def cmd_admin_sync_overrides(args) -> None:
+    """`my-bt admin sync-overrides` -- record in the exceptional-dates
+    HISTORY whatever settings.toml currently says.
+
+    Only the history. What is actually in effect is computed from
+    settings.toml plus the console's own entries every time it is needed
+    (see app/date_overrides.py), so this changes nothing a guest sees --
+    it exists so `<data_dir>/date_overrides.csv` remains a complete record
+    of every exceptional date this deployment has had, including the ones
+    that only ever lived in settings.toml. The service does the same on
+    every start; this is for doing it now, or on a machine where the
+    service is not running."""
+    appended = app_config.reconcile_config_overrides(args.settings, args.data_dir)
+    if not appended:
+        print("date_overrides: already up to date -- nothing recorded")
+        return
+    for row in appended:
+        print(f"{row['action']:6} {row['course_shortname']} {row['occurrence_date']}"
+              + (f"  {row['start_time']}" if row["start_time"] else ""))
+    print(f"{len(appended)} row(s) recorded in the history")
+
+
 def cmd_admin_watchdog_check(args) -> None:
     """`my-bt admin watchdog-check` -- runs the exact same "strange usage
     patterns" sweep the systemd timer runs (systemd/my-booking-watchdog.timer,
@@ -1420,7 +1442,7 @@ def cmd_admin_watchdog_check(args) -> None:
     equivalent before this; see systemd/my-booking-watchdog.service for
     the timer now calling this instead of `python3 -m app.watchdog`
     directly."""
-    settings = app_config.load_settings(args.settings)
+    settings = app_config.load_settings(args.settings, args.data_dir)
     store = _store(args)
     alerts = app_watchdog.check_now(store, settings)
     if alerts:
@@ -2673,6 +2695,18 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_git_snapshot)
 
     sp = _add_subcommand(
+        admin_sub, "sync-overrides",
+        "record what settings.toml says about exceptional dates in the history file.",
+        "Exceptional dates ([[course.date_override]] in settings.toml, or set from /admin's "
+        "Future Sessions box) are journalled append-only in <data-dir>/date_overrides.csv, so "
+        "that file is the full history of every one this deployment has had. This brings the "
+        "settings.toml half of that history up to date. It is HISTORY ONLY -- what is in effect "
+        "is computed from settings.toml + the console's own entries either way, so running this, "
+        "or never running it, changes nothing a guest sees. The service does it on every start.",
+    )
+    sp.set_defaults(func=cmd_admin_sync_overrides)
+
+    sp = _add_subcommand(
         admin_sub, "watchdog-check",
         "check nginx/app-log/CSP/signups/sshd for abuse patterns now (same as the periodic timer).",
         "Emails settings.admin_email ONE combined alert if anything fired -- not a dry run. "
@@ -2812,7 +2846,20 @@ def main() -> None:
 
     log_fh = None
     orig_stdout, orig_stderr = sys.stdout, sys.stderr
-    log_path = app_config.peek_log_file(args.settings)
+    # Guarded separately from the args.func(args) call below, because it
+    # runs BEFORE it: a settings.toml with a TOML syntax error used to
+    # abort every single my-bt invocation -- `admin setup` included, i.e.
+    # the very command the operator reaches for to fix a broken config --
+    # with a raw tomllib traceback out of this line. The error itself is
+    # real and must stay fatal; only the presentation changes.
+    try:
+        log_path = app_config.peek_log_file(args.settings)
+    except Exception as exc:
+        if args.debug:
+            raise
+        print(f"error: {exc}", file=sys.stderr)
+        print("(re-run with --debug for the full traceback)", file=sys.stderr)
+        sys.exit(1)
     if args.log:
         if not log_path:
             print("--log: no [logging].log_file configured in settings.toml -- "

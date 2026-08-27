@@ -418,6 +418,22 @@ class BareCommandMainBehaviorTest(unittest.TestCase):
     """Drives my_bt_mod.main() directly (patching sys.argv), the same way
     an actual `my-bt ...` invocation would reach it."""
 
+    def setUp(self):
+        # main() peeks at --settings (whose default is the INSTALLED
+        # /etc/my-booking/settings.toml) before dispatching, so without
+        # this the test reads whatever config the machine running the
+        # suite happens to have -- and fails on it if that file is
+        # malformed. That is exactly what happened during an rpmbuild on
+        # the server: a broken live settings.toml turned this test into an
+        # error about TOML, nothing to do with argparse. Unit tests must
+        # not depend on one machine's configuration; a path that cannot
+        # exist keeps this one hermetic.
+        patcher = mock.patch.object(
+            my_bt_mod, "DEFAULT_SETTINGS", "/nonexistent/my-booking/settings.toml"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _run_main(self, argv):
         old_argv = sys.argv
         sys.argv = ["my-bt"] + argv

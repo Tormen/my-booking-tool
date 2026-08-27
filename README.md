@@ -2278,6 +2278,17 @@ duration_minutes = 60         # optional -- omit to keep the course's own durati
 message = "I need to be in Kaiserslautern before 13h."  # optional
 ```
 
+Exceptional dates can also be managed from the admin console, without
+touching `settings.toml` at all -- see "Future Sessions" below.
+
+A second exceptional date means a second, complete block -- its own
+`[[course.date_override]]` header line included. Repeating `date`/
+`start_time` under one header is invalid TOML (`Cannot overwrite a
+value`) and the service will refuse to start on it. As with every other
+edit to `settings.toml`, the running service only picks the change up on
+`systemctl restart my-booking`; `my-bt admin health` first confirms the
+file still parses.
+
 `date` must match one of the course's normal weekly occurrence dates --
 this shifts an existing session's time, it does not add an extra one.
 `duration_minutes` only needs to be set if the session's length itself
@@ -2299,6 +2310,71 @@ read-only JSON endpoint listing every course's upcoming overrides
 sorted by date then course -- past dates are left out. The operator's
 own synced calendar event and the guest's `.ics` email attachment both
 reflect the shifted time too, not just the web page/email text.
+
+### Future Sessions (the `/admin` box)
+
+`/admin` has two framed boxes: **Bookings** (the registrations table,
+with its All / Only Past / Only Future selectors and filter) and
+**Future Sessions**, one tab per course, showing that course's next 52
+dates -- 10 listed, the following 42 behind a disclosure.
+
+Every date is shown, including ones that are **not** currently offered;
+a console that lists only bookable dates cannot tell you why one is
+missing, which is exactly when you go looking. Each row carries its
+status: `bookable`, `full`, `hidden (calendar)` (a `[[conflict_calendar]]`
+entry is keeping it off the page), `not offered` (you hid it) or
+`CANCELED`.
+
+Three actions per date:
+
+- **Change time** -- an exceptional start time, optional duration and
+  optional message for that one date, exactly like a
+  `[[course.date_override]]`. The calendar event for that occurrence is
+  re-written immediately, and everyone already booked is emailed, with a
+  copy to `[site].admin_email`.
+- **Hide / Unhide** -- stop offering the date for NEW bookings. The
+  session still happens, everyone booked keeps their place, and nobody is
+  emailed. Offered **only while the date has no bookings**: once anyone is
+  booked, cancelling is the only way to stop offering it, so no booked
+  guest can be caught out by a hidden date. It works by writing a
+  `NOT OFFERED:` event to your booking calendar, so deleting that event
+  from any calendar app -- your phone included -- offers the date again.
+- **Cancel session** -- identical to the "cancel the entire session" link
+  in your own calendar event: a `CANCELED:` blocker is written first
+  (fail-closed -- if that write fails, nothing is cancelled), then every
+  participant is cancelled and notified, and you get a copy.
+
+#### Where console-set overrides live
+
+Not in `settings.toml`. There is no TOML writer in the standard library,
+so writing them back would mean re-serialising the file and destroying
+every comment in it, and the service only reads `settings.toml` at
+startup. They live in `<data-dir>/date_overrides.csv` instead --
+append-only, one row per action, so the file is the complete history of
+every exceptional date this deployment has had. Removing an override
+appends a `remove` row; nothing is ever deleted.
+
+What is actually in effect is computed, never stored:
+
+> every `[[course.date_override]]` in `settings.toml`
+> **+** every console entry whose last action was `set`
+
+with the console winning if both name the same date. Two things follow.
+Deleting a block from `settings.toml` simply drops it -- there is nothing
+to synchronise. And a console change takes effect **without a restart**,
+unlike every other setting.
+
+Rows recorded from `settings.toml` are marked `origin=config` and are
+history only -- they never decide anything. `my-bt admin sync-overrides`
+brings that half of the history up to date on demand; the service does it
+on every start. Skipping it changes nothing a guest sees.
+
+When the console takes over a date that `settings.toml` also names, the
+superseded block is **commented out** in `settings.toml` with a dated
+marker line, so the file stops contradicting the site. That is a
+plain-text edit of those lines only -- no value is rewritten, no comment
+is lost -- and it is purely informational: if the file cannot be written,
+the change still takes effect.
 
 ## Account confirmation (`/my`, `/my/reset`, `/my/confirm/<token>`)
 

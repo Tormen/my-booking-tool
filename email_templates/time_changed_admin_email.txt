@@ -1,0 +1,5 @@
+{{intro}}
+
+{{details}}
+{{spots_taken}} / {{capacity}} spots taken.
+{{notified_line}}

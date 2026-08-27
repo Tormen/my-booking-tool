@@ -756,6 +756,50 @@ def cancellation_blocker_uid(settings: Settings, course_shortname: str, occurren
     return f"canceled-{slug}-{course_shortname}-{occurrence_date.isoformat()}@{domain}"
 
 
+def hide_blocker_uid(settings: Settings, course_shortname: str, occurrence_date: date) -> str:
+    """Deterministic UID for one occurrence's HIDE blocker. Same shape and
+    the same reasoning as cancellation_blocker_uid above (deterministic,
+    and deliberately not matching is_own_event) but its own prefix, so a
+    hidden date and a canceled one are never mistaken for each other --
+    by this code, or by the operator looking at their calendar app."""
+    slug, domain = _uid_parts(settings)
+    return f"hidden-{slug}-{course_shortname}-{occurrence_date.isoformat()}@{domain}"
+
+
+def _put_blocker(
+    client: CalDAVClient,
+    calendar_href: str,
+    settings: Settings,
+    course: Course,
+    occurrence_date: date,
+    uid: str,
+    summary: str,
+    lines: list[str],
+) -> None:
+    """Shared body of the two blocker writers below: build the event at
+    the occurrence's real (override-aware) hours and PUT it, treating an
+    existing one as a no-op.
+
+    Factored out when the HIDE blocker arrived (2026-08-27) rather than
+    copied: these two must stay identical in their timing, their
+    create-is-idempotent behaviour and their fail-closed contract, and
+    two copies of that is how they would quietly stop being identical."""
+    tz = ZoneInfo(settings.timezone)
+    start, end = occurrence_start_end(course, occurrence_date, tz)
+    event = VEvent(
+        uid=uid,
+        summary=summary,
+        description="\n".join(lines),
+        location=course.location,
+        start=start,
+        end=end,
+    )
+    try:
+        client.put_event(calendar_href, event.uid, event.to_ics(), etag=None)
+    except CalDAVConflictError:
+        log.debug("blocker %s already exists -- keeping it", uid)
+
+
 def create_cancellation_blocker(
     client: CalDAVClient,
     calendar_href: str,
@@ -778,11 +822,9 @@ def create_cancellation_blocker(
     blocks-mode [[conflict_calendar]] entry that covers the booking
     calendar AND applies to this course, OR -- for a course scoped out of
     every such entry (e.g. via all_courses_but) -- via the always-on,
-    UID-keyed cancellation-blocker check in
+    UID-keyed blocker check in
     conflict.ConflictEngine.occurrence_is_hidden, which is independent of
     scoping precisely so this mechanism can never be configured away."""
-    tz = ZoneInfo(settings.timezone)
-    start, end = occurrence_start_end(course, occurrence_date, tz)
     lines = []
     if message:
         lines.append(message)
@@ -793,19 +835,59 @@ def create_cancellation_blocker(
         "Delete this event to reopen the date for booking",
         "(rebooking a canceled participant from /admin reopens it too).",
     ]
-    event = VEvent(
+    _put_blocker(
+        client, calendar_href, settings, course, occurrence_date,
         uid=cancellation_blocker_uid(settings, course.shortname, occurrence_date),
         summary=f"CANCELED: {course.title}",
-        description="\n".join(lines),
-        location=course.location,
-        start=start,
-        end=end,
+        lines=lines,
     )
-    try:
-        client.put_event(calendar_href, event.uid, event.to_ics(), etag=None)
-    except CalDAVConflictError:
-        log.debug("cancellation blocker for %s on %s already exists -- keeping it",
-                  course.shortname, occurrence_date.isoformat())
+
+
+def create_hide_blocker(
+    client: CalDAVClient,
+    calendar_href: str,
+    settings: Settings,
+    course: Course,
+    occurrence_date: date,
+) -> None:
+    """PUTs the HIDE blocker for one occurrence (2026-08-27).
+
+    Hiding is NOT cancelling: the session still takes place and anyone
+    already booked keeps their place -- the date simply stops being
+    offered to new guests. /admin only offers it while a date has NO
+    bookings, so there is no state in which a booked guest silently loses
+    their session.
+
+    A calendar event rather than a flag in a file, deliberately: the
+    operator's own standing point that when they are on the go they have
+    only their calendar. Deleting this event anywhere -- phone included --
+    offers the date again, with no admin console involved."""
+    _put_blocker(
+        client, calendar_href, settings, course, occurrence_date,
+        uid=hide_blocker_uid(settings, course.shortname, occurrence_date),
+        summary=f"NOT OFFERED: {course.title}",
+        lines=[
+            f"This blocker keeps {occurrence_date.isoformat()} closed to NEW",
+            f"bookings for {course.title}",
+            f"({settings.base_url}/book/{course.shortname}).",
+            "The session itself is NOT canceled.",
+            "Delete this event to offer the date again.",
+        ],
+    )
+
+
+def delete_hide_blocker(
+    client: CalDAVClient,
+    calendar_href: str,
+    settings: Settings,
+    course_shortname: str,
+    occurrence_date: date,
+) -> None:
+    """Removes one occurrence's HIDE blocker -- "Unhide" in /admin, and
+    exactly what deleting the event by hand in a calendar app does."""
+    client.delete_event(
+        calendar_href, hide_blocker_uid(settings, course_shortname, occurrence_date)
+    )
 
 
 def delete_cancellation_blocker(

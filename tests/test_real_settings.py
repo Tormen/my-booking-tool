@@ -173,6 +173,20 @@ class RealSettingsFileTest(unittest.TestCase):
         configured = [p for p in paths.values() if p]
         if not configured or not any(Path(p).parent.is_dir() for p in configured):
             self.skipTest("secrets directory not present on this machine (dev checkout)")
+        # Present is not the same as readable: the secrets directory is
+        # deliberately root-only, so a non-root run (the RPM build runs
+        # the suite as an ordinary user) can stat the DIRECTORY through
+        # its parent but gets False from is_file() on every secret inside
+        # -- indistinguishable from the files really being absent, and it
+        # reported all four as missing on a server where all four exist.
+        # Where we cannot look, say nothing rather than something wrong.
+        if not all(
+            os.access(str(Path(p).parent), os.R_OK | os.X_OK) for p in configured
+        ):
+            self.skipTest(
+                "secrets directory is not readable by this user (it is root-only "
+                "by design) -- cannot tell present from absent, so not guessing"
+            )
         for label, p in paths.items():
             with self.subTest(secret=label):
                 self.assertIsNotNone(p, f"{label} is not configured")

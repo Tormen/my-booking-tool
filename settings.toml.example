@@ -1,3 +1,12 @@
+# The running service reads this file ONCE, at startup. After ANY edit
+# here, activate it with:
+#
+#     sudo my-bt admin health     # verify the file parses and is sane
+#     sudo systemctl restart my-booking
+#
+# (`my-bt ...` commands re-read this file on every run, so they show a
+# new value immediately -- the live site does not, until that restart.)
+#
 [site]
 timezone    = "Europe/Berlin"
 admin_email = "admin@example.org"
@@ -406,10 +415,25 @@ order_in_all_courses = 10
 # "ATTENTION" callout. Omit `message` for just the changed time with no
 # explanation. No [[course.date_override]] at all (the default) changes
 # nothing.
+#
+# EVERY override needs its own [[course.date_override]] header line.
+# Adding a second date by just repeating the keys under the first header
+# is invalid TOML ("Cannot overwrite a value") and the service will
+# refuse to start:
+#
+#     [[course.date_override]]
+#     date = "2026-08-03"
+#     date = "2026-08-29"      <-- WRONG, no second header
+#
 # [[course.date_override]]
 # date = "2026-08-03"
 # start_time = "09:00"
 # message = "Exceptionally an hour earlier this week only."
+#
+# [[course.date_override]]
+# date = "2026-08-29"
+# start_time = "09:00"
+# message = "And once more, three weeks later."
 
 [[course]]
 shortname  = "example-thursday-class"

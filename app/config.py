@@ -13,8 +13,11 @@ try:
     import tomllib
 except ModuleNotFoundError:  # Python < 3.11 (dev/test only, not the target server)
     import tomli as tomllib  # type: ignore[no-redef]
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from pathlib import Path
+
+from .atomic_io import atomic_write_text
 
 
 @dataclass(frozen=True)
@@ -566,13 +569,21 @@ class Settings:
 def load_raw_toml(toml_path: str | Path) -> dict | None:
     """Parse settings.toml without requiring the secret files load_settings()
     needs -- returns None if the file doesn't exist yet (a legitimate state
-    to check for, e.g. `my-bt status` on a fresh install), lets a genuine
-    TOML syntax error raise normally (that's a real problem to surface)."""
+    to check for, e.g. `my-bt status` on a fresh install).
+
+    A genuine TOML syntax error is still a real problem to surface, but it
+    is re-raised as a ValueError naming the file: tomllib's own message
+    ("Cannot overwrite a value (at line 478, column 20)") says nothing
+    about WHICH file, and every caller here is reading a settings.toml
+    whose path the operator needs in order to go fix it."""
     toml_path = Path(toml_path)
     if not toml_path.exists():
         return None
     with toml_path.open("rb") as f:
-        return tomllib.load(f)
+        try:
+            return tomllib.load(f)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"{toml_path}: invalid TOML -- {exc}") from exc
 
 
 # The default [logging].log_file -- inside the app's own data dir, so the
@@ -814,7 +825,201 @@ def _conflict_calendar_from_raw(
     )
 
 
-def load_settings(toml_path: str | Path) -> Settings:
+def merge_console_overrides(
+    courses: tuple[Course, ...], data_dir: str | Path
+) -> tuple[Course, ...]:
+    """Each Course with the console-managed exceptional dates from
+    <data_dir>/date_overrides.csv folded into its `date_overrides`.
+
+    THE effective set, in one place (see app/date_overrides.py for why
+    the store looks the way it does):
+
+        every [[course.date_override]] in settings.toml
+      + every admin/cli entry whose last action is "set"
+
+    with the CONSOLE winning when both name the same date -- it is the
+    more recent deliberate act, made by someone looking at that date.
+
+    Read-only and side-effect-free: no file is created, and a data_dir
+    with no date_overrides.csv (a deployment that has never used the
+    console) returns `courses` unchanged. Every consumer downstream --
+    the booking page, /schedule-exceptions, every email, the calendar
+    event -- already reads Course.date_overrides, so merging HERE is what
+    makes a console-set override appear everywhere without a single new
+    call site."""
+    from .date_overrides import OverrideStore
+
+    effective = OverrideStore(data_dir).effective()
+    if not effective:
+        return courses
+
+    merged = []
+    for course in courses:
+        extra = {
+            entry.date: CourseDateOverride(
+                date=entry.date,
+                start_time=entry.start_time,
+                duration_minutes=entry.duration_minutes,
+                message=entry.message,
+            )
+            for (shortname, _date), entry in effective.items()
+            if shortname == course.shortname
+        }
+        if not extra:
+            merged.append(course)
+            continue
+        # Keyed by date so a console entry REPLACES the settings.toml one
+        # for that date rather than both being present -- Course's own
+        # override_for() takes the first match, and two entries for one
+        # date would make which-one-wins depend on tuple order.
+        by_date = {o.date: o for o in course.date_overrides}
+        by_date.update(extra)
+        merged.append(replace(
+            course,
+            date_overrides=tuple(by_date[d] for d in sorted(by_date)),
+        ))
+    return tuple(merged)
+
+
+def config_override_entries(courses: tuple[Course, ...]) -> list:
+    """The settings.toml-owned overrides, in app.date_overrides'
+    OverrideEntry shape -- what reconcile_config_rows() compares the
+    history against. Must be called on courses BEFORE
+    merge_console_overrides(), or console entries would be recorded as
+    though settings.toml had contained them."""
+    from .date_overrides import ORIGIN_CONFIG, OverrideEntry
+
+    return [
+        OverrideEntry(
+            course_shortname=course.shortname,
+            date=o.date,
+            start_time=o.start_time,
+            duration_minutes=o.duration_minutes,
+            message=o.message,
+            origin=ORIGIN_CONFIG,
+            created_at="",
+        )
+        for course in courses
+        for o in course.date_overrides
+    ]
+
+
+def annotate_superseded_override(
+    toml_path: str | Path,
+    course_shortname: str,
+    occurrence_date: str,
+    now_stamp: str | None = None,
+) -> bool:
+    """Comment out the `[[course.date_override]]` block for one date,
+    prefixed with a dated line saying why. Returns True if the file was
+    changed.
+
+    WHY THIS EXISTS: settings.toml keeps its own copy of an override that
+    the console has taken over, and the console wins -- so without this
+    the file would sit there claiming 09:45 while the site shows 09:00.
+    Commenting the block out makes the file stop contradicting reality.
+
+    WHAT IT DELIBERATELY IS NOT: a TOML writer. This is a plain-text line
+    edit -- prefix a contiguous run of lines with "# " -- exactly like
+    cli_setup._add_nginx_access_log_setting's insert, and for the same
+    reason: parse-and-reserialise would silently destroy every comment in
+    a file whose comments are load-bearing. Nothing is rewritten, nothing
+    is reordered, no value is touched.
+
+    PURELY INFORMATIONAL. What is actually in effect is computed from
+    settings.toml + the console's own entries either way (see
+    merge_console_overrides), so every failure here -- unwritable file,
+    a block that cannot be located, a concurrent editor -- is survivable
+    and must never block the change the operator asked for."""
+    path = Path(toml_path)
+    try:
+        original = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+
+    lines = original.splitlines(keepends=True)
+    stamp = now_stamp or datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")
+
+    # Walk the file tracking which course we are inside, since
+    # [[course.date_override]] blocks say nothing about which course they
+    # belong to -- they belong to the [[course]] above them.
+    current_course = None
+    block_start = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[[course]]"):
+            current_course = None
+            block_start = None
+            continue
+        if current_course is None and stripped.startswith("shortname"):
+            _key, _eq, value = stripped.partition("=")
+            current_course = value.strip().strip('"').strip("'")
+            continue
+        if stripped.startswith("[[course.date_override]]"):
+            block_start = i
+            continue
+        if block_start is not None and stripped.startswith("["):
+            block_start = None
+            continue
+        if block_start is None or current_course != course_shortname:
+            continue
+        if not stripped.startswith("date"):
+            continue
+        _key, _eq, value = stripped.partition("=")
+        if value.strip().strip('"').strip("'") != occurrence_date:
+            continue
+
+        # Found it: comment out from the header to the end of the block
+        # (the next table header, or a blank line followed by one).
+        end = block_start + 1
+        while end < len(lines) and not lines[end].strip().startswith("["):
+            end += 1
+        while end > block_start + 1 and not lines[end - 1].strip():
+            end -= 1  # leave trailing blank lines outside the comment
+        marker = (
+            f"# {stamp}: commented out -- this date is now managed under "
+            f"/admin, which takes precedence.\n"
+        )
+        commented = [
+            ("# " + ln) if ln.strip() else ln
+            for ln in lines[block_start:end]
+        ]
+        new_lines = lines[:block_start] + [marker] + commented + lines[end:]
+        try:
+            atomic_write_text(path, "".join(new_lines))
+        except OSError:
+            return False
+        return True
+    return False
+
+
+def reconcile_config_overrides(toml_path: str | Path, data_dir: str | Path) -> list[dict]:
+    """Record in the history what settings.toml currently says about
+    exceptional dates, and return the rows appended (empty when nothing
+    changed -- the normal case).
+
+    WRITES, so it is deliberately NOT part of load_settings(): every
+    read-only context (unit tests, `my-bt list`, a report) must be able
+    to load settings without touching the data directory. Called from the
+    writable contexts instead -- service startup, `my-bt admin
+    sync-overrides` -- and safe to skip: the effective set never depends
+    on it (see app/date_overrides.py)."""
+    from .date_overrides import OverrideStore, reconcile_config_rows
+
+    raw = load_raw_toml(toml_path)
+    if raw is None:
+        return []
+    entries = config_override_entries(courses_from_raw(raw))
+    return reconcile_config_rows(OverrideStore(data_dir), entries)
+
+
+def load_settings(toml_path: str | Path, data_dir: str | Path | None = None) -> Settings:
+    """`data_dir`, when given, also folds in the console-managed
+    exceptional dates from <data_dir>/date_overrides.csv (see
+    merge_console_overrides). Left None -- the default -- nothing but
+    settings.toml is read, which is what keeps this function pure for
+    unit tests and for any caller that has no data directory of its
+    own."""
     toml_path = Path(toml_path)
     with toml_path.open("rb") as f:
         raw = tomllib.load(f)
@@ -846,6 +1051,8 @@ def load_settings(toml_path: str | Path) -> Settings:
     watchdog = raw.get("watchdog", {})
 
     courses = courses_from_raw(raw)
+    if data_dir is not None:
+        courses = merge_console_overrides(courses, data_dir)
     conflict_calendars = tuple(
         _conflict_calendar_from_raw(entry, i, {c.shortname for c in courses})
         for i, entry in enumerate(raw.get("conflict_calendar", []))
