@@ -2288,7 +2288,7 @@ class App:
             banner=banner,
         )
 
-    def _session_banner_html(self, environ, *, on_my_page: bool = False, next_path: str = "") -> str:
+    def _session_banner_html(self, environ, *, current: str = "", next_path: str = "") -> str:
         """A small "Logged in as x@example.org - Logout" banner for the
         dynamic pages a logged-in guest might reach while browsing/booking
         (2026-07-06: "/my should have a 'new booking' button... but with a
@@ -2306,12 +2306,15 @@ class App:
         one-click way back to the homepage other than the separate
         target="_blank" link my() already has for that.
 
-        `on_my_page=True` (2026-07-09: /my's own banner showed a
-        redundant "My bookings" link while already on the my-bookings
-        page) drops the "My bookings" link -- a link back to the exact page
-        you're already looking at is dead weight, not a shortcut. Only
-        my() passes this; /courses and /book (where "My bookings" is a
-        genuine link elsewhere) leave it at the default.
+        `current` is the path being rendered, and every link the bar
+        offers is suppressed when it points there: a link back to the
+        exact page you are looking at is dead weight, not a shortcut.
+        It began (2026-07-09) as an on_my_page flag for the "My bookings"
+        link alone, and became a path when a second link joined the bar
+        and reproduced the same fault on its own page (2026-08-27, the
+        operator: "Logged in as ... - Account settings" while ON the
+        account page). One rule for every link the bar will ever carry,
+        rather than a flag per link.
 
         2026-07-09: the top-bar should be ALWAYS visible (except for
         index.html), either with LOGIN or with the BAR -- an anonymous visitor to /courses or
@@ -2327,15 +2330,16 @@ class App:
         user = self.store.find_user_by_id(session["user_id"])
         if user is None:
             return self._anonymous_banner_html(next_path)
-        my_bookings_link = "" if on_my_page else '<a href="/my">My bookings</a> &middot; '
-        # The account link sits BEHIND the identity it belongs to, not in
-        # the page body: the banner is where a reader looks to see who
-        # they are, so it is where they look to change it. Same shape the
-        # admin banner uses for its own settings link.
+        # Every link the bar offers is dropped when it points at the page
+        # being rendered. The account link sits BEHIND the identity it
+        # belongs to: the banner is where a reader looks to see who they
+        # are, so it is where they look to change it.
+        my_bookings_link = "" if current == "/my" else '<a href="/my">My bookings</a> &middot; '
+        settings_link = ("" if current == "/my/settings"
+                         else ' &middot; <a href="/my/settings">Account settings</a>')
         return (
             '<div class="session-banner">'
-            f"<span>Logged in as <b>{esc(user.email)}</b> &middot; "
-            f'<a href="/my/settings">Account settings</a></span>' 
+            f"<span>Logged in as <b>{esc(user.email)}</b>{settings_link}</span>"
             f'<span>{my_bookings_link}'
             f'<a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a> &middot; '
             '<form method="post" action="/my/logout">'
@@ -3455,7 +3459,7 @@ class App:
             # (per-row, built in _row()) still need it on this same page.
             return (
                 "200 OK", [("Content-Type", "text/html")],
-                page("My bookings", body, banner=self._session_banner_html(environ, on_my_page=True)),
+                page("My bookings", body, banner=self._session_banner_html(environ, current="/my")),
             )
 
         error = None
@@ -4360,7 +4364,7 @@ class App:
         self, environ, user, *, name_error: str | None = None,
         email_error: str | None = None,
     ):
-        banner = self._session_banner_html(environ)
+        banner = self._session_banner_html(environ, current="/my/settings")
         # Two INDEPENDENT forms, one per action. They shared a single form
         # for a while (two buttons, the second using formaction=) so that
         # saving one would not discard what had been typed into the other

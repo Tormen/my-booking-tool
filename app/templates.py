@@ -353,11 +353,18 @@ th{{user-select:none;white-space:nowrap}}
    as over the table's own header row, so the course line sits between
    them rather than clinging to one. */
 .course-head{{display:flex;flex-wrap:wrap;align-items:baseline;gap:.6em;margin:1em 0}}
-/* line-height + equal vertical padding: with the inherited line-height
+/* Deliberately SHORTER than a control (2026-08-27, the operator: "here
+   the green then looks like a green button"). Shape is a promise about
+   behaviour: at the height of the button beside it, a solid green chip
+   you cannot click reads as one you can. This is read, not operated, so
+   it takes its size from its text -- the same reason .st pills, .note
+   and every other label stay off the shared control height.
+
+   line-height + equal vertical padding: with the inherited line-height
    the glyphs sat low in the pill, leaving more colour below the text
    than above it. Pinning both makes the box symmetric about the text. */
-.when{{background:#196B24;color:#fff;border-radius:6px;padding:.25em .6em;font-weight:bold;
-  line-height:1.2;display:inline-block;white-space:nowrap}}
+.when{{background:#196B24;color:#fff;border-radius:6px;padding:.03em .5em;font-weight:bold;
+  line-height:1.15;display:inline-block;white-space:nowrap}}
 table.sessions td,table.sessions th{{border-bottom:1px solid #eee;padding:.45em .6em;
   text-align:left;vertical-align:top}}
 /* Buttons in a table cell, aligned with the text beside them. Two
@@ -477,8 +484,18 @@ dialog .x{{position:absolute;top:.4em;right:.5em;font-size:1.6em;line-height:1;
    .tab-title -- /admin's Future Sessions tabs sit UNDER an <h2> and must
    keep the ordinary tab look, or nothing distinguishes the selected one
    from a row of equally-bold headings. */
-.tab-labels.tab-title{{margin-top:0}}
-.tab-labels.tab-title .tab-label{{font-size:1.3em;font-weight:bold}}
+/* A row of tabs used AS a frame's title must occupy the same box an
+   <h2> would, or the two frames on /my start their content at different
+   heights -- measured from a screenshot: 16px under the border in one,
+   36px in the other. The 20px was this row's own top margin plus each
+   tab's .5em top padding, neither of which a heading has. Zero both, keep
+   the .25em under the text that the h2 uses for its underline, and drop
+   the first tab's left padding so the title starts on the frame's own
+   left edge. */
+.tab-labels.tab-title{{margin:0 0 .6em}}
+.tab-labels.tab-title .tab-label{{font-size:1.3em;font-weight:bold;
+  padding:0 1.2em .25em}}
+.tab-labels.tab-title .tab-label:first-of-type{{padding-left:0}}
 
 /* Tabs rendered as LINKS (/admin, since 2026-08-27 -- CSS-radio tabs
    needed every course's panel in the DOM). Without this they inherit
@@ -493,8 +510,29 @@ dialog .x{{position:absolute;top:.4em;right:.5em;font-size:1.6em;line-height:1;
 a.tab-label{{text-decoration:none;color:#555}}
 a.tab-label:hover{{color:#196B24}}
 .tab-label.tab-active{{color:#196B24;border-bottom-color:#196B24;font-weight:bold}}
+/* A FRAME OWNS ITS OWN INNER EDGES. Whatever a card begins or ends
+   with -- an <h2>, a <p> (16px), a <label> (9.6px), an <input> (3.2px) --
+   contributes no margin of its own there, so every frame on the site
+   starts and ends at exactly its 1em padding. Without this the gap under
+   a frame's top border was whatever its first element happened to carry,
+   which is how two frames on the same page came out 16px and 36px
+   (measured, 2026-08-27). Applies to all 27 cards, not the two that were
+   reported. */
+.card > :first-child{{margin-top:0}}
+.card > :last-child{{margin-bottom:0}}
 .card > h2:first-child,.card-head h2{{margin:0 0 .6em;font-size:1.3em;
   border-bottom:2px solid #196B24;padding-bottom:.25em;display:inline-block}}
+/* ONE gap between a frame's title and whatever it holds, wherever the
+   title is an <h2> or a row of tabs: .6em, owned by the title, and the
+   first thing under it contributes nothing of its own. Left to each
+   child, the two frames on /my came out at 16px and 6px -- the title's
+   .6em plus a course row's own .4em in one, a tab panel's padding plus
+   an input's margin in the other. A gap belongs to the thing above it,
+   or it is the sum of two decisions nobody made together. */
+.card > h2:first-child + *,
+.tab-panel > :first-child,
+.tab-panel > .table-tools:first-child > :first-child{{margin-top:0}}
+.tab-panel{{padding-top:0}}
 /* A frame's title row when it also carries a link on the right. */
 .card-head{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;
   gap:1em}}
