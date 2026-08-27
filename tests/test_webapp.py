@@ -3777,7 +3777,7 @@ class BookingFlowTest(unittest.TestCase):
         # touching app/cancellation.py at all.
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
-        (Path(tmpdir.name) / "cancel_email.txt").write_text("CUSTOM WORDING -- {{intro}} -- {{details}}")
+        (Path(tmpdir.name) / "cancel_email.txt").write_text("CUSTOM WORDING -- {{$intro}} -- {{$details}}")
         self.app.settings = dataclasses.replace(self.settings, email_templates_folder=tmpdir.name)
         user, environ = self._login_as_guest("regular@example.org")
         self._book("regular@example.org", name="Regular")
@@ -6259,3 +6259,49 @@ class _NoConflictEngine:
 
     def blocker_kinds_in_window(self, course, first_date, last_date):
         return {}
+
+
+class OverlayOffersOnlyUnbookedDatesTest(unittest.TestCase):
+    """/my's booking overlay built its own occurrence list and skipped the
+    filter that hides dates the guest already holds, so one date showed
+    TWICE -- as a pickable box AND as a "Booked" badge (2026-08-27, from a
+    screenshot of the live site). Both pages go through
+    _bookable_occurrences now; this pins that they agree."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.course = make_course(shortname="yoga-class-1", weekday="sat")
+        self.settings = make_settings(courses=(self.course,))
+        self.app = App(self.settings, self.store)
+        self.user = self.store.upsert_user_for_booking("book@example.org", "B")
+        self.store.set_password(self.user.user_id, "h", "s")
+        self.app._conflict_engine = lambda: _NoConflictEngine()
+        self.app._sync = lambda *a, **kw: None
+        self.env = {"HTTP_COOKIE":
+                    f"session={webapp._new_session({'kind': 'guest', 'user_id': self.user.user_id})}"}
+
+    def _first_date(self) -> str:
+        return self.app._bookable_occurrences(self.course, None)[0].date.isoformat()
+
+    def test_a_booked_date_is_offered_by_neither_page(self):
+        booked = self._first_date()
+        self.store.add_registration_checking_capacity(
+            self.course.shortname, booked, self.user.user_id, "hash", self.course.capacity)
+
+        overlay = self.app.my("GET", {**self.env, "QUERY_STRING": f"book={self.course.shortname}"})[2]
+        page = self.app.book("GET", self.course.shortname, self.env)[2]
+        for where, body in (("overlay", overlay), ("/book", page)):
+            with self.subTest(where=where):
+                # Present once, as the badge; never as a pickable box.
+                self.assertIn(f'<span class="d-date">{booked}</span>', body)
+                self.assertNotIn(f'value="{booked}"', body)
+
+    def test_an_unbooked_date_is_still_offered_by_both(self):
+        free = self._first_date()
+        overlay = self.app.my("GET", {**self.env, "QUERY_STRING": f"book={self.course.shortname}"})[2]
+        page = self.app.book("GET", self.course.shortname, self.env)[2]
+        for where, body in (("overlay", overlay), ("/book", page)):
+            with self.subTest(where=where):
+                self.assertIn(f'value="{free}"', body)

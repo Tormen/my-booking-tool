@@ -1170,6 +1170,39 @@ class App:
             )
         return self._conflict_engine_cache
 
+    def _bookable_occurrences(self, course: Course, logged_in_user):
+        """The dates to OFFER for `course` -- built, then filtered of the
+        ones this guest already holds.
+
+        The two halves belong together, and were not: /book built and
+        filtered, while /my's booking overlay built its own list and
+        skipped the filter, so a date the guest was already booked for
+        appeared TWICE there -- once as a pickable box and once as a
+        "Booked" badge (2026-08-27, from a screenshot of the live site).
+        A second caller had to remember a rule it could not see. Both go
+        through here now.
+
+        2026-07-11, why the filter exists at all: a guest already
+        confirmed for a date was still offered that exact date, and would
+        only be bounced by the double-booking guard on submit. It stays a
+        display-only convenience on top of an already-enforced rule --
+        has_active_registration() still runs on POST, for two tabs or a
+        stale cached page."""
+        def capacity_lookup(sn, d):
+            return self.store.count_confirmed(sn, d.isoformat())
+
+        occurrences = build_occurrences(
+            course, self.settings, datetime.now(timezone.utc), capacity_lookup,
+            self._conflict_checker(course, exclude_own=True),
+        )
+        if logged_in_user is None:
+            return occurrences
+        return [
+            o for o in occurrences
+            if not self.store.has_active_registration(
+                course.shortname, o.date.isoformat(), logged_in_user.user_id)
+        ]
+
     def _conflict_checker(self, course: Course, exclude_own: bool):
         """slots.build_occurrences-shaped closure (start, end) -> bool
         over the [[conflict_calendar]] engine -- True = date hidden. The
@@ -1661,13 +1694,7 @@ class App:
             if session and session.get("kind") == "guest" else None
         )
 
-        def capacity_lookup(sn, d):
-            return self.store.count_confirmed(sn, d.isoformat())
-
-        now = datetime.now(timezone.utc)
-        occurrences = build_occurrences(
-            course, self.settings, now, capacity_lookup, self._conflict_checker(course, exclude_own=True)
-        )
+        occurrences = self._bookable_occurrences(course, logged_in_user)
 
         # NOTE on canceled-entirely sessions (2026-07-14, verified live):
         # nothing extra to filter here -- "cancel entire session" PUTs a
@@ -1678,27 +1705,6 @@ class App:
         # path's own lookup (book() only accepts dates from this list),
         # so a stale/crafted POST gets the normal "no longer available"
         # error. Deleting the blocker in the calendar reopens the date.
-
-        # 2026-07-11: a real case showed a guest already `confirmed`
-        # for a date while /book/<shortname> still offered that
-        # exact date as a pickable option -- fixed so a date the guest is
-        # already booked+confirmed for is simply hidden here. A logged-in guest who already holds an active (confirmed
-        # or waitlisted -- same definition Store.has_active_registration
-        # already uses for the double-booking guard below/entry #85) spot
-        # for a given occurrence never needs to see that date offered
-        # again; they'd only get bounced by that exact guard if they tried.
-        # Filtered here, once, right after occurrences is built, so both
-        # the GET render and every POST error-retry render below (which all
-        # reuse this same `occurrences` list) agree -- no separate
-        # threading needed. This is a display-only convenience on top of
-        # an already-enforced rule, not a new safety boundary: the
-        # has_active_registration() check further down still runs
-        # regardless, for the rare case of two tabs/a stale cached page.
-        if logged_in_user is not None:
-            occurrences = [
-                o for o in occurrences
-                if not self.store.has_active_registration(shortname, o.date.isoformat(), logged_in_user.user_id)
-            ]
 
         return course, occurrences, banner, logged_in_user
 
@@ -3187,10 +3193,7 @@ class App:
         overlay = ""
         course = self.settings.course(wanted) if wanted else None
         if course is not None:
-            occurrences = build_occurrences(
-                course, self.settings, datetime.now(timezone.utc),
-                self.store.count_confirmed, self._conflict_checker(course, exclude_own=True),
-            )
+            occurrences = self._bookable_occurrences(course, user)
             # `open` on the server: the operator clicked this course, so
             # the page arrives with its overlay already up. No script is
             # involved, which is what keeps the CSP hash set untouched.
