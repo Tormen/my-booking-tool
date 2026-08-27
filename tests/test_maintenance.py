@@ -200,3 +200,33 @@ class ApplyBannerToFileTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MaintenanceKeepsThePageReadableTest(unittest.TestCase):
+    """Turning maintenance ON rewrites the live homepage, and nginx reads
+    it as another user.
+
+    2026-08-27, from a live 403: atomic_write_text defaults to mode 0640,
+    which is right for everything written into this tool's own data
+    directory and wrong for a file a web server has to read. The banner
+    went in correctly and made the whole site Forbidden."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.page = Path(self._tmp.name) / "index.html"
+        self.page.write_text("<html><body><h1>Hi</h1></body></html>", encoding="utf-8")
+        self.page.chmod(0o644)
+
+    def _mode(self) -> int:
+        return self.page.stat().st_mode & 0o777
+
+    def test_turning_it_on_leaves_the_page_world_readable(self):
+        maintenance.apply_banner_to_file(self.page, True, "a@example.org", "back soon")
+        self.assertIn("maintenance", self.page.read_text().lower())
+        self.assertEqual(self._mode(), 0o644, "nginx cannot read the page it must serve")
+
+    def test_turning_it_off_leaves_it_readable_too(self):
+        maintenance.apply_banner_to_file(self.page, True, "a@example.org")
+        maintenance.apply_banner_to_file(self.page, False, "a@example.org")
+        self.assertEqual(self._mode(), 0o644)

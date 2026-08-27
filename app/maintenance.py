@@ -210,5 +210,11 @@ def apply_banner_to_file(path: Path, enabled: bool, admin_email: str, message: s
     # the actual LIVE homepage nginx serves; a torn write here (unlike
     # the flag file above) has no fail-open fallback, so a crash
     # mid-write would leave a genuinely broken page. See app/atomic_io.py.
-    atomic_write_text(path, updated)
+    #
+    # public=True (2026-08-27, from a live 403): the default mode is 0640,
+    # which is right for everything this tool writes into its own data
+    # directory and WRONG for a file nginx has to read as another user.
+    # Turning maintenance ON took the whole site down with 403 Forbidden
+    # -- the page was rewritten correctly and then made unreadable.
+    atomic_write_text(path, updated, public=True)
     return True

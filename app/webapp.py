@@ -2572,7 +2572,7 @@ class App:
             # at is dead weight (the guest banner's `current` does the
             # same for its own links).
             + ("" if on_settings else
-               '<span><a href="/admin/settings">Edit Macros &amp; Courses</a></span>')
+               '<span><a href="/admin/settings">Macros &amp; Course Settings</a></span>')
             + f'<span><a href="{esc(self.settings.base_url)}">{esc(self._site_label())}</a></span>'
             + "</div>"
         )
