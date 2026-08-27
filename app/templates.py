@@ -373,7 +373,7 @@ td.actions .btn-row{display:flex;flex-wrap:wrap;gap:.4em;align-items:flex-start}
 .split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
   grid-template-rows:auto auto;align-items:stretch;column-gap:1.2em;row-gap:0;
   margin:.6em 0 .2em}
-@media (max-width:900px){.split{grid-template-columns:minmax(0,1fr)}
+@media (max-width:900px){.split{grid-template-columns:minmax(0,1fr)}}
 /* Same margins on both, overriding the block-label rule on the left one,
    and .2em to its box -- the same distance every other field has, which
    is the input's own margin. */

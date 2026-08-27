@@ -168,3 +168,40 @@ class GuestsSectionSeparatorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StylesheetIsWellFormedTest(unittest.TestCase):
+    """The stylesheet ships inside every page, so a single missing brace
+    silently swallows every rule after it.
+
+    That is exactly what happened (2026-08-27): porting the settings CSS
+    dropped the closing brace of an `@media (max-width:900px)` block, so
+    every rule below it applied ONLY under 900px -- on a desktop the site
+    rendered nearly unstyled. Nothing failed; there is no parser in the
+    test path, and the page still contained all the text a test looks
+    for."""
+
+    def _css(self) -> str:
+        from app.templates import _CSS
+        return _CSS
+
+    def test_braces_balance(self):
+        depth = 0
+        for n, line in enumerate(self._css().splitlines(), 1):
+            depth += line.count("{") - line.count("}")
+            self.assertGreaterEqual(depth, 0, f"line {n} closes a brace that was never opened")
+        self.assertEqual(depth, 0, "a rule or at-rule is left open")
+
+    def test_nesting_never_goes_deeper_than_an_at_rule(self):
+        # One level for a rule, two inside @media/@keyframes. Three means
+        # a brace was missed somewhere above.
+        depth = 0
+        for n, line in enumerate(self._css().splitlines(), 1):
+            depth += line.count("{") - line.count("}")
+            self.assertLessEqual(depth, 2, f"line {n} nests too deep -- a brace is missing above")
+
+    def test_comments_never_reach_the_page(self):
+        from app.templates import page
+        html = page("t", "<p>x</p>")
+        style = html[html.index("<style>"):html.index("</style>")]
+        self.assertNotIn("/*", style)
