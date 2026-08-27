@@ -127,7 +127,13 @@ echo "  it -- \`my-bt admin health\` covers those files after install."
 # afterwards to count the skips. PIPESTATUS would be the obvious way to
 # get the suite's own exit status through the pipe, but that is a
 # bashism and %check runs under /bin/sh -e -- the status file is POSIX.
-{ python3 -m unittest discover 2>&1; echo $? > unittest-status; } | tee unittest-output.log
+# `set +e` INSIDE the group: rpm runs %check with errexit, so a failing
+# suite aborted this group before `echo $?` could record the status --
+# the file was then missing, `cat` failed, and the expected-skips guard
+# below never ran at all. The build did stop, but for the wrong reason
+# and without the check that explains why.
+{ set +e; python3 -m unittest discover 2>&1; echo $? > unittest-status; set -e; } \
+  | tee unittest-output.log
 test_status=$(cat unittest-status)
 [ "$test_status" -eq 0 ] || exit "$test_status"
 
