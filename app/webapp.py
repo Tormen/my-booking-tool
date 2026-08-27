@@ -1564,6 +1564,8 @@ class App:
             return self.admin_settings(method, environ)
         if path == "/admin/settings/macro":
             return self.admin_settings_macro(method, environ)
+        if path == "/admin/settings/course":
+            return self.admin_settings_course(method, environ)
         if m := re.fullmatch(r"/admin/cancel/([0-9a-fA-F-]+)", path):
             return self.admin_cancel(method, m.group(1), environ)
         if m := re.fullmatch(r"/admin/reinstate/([0-9a-fA-F-]+)", path):
@@ -5753,12 +5755,21 @@ class App:
         return macros_frame + courses_frame + data + _SETTINGS_SCRIPT
 
     def _course_form_html(self, course) -> str:
-        """One course, read-only for now except its macros preview: the
-        SAVE path for course fields lands with the shortname migration
-        (it rewrites stored data, so it is not a plain field save)."""
         chips = self._macro_chips_html(rich_ok=False)
         rich_chips = self._macro_chips_html(rich_ok=True)
+        weekdays = "".join(
+            f'<option value="{w}"{" selected" if w == course.weekday else ""}>'
+            f"{w.capitalize()}</option>"
+            for w in Course.WEEKDAYS
+        )
+        audience = "".join(
+            f'<option{" selected" if a == course.audience else ""}>{a}</option>'
+            for a in ("private", "public")
+        )
+        cc = ", ".join(course.host_calendar_entry_cc_list)
         return f"""
+      <form method="post" action="/admin/settings/course" id="course-form">
+      <input type="hidden" name="old_shortname" value="{esc(course.shortname)}">
       <p class="course-head">
         <span class="when"><span class="wd">{esc(course.weekday_label()[:3])}</span>
           {esc(course.time_range_label())}</span>
@@ -5767,48 +5778,60 @@ class App:
                         "Changing it MOVES the existing data: every booking row and every "
                         "upcoming calendar event is rewritten to the new key.")}
         <span class="req">(required)</span>
-        <input class="big-input id-input" value="{esc(course.shortname)}" readonly></label>
+        <input class="big-input id-input sn-input" name="shortname"
+               value="{esc(course.shortname)}" required pattern="[a-z0-9][a-z0-9-]*"></label>
       <label>{self._lbl("Title", "title")}
-        <input class="big-input" value="{esc(course.title)}" readonly></label>
+        <input class="big-input" name="title" value="{esc(course.title)}" required></label>
       {chips}
       <label>{self._lbl("Location", "location")}
-        <input class="big-input" value="{esc(course.location)}" readonly></label>
+        <input class="big-input" name="location" value="{esc(course.location)}" required></label>
       {chips}
       <div class="field-row">
         <label>{self._lbl("Weekday", "weekday")}
-          <input class="lang-input" value="{esc(course.weekday)}" readonly></label>
+          <select name="weekday">{weekdays}</select></label>
         <label>{self._lbl("Start time", "start_time")}
-          <input class="lang-input" value="{esc(course.start_time)}" readonly></label>
+          <input type="time" name="start_time" value="{esc(course.start_time)}" required></label>
         <label>{self._lbl("Duration (min)", "duration")}
-          <input class="num-input" value="{course.duration_minutes}" readonly></label>
+          <input type="number" class="num-input" name="duration_minutes" min="5" max="600"
+                 value="{course.duration_minutes}" required></label>
         <label>{self._lbl("Capacity", "capacity")}
-          <input class="num-input" value="{course.capacity}" readonly></label>
+          <input type="number" class="num-input" name="capacity" min="1" max="999"
+                 value="{course.capacity}" required></label>
         <label>{self._lbl("Audience", "audience")}
-          <input class="lang-input" value="{esc(course.audience)}" readonly></label>
+          <select name="audience">{audience}</select></label>
         <label>{self._lbl("Order", "order")}
-          <input class="num-input" value="{course.order_in_all_courses}" readonly></label>
+          <input type="number" class="num-input" name="order_in_all_courses" min="0" max="999"
+                 value="{course.order_in_all_courses}"></label>
       </div>
       <label>{self._lbl("Subtitle", "subtitle")}
-        <span class="with-tag"><input class="big-input" value="{esc(course.subtitle or "")}"
-          placeholder="{esc(course.derived_subtitle())}" readonly>
+        <span class="with-tag"><input class="big-input" name="subtitle"
+          value="{esc(course.subtitle or "")}"
+          placeholder="{esc(course.derived_subtitle())}">
           <span class="auto-tag">auto-generated</span></span></label>
       {chips}
       <div class="split">
-        <label class="split-head">{self._lbl("Description", "description")}</label>
+        <label class="split-head" for="course-description">
+          {self._lbl("Description", "description")}</label>
         <div class="split-head preview-head">Preview</div>
         <div class="split-half">
-          <textarea class="big-input desc-input" rows="10" readonly>{esc(course.description)}</textarea>
+          <textarea class="big-input desc-input" id="course-description" name="description"
+                    rows="10">{esc(course.description)}</textarea>
         </div>
         <div class="split-half">
           <div class="description preview-body"></div>
-          <p class="hint sanitize-note" hidden></p>
         </div>
       </div>
       <div class="split-foot">{rich_chips}</div>
-      <p class="hint">Editing a course from here lands with the shortname migration -- the
-        fields are shown read-only until then. Saving writes
-        <code>settings.web-editable.toml</code>; <code>settings.toml</code>, which holds the
-        credentials, is never written from here.</p>"""
+      <label>{self._lbl("Calendar invite cc", "cc")}
+        <span class="note">(comma-separated)</span>
+        <input class="big-input" name="cc" value="{esc(cc)}" readonly></label>
+      <div class="submit-row">
+        <button type="submit">Save this course</button>
+        <span class="note">Writes <code>settings.web-editable.toml</code>; live on the next
+          page load. <code>settings.toml</code>, which holds the credentials, is never
+          written from here.</span>
+      </div>
+      </form>"""
 
     def _macro_chips_html(self, *, rich_ok: bool) -> str:
         if not self.settings.macros:
@@ -5911,8 +5934,164 @@ class App:
             note += " -- removed: " + ", ".join(clean.dropped)
         return self._settings_redirect(self._save_settings(table, self.settings.courses), note)
 
-    def _settings_redirect(self, error: str | None, message: str = ""):
+    _COURSE_FIELDS = (
+        # (form field, Course attribute, kind) -- kind decides parsing and
+        # nothing else, so adding a field is one line here.
+        ("title", "title", "text"),
+        ("location", "location", "text"),
+        ("location_url", "location_url", "text"),
+        ("weekday", "weekday", "weekday"),
+        ("start_time", "start_time", "time"),
+        ("duration_minutes", "duration_minutes", "int"),
+        ("capacity", "capacity", "int"),
+        ("audience", "audience", "audience"),
+        ("language", "language", "text"),
+        ("order_in_all_courses", "order_in_all_courses", "int"),
+        ("subtitle", "subtitle", "text"),
+        ("description", "description", "rich"),
+    )
+
+    def _defined_in_locked_file(self, shortname: str) -> bool:
+        """Is this course a [[course]] block in settings.toml itself?"""
+        try:
+            raw = config.load_raw_toml(self.settings_path) or {}
+        except (OSError, ValueError):
+            # Unreadable means unknown, and unknown must not authorise a
+            # rename that could leave two courses behind.
+            return True
+        return any(c.get("shortname") == shortname for c in raw.get("course", []))
+
+    def admin_settings_course(self, method: str, environ):
+        """Save ONE course. A shortname change is a migration, not a
+        field edit, and is handled as one below."""
+        ok, error_response = self._settings_gate(environ)
+        if not ok:
+            return error_response
+        if method != "POST":
+            return "405 Method Not Allowed", [("Allow", "POST")], ""
+        form = self._read_form(environ)
+        old_shortname = form.get("old_shortname", "").strip()
+        course = self.settings.course(old_shortname)
+        if course is None:
+            return self._settings_redirect(f"no course called {old_shortname}")
+
+        changes: dict[str, object] = {}
+        for field, attr, kind in self._COURSE_FIELDS:
+            if field not in form:
+                continue
+            raw = form[field].strip() if kind != "rich" else form[field]
+            try:
+                changes[attr] = self._parse_course_field(kind, raw)
+            except ValueError as exc:
+                return self._settings_redirect(f"{field}: {exc}", tab=old_shortname)
+
+        dropped: list[str] = []
+        if "description" in changes:
+            clean = macros.sanitize(str(changes["description"]))
+            changes["description"] = clean.html
+            dropped = clean.dropped
+        for attr in ("title", "location", "subtitle"):
+            if attr in changes:
+                used = macros.names_used(str(changes[attr]), macros.SYSTEM)
+                if used:
+                    return self._settings_redirect(
+                        f"{{{{!{used[0]}}}}} reads settings.toml and cannot be used here",
+                        tab=old_shortname)
+
+        new_shortname = form.get("shortname", "").strip()
+        renaming = bool(new_shortname) and new_shortname != old_shortname
+        if renaming:
+            # A course defined in settings.toml cannot be renamed from
+            # here, and the reason is the split itself: the console
+            # cannot write that file, so the old block would stay and the
+            # course would exist TWICE -- once under each name. Editing
+            # its other fields is fine (the editable copy wins per
+            # shortname); only the key cannot move.
+            if self._defined_in_locked_file(old_shortname):
+                return self._settings_redirect(
+                    f"{old_shortname} is defined in settings.toml, which is not written from "
+                    f"here -- rename it there, or use `my-bt admin rename-course`",
+                    tab=old_shortname)
+            if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", new_shortname):
+                return self._settings_redirect(
+                    "a shortname is lowercase letters, digits and hyphens",
+                    tab=old_shortname)
+            if self.settings.course(new_shortname) is not None:
+                return self._settings_redirect(
+                    f"there is already a course called {new_shortname}", tab=old_shortname)
+            changes["shortname"] = new_shortname
+
+        updated = replace(course, **changes)
+        courses = tuple(updated if c.shortname == old_shortname else c
+                        for c in self.settings.courses)
+        error = self._save_settings(dict(self.settings.macros), courses)
+        if error:
+            return self._settings_redirect(error, tab=old_shortname)
+
+        note = f"{updated.shortname} saved"
+        if dropped:
+            note += " -- removed: " + ", ".join(dropped)
+        if renaming:
+            moved, calendar_note = self._migrate_shortname(old_shortname, new_shortname)
+            note = (f"{old_shortname} is now {new_shortname}: {moved} booking(s) moved"
+                    f"{calendar_note}")
+        return self._settings_redirect(None, note, tab=updated.shortname)
+
+    @staticmethod
+    def _parse_course_field(kind: str, raw: str):
+        if kind == "int":
+            if not raw.isdigit():
+                return int(raw)          # raises ValueError, which the caller reports
+            return int(raw)
+        if kind == "weekday":
+            if raw not in Course.WEEKDAYS:
+                raise ValueError(f"{raw!r} is not a weekday")
+            return raw
+        if kind == "time":
+            if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", raw):
+                raise ValueError(f"{raw!r} is not a HH:MM time")
+            return raw
+        if kind == "audience":
+            if raw not in ("private", "public"):
+                raise ValueError(f"{raw!r} is not private or public")
+            return raw
+        return raw
+
+    def _migrate_shortname(self, old_shortname: str, new_shortname: str):
+        """Move the DATA behind a renamed course.
+
+        The settings change alone would leave every booking and every
+        synced calendar event pointing at a key nothing uses any more:
+        the shortname is in the course_shortname column of each
+        registration row and baked into each calendar event's UID. Both
+        halves are the same operation `my-bt admin rename-course`
+        already performs -- reused rather than reimplemented, so the CLI
+        and the console can never drift on what a rename means.
+
+        The calendar half is best-effort: a booking row that has moved
+        but an event that has not is a stale entry in the operator's own
+        calendar, which is visible and fixable. Failing the save after
+        the rows have moved would leave the config and the data
+        disagreeing, which is not."""
+        moved = self.store.rename_course_shortname(old_shortname, new_shortname)
+        try:
+            from .calendar_sync import resync_after_course_rename
+
+            href = self._href(self.settings.booking_calendar)
+            resynced = resync_after_course_rename(
+                self._client(), href, self.store, self.settings,
+                old_shortname, new_shortname,
+            )
+            return moved, f", {resynced} calendar event(s) re-created"
+        except Exception as exc:  # noqa: BLE001 -- see the docstring
+            log.error("course renamed but the calendar was not updated: %s", exc)
+            return moved, (" -- the CALENDAR still holds events under the old name: "
+                           "run `my-bt admin rename-course` to finish that half")
+
+    def _settings_redirect(self, error: str | None, message: str = "", tab: str = ""):
         params = {}
+        if tab:
+            params["tab"] = tab
         if error:
             params["err"] = error
         elif message:
