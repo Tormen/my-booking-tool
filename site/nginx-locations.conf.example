@@ -301,6 +301,24 @@ server {
     }
 
     ############################################################
+    # When the app cannot answer
+    ############################################################
+    #
+    # A stopped service (a deploy) or a crashed one makes every proxied
+    # location below return nginx's stock "502 Bad Gateway" -- which tells
+    # a guest nothing, and reads as "your booking is gone". This serves a
+    # written page instead, with no script and no external asset: it is
+    # shown exactly when the application is unavailable, so it must depend
+    # on nothing but nginx and itself.
+    #
+    # `internal` keeps it un-linkable: it is reachable only as an error
+    # page, never as a URL someone can visit or a search engine can index.
+    error_page 502 503 504 /unavailable.html;
+    location = /unavailable.html {
+        internal;
+    }
+
+    ############################################################
     # Proxied booking app (Python, listening on 127.0.0.1:8811)
     ############################################################
     #

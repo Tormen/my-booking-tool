@@ -786,6 +786,7 @@ _OVERLAY_REAL_FILES = (
     ("site/index.html", True),
     ("site/impressum.html", True),
     ("site/terms.html", True),
+    ("site/unavailable.html", True),
     ("site/privacy.html.tmpl", True),
     ("site/nginx-locations.conf", True),
     ("site/privacy.html", False),
@@ -1228,7 +1229,12 @@ def check_watchdog_nginx_access_log_config(raw: dict) -> list[Check]:
 # Pages this tool never templates/generates (unlike privacy.html -- see
 # check_static_site_drift) but that still benefit from knowing whether the
 # LIVE deployed copy matches what's in the checkout.
-_STATIC_PAGES_TO_DEPLOY = ("index.html", "impressum.html", "terms.html")
+# unavailable.html joins these (2026-08-28): nginx serves it as the
+# error page for a stopped or crashed app, so it has to BE there
+# before the app is stopped -- a deploy is exactly when it is
+# needed and exactly when nobody can add it.
+_STATIC_PAGES_TO_DEPLOY = ("index.html", "impressum.html", "terms.html",
+                           "unavailable.html")
 
 
 def check_static_pages_reachable(raw: dict) -> list[Check]:

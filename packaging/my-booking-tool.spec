@@ -303,7 +303,7 @@ install -m 644 LICENSE %{buildroot}%{_docdir}/%{name}/LICENSE
 # packaging the %doc reference copy unconditionally doesn't opt anyone
 # into anything.
 install -d %{buildroot}%{_docdir}/%{name}/site
-install -m 644 site/index.html site/privacy.html site/terms.html site/impressum.html site/index_embedded.html %{buildroot}%{_docdir}/%{name}/site/
+install -m 644 site/index.html site/privacy.html site/terms.html site/impressum.html site/index_embedded.html site/unavailable.html %{buildroot}%{_docdir}/%{name}/site/
 
 %pre
 getent group my-booking >/dev/null || groupadd -r my-booking
@@ -501,6 +501,7 @@ exit 0
 %doc %{_docdir}/%{name}/site/terms.html
 %doc %{_docdir}/%{name}/site/impressum.html
 %doc %{_docdir}/%{name}/site/index_embedded.html
+%doc %{_docdir}/%{name}/site/unavailable.html
 
 %changelog
 # REPLACE-ME (forks): use your own name/email on entries for your own real

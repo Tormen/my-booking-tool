@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Booking is offline for a moment</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<style>
+/* No script and no external asset: this page is served precisely when
+   the application cannot answer, so it must depend on nothing but
+   nginx and itself. */
+body { font-family: sans-serif; color: #222; max-width: 40em;
+       margin: 4em auto; padding: 0 1.5em; line-height: 1.5; }
+h1 { font-size: 1.6em; margin-bottom: .3em; }
+.box { background: #fff3cd; border: 1px solid #f0ad4e; border-left-width: 6px;
+       border-radius: 8px; padding: 1em 1.2em; margin: 1.5em 0; }
+a { color: #196B24; }
+p.small { color: #555; font-style: italic; }
+</style>
+</head><body>
+<h1>Booking is offline for a moment</h1>
+<div class="box">
+  <p><b>Nothing is wrong with your booking.</b> Everything already booked
+     stays booked, and the confirmation email you have keeps working --
+     including its cancel link.</p>
+</div>
+<p>The booking pages are being updated and will be back shortly. Please
+   try again in a few minutes.</p>
+<p class="small">If it is still offline in an hour, write to
+   <a href="mailto:REPLACE-ME-ADMIN-EMAIL">REPLACE-ME-ADMIN-EMAIL</a>.</p>
+<p><a href="/">Back to the homepage</a></p>
+</body></html>

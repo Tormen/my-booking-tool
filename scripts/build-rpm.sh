@@ -107,7 +107,7 @@ tar -C "$HERE" --exclude='./data' --exclude='./secrets' --exclude='./.git' \
 # matter how complete this SOURCE checkout's copy was.
 for real in settings.toml site/index.html site/impressum.html site/terms.html \
             site/privacy.html site/privacy.html.tmpl site/index_embedded.html \
-            site/nginx-locations.conf; do
+            site/unavailable.html site/nginx-locations.conf; do
   # -p (preserve mtime) on both copies: app/version.py's SOURCE_STAMP is
   # the newest mtime across the staged source, so a plain `cp` -- which
   # stamps the copy with the CURRENT time -- would quietly turn that back

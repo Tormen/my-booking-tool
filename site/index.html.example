@@ -54,10 +54,13 @@
 <style>
  body { max-width: 760px; margin: 2em auto; padding: 0 1em; font-family: sans-serif; }
  footer { margin-top: 3em; font-size: 0.85em; color: #666; }
- /* A float, not a flex row: it sits under the exceptions banner and
-    still costs no height, so the heading below does not move down
-    when either is present. */
- .top-bar { float: right; margin-left: 1em; }
+ /* A row that takes NO height: it sits in normal flow right after the
+   exceptions banner (so the button is below the red bar, never on it),
+   its content overflows downward in front of what follows, and because
+   it is a block rather than a float it does not narrow the line boxes
+   beside it -- which is what made the centred <h1> drift left when this
+   was a float (2026-08-27, spotted from a screenshot). */
+.top-bar { height: 0; text-align: right; position: relative; z-index: 1; }
  .login-btn { font-size: 0.85em; padding: 0.3em 0.9em; border: 1px solid #ccc; border-radius: 4px;
               text-decoration: none; color: #222; }
  .login-btn:hover { background: #f4f7f4; }
