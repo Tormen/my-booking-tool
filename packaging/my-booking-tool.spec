@@ -347,6 +347,16 @@ fi
 exit 0
 
 %post
+# Stale bytecode from a PREVIOUS install (2026-08-28, seen live: `my-bt
+# --version` kept printing 1.1.0 while /opt/my-booking/app/version.py
+# said 1.2.0). The package ships no __pycache__ -- build-rpm.sh excludes
+# it -- but Python writes one at RUNTIME, into a directory rpm owns,
+# with files rpm does NOT own and therefore never removes on upgrade. A
+# hash-based .pyc is trusted without re-reading its source, so the old
+# module can outlive the new one indefinitely. Clearing it here costs one
+# recompile on the first request and removes the whole class of "the code
+# is new but the behaviour is old".
+find /opt/my-booking -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || :
 chown -R my-booking:my-booking %{_sharedstatedir}/my-booking /etc/my-booking
 chmod 750 %{_sharedstatedir}/my-booking
 chmod 700 /etc/my-booking/secrets

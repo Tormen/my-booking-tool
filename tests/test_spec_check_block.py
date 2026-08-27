@@ -151,3 +151,40 @@ class VersionIsWrittenOnceTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PostRemovesStaleBytecodeTest(unittest.TestCase):
+    """%post clears __pycache__ under /opt/my-booking.
+
+    2026-08-28, from the live server: `my-bt --version` reported 1.1.0
+    while the installed app/version.py said 1.2.0. The package ships no
+    bytecode -- build-rpm.sh excludes __pycache__ -- but Python writes it
+    at RUNTIME into a directory rpm owns, as files rpm does not own and
+    so never removes on upgrade. A hash-based .pyc is trusted without
+    re-reading its source, so an old module can outlive the new one for
+    good. The symptom was cosmetic here; the same mechanism can serve
+    stale CODE."""
+
+    def _spec(self) -> str:
+        from pathlib import Path
+        return (Path(__file__).resolve().parent.parent
+                / "packaging" / "my-booking-tool.spec").read_text()
+
+    def test_post_clears_it(self):
+        post = self._spec().split("%post", 1)[1].split("%preun", 1)[0]
+        self.assertIn("__pycache__", post)
+        self.assertIn("/opt/my-booking", post)
+
+    def test_it_runs_before_anything_that_could_import_the_app(self):
+        # Order matters: daemon-reload and the service restart come after,
+        # so the first import already sees a clean directory.
+        post = self._spec().split("%post", 1)[1].split("%preun", 1)[0]
+        self.assertLess(post.index("__pycache__"), post.index("systemctl daemon-reload"))
+
+    def test_the_build_still_excludes_it_from_the_package(self):
+        # Belt and braces: %post cleans what runtime leaves behind, and
+        # the tarball never carries any in the first place.
+        from pathlib import Path
+        build = (Path(__file__).resolve().parent.parent
+                 / "scripts" / "build-rpm.sh").read_text()
+        self.assertIn("--exclude='./app/__pycache__'", build)
