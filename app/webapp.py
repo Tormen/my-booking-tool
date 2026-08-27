@@ -556,8 +556,17 @@ def _record_page_view(environ, path: str) -> None:
     already stores `expires` (set once, at _new_session() time, to
     now + SESSION_TTL_SECONDS) -- `expires - SESSION_TTL_SECONDS` IS the
     creation time, exactly, with no extra bookkeeping. See
-    internal_status() (App, below) for the one place that math happens."""
-    session = _get_session(environ)
+    internal_status() (App, below) for the one place that math happens.
+
+    WHICH session gets the credit is decided by the PATH (2026-08-28): a
+    browser can now hold a guest and an admin session at once, and asking
+    for "a session" returned the guest one for every request -- so an
+    admin page view was recorded against the guest, and the admin session
+    showed "(none yet)" while plainly being in use. The path is what
+    routing itself dispatches on, so it is the honest answer to "who is
+    this request for"."""
+    kind = "admin" if path == "/admin" or path.startswith("/admin/") else "guest"
+    session = _get_session(environ, kind)
     if session is None:
         return
     sid = session["_sid"]

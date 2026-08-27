@@ -401,3 +401,42 @@ class UnsavedChangesTest(unittest.TestCase):
                 self.assertNotIn("evil", dict(headers)["Location"])
                 self.assertNotIn("javascript", dict(headers)["Location"])
                 self.assertTrue(dict(headers)["Location"].startswith("/admin/settings"))
+
+
+class PageViewGoesToTheRightSessionTest(unittest.TestCase):
+    """Activity is recorded against the session the request is FOR.
+
+    2026-08-28, from `my-bt admin sessions` on the live server: a guest
+    session listed "/admin/settings" as its last page, while the admin
+    session next to it said "(none yet)" -- during the very minutes that
+    admin page was being used. Splitting the cookies let a browser hold
+    both, and the recorder asked for "a session", which returns the guest
+    one. The path decides now, exactly as routing does."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.app = App(make_settings(courses=(make_course(shortname="yoga"),)), self.store)
+        user = self.store.upsert_user_for_booking("both@example.org", "Both")
+        self.guest = webapp._new_session({"kind": "guest", "user_id": user.user_id})
+        self.admin = webapp._new_session({"kind": "admin"})
+        self.addCleanup(webapp.SESSIONS.pop, self.guest, None)
+        self.addCleanup(webapp.SESSIONS.pop, self.admin, None)
+        self.env = {"HTTP_COOKIE": f"session={self.guest}; admin_session={self.admin}"}
+
+    def test_an_admin_page_credits_the_admin_session(self):
+        webapp._record_page_view(self.env, "/admin/settings")
+        self.assertEqual(webapp.SESSIONS[self.admin].get("last_page"), "/admin/settings")
+        self.assertIsNone(webapp.SESSIONS[self.guest].get("last_page"))
+
+    def test_a_guest_page_credits_the_guest_session(self):
+        webapp._record_page_view(self.env, "/my")
+        self.assertEqual(webapp.SESSIONS[self.guest].get("last_page"), "/my")
+        self.assertIsNone(webapp.SESSIONS[self.admin].get("last_page"))
+
+    def test_a_path_merely_starting_with_admin_is_not_an_admin_page(self):
+        # /administration-guide would otherwise be credited to the admin.
+        webapp._record_page_view(self.env, "/administrivia")
+        self.assertEqual(webapp.SESSIONS[self.guest].get("last_page"), "/administrivia")
+        self.assertIsNone(webapp.SESSIONS[self.admin].get("last_page"))
