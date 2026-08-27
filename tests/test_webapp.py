@@ -1,4 +1,6 @@
+import base64
 import dataclasses
+import hashlib
 import io
 import json
 import re
@@ -11,7 +13,7 @@ from http import cookies
 from unittest.mock import patch
 from urllib.parse import urlencode
 
-from app import maintenance, webapp
+from app import date_overrides, maintenance, webapp
 from app.caldav_client import CalDAVClient, Response
 from app.config import CourseDateOverride
 from app.erasure import erase_user_by_email
@@ -1598,8 +1600,27 @@ class MySettingsTest(unittest.TestCase):
         self.assertIn("new@example.org", body)
         user = self.store.find_user_by_email("regular@example.org")
         self.assertEqual(user.email, "regular@example.org")  # unchanged by GET
-        # 2026-07-11: audit of every single-submit-button direct-link page.
-        self.assertIn('href="/" class="link-button">Never mind</a>', body)
+        # 2026-08-27: the second button was a "Never mind" LINK that
+        # navigated home and left the pending change standing -- although
+        # the reason for pressing it is "I did not request this". It is a
+        # real cancel now, with a footnote saying so.
+        self.assertIn('value="cancel">Cancel (*)</button>', body)
+        self.assertIn("(*) in case this was not you", body)
+
+    def test_confirm_email_cancel_button_really_drops_the_pending_change(self):
+        user = self.store.upsert_user_for_booking("regular@example.org", "Regular")
+        token = new_token()
+        self.store.set_pending_email(
+            user.user_id, "new@example.org", hash_token(token), webapp.now_iso(),
+            cancel_token_hash=hash_token(new_token()),
+        )
+        body_bytes = urlencode({"action": "cancel"}).encode()
+        environ = {"CONTENT_LENGTH": str(len(body_bytes)), "wsgi.input": io.BytesIO(body_bytes)}
+        _s, _h, body = self.app.my_confirm_email("POST", token, environ)
+        after = self.store.find_user_by_id(user.user_id)
+        self.assertEqual(after.email, "regular@example.org", "the address must not change")
+        self.assertEqual(after.pending_email, "", "the pending change must be gone")
+        self.assertIn("has been canceled", body)
 
     def test_confirm_email_post_applies_change_and_emails_both_addresses(self):
         environ = self._login_environ("regular@example.org")
@@ -3960,7 +3981,8 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
-        self.assertIn("<td>Confirmed</td>", body)
+        # nowrap since 2026-08-27: Status/Course/Date must not wrap.
+        self.assertIn('<td class="nowrap">Confirmed</td>', body)
         self.assertNotIn("<td>confirmed</td>", body)
 
     def test_admin_overview_date_column_is_nowrap(self):
@@ -4057,8 +4079,14 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=past"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
-        self.assertIn("2026-01-01", body)
-        self.assertNotIn(self._other_occ_date(), body)
+        # Scoped to the Bookings box: since 2026-08-27 /admin also carries
+        # a Future Sessions box, which lists upcoming dates BY DESIGN --
+        # so a page-wide assertNotIn would now be asserting the opposite
+        # of what this feature is for. The scope selectors govern the
+        # registrations table, and that is what is checked here.
+        bookings = body.split("<h2>Future Sessions</h2>")[0]
+        self.assertIn("2026-01-01", bookings)
+        self.assertNotIn(self._other_occ_date(), bookings)
 
     def test_only_future_view_excludes_past_rows(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -4102,9 +4130,11 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         environ = {"HTTP_COOKIE": f"session={admin_sid}"}
         _status, _headers, body = self.app.admin_overview("GET", environ)
+        # 2026-08-27: three numbers now, on two scoped lines -- see
+        # cli_list.compute_times_booked.
         self.assertIn(
             '<th>Times booked<span class="sort-indicator"></span>'
-            '<span class="th-note">for now / total</span></th>',
+            '<span class="th-note">to-date / incl. this / total</span></th>',
             body,
         )
 
@@ -4142,7 +4172,40 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
-        self.assertIn("<td>1/2</td>", body)
+        # 2026-08-27: the cell now carries two scoped lines of three
+        # numbers -- to-date / including the session THIS row is about /
+        # total. Both sessions are the same course here, so the two lines
+        # agree: 1 has happened, 2 counting the future one, 2 in all.
+        self.assertIn("this course: 1/2/2", body)
+        self.assertIn("all courses: 1/2/2", body)
+
+    def test_admin_overview_times_booked_ignores_a_booking_cancelled_beforehand(self):
+        # 2026-08-27, operator's rule: these counts say how often someone
+        # actually stood at a session. A booking cancelled BEFORE its date
+        # never stood, so it must not count.
+        user, environ = self._login_as_guest("regular@example.org")
+        today = datetime.now(timezone.utc).date().isoformat()
+        self._import_past(user.user_id, today, "attended")
+        self._import_past(user.user_id, "2027-01-01", "dropped-out")
+        self.store.cancel("dropped-out", canceled_by="guest")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn("all courses: 1/1/1", body)
+
+    def test_a_booking_cancelled_after_its_session_still_counts(self):
+        # The other half of the same rule, and the reason the check cannot
+        # simply be "status == confirmed": erasing a guest force-cancels
+        # every booking they ever had, including ones they genuinely
+        # attended years ago. `canceled_at` is what lets the count ask
+        # whether it stood AT THE TIME rather than what it says today.
+        user, environ = self._login_as_guest("regular@example.org")
+        self._import_past(user.user_id, "2026-01-01", "attended-then-cancelled")
+        self.store.cancel("attended-then-cancelled", canceled_by="host")
+        admin_sid = webapp._new_session({"kind": "admin"})
+        admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
+        _status, _headers, body = self.app.admin_overview("GET", admin_environ)
+        self.assertIn("all courses: 1/1/1", body)
 
     def test_admin_overview_cancel_disabled_for_past_confirmed_booking(self):
         # 2026-07-08: a screenshot of /admin?past=1 showing an enabled
@@ -4308,12 +4371,15 @@ class BookingFlowTest(unittest.TestCase):
         admin_sid = webapp._new_session({"kind": "admin"})
         admin_environ = {"HTTP_COOKIE": f"session={admin_sid}", "QUERY_STRING": "scope=all"}
         _status, _headers, body = self.app.admin_overview("GET", admin_environ)
-        # times-booked column should show 1/1 (one up-to-now, one total),
-        # not 0/0, for the erased row -- see the "N/M" format's own comment
-        # on times_upto_now_by_user/times_total_by_user (2026-07-08).
+        # The erased row must still show its own history -- 1 attended, 1
+        # in total -- rather than 0, which is what a naive "skip cancelled
+        # rows" rule would have produced (2026-08-27: erasure force-cancels
+        # a guest's bookings, so the count has to ask whether the booking
+        # stood AT THE TIME, not what its status says today; see
+        # cli_list._rows_that_stood).
         row_start = body.index("[erased]")
-        row_html = body[row_start:row_start + 400]
-        self.assertIn("<td>1/1</td>", row_html)
+        row_html = body[row_start:row_start + 500]
+        self.assertIn("this course: 1/1/1", row_html)
 
     def _other_occ_date(self) -> str:
         """A second, distinct occurrence date for yoga-class-1 -- lets a
@@ -4381,11 +4447,17 @@ class BookingFlowTest(unittest.TestCase):
         # row's user_id is relabeled for display only, so there's no more
         # separate "[erased]"/hashed row shown for this email.
         self.assertNotIn("[erased]", body)
-        self.assertEqual(body.count(f"<td>{email}</td>"), 2)
-        # true combined "Times booked": 2 total (pre- + post-erasure), but
-        # only 1 up to today -- the post-erasure rebooking is for a FUTURE
-        # occurrence (_other_occ_date()), so it doesn't count yet.
-        self.assertIn("<td>1/2</td>", body)
+        # The address is a mailto link split before the "@" since
+        # 2026-08-27 -- count the link target, which is the whole
+        # address and unaffected by how it is displayed.
+        self.assertEqual(body.count(f'href="mailto:{email}"'), 2)
+        # 1/1/1: the pre-erasure session was attended (it was cancelled by
+        # the erasure only AFTER its date, so it still counts -- see
+        # cli_list._rows_that_stood), while the post-erasure re-booking is
+        # still PENDING CONFIRMATION and has therefore never stood. Both
+        # rows show the live account's own combined figure, which is the
+        # identity-merge this test is really about.
+        self.assertIn("this course: 1/1/1", body)
         # Nothing was actually written: the live account still only has ITS
         # OWN one row on disk, and the pre-erasure row is still archived.
         self.assertEqual(len(self.store.registrations_for_user(live_user.user_id)), 1)
@@ -4437,7 +4509,7 @@ class BookingFlowTest(unittest.TestCase):
         # Only ONE row survives for this course+date -- not two.
         regs = self.store.registrations_for_user(live_user.user_id)
         self.assertEqual(len(regs), 1)
-        self.assertEqual(body.count(f"<td>{email}</td>"), 1)
+        self.assertEqual(body.count(f'href="mailto:{email}"'), 1)
 
     def test_admin_overview_cancel_button_opens_dialog_with_reason_field(self):
         user, environ = self._login_as_guest("regular@example.org")
@@ -5214,7 +5286,8 @@ class BookingFlowTest(unittest.TestCase):
         for i, d in enumerate(["2027-01-01", "2027-02-01", "2027-03-01", "2027-04-01"]):
             self._import_past(user.user_id, d, f"future-{i}")
         _status, _headers, body = self.app.my("GET", environ)
-        self.assertIn("<h3>Upcoming</h3>", body)
+        # Upcoming is a TAB now, not an <h3> heading (2026-08-27).
+        self.assertIn('for="my-tab-upcoming">Upcoming</label>', body)
         for d in ["2027-01-01", "2027-02-01", "2027-03-01", "2027-04-01"]:
             self.assertIn(d, body)
 
@@ -5235,11 +5308,16 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, body = self.app.my("GET", environ)
         self.assertIn("You have no upcoming bookings.", body)
 
-    def test_my_page_has_new_booking_button_linking_to_courses(self):
+    def test_my_page_has_a_new_booking_frame_with_a_row_per_course(self):
+        # 2026-08-27: the single "New booking" button to /courses became a
+        # frame listing every course, each row opening that course's own
+        # booking form in an overlay -- one click less, and the guest sees
+        # the weekday and time before choosing.
         user, environ = self._login_as_guest("regular@example.org")
         _status, _headers, body = self.app.my("GET", environ)
-        self.assertIn('<a href="/courses">', body)
-        self.assertIn("New booking", body)
+        self.assertIn("<h2>New booking</h2>", body)
+        self.assertIn('href="/my?book=yoga-class-1"', body)
+        self.assertIn("course-pick", body)
 
     def test_my_page_no_longer_has_its_own_separate_homepage_link(self):
         # 2026-07-09: the ugly green
@@ -5283,7 +5361,8 @@ class BookingFlowTest(unittest.TestCase):
         # either button.
         user, environ = self._login_as_guest("regular@example.org")
         _status, _headers, body = self.app.my("GET", environ)
-        bottom = body.split("<h3>Past")[1]
+        # The Past table is a tab panel now, not an <h3> section.
+        bottom = body.split('id="my-panel-past"')[1]
         self.assertNotIn(">Log out<", bottom)
         self.assertNotIn("Delete my account", bottom)
         self.assertNotIn("delete-account-form", bottom)
@@ -5499,3 +5578,510 @@ class MyLoginAsAdminTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MyPageNewBookingFrameTest(unittest.TestCase):
+    """/my's "New booking" frame (2026-08-27, from the approved mockup):
+    a row per course, opening that course's REAL booking form in an
+    overlay -- server-rendered via ?book=<shortname>, so no script is
+    involved and the CSP hash set is untouched."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.course = make_course(shortname="yoga-class-1", weekday="wed", capacity=4)
+        self.settings = make_settings(courses=(self.course,), booking_calendar="Calendar")
+        self.app = App(self.settings, self.store)
+        self.app._conflict_checker = lambda course, exclude_own: (lambda s, e: False)
+        self.user = self.store.upsert_user_for_booking("m@example.org", "M")
+        self.store.set_password(self.user.user_id, "h", "s")
+        sid = webapp._new_session({"kind": "guest", "user_id": self.user.user_id})
+        self.environ = {"HTTP_COOKIE": f"session={sid}"}
+
+    def _page(self, query=""):
+        env = dict(self.environ)
+        env["QUERY_STRING"] = query
+        return self.app.my("GET", env)[2]
+
+    def test_a_row_per_course_leading_with_the_weekday_and_time(self):
+        body = self._page()
+        self.assertIn("<h2>New booking</h2>", body)
+        self.assertIn('href="/my?book=yoga-class-1"', body)
+        self.assertIn('class="when"', body)
+
+    def test_all_courses_stays_reachable(self):
+        # /courses had exactly ONE link in the whole app -- /my's old
+        # "New booking" button -- and replacing that button with this
+        # frame orphaned the page entirely (2026-08-27, the operator:
+        # "from where IS /courses reachable actually?"). The link is not
+        # navigation anyone needs (the frame lists every course); it is
+        # the page not being stranded.
+        body = self._page()
+        self.assertIn('<a href="/courses">All courses</a>', body)
+
+    def test_no_booking_form_is_built_until_a_course_is_asked_for(self):
+        # The /admin lesson, applied before it bites: building every
+        # course's form would mean every course's occurrence and conflict
+        # lookups on a page most people open just to read their bookings.
+        self.assertNotIn('class="book-dialog"', self._page())
+
+    def test_asking_for_a_course_opens_its_real_booking_form(self):
+        body = self._page("book=yoga-class-1")
+        self.assertIn('<dialog class="book-dialog" open>', body)
+        # The SAME markup /book/<shortname> serves -- not a copy of it.
+        self.assertIn('id="book-form"', body)
+        self.assertIn("add-guest-btn", body)
+        self.assertIn("book-agree", body)
+
+    def test_the_overlay_can_be_closed_without_script(self):
+        body = self._page("book=yoga-class-1")
+        self.assertIn('href="/my" aria-label="Close"', body)
+
+    def test_the_overlay_actually_floats(self):
+        # 2026-08-27, from a live screenshot: the panel rendered INLINE,
+        # in normal document flow. <dialog open> is NON-modal -- only
+        # showModal() puts a dialog in the top layer with a real
+        # ::backdrop, and that is a JS call this design avoids. The
+        # floating is therefore done in CSS, over a backdrop element that
+        # is itself a link back to /my so clicking outside closes it.
+        body = self._page("book=yoga-class-1")
+        self.assertIn('<a class="overlay-backdrop" href="/my"', body)
+        self.assertIn("dialog.book-dialog[open]{position:fixed", body)
+
+    def test_no_backdrop_element_without_an_open_overlay(self):
+        body = self._page()
+        self.assertNotIn('<a class="overlay-backdrop"', body)
+
+    def test_the_overlay_form_says_where_it_came_from(self):
+        body = self._page("book=yoga-class-1")
+        self.assertIn('name="from" value="my"', body)
+
+    def test_booking_from_the_overlay_shows_done_and_returns_to_my(self):
+        # The operator: "there should be a DONE visible for 3 seconds as
+        # overlay and then fade / disappear and bring you back to /my
+        # where you started."
+        occs = build_occurrences(
+            self.course, self.settings, datetime.now(timezone.utc),
+            lambda sn, d: 0, lambda start, end: False,
+        )
+        form = urlencode({
+            "occurrence_date": occs[0].date.isoformat(),
+            "name": "M", "email": "m@example.org", "agree": "on", "from": "my",
+        }).encode()
+        env = dict(self.environ)
+        env.update({"CONTENT_LENGTH": str(len(form)), "wsgi.input": io.BytesIO(form)})
+        self.app._sync = lambda *a, **k: None
+        with patch("app.webapp.send_mail"):
+            _s, _h, body = self.app.book("POST", "yoga-class-1", env)
+        self.assertIn(">Done</h2>", body)
+        self.assertIn('http-equiv="refresh" content="3;url=/my"', body)
+        self.assertIn('<div class="done-panel">', body)
+        # Cosmetic-fail-safe: a browser honouring neither the refresh nor
+        # the animation still gets a way back.
+        self.assertIn('<a href="/my">go now</a>', body)
+
+    def test_booking_from_the_ordinary_page_is_unchanged(self):
+        occs = build_occurrences(
+            self.course, self.settings, datetime.now(timezone.utc),
+            lambda sn, d: 0, lambda start, end: False,
+        )
+        form = urlencode({
+            "occurrence_date": occs[0].date.isoformat(),
+            "name": "M", "email": "m@example.org", "agree": "on",
+        }).encode()
+        env = dict(self.environ)
+        env.update({"CONTENT_LENGTH": str(len(form)), "wsgi.input": io.BytesIO(form)})
+        self.app._sync = lambda *a, **k: None
+        with patch("app.webapp.send_mail"):
+            _s, _h, body = self.app.book("POST", "yoga-class-1", env)
+        self.assertNotIn('http-equiv="refresh"', body)
+        # The ELEMENT, not the string: "done-panel" is also a CSS rule,
+        # and the stylesheet ships on every page (same trap as
+        # "tab-active" earlier today).
+        self.assertNotIn('<div class="done-panel">', body)
+
+    def test_an_unknown_course_just_shows_the_page(self):
+        body = self._page("book=no-such-course")
+        self.assertNotIn('class="book-dialog"', body)
+        self.assertIn("<h2>New booking</h2>", body)
+
+    def test_upcoming_and_past_are_tabs_of_one_frame(self):
+        body = self._page()
+        self.assertIn('id="my-tab-upcoming"', body)
+        self.assertIn('id="my-tab-past"', body)
+        # The tabs ARE the frame's title: no separate heading above them.
+        self.assertNotIn("<h2>My bookings</h2>", body)
+
+
+class AccountSettingsDraftTest(unittest.TestCase):
+    """/my/settings holds two things to change -- a name and an email --
+    and saving one used to silently discard whatever had been typed into
+    the other (2026-08-27, reported from the live site: type a new
+    address, press Save name, address gone).
+
+    Both fields now belong to ONE form with two submit buttons, so both
+    are always submitted, and the half that was not acted on is handed
+    back through the SESSION -- never the URL, where an email address
+    would end up in browser history, the next Referer and nginx's log."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.settings = make_settings(courses=(make_course(shortname="yoga-class-1"),))
+        self.app = App(self.settings, self.store)
+        self.user = self.store.upsert_user_for_booking("draft@example.org", "Old Name")
+        self.store.set_password(self.user.user_id, "hash", "salt")
+        sid = webapp._new_session({"kind": "guest", "user_id": self.user.user_id})
+        self.environ = {"HTTP_COOKIE": f"session={sid}"}
+
+    def _post(self, fn, form):
+        body = urlencode(form).encode()
+        env = dict(self.environ)
+        env.update({"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)})
+        return fn("POST", env)
+
+    def _page(self) -> str:
+        return self.app.my_settings("GET", self.environ)[2]
+
+    def test_saving_the_name_keeps_a_typed_but_unsent_email(self):
+        self._post(self.app.my_settings_name,
+                   {"name": "New Name", "email": "typed@example.org"})
+        body = self._page()
+        self.assertIn("typed@example.org", body)
+        self.assertIn('value="New Name"', body)
+
+    def test_a_rejected_email_change_keeps_both_fields(self):
+        # Making someone retype an address you just told them was wrong is
+        # the most annoying possible way to report it.
+        # The rejection page IS the response here (no redirect), so the
+        # kept fields must be asserted on THAT body -- a later GET would
+        # find the draft already consumed, which is by design.
+        _s, _h, body = self._post(
+            self.app.my_settings_email,
+            {"name": "Edited Name", "email": "draft@example.org"},
+        )
+        self.assertIn("draft@example.org", body)
+        self.assertIn('value="Edited Name"', body)
+
+    def test_the_draft_is_shown_once_and_then_gone(self):
+        self._post(self.app.my_settings_name,
+                   {"name": "New Name", "email": "typed@example.org"})
+        self.assertIn("typed@example.org", self._page())
+        self.assertNotIn("typed@example.org", self._page())
+
+    def test_both_fields_post_to_one_form(self):
+        # The mechanism itself: two <form>s cannot submit each other's
+        # fields, so if this ever goes back to separate forms the drafts
+        # above stop being possible at all.
+        body = self._page()
+        self.assertIn('id="settings-form"', body)
+        self.assertIn('form="settings-form"', body)
+        self.assertIn('formaction="/my/settings/email"', body)
+
+
+class FutureSessionsBoxTest(unittest.TestCase):
+    """/admin's Future Sessions box (2026-08-27): managing exceptional
+    dates, hiding a date, and cancelling a session from the console
+    instead of from settings.toml plus a calendar app."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.course = make_course(shortname="yoga-class-1", weekday="wed", capacity=4)
+        self.settings = make_settings(courses=(self.course,), booking_calendar="Calendar")
+        self.settings_path = Path(self._tmp.name) / "settings.toml"
+        self.app = App(self.settings, self.store, settings_path=str(self.settings_path))
+        self.app._sync = lambda *a, **kw: None
+        # No CalDAV in these tests: what is being checked is the console's
+        # own behaviour, and the blocker/conflict mechanics have their own
+        # coverage in test_conflict.py and test_calendar_sync.py.
+        self.blockers = []
+        self.app._href = lambda name: "/caldav/Calendar/"
+        self.app._conflict_engine = lambda: _NoConflictEngine()
+        self.sent = []
+        for target in ("app.webapp.send_mail", "app.cancellation.send_mail",
+                       "app.cancel_flow.send_mail"):
+            patcher = patch(target, side_effect=lambda settings, to, subject, body, **kw:
+                            self.sent.append((to, subject, body)))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.admin_environ = {
+            "HTTP_COOKIE": f"session={webapp._new_session({'kind': 'admin'})}"
+        }
+
+    def _next_wednesday(self) -> str:
+        d = self.app._today()
+        return (d + timedelta(days=(2 - d.weekday()) % 7 or 7)).isoformat()
+
+    def _post(self, fn, args, form):
+        body = urlencode(form).encode()
+        environ = dict(self.admin_environ)
+        environ.update({"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)})
+        return fn("POST", *args, environ)
+
+    # -- rendering -------------------------------------------------------
+
+    def test_the_box_lists_dates_beyond_the_bookable_horizon(self):
+        _s, _h, body = self.app.admin_overview("GET", self.admin_environ)
+        self.assertIn("<h2>Future Sessions</h2>", body)
+        self.assertIn("<h2>Bookings</h2>", body)
+        # 52 dates per course: 10 shown, 42 behind the disclosure -- far
+        # past show_next_slots, which is the point (you cannot cancel a
+        # date the page refuses to show you).
+        self.assertIn("Show the following 42 dates", body)
+
+    def test_the_action_buttons_are_wired_to_the_dialog_script(self):
+        # 2026-08-27, found from a live page where none of the three
+        # buttons did anything: _DIALOG_WIRING_SCRIPT binds by CLASS
+        # (.confirm-dialog-btn / .dialog-close-btn) and reads data-dialog
+        # only after that. A button carrying data-dialog alone is invisible
+        # to it, and fails silently -- no console error, nothing to see.
+        _s, _h, body = self.app.admin_overview("GET", self.admin_environ)
+        for prefix in ("time-", "hide-", "cancel-"):
+            with self.subTest(dialog=prefix):
+                opener = f'class="confirm-dialog-btn"'
+                self.assertIn(opener, body)
+                self.assertIn(f'data-dialog="{prefix}yoga-class-1-', body)
+        # Every dialog must also be closable, or the X is a dead end.
+        self.assertIn("dialog-close-btn", body)
+
+    def test_the_tab_is_the_shortname(self):
+        # 2026-08-27: tabs are LINKS now, not CSS radios -- a radio needs
+        # every course's panel in the DOM, which is what made this page
+        # 847 kB. The active one is a plain span; the others are links.
+        _s, _h, body = self.app.admin_overview("GET", self.admin_environ)
+        self.assertIn('<span class="tab-label tab-active">yoga-class-1</span>', body)
+
+    def test_only_the_selected_course_is_rendered(self):
+        _s, _h, body = self.app.admin_overview("GET", self.admin_environ)
+        # Count the ELEMENT, not the string: "tab-active" also appears
+        # in the stylesheet, which ships on every page.
+        self.assertEqual(body.count('class="tab-label tab-active"'), 1)
+
+    def test_the_extra_dates_are_fetched_on_demand(self):
+        # The drop-down became a link: its 42 dates and their dialogs are
+        # rendered only when asked for, which is the difference between a
+        # 56 kB page and a 211 kB one.
+        _s, _h, few = self.app.admin_overview("GET", self.admin_environ)
+        env = dict(self.admin_environ); env["QUERY_STRING"] = "more=1"
+        _s, _h, many = self.app.admin_overview("GET", env)
+        self.assertIn("more=1", few)
+        self.assertLess(len(few), len(many))
+        self.assertLess(few.count("<dialog"), many.count("<dialog"))
+
+    def test_no_new_inline_script_is_introduced(self):
+        # The whole feature is CSS-only tabs + pre-rendered dialogs
+        # precisely so the CSP hash set does not change. If this ever
+        # fails, the nginx confs need a new hash and this test is the
+        # reminder.
+        _s, _h, body = self.app.admin_overview("GET", self.admin_environ)
+        from app import cli_checks, site_render
+        known = set(cli_checks.expected_csp_hashes({}).values())
+        for script_body in site_render.extract_script_bodies(body):
+            digest = base64.b64encode(
+                hashlib.sha256(script_body.encode("utf-8")).digest()
+            ).decode()
+            self.assertIn("sha256-" + digest, known)
+
+    # -- change time -----------------------------------------------------
+
+    def test_setting_an_override_changes_the_time_everywhere(self):
+        occ = self._next_wednesday()
+        status, headers, _b = self._post(
+            self.app.admin_set_override, ("yoga-class-1", occ),
+            {"action": "set", "start_time": "09:45", "message": "earlier"},
+        )
+        self.assertEqual(status, "302 Found")
+        self.assertEqual(dict(headers)["Location"], "/admin?tab=yoga-class-1")
+        # Read back through the App's own settings, which is what every
+        # page, email and calendar event reads.
+        course = self.app.settings.course("yoga-class-1")
+        self.assertEqual(course.override_for(occ).start_time, "09:45")
+        self.assertEqual(course.override_message_for(occ), "earlier")
+
+    def test_the_override_is_recorded_with_its_origin_and_not_in_settings(self):
+        occ = self._next_wednesday()
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45"})
+        rows = date_overrides.OverrideStore(self._tmp.name).read_all()
+        self.assertEqual([r["origin"] for r in rows], [date_overrides.ORIGIN_ADMIN])
+        self.assertEqual([r["action"] for r in rows], [date_overrides.ACTION_SET])
+        self.assertFalse(self.settings_path.exists(),
+                         "the console must never create or write settings.toml here")
+
+    def test_removing_an_override_appends_a_row_and_restores_the_time(self):
+        occ = self._next_wednesday()
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45"})
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ), {"action": "remove"})
+        self.assertIsNone(self.app.settings.course("yoga-class-1").override_for(occ))
+        self.assertEqual(
+            [r["action"] for r in date_overrides.OverrideStore(self._tmp.name).read_all()],
+            [date_overrides.ACTION_SET, date_overrides.ACTION_REMOVE],
+        )
+
+    def test_a_bad_start_time_is_rejected_and_records_nothing(self):
+        occ = self._next_wednesday()
+        status, _h, _b = self._post(
+            self.app.admin_set_override, ("yoga-class-1", occ),
+            {"action": "set", "start_time": "25:99"},
+        )
+        self.assertTrue(status.startswith("400"))
+        self.assertEqual(date_overrides.OverrideStore(self._tmp.name).read_all(), [])
+
+    def test_booked_participants_are_told_and_the_host_gets_a_copy(self):
+        occ = self._next_wednesday()
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", occ, user.user_id, "tok-hash", self.course.capacity,
+        )
+        self.sent.clear()
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45"})
+        to_guest = [e for e in self.sent if e[0] == "guest@example.org"]
+        to_host = [e for e in self.sent if e[0] == self.settings.admin_email]
+        self.assertTrue(to_guest, "a booked participant must be told the time moved")
+        # "9h45", not "09h45": Course._fmt_hm pads the minutes, not the hour.
+        self.assertIn("9h45", to_guest[0][2])
+        self.assertTrue(to_host, "the host always gets their own copy")
+        self.assertIn("yoga-class-1", to_host[0][1])
+
+    def test_editing_only_the_message_does_not_announce_a_time_change(self):
+        # 2026-08-27, from a live email: editing only the note sent
+        # "The time of your session has changed", which had not happened.
+        # Worse than saying nothing -- the reader re-reads a time they
+        # already had and wonders what they missed.
+        occ = self._next_wednesday()
+        user = self.store.upsert_user_for_booking("g@example.org", "G")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", occ, user.user_id, "h", self.course.capacity)
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45", "message": "first note"})
+        self.sent.clear()
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45", "message": "second note"})
+        guest = [e for e in self.sent if e[0] == "g@example.org"]
+        self.assertTrue(guest)
+        self.assertNotIn("has changed. It now runs", guest[0][2])
+        self.assertIn("new note", guest[0][2])
+        self.assertIn("time is unchanged", guest[0][2])
+        host = [e for e in self.sent if e[0] == self.settings.admin_email]
+        self.assertTrue(host[0][1].startswith("Note changed:"), host[0][1])
+
+    def test_a_real_time_change_still_says_so(self):
+        occ = self._next_wednesday()
+        user = self.store.upsert_user_for_booking("g@example.org", "G")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", occ, user.user_id, "h", self.course.capacity)
+        self.sent.clear()
+        self._post(self.app.admin_set_override, ("yoga-class-1", occ),
+                   {"action": "set", "start_time": "09:45"})
+        guest = [e for e in self.sent if e[0] == "g@example.org"]
+        self.assertIn("has changed. It now runs", guest[0][2])
+
+    def test_nobody_booked_still_tells_the_host(self):
+        # "Nobody had to be told" is itself worth knowing.
+        self.sent.clear()
+        self._post(self.app.admin_set_override, ("yoga-class-1", self._next_wednesday()),
+                   {"action": "set", "start_time": "09:45"})
+        self.assertTrue([e for e in self.sent if e[0] == self.settings.admin_email])
+
+    # -- hide ------------------------------------------------------------
+
+    def test_hiding_a_date_writes_a_blocker_and_notifies_nobody(self):
+        occ = self._next_wednesday()
+        created = []
+        with patch("app.calendar_sync.create_hide_blocker",
+                   side_effect=lambda *a, **k: created.append(a)):
+            self.sent.clear()
+            status, headers, _b = self._post(
+                self.app.admin_hide_occurrence, ("yoga-class-1", occ), {"action": "hide"})
+        self.assertEqual(status, "302 Found")
+        self.assertTrue(created)
+        self.assertEqual(self.sent, [], "hiding must not email anyone")
+
+    def test_hiding_a_date_with_bookings_is_refused(self):
+        # The rule that makes "hidden" a state no booked guest can be
+        # caught by: once anyone is booked, cancelling is the only honest
+        # way to stop offering the date. Enforced here, not only by a
+        # disabled button in the markup.
+        occ = self._next_wednesday()
+        user = self.store.upsert_user_for_booking("guest@example.org", "Guest")
+        self.store.add_registration_checking_capacity(
+            "yoga-class-1", occ, user.user_id, "tok-hash", self.course.capacity,
+        )
+        created = []
+        with patch("app.calendar_sync.create_hide_blocker",
+                   side_effect=lambda *a, **k: created.append(a)):
+            status, _h, body = self._post(
+                self.app.admin_hide_occurrence, ("yoga-class-1", occ), {"action": "hide"})
+        self.assertTrue(status.startswith("409"))
+        self.assertIn("cancel the session instead", body)
+        self.assertEqual(created, [])
+
+    def test_unhiding_deletes_the_blocker(self):
+        deleted = []
+        with patch("app.calendar_sync.delete_hide_blocker",
+                   side_effect=lambda *a, **k: deleted.append(a)):
+            self._post(self.app.admin_hide_occurrence,
+                       ("yoga-class-1", self._next_wednesday()), {"action": "unhide"})
+        self.assertTrue(deleted)
+
+    # -- cancel ----------------------------------------------------------
+
+    def test_cancelling_uses_the_same_path_as_the_calendar_link(self):
+        # Same _cancel_occurrence() the magic link uses -- blocker first,
+        # fail-closed, both-sides emails. Only the destination differs.
+        occ = self._next_wednesday()
+        calls = []
+        self.app._cancel_occurrence = lambda sn, d, message="": calls.append((sn, d, message))
+        status, headers, _b = self._post(
+            self.app.admin_cancel_occurrence, ("yoga-class-1", occ), {"message": "flu"})
+        self.assertEqual(calls, [("yoga-class-1", occ, "flu")])
+        self.assertEqual(dict(headers)["Location"], "/admin?tab=yoga-class-1")
+
+    # -- gating ----------------------------------------------------------
+
+    def test_every_action_requires_an_admin_session(self):
+        occ = self._next_wednesday()
+        for fn, form in (
+            (self.app.admin_set_override, {"action": "set", "start_time": "09:45"}),
+            (self.app.admin_hide_occurrence, {"action": "hide"}),
+            (self.app.admin_cancel_occurrence, {"message": ""}),
+        ):
+            with self.subTest(fn=fn.__name__):
+                body = urlencode(form).encode()
+                environ = {"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)}
+                status, headers, _b = fn("POST", "yoga-class-1", occ, environ)
+                self.assertEqual(status, "302 Found")
+                self.assertEqual(dict(headers)["Location"], "/admin/login")
+
+    def test_get_is_refused_on_the_mutating_routes(self):
+        # A GET that changes something is one stray prefetch away from a
+        # cancelled session.
+        occ = self._next_wednesday()
+        for fn in (self.app.admin_set_override, self.app.admin_hide_occurrence,
+                   self.app.admin_cancel_occurrence):
+            with self.subTest(fn=fn.__name__):
+                status, _h, _b = fn("GET", "yoga-class-1", occ, self.admin_environ)
+                self.assertTrue(status.startswith("405"))
+
+    def test_an_unknown_course_is_a_404(self):
+        status, _h, _b = self._post(
+            self.app.admin_set_override, ("no-such-course", self._next_wednesday()),
+            {"action": "set", "start_time": "09:45"})
+        self.assertTrue(status.startswith("404"))
+
+
+class _NoConflictEngine:
+    """Nothing is ever hidden and no blocker exists -- keeps these tests
+    about the console rather than about CalDAV."""
+
+    def hidden_dates(self, course, occurrences):
+        return {d: False for d, _s, _e in occurrences}
+
+    def blocker_kinds_in_window(self, course, first_date, last_date):
+        return {}

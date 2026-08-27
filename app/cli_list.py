@@ -13,7 +13,10 @@ from datetime import date, datetime
 
 from .erasure import find_archived_user_ids_for_email
 from .security import is_erased_email
-from .storage import format_display_timestamp, status_label
+from .storage import (
+    STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED,
+    format_display_timestamp, status_label,
+)
 
 
 def _format_display_date(iso_str: str) -> str:
@@ -225,22 +228,100 @@ def annotate_admin_party_label(rows: list[dict], users_by_id: dict[str, dict]) -
 
 
 def compute_times_booked_counts(rows: list[dict], today: date) -> tuple[Counter, Counter]:
-    """Returns (total_by_user, upto_now_by_user), both Counter[user_id].
-    total_by_user counts EVERY registration ever made by that user_id (any
-    status, any date); upto_now_by_user restricts to occurrence_date <=
-    today. Same computation, same "N/total" up-to-now-over-total framing,
-    app/webapp.py's admin_overview() uses for its own Times booked column
-    (2026-07-08: shows both the up-to-now count and the total, e.g.
-    "2/9") -- `rows`
-    should be ALL registrations (live + archived, e.g.
-    Store.read_registrations(scope="all")), same as admin_overview()'s own
-    `all_regs`, so an erased-but-never-rebooked attendee's true historical
-    count isn't silently dropped."""
-    total_by_user = Counter(r["user_id"] for r in rows)
+    """Kept for callers that only want the two per-user totals. See
+    compute_times_booked() below for the full six-number form and for
+    which CANCELLED rows still count."""
+    counts = _rows_that_stood(rows)
+    total_by_user = Counter(r["user_id"] for r in counts)
     upto_now_by_user = Counter(
-        r["user_id"] for r in rows if date.fromisoformat(r["occurrence_date"]) <= today
+        r["user_id"] for r in counts if date.fromisoformat(r["occurrence_date"]) <= today
     )
     return total_by_user, upto_now_by_user
+
+
+def _rows_that_stood(rows: list[dict]) -> list[dict]:
+    """Only the bookings that actually STOOD at the time of their session.
+
+    2026-08-27, operator's rule: these counts say how often someone was
+    really there, "so it should only count bookings that stood at the
+    time of the course". Confirmed only -- a waitlisted guest never got a
+    place and a pending one never confirmed, so neither was there.
+
+    A CANCELLED row still counts when it was cancelled AFTER its session
+    had already happened, because at the time of the course it stood.
+    That is not a hypothetical: erasing a guest force-cancels every one
+    of their bookings, including years-old attended ones, so testing the
+    current status alone silently rewrote an erased guest's history to
+    zero. `canceled_at` is recorded per row, which is what makes the real
+    rule expressible instead of approximated.
+
+    A cancelled row with no `canceled_at` at all (pre-dating that column)
+    does not count -- with nothing to place the cancellation in time, the
+    conservative reading is the honest one."""
+    out = []
+    for r in rows:
+        status = r.get("status", STATUS_CONFIRMED)
+        if status == STATUS_CONFIRMED:
+            out.append(r)
+            continue
+        if status not in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST):
+            continue  # waitlisted / pending: never stood
+        canceled_at = (r.get("canceled_at") or "")[:10]
+        # >= not >: a cancellation dated the same DAY as the session is
+        # counted as having stood. Only a date is recorded for the
+        # occurrence, so same-day cannot be ordered against the session
+        # itself -- and the realistic same-day case is administrative
+        # tidying (an erasure, a host clearing up) after a session that
+        # already took place, not a guest dropping out of it.
+        if canceled_at and canceled_at >= r["occurrence_date"]:
+            out.append(r)
+    return out
+
+
+def compute_times_booked(
+    rows: list[dict], today: date
+) -> dict[tuple[str, str], tuple[int, int, int]]:
+    """{(user_id, course_shortname): (to_date, incl_this, total)} plus, under
+    the course key "", the same three numbers across ALL courses.
+
+    The three, for one guest:
+
+      to_date    -- sessions that have already happened (occurrence_date
+                    <= today). What they have actually attended.
+      incl_this  -- everything up to and INCLUDING the row being displayed,
+                    i.e. counting the session that row is about even when
+                    it is still in the future. Filled in per row by the
+                    caller, since it depends on which row is on screen.
+      total      -- every booking that stands, future ones included.
+
+    Only bookings that stood count -- see _rows_that_stood."""
+    confirmed = _rows_that_stood(rows)
+    out: dict[tuple[str, str], tuple[int, int, int]] = {}
+    keys = {(r["user_id"], r.get("course_shortname", "")) for r in confirmed}
+    keys |= {(r["user_id"], "") for r in confirmed}
+    for user_id, course in keys:
+        scoped = [
+            r for r in confirmed
+            if r["user_id"] == user_id
+            and (course == "" or r.get("course_shortname", "") == course)
+        ]
+        to_date = sum(1 for r in scoped if date.fromisoformat(r["occurrence_date"]) <= today)
+        out[(user_id, course)] = (to_date, to_date, len(scoped))
+    return out
+
+
+def times_booked_upto(
+    rows: list[dict], user_id: str, course_shortname: str, occurrence_date: str
+) -> int:
+    """How many of this guest's confirmed bookings fall on or before
+    `occurrence_date` -- the "including this booking" middle number, which
+    only makes sense relative to the row on screen."""
+    return sum(
+        1 for r in _rows_that_stood(rows)
+        if r["user_id"] == user_id
+        and (not course_shortname or r.get("course_shortname", "") == course_shortname)
+        and r["occurrence_date"] <= occurrence_date
+    )
 
 
 def build_clean_registration_view(

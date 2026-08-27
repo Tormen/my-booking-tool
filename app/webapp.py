@@ -108,8 +108,10 @@ import logging
 import re
 import socket
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from http import cookies
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -125,8 +127,15 @@ from .cancellation import (
     host_cancel_url, host_details_text, host_subject, html_email_body, html_to_text, intro_html,
     join_attention_sections, send_cancellation_emails, send_reinstatement_emails,
 )
-from .config import Course, Settings, upcoming_date_overrides
-from .conflict import ConflictEngine
+from .config import (
+    Course, Settings, annotate_superseded_override, merge_console_overrides,
+    upcoming_date_overrides,
+)
+from .conflict import BLOCKER_CANCELED, BLOCKER_HIDDEN, ConflictEngine
+from .date_overrides import (
+    ACTION_REMOVE, ACTION_SET, FILENAME as OVERRIDES_FILENAME, ORIGIN_ADMIN,
+    OverrideStore,
+)
 from .email_templates import load_email_template, render_template
 from .emailer import _masked, send_mail
 from .erasure import erase_user_by_email
@@ -134,7 +143,7 @@ from .security import (
     RateLimiter, hash_secret, hash_token, is_erased_email, new_token,
     sanitize_csv_field, tokens_match, verify_admin_password, verify_secret,
 )
-from .slots import build_occurrences
+from .slots import build_occurrences, candidate_dates
 from .storage import (
     STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST, STATUS_CONFIRMED, STATUS_PENDING_CONFIRMATION,
     STATUS_WAITLISTED, Registration, Store, User, format_display_timestamp, now_iso, status_label,
@@ -239,6 +248,64 @@ MY_PAST_BOOKINGS_LIMIT = 3
 # oversized body is treated as an empty/blank submission (see _read_form)
 # or an ignored CSP report (see csp_report) -- never half-parsed.
 MAX_REQUEST_BODY_BYTES = 64 * 1024
+
+
+def _email_cell_html(email: str) -> str:
+    """A guest's address as a clickable mailto link, broken before the "@"
+    so the domain wraps onto a second line.
+
+    Real addresses here run to 30+ characters
+    (firstname.lastname@employer.example) and were the widest thing in the
+    admin table by a distance. Splitting at the "@" costs nothing in
+    readability -- an address is read in those two halves anyway -- and
+    gives the width back to the columns that need it.
+
+    <wbr> would be the tidier tag, but it only wraps when the browser
+    decides the line is too long; the point here is that the domain
+    ALWAYS moves to the second line, which is what <br> says."""
+    local, at, domain = esc(email).partition("@")
+    shown = f"{local}<br>{at}{domain}" if at else local
+    return f'<a href="mailto:{esc(email)}">{shown}</a>'
+
+
+def _registered_cell_html(registered_at: str) -> str:
+    """The registration timestamp with the date and the time on their own
+    lines. Same width reasoning as _email_cell_html: the column only ever
+    holds this one value, and stacking the halves narrows it by nearly
+    half without losing anything."""
+    shown = esc(format_display_timestamp(registered_at))
+    date_part, sep, time_part = shown.partition(" ")
+    return f"{date_part}<br>{time_part}" if sep else shown
+
+
+def _take_settings_draft(environ) -> dict:
+    """Whatever the account-settings page was carrying over from a
+    previous submit -- returned once and cleared.
+
+    Held in the session rather than the URL: these are a name and an email
+    address, and a query string ends up in browser history, in the
+    Referer of the next request and in nginx's access log. Cleared on
+    read so a stale draft cannot reappear on a later visit."""
+    session = _get_session(environ)
+    if not session:
+        return {}
+    stored = SESSIONS.get(session.get("_sid"), {})
+    return stored.pop("settings_draft", {}) or {}
+
+
+def _keep_settings_draft(environ, **fields) -> None:
+    """Stash the field(s) this request did NOT act on, so the redirect
+    back to the settings page can re-fill them. Blank values are dropped:
+    an empty box is what the page renders by default anyway."""
+    session = _get_session(environ)
+    if not session:
+        return
+    stored = SESSIONS.get(session.get("_sid"))
+    if stored is None:
+        return
+    kept = {k: v for k, v in fields.items() if v}
+    if kept:
+        stored["settings_draft"] = kept
 
 
 def _client_ip(environ: dict) -> str:
@@ -973,13 +1040,58 @@ _BOOKING_FORM_SCRIPT = """<script>
 _html_to_text = html_to_text
 
 
+# "HH:MM", 24-hour. The console's own <input type="time"> already
+# produces this shape; validated again here because a hand-crafted POST
+# is not obliged to.
+_HHMM_RE = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+
+
 class App:
-    def __init__(self, settings: Settings, store: Store):
+    def __init__(self, settings: Settings, store: Store, settings_path: str | None = None):
+        # `settings.courses` as handed in is the settings.toml view. It is
+        # kept as the BASE, and the console-managed exceptional dates are
+        # merged on top -- here and again whenever date_overrides.csv
+        # changes underneath us (see _reload_overrides). Keeping the base
+        # is what lets a REMOVED console entry actually disappear: merging
+        # onto an already-merged tuple could only ever add.
+        self._base_courses = settings.courses
         self.settings = settings
         self.store = store
+        self.settings_path = settings_path
+        self._overrides_mtime: float | None = None
         self.caldav = CalDAVClient(settings.caldav_url, settings.caldav_username, settings.caldav_password)
         self._calendars_cache: dict[str, str] | None = None
         self._conflict_engine_cache: ConflictEngine | None = None
+        self._reload_overrides()
+
+    def _overrides_path(self) -> Path:
+        return Path(self.store.data_dir) / OVERRIDES_FILENAME
+
+    def _reload_overrides(self) -> None:
+        """Re-merge the console-managed exceptional dates onto the base
+        courses. Cheap (one small CSV) and idempotent."""
+        courses = merge_console_overrides(self._base_courses, self.store.data_dir)
+        self.settings = replace(self.settings, courses=courses)
+        # The engine holds its own reference to Settings, so it has to be
+        # rebuilt or it would keep deciding on the old course times. Its
+        # ICS cache is on-disk-backed, so this is not an expensive loss.
+        self._conflict_engine_cache = None
+        try:
+            self._overrides_mtime = self._overrides_path().stat().st_mtime
+        except OSError:
+            self._overrides_mtime = None
+
+    def _refresh_overrides_if_changed(self) -> None:
+        """Pick up an override set elsewhere (another process, `my-bt`, a
+        restored backup) without a restart. Safe as a plain
+        read-modify-write because this runs in the single wsgiref worker,
+        which serialises requests -- there is no second thread to race."""
+        try:
+            mtime = self._overrides_path().stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime != self._overrides_mtime:
+            self._reload_overrides()
 
     # -- calendar helpers -----------------------------------------------
 
@@ -1020,8 +1132,53 @@ class App:
         over the [[conflict_calendar]] engine -- True = date hidden. The
         course is needed for per-entry `courses` scoping and the entry
         from/till defaults; blocks/requires/show_as/all-day semantics all
-        live in app/conflict.py."""
+        live in app/conflict.py.
+
+        BATCHED since 2026-08-27, and the reason is measurable:
+        build_occurrences calls this once per candidate date, and the
+        per-date path issues its own CalDAV REPORT and expands the whole
+        ICS feed for that one day. On the live site that made
+        /book/lux-fri-yoga take 2.2s consistently (0.7s for a course
+        checked only against the booking calendar; 0.05s for a static
+        page) -- four round-trips to the CalDAV server, one per date,
+        plus four expansions of a ~1500-event feed.
+
+        Every candidate date is therefore resolved UP FRONT in one pass
+        (ConflictEngine.hidden_dates: one read per source for the whole
+        span), and this closure just looks the answer up. A date the
+        pre-pass did not cover -- it cannot happen via build_occurrences,
+        but this closure is not private to it -- falls back to the
+        per-date query rather than guessing."""
+        from .calendar_sync import occurrence_start_end
+
+        tz = ZoneInfo(self.settings.timezone)
+        # hidden_dates() always filters this tool's OWN events (a course
+        # must never conflict with itself). Only pre-pass when the caller
+        # wants that too -- otherwise the fast answer would be a
+        # different answer, which is worse than a slow one.
+        if not exclude_own:
+            def check_per_date(start: datetime, end: datetime) -> bool:
+                return self._conflict_engine().occurrence_is_hidden(
+                    course, start, end, exclude_own=exclude_own
+                )
+            return check_per_date
+
+        today = self._today()
+        occs = []
+        for d in candidate_dates(course, today, self.settings.show_next_days):
+            start, end = occurrence_start_end(course, d, tz)
+            occs.append((d, start, end))
+        try:
+            hidden = self._conflict_engine().hidden_dates(course, occs)
+        except Exception:  # noqa: BLE001 - fall back to per-date below
+            log.exception("conflict pre-pass failed for %r -- falling back to per-date",
+                          course.shortname)
+            hidden = {}
+
         def check(start: datetime, end: datetime) -> bool:
+            occ_date = start.astimezone(tz).date()
+            if occ_date in hidden:
+                return hidden[occ_date]
             return self._conflict_engine().occurrence_is_hidden(
                 course, start, end, exclude_own=exclude_own
             )
@@ -1077,6 +1234,7 @@ class App:
         # only, never query strings/form bodies/cookies, so this is safe to
         # leave on without leaking anything from a booking form into logs.
         log.debug("%s %s", method, path)
+        self._refresh_overrides_if_changed()
         _record_page_view(environ, path)
         try:
             status, headers, body = self.route(method, path, environ)
@@ -1146,6 +1304,16 @@ class App:
             return self.admin_cancel(method, m.group(1), environ)
         if m := re.fullmatch(r"/admin/reinstate/([0-9a-fA-F-]+)", path):
             return self.admin_reinstate(method, m.group(1), environ)
+        # The Future Sessions box's three actions. All POST-only and
+        # admin-session-gated -- unlike the /host-* magic links, which are
+        # deliberately session-less because they are tapped from inside
+        # the operator's own calendar.
+        if m := re.fullmatch(r"/admin/override/([a-z0-9-]+)/(\d{4}-\d{2}-\d{2})", path):
+            return self.admin_set_override(method, m.group(1), m.group(2), environ)
+        if m := re.fullmatch(r"/admin/hide/([a-z0-9-]+)/(\d{4}-\d{2}-\d{2})", path):
+            return self.admin_hide_occurrence(method, m.group(1), m.group(2), environ)
+        if m := re.fullmatch(r"/admin/cancel-occurrence/([a-z0-9-]+)/(\d{4}-\d{2}-\d{2})", path):
+            return self.admin_cancel_occurrence(method, m.group(1), m.group(2), environ)
         if m := re.fullmatch(r"/host-cancel/([0-9a-fA-F-]+)", path):
             return self.host_cancel(method, m.group(1), environ)
         if m := re.fullmatch(r"/host-reinstate/([0-9a-fA-F-]+)", path):
@@ -1598,6 +1766,7 @@ class App:
                 return self._book_with_guests(
                     course, shortname, occ_date, user, guests, banner=banner,
                     already_booked=already_booked_guests,
+                    from_my=form.get("from") == "my",
                 )
 
             if user.password_hash:
@@ -1620,6 +1789,8 @@ class App:
                     if reg.status == STATUS_WAITLISTED
                     else f"You're booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
                 ) + self._already_booked_guests_note(already_booked_guests)
+                if form.get("from") == "my":
+                    return self._booked_from_my_page(msg, banner)
                 return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
                     "Booked!",
                     f"<p>{msg}<br>{self._check_confirmation_text(environ)}</p>"
@@ -1972,7 +2143,7 @@ class App:
 
     def _book_with_guests(
         self, course, shortname: str, occ_date: str, leader, guests: list[tuple[str, str]], banner: str = "",
-        already_booked: list[str] = (),
+        already_booked: list[str] = (), from_my: bool = False,
     ):
         """The atomic party-booking path -- taken whenever the booking form
         included at least one "+ Add participant" guest (see book()).
@@ -2032,6 +2203,8 @@ class App:
         else:
             msg = f"Your party of {party_size} is booked for <b>{esc(course.title)}</b> on {esc(occ_date)}."
         msg += self._already_booked_guests_note(list(already_booked))
+        if from_my:
+            return self._booked_from_my_page(msg, banner)
         return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
             "Booked!",
             f"<p>{msg}</p><p>Everyone in the party -- including you -- got their own email with "
@@ -2344,6 +2517,22 @@ class App:
         self, course, occurrences, error: str | None = None, banner: str = "", logged_in_user=None,
         login_error: str | None = None, login_lockout_seconds: float = 0.0,
     ):
+        """The full /book/<shortname> response. The body itself is built
+        by _book_body below, which /my also renders inside an overlay --
+        one booking form, two places it can appear, so the two can never
+        drift apart in what they offer (guests, the acknowledgement, the
+        date picker or the button label)."""
+        body = self._book_body(
+            course, occurrences, error=error, logged_in_user=logged_in_user,
+            login_error=login_error, login_lockout_seconds=login_lockout_seconds,
+        )
+        return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
+            course.title, body, banner=banner)
+
+    def _book_body(
+        self, course, occurrences, error: str | None = None, logged_in_user=None,
+        login_error: str | None = None, login_lockout_seconds: float = 0.0,
+    ):
         subtitle = _course_subtitle_html(course)
         # course.description is operator-authored (settings.toml, edited by
         # whoever runs this install), not guest-submitted -- unlike every
@@ -2604,6 +2793,8 @@ class App:
             <div class="card">
               {card_identity_html}
               <div class="guests-section">
+                <p class="guests-intro">Bringing someone? Add them here -- each guest gets
+                   their own place and their own cancel link:</p>
                 <div id="guest-rows"></div>
                 <button type="button" id="add-guest-btn" class="link-button">+ Add participant</button>
                 <p id="party-warning" class="note" style="display:none"></p>
@@ -2617,7 +2808,7 @@ class App:
               </div>
             </div>
             {_BOOKING_FORM_SCRIPT}"""
-        return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(course.title, body, banner=banner)
+        return body
 
     # -- /cancel/<token> (guest, from email) ---------------------------------
 
@@ -2846,6 +3037,99 @@ class App:
 
     # -- /my (guest self-service) --------------------------------------------
 
+    # How long the "done" panel stays up before /my is loaded again.
+    # Long enough to read a two-line confirmation, short enough not to
+    # feel like a wait.
+    BOOKED_OVERLAY_SECONDS = 3
+
+    def _booked_from_my_page(self, message_html: str, banner: str):
+        """The response to a booking made in /my's overlay: a floating
+        "Done" panel, then back to where they started.
+
+        The operator's own words: "there should be a DONE visible for 3
+        seconds as overlay and then fade / disappear and bring you back
+        to /my where you started". The return trip is a <meta refresh>
+        and the fade is a CSS animation -- no script, so this page costs
+        no CSP hash. Both are cosmetic-fail-safe: a browser honouring
+        neither still shows the confirmation and a plain link back."""
+        return "200 OK", [("Content-Type", "text/html; charset=utf-8")], page(
+            "Booked!",
+            '<div class="overlay-backdrop"></div>'
+            '<div class="done-panel">'
+            "<h2>Done</h2>"
+            f"<p>{message_html}</p>"
+            '<p class="note">Back to your bookings in a moment --'
+            ' <a href="/my">go now</a>.</p>'
+            "</div>",
+            banner=banner,
+            head_extra=f'<meta http-equiv="refresh" content="{self.BOOKED_OVERLAY_SECONDS};url=/my">',
+        )
+
+    def _new_booking_frame_html(self, environ, user) -> str:
+        """The "New booking" frame on /my: one row per course, each
+        opening that course's REAL booking form in an overlay.
+
+        The overlay is server-rendered, opened by a link
+        (/my?book=<shortname>) rather than by script -- so the form
+        inside it is _book_body's own output, the same markup
+        /book/<shortname> serves. One booking form, two places it appears:
+        guests, the acknowledgement, the date picker and the button label
+        cannot drift between them.
+
+        Only the requested course's form is built. Building all of them
+        would mean every course's occurrence and conflict lookups on a
+        page most people open just to read their bookings -- the exact
+        cost that made /admin unusable before it was split up."""
+        courses = self.settings.courses
+        if not courses:
+            return ""
+        wanted = parse_qs(environ.get("QUERY_STRING", "")).get("book", [""])[0]
+        rows = []
+        for course in courses:
+            rows.append(
+                f'<a class="course-pick" href="/my?book={esc(course.shortname)}">'
+                f'<span class="when"><span class="wd">{esc(course.weekday_label()[:3])}</span> '
+                f'{esc(course.time_range_label())}</span>'
+                f'<span class="pick-title">{esc(course.title)}</span>'
+                f'<span class="note">{esc(course.location)}</span></a>'
+            )
+
+        overlay = ""
+        course = self.settings.course(wanted) if wanted else None
+        if course is not None:
+            occurrences = build_occurrences(
+                course, self.settings, datetime.now(timezone.utc),
+                self.store.count_confirmed, self._conflict_checker(course, exclude_own=True),
+            )
+            # `open` on the server: the operator clicked this course, so
+            # the page arrives with its overlay already up. No script is
+            # involved, which is what keeps the CSP hash set untouched.
+            overlay = (
+                # The backdrop is a LINK back to /my, so clicking outside
+                # the panel closes it -- what a modal would do, without
+                # needing showModal().
+                '<a class="overlay-backdrop" href="/my" aria-label="Close"></a>'
+                '<dialog class="book-dialog" open>'
+                f'<a class="x" href="/my" aria-label="Close">&times;</a>'
+                f'<h3>{esc(course.title)}</h3>'
+                + self._book_body(course, occurrences, logged_in_user=user)
+                # Which page this booking was made FROM. The fields in
+                # _book_body reach the form by id, so this one does too.
+                + '<input type="hidden" name="from" value="my" form="book-form">' 
+                + '<p><a href="/my">Close without booking</a></p>'
+                + "</dialog>"
+            )
+
+        # "All courses" lives here because /courses is otherwise
+        # unreachable: its only link in the whole app was /my's old "New
+        # booking" button, which this frame replaced. The frame lists
+        # every course already, so the link is not navigation people
+        # need -- it is the page not being orphaned.
+        return ('<div class="card">'
+                '<div class="card-head"><h2>New booking</h2>'
+                '<a href="/courses">All courses</a></div>'
+                + "".join(rows) + "</div>" + overlay)
+
     def my(self, method: str, environ):
         """Note (2026-07-06): upcoming bookings are always shown in full,
         sorted soonest-first; past bookings are sorted most-recent-first
@@ -3012,7 +3296,7 @@ class App:
                     f'<tr><td>{course_cell}</td><td class="nowrap">{esc(r.occurrence_date)}</td>'
                     f"<td>{esc(time_range)}</td><td>{location_cell}</td>"
                     f"<td>{esc(status_label(r.status))}</td>"
-                    f"<td>{actions}</td></tr>"
+                    f'<td class="actions"><div class="btn-row">{actions}</div></td></tr>'
                 )
 
             def _table(table_id: str, regs_for_table: list, default_sort_dir: str = "asc") -> str:
@@ -3038,15 +3322,39 @@ class App:
             upcoming_id, past_id = "my-upcoming-table", "my-past-table"
             upcoming_html = _table(upcoming_id, upcoming) or "<p>You have no upcoming bookings.</p>"
             past_html = _table(past_id, past, default_sort_dir="desc") or "<p>You have no past bookings.</p>"
+            # 2026-08-27, the /my rebuild (mockup:
+            # my-booking.local/,mockups/my-page.py):
+            #   New booking   -- one row per course, opening that course's
+            #                    real booking form in an overlay
+            #   My bookings   -- Upcoming / Past as tabs of one frame,
+            #                    where the TABS are the frame's title
+            #
+            # The overlay's content is only built for the course actually
+            # asked for (?book=<shortname>), not for all of them up front.
+            # That is the /admin lesson applied here before it bites:
+            # every course's form means every course's occurrence and
+            # conflict lookups on a page most visitors open just to read
+            # their bookings.
+            # The signed-in guest, for the booking form inside the
+            # overlay (it renders "Booking as ..." rather than asking for
+            # a name and an address again).
+            me = self.store.find_user_by_id(session["user_id"])
+            new_booking_html = self._new_booking_frame_html(environ, me)
             body = f"""
-            <div class="submit-row">
-              <a href="/courses"><button type="button">New booking</button></a>
-              <a href="/my/settings"><button type="button">Account settings</button></a>
+            {new_booking_html}
+            <div class="card">
+              <input class="tab-radio" type="radio" name="my-tab" id="my-tab-upcoming" checked>
+              <input class="tab-radio" type="radio" name="my-tab" id="my-tab-past">
+              <div class="tab-labels">
+                <label class="tab-label" for="my-tab-upcoming">Upcoming</label>
+                <label class="tab-label" for="my-tab-past">Past (most recent {MY_PAST_BOOKINGS_LIMIT})</label>
+              </div>
+              <div class="tab-panel" id="my-panel-upcoming">{upcoming_html}</div>
+              <div class="tab-panel" id="my-panel-past">{past_html}</div>
             </div>
-            <h3>Upcoming</h3>
-            {upcoming_html}
-            <h3>Past (most recent {MY_PAST_BOOKINGS_LIMIT})</h3>
-            {past_html}""" + _DIALOG_WIRING_SCRIPT
+            <div class="submit-row">
+              <a href="/my/settings"><button type="button">Account settings</button></a>
+            </div>""" + _DIALOG_WIRING_SCRIPT
             # 2026-07-14: the delete button moved under
             # 'Account settings' and was renamed to 'DELETE this account' --
             # the delete-account form/dialog used to live at the bottom of
@@ -3962,11 +4270,24 @@ class App:
         email_error: str | None = None,
     ):
         banner = self._session_banner_html(environ, on_my_page=True)
+        # 2026-08-27: saving one of these used to discard whatever had been
+        # typed into the OTHER -- type a new address, hit Save name, and the
+        # address was gone with no warning. Both fields now live in ONE form
+        # (two submit buttons, the second using formaction=), so BOTH are
+        # always submitted whichever button is pressed, and the half that
+        # was not acted on is handed back through the session and re-filled
+        # below. Nothing is carried in the URL: an email address has no
+        # business in a query string, a browser history or an access log.
+        draft = _take_settings_draft(environ)
         name_err_html = f'<p class="err">{esc(name_error)}</p>' if name_error else ""
-        name_body = f"""{name_err_html}<form method="post" action="/my/settings/name" class="card">
-          <label>Name <input class="big-input id-input" name="name" type="text" value="{esc(user.name)}" required></label>
-          <div class="submit-row"><button type="submit">Save name</button></div>
-        </form>"""
+        name_value = draft.get("name") or user.name
+        name_body = f"""{name_err_html}<div class="card">
+          <label>Name <input class="big-input id-input" name="name" type="text" form="settings-form"
+                 value="{esc(name_value)}" required></label>
+          <div class="submit-row">
+            <button type="submit" form="settings-form" formaction="/my/settings/name">Save name</button>
+          </div>
+        </div>"""
 
         # email_err_html is rendered above EITHER branch below (not just
         # the request-form one) -- a rate-limit hit can occur on an
@@ -3993,15 +4314,20 @@ class App:
               </form>
             </div>"""
         else:
-            email_body = f"""{email_err_html}<form method="post" action="/my/settings/email" class="card">
+            email_body = f"""{email_err_html}<div class="card">
               <label>Current email <input class="big-input id-input" value="{esc(user.email)}" disabled></label>
-              <label>New email <input class="big-input id-input" name="email" type="email" required></label>
+              <label>New email <input class="big-input id-input" name="email" type="email" required
+                     form="settings-form" value="{esc(draft.get("email", ""))}"></label>
               <p class="hint">We'll email a confirmation link to the new address -- your login
                 email only changes once that link is clicked.</p>
-              <div class="submit-row"><button type="submit">Change email</button></div>
-            </form>"""
+              <div class="submit-row">
+                <button type="submit" form="settings-form"
+                        formaction="/my/settings/email">Change email</button>
+              </div>
+            </div>"""
 
         body = f"""
+        <form method="post" action="/my/settings/name" id="settings-form"></form>
         <h3>Name</h3>
         {name_body}
         <h3>Email</h3>
@@ -4064,6 +4390,10 @@ class App:
             return "302 Found", [("Location", "/my")], ""
         form = self._read_form(environ)
         name = form.get("name", "").strip()
+        # Both fields arrive on every submit (one form, two buttons), so
+        # an address typed but not yet submitted for change survives this
+        # save instead of being silently thrown away.
+        _keep_settings_draft(environ, email=form.get("email", "").strip())
         if not name:
             return self._my_settings_page(environ, user, name_error="Name can't be empty.")
         self.store.set_name(user.user_id, name)
@@ -4093,6 +4423,17 @@ class App:
             return "302 Found", [("Location", "/my")], ""
         form = self._read_form(environ)
         new_email = form.get("email", "").strip().lower()
+        # An edited-but-unsaved name must survive an email change (and
+        # every one of its error paths below) for the same reason.
+        typed_name = form.get("name", "").strip()
+        # Also keep the address itself: every rejection below re-renders
+        # this page, and making someone retype an address we just told
+        # them was wrong is the most annoying possible way to say so.
+        _keep_settings_draft(
+            environ,
+            name=typed_name if typed_name != user.name else "",
+            email=new_email,
+        )
         if not new_email or "@" not in new_email:
             return self._my_settings_page(environ, user, email_error="Please enter a valid email address.")
         if new_email == user.email.strip().lower():
@@ -4172,6 +4513,21 @@ class App:
 
         new_email = user.pending_email
         if method == "POST":
+            # 2026-08-27: the second button on this page used to be a
+            # plain "Never mind" link that navigated home and did NOTHING
+            # -- while the reason someone presses it is precisely "I did
+            # not request this". Leaving the pending change standing after
+            # that is the opposite of what they just said. It now really
+            # cancels, which the holder of this link may do: they proved
+            # access to the NEW address by receiving it, and cancelling
+            # only restores the status quo. Confirming still needs the
+            # explicit Confirm button, unchanged.
+            if self._read_form(environ).get("action") == "cancel":
+                self.store.clear_pending_email(user.user_id)
+                body = (f'<p>The change to <b>{esc(new_email)}</b> has been canceled. '
+                        f'Your login email is still <b>{esc(user.email)}</b>.</p>')
+                return "200 OK", [("Content-Type", "text/html")], page(
+                    "Change canceled", body, banner=banner)
             old_email = user.email
             updated = self.store.apply_pending_email(user.user_id)
             if updated is None:
@@ -4201,8 +4557,12 @@ class App:
         body = ('<form method="post" class="card">'
                 f'<p>Change your login email from <b>{esc(user.email)}</b> to '
                 f'<b>{esc(new_email)}</b>?</p>'
-                '<div class="submit-row"><button type="submit">Confirm change</button>'
-                '<a href="/" class="link-button">Never mind</a></div>'
+                '<div class="submit-row">'
+                '<button type="submit" name="action" value="confirm">Confirm change</button>'
+                '<button type="submit" name="action" value="cancel">Cancel (*)</button>'
+                '</div>'
+                '<p class="hint">(*) in case this was not you -- the change is dropped '
+                'and your current email stays as it is.</p>'
                 '</form>')
         return "200 OK", [("Content-Type", "text/html")], page("Confirm email change", body, banner=banner)
 
@@ -4305,6 +4665,274 @@ class App:
             "Admin login", body, banner=self._homepage_only_banner_html()
         )
 
+    # -- /admin "Future Sessions" box (2026-08-27) ------------------------
+    #
+    # Managing exceptional dates and cancellations from the console
+    # instead of from settings.toml + a calendar app. Three things per
+    # date -- change the time, stop offering it, cancel it -- for the
+    # next FUTURE_SESSIONS_VISIBLE + FUTURE_SESSIONS_IN_DROPDOWN dates of
+    # each course, INCLUDING dates that are currently not offered (a
+    # console that only lists bookable dates cannot tell you why one is
+    # missing, which is exactly when you go looking).
+    #
+    # No new inline script: the tabs are CSS-only radios (the component
+    # /my and /book already use) and every dialog is pre-rendered, so the
+    # CSP hash set is untouched by this whole feature.
+
+    FUTURE_SESSIONS_VISIBLE = 10
+    FUTURE_SESSIONS_IN_DROPDOWN = 42
+
+    def _future_session_rows(self, course, dates, blocker_kinds, hidden, users_by_id, regs_by_occ):
+        """One <tr> + its dialogs per date. Split out of the box builder
+        so the visible table and the drop-down's table are built by the
+        same code -- they differ only in which dates they get."""
+        out = []
+        for occ_date in dates:
+            iso = occ_date.isoformat()
+            row_id = f"{course.shortname}-{iso}"
+            override = course.override_for(iso)
+            of_this_date = regs_by_occ.get((course.shortname, iso), ())
+            taken = sum(1 for r in of_this_date if r.status == STATUS_CONFIRMED)
+            booked = [r for r in of_this_date if r.status in CANCELABLE_STATUSES]
+            kind = blocker_kinds.get(occ_date)
+            time_label = course.time_range_label_for(iso)
+
+            if kind == BLOCKER_CANCELED:
+                status = '<span class="st st-can">CANCELED</span>'
+            elif kind == BLOCKER_HIDDEN:
+                status = '<span class="st st-hid">hidden (by you)</span>'
+            elif hidden.get(occ_date):
+                status = '<span class="st st-con">hidden (calendar)</span>'
+            elif taken >= course.capacity:
+                status = '<span class="st st-full">full</span>'
+            else:
+                status = '<span class="st st-ok">bookable</span>'
+
+            note = ""
+            if override is not None:
+                note = (
+                    f'<div class="row-note">changed from {esc(course.time_range_label())}'
+                    + (f" -- {esc(override.message)}" if override.message else "")
+                    + "</div>"
+                )
+
+            # Hide is offered ONLY while nobody is booked. Once someone
+            # is, cancelling is the only honest way to stop offering the
+            # date -- see the design note; this is what makes "hidden"
+            # a state no booked guest can be caught by.
+            if kind == BLOCKER_HIDDEN:
+                hide_btn = (
+                    '<button type="button" class="confirm-dialog-btn" '
+                    f'data-dialog="hide-{esc(row_id)}">Unhide</button>'
+                )
+            elif booked:
+                hide_btn = (
+                    '<button type="button" disabled '
+                    f'title="{len(booked)} booked -- cancel the session instead">Hide</button>'
+                )
+            elif kind == BLOCKER_CANCELED:
+                hide_btn = '<button type="button" disabled title="already canceled">Hide</button>'
+            else:
+                hide_btn = f'<button type="button" data-dialog="hide-{esc(row_id)}">Hide</button>'
+
+            out.append(f"""<tr>
+              <td class="nowrap"><b>{esc(occ_date.strftime("%a"))} {esc(iso)}</b></td>
+              <td class="nowrap">{esc(time_label)}{note}</td>
+              <td class="nowrap">{taken} / {course.capacity}</td>
+              <td class="nowrap">{status}</td>
+              <td class="nowrap actions"><div class="btn-row">
+                <button type="button" class="confirm-dialog-btn"
+                        data-dialog="time-{esc(row_id)}">Edit</button>
+                {hide_btn}
+                <button type="button" class="confirm-dialog-btn"
+                        data-dialog="cancel-{esc(row_id)}">Cancel session</button>
+              </div></td>
+            </tr>""")
+            out.append(self._future_session_dialogs(
+                course, occ_date, override, booked, kind, time_label, users_by_id
+            ))
+        return "".join(out)
+
+    def _future_session_dialogs(self, course, occ_date, override, booked, kind, time_label, users_by_id):
+        """The three pop-ups for one date, pre-rendered into the page.
+
+        Pre-rendered rather than fetched on click: a fetch would need an
+        inline script, and a new inline script means a new CSP hash in
+        both nginx confs. The markup is small (a handful of participants
+        at this scale), so the trade is easy."""
+        iso = occ_date.isoformat()
+        row_id = f"{course.shortname}-{iso}"
+        # A Registration carries a user_id, not a name -- resolved through
+        # the map the caller built ONCE for the whole box (scope="all", so
+        # an erased guest still shows as a row rather than vanishing from
+        # the list of people this cancel would affect).
+        who = "".join(
+            f"<li>{esc(getattr(users_by_id.get(r.user_id), 'name', '') or '(name withheld)')}"
+            f" -- {esc(status_label(r.status))}</li>"
+            for r in booked
+        ) or '<li class="note">Nobody is booked -- nothing to notify.</li>'
+
+        time_dialog = f"""<dialog id="time-{esc(row_id)}" class="card">
+          <h3>Edit {esc(iso)}</h3>
+          <p class="note">{esc(course.title)} -- normally {esc(course.time_range_label())}.
+             The time and the message below apply to THIS date only.</p>
+          <form method="post" action="/admin/override/{esc(course.shortname)}/{esc(iso)}">
+            <label>New start time <span class="req">(required)</span>
+              <input type="time" name="start_time" required
+                     value="{esc(override.start_time if override else course.start_time)}"></label>
+            <label>Duration in minutes
+              <span class="note">(optional -- empty keeps {course.duration_minutes})</span>
+              <input type="number" name="duration_minutes" class="id-input" min="1"
+                     value="{esc(str(override.duration_minutes) if override and override.duration_minutes else '')}"></label>
+            <label>Message shown to guests <span class="note">(optional)</span>
+              <textarea name="message" class="big-input" rows="2">{esc(override.message if override else '')}</textarea></label>
+            <div class="submit-row">
+              <button type="submit" name="action" value="set">Save</button>
+              {'<button type="submit" name="action" value="remove" class="danger">Remove override</button>' if override else ''}
+              <button type="button" class="link-button dialog-close-btn"
+                      data-dialog="time-{esc(row_id)}">Close</button>
+            </div>
+          </form>
+        </dialog>"""
+
+        unhide = kind == BLOCKER_HIDDEN
+        hide_dialog = f"""<dialog id="hide-{esc(row_id)}" class="card">
+          <h3>{"Offer " + esc(iso) + " again?" if unhide else "Stop offering " + esc(iso) + "?"}</h3>
+          <p class="note">{
+            "Deletes the blocker event from your calendar; the date is bookable again."
+            if unhide else
+            "The session still happens and nobody is emailed -- it simply stops accepting NEW "
+            "bookings. A blocker event goes into your booking calendar; deleting that event "
+            "anywhere, phone included, undoes this."
+          }</p>
+          <form method="post" action="/admin/hide/{esc(course.shortname)}/{esc(iso)}">
+            <div class="submit-row">
+              <button type="submit" name="action" value="{'unhide' if unhide else 'hide'}">
+                {"Unhide" if unhide else "Hide this date"}</button>
+              <button type="button" class="link-button dialog-close-btn"
+                      data-dialog="hide-{esc(row_id)}">Leave it</button>
+            </div>
+          </form>
+        </dialog>"""
+
+        cancel_dialog = f"""<dialog id="cancel-{esc(row_id)}" class="card">
+          <h3>Cancel the entire session on {esc(iso)}?</h3>
+          <p class="note">{esc(course.title)}, {esc(time_label)}. Everyone below is canceled and
+             notified, and you get a copy. A CANCELED blocker event is written to your calendar
+             first -- if that write fails, nothing is canceled.</p>
+          <ul>{who}</ul>
+          <form method="post" action="/admin/cancel-occurrence/{esc(course.shortname)}/{esc(iso)}">
+            <label>Reason <span class="note">(optional, included in the emails)</span>
+              <textarea name="message" class="big-input" rows="2"></textarea></label>
+            <div class="submit-row">
+              <button type="submit" class="danger">Cancel this session</button>
+              <button type="button" class="link-button dialog-close-btn"
+                      data-dialog="cancel-{esc(row_id)}">Keep it</button>
+            </div>
+          </form>
+        </dialog>"""
+        return time_dialog + hide_dialog + cancel_dialog
+
+    def _future_sessions_html(self, active_shortname: str = "", show_all_dates: bool = False) -> str:
+        """The Future Sessions box: the SELECTED course's next dates, with
+        their real status and the three per-date actions.
+
+        Only the selected course is rendered, and by default only the
+        first FUTURE_SESSIONS_VISIBLE dates. Both are size decisions, and
+        the measured sizes are the argument: with CSS-only tabs every
+        course's panel must be in the DOM, and with three pre-rendered
+        dialogs per date that came to 847 kB and a 7s reload after every
+        save on the live site (2026-08-27). One course at 10 dates is
+        ~84 kB -- a tenth -- and the rest is fetched on demand via
+        ?more=1.
+
+        The cost is that switching tabs is a page load rather than
+        instant. At this size that is a few hundred milliseconds, and it
+        buys back a reload that had become unusable."""
+        courses = self.settings.courses
+        if not courses:
+            return ""
+        course = self.settings.course(active_shortname) or courses[0]
+        sn = course.shortname
+        today = self._today()
+        total = self.FUTURE_SESSIONS_VISIBLE + self.FUTURE_SESSIONS_IN_DROPDOWN
+        tz = ZoneInfo(self.settings.timezone)
+        from .calendar_sync import occurrence_start_end
+
+        users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
+        # ONE read of registrations.csv for the whole box. Before this,
+        # every row called count_confirmed() and
+        # find_cancelable_registrations_for_occurrence(), each of which
+        # opens and flock-reads the entire file -- 52 dates x 2 per
+        # course, measuring 6-7 seconds on the live site.
+        regs_by_occ: dict[tuple[str, str], list] = {}
+        for raw_reg in self.store.read_registrations(scope="live"):
+            reg = Registration(**raw_reg)
+            regs_by_occ.setdefault((reg.course_shortname, reg.occurrence_date), []).append(reg)
+
+        all_dates = candidate_dates(course, today, horizon_days=total * 7)[:total]
+        shown = all_dates if show_all_dates else all_dates[:self.FUTURE_SESSIONS_VISIBLE]
+        occs = []
+        for d in shown:
+            start, end = occurrence_start_end(course, d, tz)
+            occs.append((d, start, end))
+
+        # Both reads are batched over the whole span -- see
+        # ConflictEngine.hidden_dates / blocker_kinds_in_window. A source
+        # failure fails closed there, which here means those dates show
+        # as hidden rather than as bookable.
+        engine = self._conflict_engine()
+        try:
+            hidden = engine.hidden_dates(course, occs)
+        except Exception:  # noqa: BLE001 - the console must still render
+            log.exception("future sessions: conflict lookup failed for %r", sn)
+            hidden = {}
+        try:
+            blocker_kinds = engine.blocker_kinds_in_window(course, shown[0], shown[-1]) if shown else {}
+        except Exception:  # noqa: BLE001 - same
+            log.exception("future sessions: blocker lookup failed for %r", sn)
+            blocker_kinds = {}
+
+        # Tabs are LINKS, not CSS radios: a radio needs every course's
+        # panel present in the DOM, which is exactly what made this page
+        # four times larger than it had to be.
+        labels = []
+        for c in courses:
+            if c.shortname == sn:
+                labels.append(f'<span class="tab-label tab-active">{esc(c.shortname)}</span>')
+            else:
+                labels.append(
+                    f'<a class="tab-label" href="/admin?tab={esc(c.shortname)}">{esc(c.shortname)}</a>'
+                )
+
+        head = ("<tr><th>Date</th><th>Time</th><th>Booked</th>"
+                "<th>Status</th><th>Actions</th></tr>")
+        rest_count = len(all_dates) - len(shown)
+        if rest_count:
+            more = (f'<p><a href="/admin?tab={esc(sn)}&amp;more=1">Show the following '
+                    f'{rest_count} dates (up to {esc(all_dates[-1].isoformat())})</a></p>')
+        elif show_all_dates:
+            more = f'<p><a href="/admin?tab={esc(sn)}">Show fewer dates</a></p>'
+        else:
+            more = ""
+
+        course_head = (
+            '<p class="course-head">'
+            f'<span class="when">{esc(course.weekday_label()[:3])} '
+            f'{esc(course.time_range_label())}</span> <b>{esc(course.title)}</b> '
+            f'<span class="note">{esc(course.location)} -- capacity {course.capacity}</span></p>'
+        )
+        rows = self._future_session_rows(
+            course, shown, blocker_kinds, hidden, users_by_id, regs_by_occ)
+        return (
+            '<div class="card"><h2>Future Sessions</h2>'
+            + '<div class="tab-labels">' + "".join(labels) + "</div>"
+            + course_head
+            + f'<table class="sessions">{head}{rows}</table>'
+            + more
+            + "</div>"
+        )
+
     def admin_overview(self, method: str, environ):
         session = _get_session(environ)
         if not session or session.get("kind") != "admin":
@@ -4388,10 +5016,16 @@ class App:
         raw_all_regs = [
             {"registration_id": r.registration_id, "party_id": r.party_id,
              "invited_by_user_id": r.invited_by_user_id, "user_id": r.user_id,
-             "occurrence_date": r.occurrence_date}
+             "occurrence_date": r.occurrence_date, "status": r.status,
+             "course_shortname": r.course_shortname, "canceled_at": r.canceled_at}
             for r in all_regs
         ]
-        times_total_by_user, times_upto_now_by_user = cli_list.compute_times_booked_counts(raw_all_regs, today)
+        # 2026-08-27: six numbers, two scopes -- see
+        # cli_list.compute_times_booked. Cancelled bookings no longer
+        # count in any of them: these are meant to say how often this
+        # guest actually stood at a session, and a cancellation is
+        # precisely the case where they did not.
+        times_booked = cli_list.compute_times_booked(raw_all_regs, today)
         # "future" (default): today-or-later, live rows only -- unchanged
         # from the old default view. "past": strictly-before-today live
         # rows, PLUS every archived row (an erased guest's booking was
@@ -4476,7 +5110,7 @@ class App:
                 email_cell = f'<td class="hash-cell">{esc(user.email)}</td>'
             elif user:
                 name_cell = f"<td>{esc(user.name)}</td>"
-                email_cell = f"<td>{esc(user.email)}</td>"
+                email_cell = f"<td>{_email_cell_html(user.email)}</td>"
             else:
                 name_cell = "<td>(unknown)</td>"
                 email_cell = "<td>(unknown)</td>"
@@ -4485,7 +5119,23 @@ class App:
             # already moved any pre-erasure history for a live, re-booked
             # guest into their real registrations before these counts were
             # even computed, so both are already the true totals.
-            times_cell = f"{times_upto_now_by_user.get(r.user_id, 0)}/{times_total_by_user.get(r.user_id, 0)}"
+            course_to_date, _c, course_total = times_booked.get((r.user_id, r.course_shortname), (0, 0, 0))
+            all_to_date, _a, all_total = times_booked.get((r.user_id, ""), (0, 0, 0))
+            # The middle number is the only one that depends on WHICH row
+            # this is: everything up to and including the session this row
+            # is about, so a future booking still shows where it will
+            # land rather than only what has happened already.
+            course_incl = cli_list.times_booked_upto(
+                raw_all_regs, r.user_id, r.course_shortname, r.occurrence_date)
+            all_incl = cli_list.times_booked_upto(
+                raw_all_regs, r.user_id, "", r.occurrence_date)
+            # Raw HTML, not esc()'d at the call site: every part of this
+            # cell is either an integer this code computed or a literal
+            # written here, so there is no guest-supplied text in it.
+            times_cell = (
+                f'<span class="nowrap">this course: {course_to_date}/{course_incl}/{course_total}</span><br>'
+                f'<span class="nowrap">all courses: {all_to_date}/{all_incl}/{all_total}</span>'
+            )
             if user and not erased:
                 cancel_id = f"admin-cancel-{esc(r.registration_id)}"
                 # 2026-07-08: PAST
@@ -4597,7 +5247,8 @@ class App:
             # placeholder fallback, now lives there instead of here).
             party_cell = party_label_by_reg_id.get(r.registration_id, "")
             rows.append(
-                f"<tr><td>{esc(status_label(r.status))}</td><td>{esc(r.course_shortname)}</td>"
+                f'<tr><td class="nowrap">{esc(status_label(r.status))}</td>'
+                f'<td class="nowrap">{esc(r.course_shortname)}</td>' 
                 f'<td class="nowrap">{esc(r.occurrence_date)}</td>{name_cell}{email_cell}'
                 # 2026-07-14: both date and time should be
                 # non-linebreakable -- format_display_timestamp() now
@@ -4605,9 +5256,9 @@ class App:
                 # 11h49.54"), which is a line-break opportunity in an
                 # HTML table cell; nowrap keeps it on one line, same class
                 # occurrence_date's own cell already uses above.
-                f'<td class="nowrap">{esc(format_display_timestamp(r.registered_at))}</td><td>{esc(times_cell)}</td>'
+                f'<td class="nowrap">{_registered_cell_html(r.registered_at)}</td><td>{times_cell}</td>'
                 f"<td>{esc(party_cell)}</td>"
-                f"<td>{actions}</td></tr>"
+                f'<td class="actions"><div class="btn-row">{actions}</div></td></tr>'
             )
         # One-click, mutually-exclusive selectors (2026-07-14: not a
         # drop-down list, but directly accessible 1-click
@@ -4639,11 +5290,22 @@ class App:
           <th>Name<span class="sort-indicator"></span></th>
           <th>Email<span class="sort-indicator"></span></th>
           <th>Registered<span class="sort-indicator"></span></th>
-          <th>Times booked<span class="sort-indicator"></span><span class="th-note">for now / total</span></th>
+          <th>Times booked<span class="sort-indicator"></span><span class="th-note">to-date / incl. this / total</span></th>
           <th>Guests<span class="sort-indicator"></span></th>
           <th>Actions<span class="sort-indicator"></span></th>
         </tr></thead>
-        <tbody>{''.join(rows)}</tbody></table>""" + (
+        <tbody>{''.join(rows)}</tbody></table>"""
+        # 2026-08-27: the registrations table keeps everything it had --
+        # scope selectors and filter included, since those control THIS
+        # table and nothing else -- but now inside a framed box of its
+        # own, with the Future Sessions box as a second one below it.
+        query = parse_qs(environ.get("QUERY_STRING", ""))
+        active_tab = query.get("tab", [""])[0]
+        show_all_dates = query.get("more", [""])[0] == "1"
+        body = (
+            '<div class="card"><h2>Bookings</h2>' + body + "</div>"
+            + self._future_sessions_html(active_tab, show_all_dates)
+        ) + (
             _SORTABLE_FILTERABLE_TABLE_SCRIPT + _DIALOG_WIRING_SCRIPT + _CANCEL_ENTIRE_SESSION_SCRIPT
         )
         # 2026-07-14: /admin also gets the same boxed
@@ -4651,6 +5313,224 @@ class App:
         return "200 OK", [("Content-Type", "text/html")], page(
             "Admin overview", body, banner=self._admin_banner_html(environ)
         )
+
+    def _admin_gate(self, method: str, environ, course_shortname: str):
+        """(course, error_response) for the three Future Sessions
+        handlers. POST-only: these all change something, and a GET that
+        mutates is one stray prefetch away from a cancelled session."""
+        session = _get_session(environ)
+        if not session or session.get("kind") != "admin":
+            return None, ("302 Found", [("Location", "/admin/login")], "")
+        if method != "POST":
+            return None, ("405 Method Not Allowed", [("Allow", "POST")], "")
+        course = self.settings.course(course_shortname)
+        if course is None:
+            return None, ("404 Not Found", [("Content-Type", "text/plain")], "no such course")
+        return course, None
+
+    def _back_to_sessions(self, course_shortname: str):
+        """Back to /admin with the Future Sessions box open on the tab the
+        operator was working in -- they are usually mid-task on one
+        course, and dropping them at the top of the page would make them
+        find their place again after every single action."""
+        return "302 Found", [("Location", f"/admin?tab={course_shortname}")], ""
+
+    def admin_set_override(self, method: str, course_shortname: str, occurrence_date: str, environ):
+        """Set or remove one date's exceptional time from the console.
+
+        Writes to <data_dir>/date_overrides.csv, never to settings.toml --
+        see app/date_overrides.py for why. Three side effects, in this
+        order, because each depends on the previous one having happened:
+        record it, re-sync the calendar event so the operator's own
+        calendar stops showing the old hours, then tell the people who
+        are already booked."""
+        course, err = self._admin_gate(method, environ, course_shortname)
+        if err:
+            return err
+        form = self._read_form(environ)
+        action = form.get("action", "set")
+        store = OverrideStore(self.store.data_dir)
+        # What this date looked like BEFORE the edit. Without it the
+        # notice could only ever say "the time changed", which was a
+        # plain untruth when only the message had been edited
+        # (2026-08-27, reported from a live email).
+        was = course.override_for(occurrence_date)
+        was_time = (was.start_time, was.duration_minutes) if was else None
+
+        if action == "remove":
+            store.append(
+                origin=ORIGIN_ADMIN, action=ACTION_REMOVE,
+                course_shortname=course_shortname, occurrence_date=occurrence_date,
+            )
+        else:
+            start_time = (form.get("start_time") or "").strip()
+            if not _HHMM_RE.fullmatch(start_time):
+                return "400 Bad Request", [("Content-Type", "text/plain")], "start_time must be HH:MM"
+            duration_raw = (form.get("duration_minutes") or "").strip()
+            try:
+                duration = int(duration_raw) if duration_raw else None
+            except ValueError:
+                return "400 Bad Request", [("Content-Type", "text/plain")], "duration must be a number"
+            if duration is not None and duration <= 0:
+                return "400 Bad Request", [("Content-Type", "text/plain")], "duration must be positive"
+            store.append(
+                origin=ORIGIN_ADMIN, action=ACTION_SET,
+                course_shortname=course_shortname, occurrence_date=occurrence_date,
+                start_time=start_time, duration_minutes=duration,
+                message=sanitize_csv_field((form.get("message") or "").strip()),
+            )
+            # Taking a date over from settings.toml: say so IN the file,
+            # so it stops contradicting what the site shows. Informational
+            # only -- see config.annotate_superseded_override.
+            try:
+                annotate_superseded_override(
+                    self.settings_path, course_shortname, occurrence_date
+                )
+            except Exception:  # noqa: BLE001 - never block the change itself
+                log.exception("could not annotate settings.toml for %s on %s",
+                              course_shortname, occurrence_date)
+
+        self._reload_overrides()
+        course = self.settings.course(course_shortname) or course
+        now_override = course.override_for(occurrence_date)
+        now_time = (now_override.start_time, now_override.duration_minutes) if now_override else None
+        self._resync_and_notify_override(
+            course, occurrence_date,
+            removed=(action == "remove"),
+            time_changed=(was_time != now_time),
+        )
+        return self._back_to_sessions(course_shortname)
+
+    def _resync_and_notify_override(
+        self, course, occ_date: str, removed: bool, time_changed: bool = True
+    ) -> None:
+        """After a console time change: put the calendar right, then tell
+        the people it affects.
+
+        Calendar first, deliberately. The operator's own calendar showing
+        the old hours is the failure they would discover the hard way, at
+        the venue -- whereas an email that did not send is visible here
+        and can be repeated. Neither is allowed to raise: the override is
+        already recorded by the time this runs, and failing the request
+        now would tell the operator their change did not happen when it
+        did."""
+        try:
+            self._sync(course.shortname, date.fromisoformat(occ_date))
+        except Exception:  # noqa: BLE001 - reported, never fatal
+            log.exception("override: could not re-sync the calendar event for %s on %s",
+                          course.shortname, occ_date)
+
+        booked = find_cancelable_registrations_for_occurrence(
+            self.store, course.shortname, occ_date
+        )
+        users_by_id = {u["user_id"]: User(**u) for u in self.store.read_users(scope="all")}
+        when = course.time_range_label_for(occ_date)
+        # Say what actually changed. Editing only the note used to
+        # announce a time change that had not happened -- which is worse
+        # than saying nothing, because a participant then re-reads a
+        # time they already had and wonders what they missed.
+        if removed:
+            intro = (f"The time of your session on {occ_date} has changed back to the usual "
+                     f"{when}.")
+        elif time_changed:
+            intro = f"The time of your session on {occ_date} has changed. It now runs {when}."
+        else:
+            intro = (f"There is a new note about your session on {occ_date}. "
+                     f"The time is unchanged ({when}).")
+        override = course.override_for(occ_date)
+        message_line = f"{override.message}\n" if (override and override.message) else ""
+        details = self._booking_details_text(course, occ_date)
+
+        notified = 0
+        for reg in booked:
+            user = users_by_id.get(reg.user_id)
+            if user is None or not user.email or is_erased_email(user.email):
+                continue
+            try:
+                send_mail(
+                    self.settings, user.email,
+                    f"Time changed: {course.title} on {occ_date}",
+                    render_template(
+                        load_email_template(self.settings, "time_changed_email.txt"),
+                        name=user.name or "guest", intro=intro, message_line=message_line,
+                        details=details, manage_url=f"{self.settings.base_url}/my",
+                    ),
+                    bcc_addrs=self.settings.bcc_attendee_email_list,
+                )
+                notified += 1
+            except Exception:  # noqa: BLE001 - one bad address must not stop the rest
+                log.exception("override: could not notify a participant of %s on %s",
+                              course.shortname, occ_date)
+
+        # The host's own copy, in the plain-text ASCII shape every
+        # host-only email uses (see cancellation.host_details_text /
+        # host_subject) -- and always sent, including when nobody was
+        # booked, because "nobody had to be told" is itself worth knowing.
+        taken, capacity = self._occupancy(course, occ_date)
+        try:
+            send_mail(
+                self.settings, self.settings.admin_email,
+                host_subject(
+                    "Time restored" if removed
+                    else ("Time changed" if time_changed else "Note changed"),
+                    course, occ_date, taken,
+                ),
+                render_template(
+                    load_email_template(self.settings, "time_changed_admin_email.txt"),
+                    intro=intro,
+                    details=host_details_text(course, occ_date),
+                    spots_taken=str(taken), capacity=str(capacity),
+                    notified_line=(
+                        f"{notified} participant(s) notified."
+                        if notified else "Nobody was booked -- nobody was notified."
+                    ),
+                ),
+            )
+        except Exception:  # noqa: BLE001 - same
+            log.exception("override: could not send the host copy for %s on %s",
+                          course.shortname, occ_date)
+
+    def admin_hide_occurrence(self, method: str, course_shortname: str, occurrence_date: str, environ):
+        """Stop offering one date (or offer it again).
+
+        NOT a cancellation: the session happens and everyone booked keeps
+        their place. Refused outright once anyone IS booked -- the button
+        is already disabled there, and this is the same rule enforced
+        where it actually matters rather than only in the markup."""
+        course, err = self._admin_gate(method, environ, course_shortname)
+        if err:
+            return err
+        form = self._read_form(environ)
+        unhide = form.get("action") == "unhide"
+        occ = date.fromisoformat(occurrence_date)
+        href = self._href(self.settings.booking_calendar)
+        if unhide:
+            calendar_sync.delete_hide_blocker(
+                self.caldav, href, self.settings, course_shortname, occ)
+        else:
+            booked = find_cancelable_registrations_for_occurrence(
+                self.store, course_shortname, occurrence_date
+            )
+            if booked:
+                return "409 Conflict", [("Content-Type", "text/plain")], (
+                    "this date has bookings -- cancel the session instead of hiding it"
+                )
+            calendar_sync.create_hide_blocker(self.caldav, href, self.settings, course, occ)
+        return self._back_to_sessions(course_shortname)
+
+    def admin_cancel_occurrence(self, method: str, course_shortname: str, occurrence_date: str, environ):
+        """"Cancel entire session" from the console.
+
+        Deliberately the SAME _cancel_occurrence() the calendar magic link
+        uses -- blocker event first, fail-closed, both-sides emails -- so
+        the two routes can never drift into cancelling differently. Only
+        where you end up afterwards differs."""
+        course, err = self._admin_gate(method, environ, course_shortname)
+        if err:
+            return err
+        message = sanitize_csv_field((self._read_form(environ).get("message") or "").strip())
+        self._cancel_occurrence(course_shortname, occurrence_date, message=message)
+        return self._back_to_sessions(course_shortname)
 
     def admin_cancel(self, method: str, registration_id: str, environ):
         session = _get_session(environ)

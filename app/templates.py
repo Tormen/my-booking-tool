@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import html
 
+from .version import short_version
+
 
 def esc(value) -> str:
     return html.escape(str(value), quote=True)
@@ -51,11 +53,16 @@ _SUBMIT_FEEDBACK_SCRIPT = """<script>
 </script>"""
 
 
-def page(title: str, body: str, banner: str = "") -> str:
+def page(title: str, body: str, banner: str = "", head_extra: str = "") -> str:
     """Every page in the app gets `_SUBMIT_FEEDBACK_SCRIPT` appended
     automatically (2026-07-11) -- see that constant's own docstring/comment
     above for why (submissions with no feedback, buttons stayed
     clickable during a slow one). No per-page opt-in needed or possible.
+
+    `head_extra` is raw markup for the <head> -- currently only the
+    <meta http-equiv="refresh"> that carries someone back to /my after a
+    booking made in the overlay there. Not escaped and not guest-
+    reachable: every caller passes a literal built in this codebase.
 
     `banner` (2026-07-06, see app/webapp.py's _session_banner_html) is
     OPTIONAL, small, session-aware markup rendered above the page's own
@@ -133,6 +140,7 @@ def page(title: str, body: str, banner: str = "") -> str:
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)}</title>
+{head_extra}
 <link rel="icon" type="image/png" href="/favicon/favicon-96x96.png" sizes="96x96">
 <link rel="icon" type="image/svg+xml" href="/favicon/favicon.svg">
 <link rel="shortcut icon" href="/favicon/favicon.ico">
@@ -229,6 +237,123 @@ th{{user-select:none;white-space:nowrap}}
    in a given response. */
 #book-tab-login:checked ~ #book-panel-login{{display:block}}
 #book-tab-signup:checked ~ #book-panel-signup{{display:block}}
+/* /admin's Future Sessions box (2026-08-27): per-date status pills, the
+   weekday+time chip each tab leads with (that pair is how a course is
+   recognised at a glance), and the row note under a changed time. */
+/* No font-size shrink anywhere here: the standing rule is that nothing
+   renders below the 1em button baseline, and de-emphasis is done with
+   italics. These pills read as secondary through their background,
+   which costs no legibility at all. */
+.st{{padding:.1em .5em;border-radius:10px;white-space:nowrap}}
+.st-ok{{background:#e6f4e8;color:#196B24}}
+.st-full{{background:#fdf3e0;color:#8a5a00}}
+.st-can{{background:#fde8e8;color:#b00020;font-weight:bold}}
+.st-con{{background:#eee;color:#666}}
+.st-hid{{background:#ece7f6;color:#5b3fa0;font-weight:bold}}
+.row-note{{font-style:italic;color:#666;white-space:normal;max-width:34ch}}
+/* Equal air above and below this line: the same gap under the tab rule
+   as over the table's own header row, so the course line sits between
+   them rather than clinging to one. */
+.course-head{{display:flex;flex-wrap:wrap;align-items:baseline;gap:.6em;margin:1em 0}}
+/* line-height + equal vertical padding: with the inherited line-height
+   the glyphs sat low in the pill, leaving more colour below the text
+   than above it. Pinning both makes the box symmetric about the text. */
+.when{{background:#196B24;color:#fff;border-radius:6px;padding:.25em .6em;font-weight:bold;
+  line-height:1.2;display:inline-block;white-space:nowrap}}
+table.sessions td,table.sessions th{{border-bottom:1px solid #eee;padding:.45em .6em;
+  text-align:left;vertical-align:top}}
+/* Buttons in a table cell, aligned with the text beside them. Two
+   earlier attempts with vertical-align alone did NOT work, and the
+   reason is worth writing down: an inline-block button is laid out in a
+   LINE BOX, so it is subject to the line's baseline and to the global
+   `button{{margin:.2em 0}}` -- in a tall row it ends up visibly lower
+   than the first line of text next to it. Taking the buttons out of
+   inline layout entirely (a flex box, items aligned to the start, no
+   stray top margin) removes every one of those variables instead of
+   fighting them one at a time.
+
+   The flex box is an inner <div>, NOT the cell: `display:flex` on a <td>
+   takes it out of table layout, so border-collapse stops applying and
+   its border renders twice as thick as every other cell's -- a visibly
+   heavier frame around the Cancel column. The cell stays a table-cell;
+   its child does the work. */
+td.actions .btn-row{{display:flex;flex-wrap:wrap;gap:.4em;align-items:flex-start}}
+/* Introduces the guests block on the booking page. NOTE: this <style>
+   ships on every page, so comments here must avoid ordinary English
+   words a test or a grep might look for in the page TEXT -- see the
+   .booking-as comment above for the same warning. */
+.guests-intro{{margin:0 0 .8em;color:#444}}
+/* Which build this page came from, so a screenshot of it identifies
+   itself. Italic + grey rather than smaller: nothing here renders below
+   the 1em button baseline (see the .note/.hint rules above). */
+.version{{margin:2.5em 0 0;text-align:right;font-style:italic;color:#999}}
+td.actions .btn-row button{{margin-top:0}}
+/* EVERY overlay on every page, in one rule (2026-08-27, the operator:
+   "ALL are now centered please"). There was no `dialog` rule at all
+   before this, so each one sat wherever the browser put it -- typically
+   pinned near the top. `margin:auto` is what actually centres a modal
+   <dialog>: several engines apply `auto` only in the inline axis by
+   default, so the block axis has to be asked for. The height cap
+   matters as much: a booking form with a date grid, guest rows and an
+   acknowledgement runs past the bottom of a laptop viewport, and the
+   submit button becomes unreachable with no scrollbar. */
+/* /my's "New booking" frame: one row per course, led by the same chip
+   /admin uses. Equal chip widths without a guessed min-width -- the
+   labels differ only in the weekday and the digits, so pinning those two
+   makes the natural widths match (see .wd and tabular-nums). */
+.course-pick{{display:flex;flex-wrap:wrap;align-items:baseline;gap:.6em;width:100%;
+  box-sizing:border-box;text-align:left;background:none;border:1px solid #ddd;
+  border-radius:8px;padding:.7em .9em;margin:.4em 0;cursor:pointer;font:inherit;
+  color:inherit;text-decoration:none}}
+.course-pick:hover{{background:#f4f7f4;border-color:#196B24}}
+.course-pick .when{{font-variant-numeric:tabular-nums}}
+.course-pick .wd{{display:inline-block;min-width:2.4em}}
+.pick-title{{font-weight:bold}}
+/* A dialog opened by the SERVER (<dialog open>, no script) is
+   non-modal: it renders in normal document flow, which is why the
+   booking overlay appeared inline rather than floating. Only
+   showModal() puts a dialog in the top layer with a real ::backdrop,
+   and that is a JS call this design deliberately avoids.
+   So the floating is done here instead: fixed position, centred, above
+   its own dimmed backdrop element. `.overlay-backdrop` is a LINK, so
+   clicking outside the panel closes it -- the behaviour people expect
+   from a modal, without the modal. */
+dialog.book-dialog{{max-width:720px}}
+dialog.book-dialog[open]{{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  z-index:1001;box-shadow:0 8px 30px rgba(0,0,0,.35);background:#fff}}
+.overlay-backdrop{{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1000;
+  display:block}}
+/* The "done" panel after booking from /my's overlay: shown in the same
+   place the booking form was, then faded out while a <meta refresh>
+   carries the reader back to /my. CSS, not script -- the fade is
+   cosmetic and the refresh is what actually returns them, so a browser
+   that honours neither still lands on a page with a plain link. */
+.done-panel{{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:1001;
+  background:#fff;border:1px solid #ddd;border-radius:8px;padding:1.6em 2em;text-align:center;
+  box-shadow:0 8px 30px rgba(0,0,0,.35);animation:done-fade .8s ease 2.2s forwards}}
+.done-panel h2{{margin:0 0 .3em;color:#196B24}}
+@keyframes done-fade{{to{{opacity:0;visibility:hidden}}}}
+dialog .x{{position:absolute;top:.4em;right:.5em;font-size:1.6em;line-height:1;
+  color:#666;text-decoration:none;padding:0 .2em}}
+/* The tabs ARE this frame's title, so they carry the <h2>'s size and
+   weight; only colour marks which one is active. */
+#my-tab-upcoming:checked ~ #my-panel-upcoming{{display:block}}
+#my-tab-past:checked ~ #my-panel-past{{display:block}}
+#my-tab-upcoming:checked ~ .tab-labels label[for="my-tab-upcoming"],
+#my-tab-past:checked ~ .tab-labels label[for="my-tab-past"]{{color:#196B24;
+  border-bottom-color:#196B24}}
+.card .tab-label{{font-size:1.3em;font-weight:bold}}
+.card > h2:first-child,.card-head h2{{margin:0 0 .6em;font-size:1.3em;
+  border-bottom:2px solid #196B24;padding-bottom:.25em;display:inline-block}}
+/* A frame's title row when it also carries a link on the right. */
+.card-head{{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;
+  gap:1em}}
+.tab-active{{color:#196B24;border-bottom-color:#196B24}}
+dialog{{margin:auto;max-width:640px;width:92%;max-height:88vh;overflow:auto;
+  position:relative}}
+dialog::backdrop{{background:rgba(0,0,0,.45)}}
+details summary{{cursor:pointer;margin:.8em 0;color:#196B24}}
+button.danger{{background:#b00020;color:#fff;border:1px solid #b00020;border-radius:6px}}
 .tab-labels{{display:flex;border-bottom:1px solid #ddd;margin-top:.6em}}
 .tab-label{{padding:.5em 1.2em;cursor:pointer;color:#555;border-bottom:2px solid transparent;margin-bottom:-1px}}
 #my-tab-login:checked ~ .tab-labels label[for="my-tab-login"],
@@ -239,5 +364,6 @@ th{{user-select:none;white-space:nowrap}}
 {banner}
 <h1>{esc(title)}</h1>
 {body}
+<p class="version">{esc(short_version())}</p>
 {_SUBMIT_FEEDBACK_SCRIPT}
 </body></html>"""
