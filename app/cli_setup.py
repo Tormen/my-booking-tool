@@ -829,6 +829,34 @@ def interactive_setup(
             elif not is_root():
                 print_fn("(needs root -- re-run `sudo my-bt setup -i`)")
 
+    # A course defined in BOTH settings files: legal, and the editable
+    # copy wins -- so the settings.toml block is dead config that still
+    # LOOKS live. Offered as a fix HERE, never from the console: this
+    # writes settings.toml, the file /admin must never be able to touch.
+    for label, level, detail in cli_checks.check_web_editable_settings(settings_path):
+        if level == "ok":
+            print_fn(f"[ok] {label}: {detail}")
+            continue
+        print_fn(f"[{level}] {label}: {detail}")
+        if label != "course defined in both settings files":
+            continue
+        names = tuple(part.strip() for part in detail.split("--")[0].split(","))
+        names = tuple(n for n in names if n)
+        if not names:
+            continue
+        if not is_root():
+            print_fn("(needs root to edit settings.toml -- re-run `sudo my-bt setup -i`)")
+            continue
+        if prompt(f"Comment out the superseded [[course]] block(s) in {settings_path}?"):
+            done = config.comment_out_superseded_courses(settings_path, names)
+            if done:
+                # Commented, not deleted: the text is yours, and it may be
+                # the only copy of a description that took a while to write.
+                print_fn(f"[ok] commented out {len(done)} block(s): {', '.join(done)} "
+                         f"-- kept in the file, dated, so nothing is lost")
+            else:
+                print_fn("[warn] nothing changed -- the blocks were not found by name")
+
     # settings.toml can be edited on disk without the running service ever
     # noticing (see check_settings_fresh()'s docstring) -- flag it right
     # here, next to the service's own status, and offer the one-line fix.

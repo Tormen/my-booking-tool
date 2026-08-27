@@ -352,3 +352,75 @@ capacity = 10
 ''')
         with self.assertRaises(Exception):
             config.load_settings(self.toml)
+
+
+class CommentOutSupersededCoursesTest(unittest.TestCase):
+    """The offered cleanup for a course defined in both files.
+
+    Legal, but the settings.toml block is dead config that still looks
+    live: edit it and nothing happens. Offered by `my-bt admin setup`
+    only -- it writes settings.toml, the file the console must never be
+    able to touch."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.toml = Path(self._tmp.name) / "settings.toml"
+        self.toml.write_text('''[site]
+timezone = "UTC"
+
+# a note of my own, above the block
+[[course]]
+shortname = "yoga"
+title = "Yoga"
+capacity = 10
+
+[[course.date_override]]
+date = "2026-09-05"
+message = "starts early"
+
+[[course]]
+shortname = "pilates"
+title = "Pilates"
+
+[smtp]
+host = "x"
+''')
+
+    def _parsed(self) -> dict:
+        import tomllib
+        return tomllib.loads(self.toml.read_text())
+
+    def test_it_removes_only_the_named_course(self):
+        done = config.comment_out_superseded_courses(self.toml, ["yoga"])
+        self.assertEqual(done, ["yoga"])
+        self.assertEqual([c["shortname"] for c in self._parsed()["course"]], ["pilates"])
+
+    def test_the_courses_own_date_override_goes_with_it(self):
+        # It belongs to the block above it; left behind it would attach
+        # to the NEXT course, silently.
+        config.comment_out_superseded_courses(self.toml, ["yoga"])
+        self.assertNotIn("date_override", self._parsed()["course"][0])
+
+    def test_every_other_section_survives(self):
+        config.comment_out_superseded_courses(self.toml, ["yoga"])
+        parsed = self._parsed()
+        self.assertEqual(parsed["site"]["timezone"], "UTC")
+        self.assertEqual(parsed["smtp"]["host"], "x")
+
+    def test_the_text_is_kept_and_dated_not_deleted(self):
+        config.comment_out_superseded_courses(self.toml, ["yoga"], now_stamp="2026-08-28_0130")
+        text = self.toml.read_text()
+        self.assertIn('# shortname = "yoga"', text)
+        self.assertIn("2026-08-28_0130: commented out", text)
+        self.assertIn("# a note of my own, above the block", text)
+
+    def test_all_of_them_at_once(self):
+        done = config.comment_out_superseded_courses(self.toml, ["yoga", "pilates"])
+        self.assertEqual(sorted(done), ["pilates", "yoga"])
+        self.assertEqual(self._parsed().get("course", []), [])
+
+    def test_an_unknown_name_changes_nothing(self):
+        before = self.toml.read_text()
+        self.assertEqual(config.comment_out_superseded_courses(self.toml, ["nope"]), [])
+        self.assertEqual(self.toml.read_text(), before)

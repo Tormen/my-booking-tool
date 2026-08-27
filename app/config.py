@@ -917,6 +917,84 @@ def config_override_entries(courses: tuple[Course, ...]) -> list:
     ]
 
 
+def comment_out_superseded_courses(
+    toml_path: str | Path,
+    shortnames: tuple[str, ...] | list[str],
+    now_stamp: str | None = None,
+) -> list[str]:
+    """Comment out the [[course]] blocks that settings.web-editable.toml
+    now owns. Returns the shortnames actually commented.
+
+    Two files defining the same course is legal -- the editable one wins
+    -- but the losing block is dead config that still LOOKS live: edit it
+    and nothing happens. `my-bt admin health` reports the situation, and
+    this is the offered fix.
+
+    COMMENTED, not deleted, and dated, exactly like
+    annotate_superseded_override does for a superseded date: the text is
+    the operator's own and may be the only copy of a description they
+    spent time on. It also stays a plain-text edit -- tomllib has no
+    writer, so parsing and re-emitting this hand-maintained file would
+    silently drop every comment in it.
+
+    Only ever called by `my-bt admin setup` with a person at the
+    keyboard, never by the web process: settings.toml is the file the
+    console must not be able to touch."""
+    path = Path(toml_path)
+    try:
+        original = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    lines = original.splitlines(keepends=True)
+    stamp = now_stamp or datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M")
+    wanted = set(shortnames)
+
+    # One pass to find each [[course]] block's extent and its shortname.
+    # A block runs to the next TOP-LEVEL table header; its own
+    # [[course.date_override]] sub-tables belong to it and go with it.
+    blocks: list[tuple[int, int, str]] = []
+    start = None
+    name = None
+    for i, line in enumerate(lines + ["[end]\n"]):
+        stripped = line.strip()
+        is_course_header = stripped.startswith("[[course]]")
+        is_other_top_level = (stripped.startswith("[") and not is_course_header
+                              and not stripped.startswith("[[course."))
+        if start is not None and (is_course_header or is_other_top_level):
+            end = i
+            while end > start + 1 and not lines[end - 1].strip():
+                end -= 1          # leave trailing blank lines outside
+            if name in wanted:
+                blocks.append((start, end, name))
+            start = None
+            name = None
+        if is_course_header:
+            start = i
+            name = None
+            continue
+        if start is not None and name is None and stripped.startswith("shortname"):
+            _key, _eq, value = stripped.partition("=")
+            name = value.strip().strip('"').strip("'")
+
+    if not blocks:
+        return []
+
+    for block_start, block_end, _name in reversed(blocks):
+        marker = (
+            f"# {stamp}: commented out -- this course is now managed under "
+            f"/admin (see {WEB_EDITABLE_DIRNAME}/{WEB_EDITABLE_FILENAME}), "
+            f"which takes precedence over anything written here.\n"
+        )
+        commented = [
+            (line if not line.strip() else "# " + line)
+            for line in lines[block_start:block_end]
+        ]
+        lines[block_start:block_end] = [marker] + commented
+
+    atomic_write_text(path, "".join(lines))
+    return [name for _s, _e, name in blocks]
+
+
 def annotate_superseded_override(
     toml_path: str | Path,
     course_shortname: str,
