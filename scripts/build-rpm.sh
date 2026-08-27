@@ -99,11 +99,15 @@ tar -C "$HERE" --exclude='./data' --exclude='./secrets' --exclude='./.git' \
 for real in settings.toml site/index.html site/impressum.html site/terms.html \
             site/privacy.html site/privacy.html.tmpl site/index_embedded.html \
             site/nginx-locations.conf; do
+  # -p (preserve mtime) on both copies: app/version.py's SOURCE_STAMP is
+  # the newest mtime across the staged source, so a plain `cp` -- which
+  # stamps the copy with the CURRENT time -- would quietly turn that back
+  # into a build clock, which is exactly what it must not be.
   if [ -n "$OVERLAY" ] && [ -f "$OVERLAY/$real" ]; then
     mkdir -p "$DEST/$(dirname "$real")"
-    cp "$OVERLAY/$real" "$DEST/$real"
+    cp -p "$OVERLAY/$real" "$DEST/$real"
   elif [ ! -f "$DEST/$real" ] && [ -f "$DEST/$real.example" ]; then
-    cp "$DEST/$real.example" "$DEST/$real"
+    cp -p "$DEST/$real.example" "$DEST/$real"
     echo "no $real found -- using the generic $real.example as a starting point"
   fi
 done
@@ -124,6 +128,14 @@ else
   GIT_COMMIT_VALUE="unknown (not built from a git checkout)"
 fi
 echo "$GIT_COMMIT_VALUE" > "$DEST/GIT_COMMIT"
+
+# The SOURCE stamp: the newest modification time across the packaged
+# source, "YYYY-MM-DD_HHMM" UTC. NOT a build clock -- rebuilding
+# untouched source must report the same string, and editing one line must
+# move it (see app/version.py::compute_source_stamp). Computed from the
+# STAGED tree, i.e. exactly what this package will contain.
+python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); from app import version; \
+    print(version.compute_source_stamp(sys.argv[1]) or "")' "$DEST" > "$DEST/SOURCE_STAMP"
 
 tar -C "$STAGE" -czf "$RPMBUILD_DIR/SOURCES/$NAME-$VERSION.tar.gz" "$NAME-$VERSION"
 cp "$HERE/packaging/$NAME.spec" "$RPMBUILD_DIR/SPECS/"

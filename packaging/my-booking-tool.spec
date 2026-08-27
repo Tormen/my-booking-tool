@@ -1,5 +1,5 @@
 Name:           my-booking-tool
-Version:        1.0.0
+Version:        1.1.0
 # Release is a timestamp, not a hand-bumped counter: scripts/build-rpm.sh
 # passes --define "build_timestamp <UTC YYYYmmddHHMMSS>" on every run, so
 # each build produces a strictly newer NEVRA. That means `dnf install` on
@@ -82,7 +82,73 @@ MY_BOOKING_HOME=$(pwd) python3 scripts/my-bt --print-zsh-completion > _my-bt.zsh
 # (F/E on failure/error) as they run, so there's visible progress and an
 # immediate pointer to which test broke, without the much longer
 # one-line-per-test output -v would add to the build log.
-python3 -m unittest discover
+#
+# The version line first: the suite takes ~20-40s, and this is the moment
+# the operator is watching the build scroll by. It also stamps the build
+# log with exactly WHICH source produced this package -- both GIT_COMMIT
+# and SOURCE_STAMP are already staged by scripts/build-rpm.sh at this
+# point, so this prints the same string `my-bt --version` will report
+# once installed. Note the stamp dates the SOURCE, so an unchanged tree
+# built twice prints the same line twice -- that is the intent, not a
+# staleness bug.
+MY_BOOKING_HOME="$(pwd)" python3 scripts/my-bt --version
+# How many "s" to expect among the dots below, so a skip never has to be
+# wondered about. Printed rather than only commented: the dots scroll past
+# in the build log, and the answer wants to be right next to them.
+#
+#   1 skip, building as an ordinary user (the normal case here):
+#     tests/test_real_settings.py's secret-files check. The secrets
+#     directory is root-only BY DESIGN, so a non-root build cannot tell
+#     "absent" from "cannot look" -- and saying nothing beats reporting
+#     four files as missing when they are all present, which is what an
+#     earlier version of that test did.
+#   0 skips, building as root: it can stat them, so the check really runs.
+#
+# Avoiding the skip is therefore just "build as root" -- but that is NOT a
+# recommendation: rpmbuild as root lets a misbehaving spec write anywhere
+# on the system, which is why the ordinary-user build is the default here.
+# The skip costs nothing either: `my-bt admin health`, which DOES run as
+# root on the server, checks the same four secret files after install.
+#
+# A skip count other than the two above is worth reading:
+#   python3 -m unittest discover -v 2>&1 | grep '\.\.\. skipped'
+# The number of skips is CHECKED, not merely announced (2026-08-27, the
+# operator): an unexpected skip means a test stopped running, which is
+# indistinguishable from a green build if only the exit status is read.
+# unittest exits 0 whether it ran 1880 tests or skipped half of them.
+expected_skips=1
+[ "$(id -u)" -eq 0 ] && expected_skips=0
+echo "expecting $expected_skips skipped test(s) (\"s\" among the dots): the secrets check"
+echo "  needs root to see /etc/my-booking/secrets. Build as root to run it too, or leave"
+echo "  it -- \`my-bt admin health\` covers those files after install."
+
+# Streamed AND captured: the dots have to stay visible (a silent 40s
+# looks like a hung build), and the summary line has to be re-readable
+# afterwards to count the skips. PIPESTATUS would be the obvious way to
+# get the suite's own exit status through the pipe, but that is a
+# bashism and %check runs under /bin/sh -e -- the status file is POSIX.
+{ python3 -m unittest discover 2>&1; echo $? > unittest-status; } | tee unittest-output.log
+test_status=$(cat unittest-status)
+[ "$test_status" -eq 0 ] || exit "$test_status"
+
+# "OK", "OK (skipped=1)", "OK (skipped=1, expected failures=2)" -- take
+# the number if it is there, zero if it is not.
+actual_skips=$(sed -n 's/.*skipped=\([0-9][0-9]*\).*/\1/p' unittest-output.log | tail -n 1)
+: "${actual_skips:=0}"
+if [ "$actual_skips" -ne "$expected_skips" ]; then
+  cat <<MSG
+
+my-booking-tool: FAILING the build -- $actual_skips test(s) skipped, expected $expected_skips.
+
+A skip that was not expected means a test quietly stopped running, which
+looks exactly like a passing build if only the exit status is read. Find
+out which one, then either fix it or update the expected count here:
+
+  python3 -m unittest discover -v 2>&1 | grep '\.\.\. skipped'
+
+MSG
+  exit 1
+fi
 
 %install
 rm -rf %{buildroot}
@@ -119,6 +185,16 @@ if [ -f GIT_COMMIT ]; then
   install -m 644 GIT_COMMIT %{buildroot}/opt/my-booking/GIT_COMMIT
 else
   echo "unknown (not built via scripts/build-rpm.sh)" > %{buildroot}/opt/my-booking/GIT_COMMIT
+fi
+# SOURCE_STAMP -- the newest mtime across the packaged SOURCE,
+# "YYYY-MM-DD_HHMM" UTC. Deliberately NOT the build time (which is what
+# Release above already is): this dates the CODE, so two builds of an
+# untouched tree report the same string. Written unconditionally for the
+# same reason as GIT_COMMIT: %files can then reference it plainly.
+if [ -f SOURCE_STAMP ]; then
+  install -m 644 SOURCE_STAMP %{buildroot}/opt/my-booking/SOURCE_STAMP
+else
+  echo "" > %{buildroot}/opt/my-booking/SOURCE_STAMP
 fi
 
 install -d %{buildroot}/usr/local/bin
@@ -391,6 +467,7 @@ exit 0
 %defattr(-,root,root,-)
 /opt/my-booking/app
 /opt/my-booking/GIT_COMMIT
+/opt/my-booking/SOURCE_STAMP
 /usr/local/bin/my-bt
 %attr(755,root,root) /opt/my-booking/bin/my-bt
 %{_datadir}/zsh/site-functions/_my-bt
@@ -424,5 +501,17 @@ exit 0
 # builds (this is just packaging metadata, not tracked separately from
 # this file, so it's your call each release, same as git commit
 # authorship).
+* Thu Aug 27 2026 Tormen <tormen@mail.ch> - 1.1.0-1
+- Future Sessions in the admin console: per-date time overrides, hide and
+  cancel, journalled in date_overrides.csv instead of settings.toml
+- /my rebuilt: New booking frame with an in-page booking overlay, and
+  Upcoming/Past as tabs
+- Conflict checks batched: one CalDAV query per page render instead of
+  one per candidate date
+- Static-site pages are written world-readable (they were 0600, so nginx
+  served 403)
+- Version now identifies the SOURCE it was built from, and every page
+  carries it
+
 * Sat Jul 04 2026 Tormen <tormen@mail.ch> - 1.0.0-1
 - Initial package
