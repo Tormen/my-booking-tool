@@ -1163,9 +1163,8 @@ def _course_recap_html(course, occ_date: str) -> str:
 # matter how many tables exist or what they're named, so ONE hash covers
 # every one of them, forever.
 _SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
-(function() {
-  var table = document.currentScript.previousElementSibling;
-  if (!table || table.tagName !== "TABLE" || !table.tHead || !table.tBodies.length) return;
+document.querySelectorAll("table[data-sortable]").forEach(function(table) {
+  if (!table.tHead || !table.tBodies.length) return;
   var tbody = table.tBodies[0];
   var headerCells = Array.prototype.slice.call(table.tHead.rows[0].cells);
   var rows = Array.prototype.slice.call(tbody.rows);
@@ -1195,8 +1194,10 @@ _SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
       applySort(th, idx, th.dataset.dir === "asc" ? "desc" : "asc");
     });
   });
-  var toolsDiv = table.previousElementSibling;
-  var filterInput = toolsDiv ? toolsDiv.querySelector('input[type="search"]') : null;
+  // The filter box inside the same frame -- not "the element before the
+  // table", which is what this used to be and what broke it.
+  var scope = table.closest(".card") || table.parentNode;
+  var filterInput = scope ? scope.querySelector('input[type="search"]') : null;
   if (filterInput) {
     filterInput.addEventListener("input", function() {
       var q = filterInput.value.trim().toLowerCase();
@@ -1222,7 +1223,7 @@ _SORTABLE_FILTERABLE_TABLE_SCRIPT = """<script>
     var dir = th.getAttribute("data-default-sort");
     if (dir === "asc" || dir === "desc") applySort(th, idx, dir);
   });
-})();
+});
 </script>"""
 
 
@@ -3808,7 +3809,7 @@ class App:
                 <div class="table-tools">
                   <input type="search" id="{table_id}-filter" class="big-input id-input" placeholder="Filter bookings...">
                 </div>
-                <table id="{table_id}" border="1" cellpadding="6">
+                <table id="{table_id}" data-sortable border="1" cellpadding="6">
                   <thead><tr>
                     <th>Course<span class="sort-indicator"></span></th>
                     <th data-default-sort="{default_sort_dir}">Date<span class="sort-indicator"></span></th>
@@ -5797,7 +5798,7 @@ class App:
         <div class="table-tools">
           <input type="search" id="{table_id}-filter" class="big-input id-input" placeholder="Filter...">
         </div>
-        <table id="{table_id}" border="1" cellpadding="6">
+        <table id="{table_id}" data-sortable border="1" cellpadding="6">
         <thead><tr>
           <th>Status<span class="sort-indicator"></span></th>
           <th>Course<span class="sort-indicator"></span></th>

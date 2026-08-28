@@ -3503,7 +3503,7 @@ class BookingFlowTest(unittest.TestCase):
         # DOM position instead, so the same script text is emitted verbatim
         # everywhere. Assert on that stable marker instead of the old
         # getElementById() call.
-        self.assertIn("document.currentScript.previousElementSibling", body)
+        self.assertIn('querySelectorAll("table[data-sortable]")', body)
 
     def test_my_upcoming_table_date_column_defaults_to_ascending_sort(self):
         # 2026-07-08: a screenshot of /admin?past=1 led to sorting by
@@ -4286,8 +4286,12 @@ class BookingFlowTest(unittest.TestCase):
         self.assertIn('<table id="admin-overview-table"', body)
         self.assertIn('<thead><tr>', body)
         self.assertIn('<input type="search" id="admin-overview-table-filter"', body)
-        # See the same 2026-07-10 comment in the /my equivalent test above.
-        self.assertIn("document.currentScript.previousElementSibling", body)
+        # Wired by MARKER, not by position (2026-08-28): the script used to
+        # take "the element before me" as its table, which stopped being
+        # true the moment /admin grew a second frame -- filtering and
+        # sorting both went silently dead.
+        self.assertIn("data-sortable", body)
+        self.assertIn('querySelectorAll("table[data-sortable]")', body)
 
     def test_admin_overview_date_column_defaults_to_ascending_sort(self):
         # 2026-07-08: same default-sort-indicator request as /my's.
@@ -4318,7 +4322,7 @@ class BookingFlowTest(unittest.TestCase):
         _status, _headers, admin_body = self.app.admin_overview("GET", {"HTTP_COOKIE": f"session={admin_sid}"})
 
         def extract_sort_script(body: str) -> str:
-            start = body.index("<script>\n(function() {\n  var table = document.currentScript")
+            start = body.index('<script>\ndocument.querySelectorAll("table[data-sortable]")')
             end = body.index("</script>", start) + len("</script>")
             return body[start:end]
 
@@ -6322,3 +6326,49 @@ class OverlayOffersOnlyUnbookedDatesTest(unittest.TestCase):
         for where, body in (("overlay", overlay), ("/book", page)):
             with self.subTest(where=where):
                 self.assertIn(f'value="{free}"', body)
+
+
+class SortableTableIsWiredByMarkerTest(unittest.TestCase):
+    """Filtering and sorting must survive the page being rearranged.
+
+    2026-08-28, reported live: typing in /admin's filter box did nothing,
+    and clicking a column header did nothing either. The script took
+    `document.currentScript.previousElementSibling` as its table -- true
+    when the script sat directly after it, and false the moment /admin
+    grew a second frame and the scripts moved to the end of the body. It
+    failed its own guard and returned, silently.
+
+    Its text must ALSO stay identical for every table: a per-table id
+    would mean a per-table CSP hash, which has already broken this app
+    once (see the constant's own comment)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.app = App(make_settings(courses=(make_course(shortname="c1"),)), self.store)
+        self.admin = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}"}
+
+    def test_the_script_never_depends_on_where_it_sits(self):
+        script = webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT
+        self.assertNotIn("currentScript", script)
+        self.assertIn('querySelectorAll("table[data-sortable]")', script)
+
+    def test_the_bookings_table_carries_the_marker(self):
+        # Only the tables that HAVE a filter box: the Future Sessions
+        # table is a list of dates with buttons, deliberately neither
+        # sortable nor filterable.
+        _s, _h, body = self.app.admin_overview("GET", self.admin)
+        self.assertIn('<table id="admin-overview-table" data-sortable', body)
+
+    def test_the_filter_box_is_found_in_the_same_frame(self):
+        # Not "the element before the table" -- that is the assumption
+        # that broke. The frame is what actually groups them.
+        script = webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT
+        self.assertIn('closest(".card")', script)
+
+    def test_the_table_and_its_filter_share_a_frame_on_admin(self):
+        _s, _h, body = self.app.admin_overview("GET", self.admin)
+        frame = body[body.index('<div class="card">'):body.index("Future Sessions")]
+        self.assertIn('type="search"', frame)
+        self.assertIn("data-sortable", frame)
