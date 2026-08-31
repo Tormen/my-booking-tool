@@ -577,6 +577,23 @@ class UnsavedPromptAccuracyTest(unittest.TestCase):
         self.assertIn("textContent", script)
         self.assertNotIn("innerHTML = shorten", script)
 
+    def test_the_change_list_quotes_the_part_that_changed(self):
+        """2026-08-31, from a screenshot of the real console: "this is not
+        helpful". Both sides were cut to their first 70 characters, so
+        editing a long HTML description showed the same opening twice with
+        an arrow between them -- the change itself was past the cut.
+
+        Structural, because there is no JS engine here to run the script:
+        it checks that the code trims the SHARED head and tail (which is
+        what moves the window onto the difference) and that the old
+        cut-from-the-start helper is gone."""
+        script = self._script()
+        self.assertIn("changedPart", script)
+        self.assertIn("a.charAt(head) === b.charAt(head)", script)   # common prefix
+        self.assertIn("a.charAt(a.length - 1 - tail)", script)       # common suffix
+        self.assertIn("changedPart(was, now)", script)
+        self.assertNotIn("function shorten", script)
+
     def test_the_dialog_has_somewhere_to_put_that_list(self):
         import tempfile
         from pathlib import Path

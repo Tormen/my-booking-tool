@@ -2419,6 +2419,7 @@ class ExpectedCspHashesTest(unittest.TestCase):
         "webapp._CANCEL_ENTIRE_SESSION_SCRIPT",
         "webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT",
         "webapp._BOOKING_FORM_SCRIPT",
+        "webapp._SETTINGS_SCRIPT",
     }
 
     def setUp(self):
@@ -2426,7 +2427,7 @@ class ExpectedCspHashesTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.dir = Path(self._tmp.name)
 
-    def test_no_static_site_dir_returns_only_the_eight_static_constants(self):
+    def test_no_static_site_dir_returns_only_the_static_constants(self):
         hashes = cli_checks.expected_csp_hashes({})
         self.assertEqual(set(hashes), self._STATIC_LABELS)
         for h in hashes.values():
@@ -2446,7 +2447,7 @@ class ExpectedCspHashesTest(unittest.TestCase):
             ).decode()
             self.assertEqual(hashes[label], expected)
 
-    def test_static_site_dir_configured_but_no_index_html_still_just_eight(self):
+    def test_static_site_dir_configured_but_no_index_html_adds_nothing(self):
         raw = {"site": {"static_site_dir": str(self.dir)}}
         hashes = cli_checks.expected_csp_hashes(raw)
         self.assertEqual(set(hashes), self._STATIC_LABELS)

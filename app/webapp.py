@@ -917,10 +917,34 @@ _SETTINGS_SCRIPT = r"""<script>
     return (text || el.name).replace(/\s+/g, " ").trim().replace(/\(required\)$/, "").trim();
   }
 
-  function shorten(value) {
-    var one = String(value == null ? "" : value).replace(/\s+/g, " ").trim();
-    if (!one) { return "(empty)"; }
-    return one.length > 70 ? one.slice(0, 70) + "..." : one;
+  // Quote the part that actually CHANGED. Truncating both sides from the
+  // start shows two identical-looking openings when the edit is further
+  // in -- which is exactly what a long HTML description does (2026-08-31,
+  // the operator, with a screenshot: "this is not helpful"). So trim the
+  // shared head and tail away first, keep a little context either side,
+  // and mark every cut with an ellipsis.
+  var CONTEXT = 20, WINDOW = 60;
+
+  function changedPart(mine, other) {
+    var a = String(mine == null ? "" : mine).replace(/\s+/g, " ").trim();
+    var b = String(other == null ? "" : other).replace(/\s+/g, " ").trim();
+    if (!a) { return "(empty)"; }
+    var max = Math.min(a.length, b.length), head = 0;
+    while (head < max && a.charAt(head) === b.charAt(head)) { head++; }
+    var tail = 0;
+    while (tail < max - head && a.charAt(a.length - 1 - tail) === b.charAt(b.length - 1 - tail)) {
+      tail++;
+    }
+    var from = Math.max(0, head - CONTEXT);
+    var to = Math.min(a.length, a.length - tail + CONTEXT);
+    var text = a.slice(from, to);
+    var cutInside = false;
+    if (text.length > WINDOW) {
+      text = text.slice(0, WINDOW / 2) + " ... " + text.slice(text.length - WINDOW / 2);
+      cutInside = true;
+    }
+    if (!text.trim() && !cutInside) { return "(empty)"; }
+    return (from > 0 ? "..." : "") + text + (to < a.length ? "..." : "");
   }
 
   function listChanges() {
@@ -952,7 +976,8 @@ _SETTINGS_SCRIPT = r"""<script>
       var name = document.createElement("b");
       name.textContent = fieldLabel(el) + ": ";
       item.appendChild(name);
-      item.appendChild(document.createTextNode(shorten(was) + "  \u2192  " + shorten(now)));
+      item.appendChild(document.createTextNode(
+        changedPart(was, now) + "  \u2192  " + changedPart(now, was)));
       list.appendChild(item);
     });
   }

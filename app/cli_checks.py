@@ -2134,6 +2134,12 @@ def expected_csp_hashes(raw: dict) -> dict[str, str]:
         ("webapp._CANCEL_ENTIRE_SESSION_SCRIPT", webapp._CANCEL_ENTIRE_SESSION_SCRIPT),
         ("webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT", webapp._SORTABLE_FILTERABLE_TABLE_SCRIPT),
         ("webapp._BOOKING_FORM_SCRIPT", webapp._BOOKING_FORM_SCRIPT),
+        # 2026-08-31: the settings console's script was missing from this
+        # tuple from the day it was written, so every edit to it shipped
+        # unguarded -- the hash had to be remembered by hand, and nothing
+        # would have said a word if it had not been. That is the exact
+        # failure this function exists to prevent.
+        ("webapp._SETTINGS_SCRIPT", webapp._SETTINGS_SCRIPT),
     )
     for label, constant in static_constants:
         hashes[label] = _hash(_body_of(constant))
