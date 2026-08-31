@@ -440,3 +440,85 @@ class PageViewGoesToTheRightSessionTest(unittest.TestCase):
         webapp._record_page_view(self.env, "/administrivia")
         self.assertEqual(webapp.SESSIONS[self.guest].get("last_page"), "/administrivia")
         self.assertIsNone(webapp.SESSIONS[self.admin].get("last_page"))
+
+
+class MacrosSurviveEditingTest(unittest.TestCase):
+    """The console edits the course AS WRITTEN, not as rendered.
+
+    2026-08-31, reported live: replace text in a description with
+    {{macro}}, save, switch course and come back -- and the field showed
+    the expanded TEXT instead of the macro. Saving from there would have
+    written the expansion back and lost the reference for good, silently
+    undoing the macro the operator had just created."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = Path(self._tmp.name)
+        secrets = self.dir / "secrets"
+        secrets.mkdir()
+        for name in ("caldav", "smtp", "admin"):
+            (secrets / name).write_text("x")
+        (secrets / "pepper").write_text("00" * 32)
+        self.toml = self.dir / "settings.toml"
+        self.toml.write_text(BASE_SETTINGS.format(secrets=secrets))
+        editable = self.dir / "web-editable"
+        editable.mkdir()
+        (editable / "settings.web-editable.toml").write_text('''
+[macros]
+studio = "Ayur Yoga Center"
+
+[[course]]
+shortname = "yoga"
+title = "Yoga"
+location = "Studio"
+weekday = "wed"
+start_time = "18:00"
+duration_minutes = 60
+capacity = 10
+description = "<p>See you at {{studio}}</p>"
+''')
+        self.store = Store(str(self.dir / "data"))
+        self.app = App(config.load_settings(self.toml), self.store,
+                       settings_path=str(self.toml))
+        self.admin = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}"}
+
+    def test_the_edit_form_shows_the_macro_not_its_value(self):
+        _s, _h, body = self.app.admin_settings("GET", self.admin)
+        i = body.index('id="course-description"')
+        field = body[i:body.index("</textarea>", i)]
+        self.assertIn("{{studio}}", field)
+        # Not the expansion -- though the macro CHIP beside the field
+        # does show it, as its hover, which is the point of the chip.
+        self.assertNotIn("Ayur Yoga Center", field)
+
+    def test_the_booking_page_still_shows_the_value(self):
+        # Both at once is the whole point: written as a macro, rendered
+        # as its text.
+        course = self.app.settings.course("yoga")
+        self.assertIn("Ayur Yoga Center", course.description)
+        self.assertNotIn("{{studio}}", course.description)
+
+    def test_saving_another_field_leaves_the_macro_in_place(self):
+        form = {"old_shortname": "yoga", "shortname": "yoga", "title": "Yoga, renamed",
+                "location": "Studio", "weekday": "wed", "start_time": "18:00",
+                "duration_minutes": "60", "capacity": "10", "audience": "private",
+                "order_in_all_courses": "0", "subtitle": "",
+                "description": "<p>See you at {{studio}}</p>"}
+        body = urlencode(form).encode()
+        env = dict(self.admin)
+        env.update({"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)})
+        self.app.admin_settings_course("POST", env)
+        written = config.web_editable_path(self.toml).read_text()
+        self.assertIn("{{studio}}", written)
+        self.assertNotIn("See you at Ayur Yoga Center", written)
+
+    def test_saving_a_macro_does_not_bake_expansions_into_the_courses(self):
+        # The macro form rewrites the WHOLE file, so it hits the same trap.
+        form = {"old_name": "", "name": "gym", "value": "The Gym", "action": "save"}
+        body = urlencode(form).encode()
+        env = dict(self.admin)
+        env.update({"CONTENT_LENGTH": str(len(body)), "wsgi.input": io.BytesIO(body)})
+        self.app.admin_settings_macro("POST", env)
+        written = config.web_editable_path(self.toml).read_text()
+        self.assertIn("{{studio}}", written)

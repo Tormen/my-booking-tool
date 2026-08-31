@@ -5917,7 +5917,10 @@ class App:
         return "".join(rows)
 
     def _settings_body(self, tab: str, message: str, error: str) -> str:
-        courses = self.settings.courses
+        # RAW courses: the form must show {{studio}}, not the studio
+        # name. Saving what the page rendered would write the expansion
+        # back into the config and lose the macro for good.
+        courses = self.settings.raw_courses or self.settings.courses
         active = next((c for c in courses if c.shortname == tab), courses[0] if courses else None)
         note = ""
         if error:
@@ -6134,8 +6137,9 @@ class App:
         table = dict(self.settings.macros)
         if action == "remove":
             table.pop(old_name, None)
-            return self._settings_redirect(self._save_settings(table, self.settings.courses),
-                                           f"{old_name} removed")
+            return self._settings_redirect(
+                self._save_settings(table, self.settings.raw_courses or self.settings.courses),
+                f"{old_name} removed")
         try:
             macros.validate_name(name)
         except macros.MacroError as exc:
@@ -6159,7 +6163,8 @@ class App:
         note = f"{name} saved"
         if clean.dropped:
             note += " -- removed: " + ", ".join(clean.dropped)
-        return self._settings_redirect(self._save_settings(table, self.settings.courses), note)
+        return self._settings_redirect(
+            self._save_settings(table, self.settings.raw_courses or self.settings.courses), note)
 
     _COURSE_FIELDS = (
         # (form field, Course attribute, kind) -- kind decides parsing and
@@ -6198,7 +6203,7 @@ class App:
             return "405 Method Not Allowed", [("Allow", "POST")], ""
         form = self._read_form(environ)
         old_shortname = form.get("old_shortname", "").strip()
-        course = self.settings.course(old_shortname)
+        course = self.settings.raw_course(old_shortname) or self.settings.course(old_shortname)
         if course is None:
             return self._settings_redirect(f"no course called {old_shortname}")
 
@@ -6250,7 +6255,7 @@ class App:
 
         updated = replace(course, **changes)
         courses = tuple(updated if c.shortname == old_shortname else c
-                        for c in self.settings.courses)
+                        for c in (self.settings.raw_courses or self.settings.courses))
         error = self._save_settings(dict(self.settings.macros), courses)
         if error:
             return self._settings_redirect(error, tab=old_shortname)

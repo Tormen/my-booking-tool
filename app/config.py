@@ -343,6 +343,12 @@ class Settings:
     # Empty unless that file exists, which is what keeps every existing
     # install and every test unchanged by their arrival.
     macros: dict[str, str] = field(default_factory=dict)
+    # The same courses BEFORE macro expansion -- what the console must
+    # edit and save. `courses` holds the expanded text every page and
+    # email renders; writing that back would bake the macro out of the
+    # config permanently, turning {{studio}} into the studio name and
+    # losing the reference for good (2026-08-31, reported live).
+    raw_courses: tuple[Course, ...] = field(default_factory=tuple)
 
     # Calendar-invite VALARM reminders (minutes before start), both under
     # [booking_calendar] since 2026-07-18 -- see
@@ -573,6 +579,14 @@ class Settings:
 
     def course(self, shortname: str) -> Course | None:
         for c in self.courses:
+            if c.shortname == shortname:
+                return c
+        return None
+
+    def raw_course(self, shortname: str) -> Course | None:
+        """The course AS WRITTEN, macros unexpanded -- for the console's
+        edit form, and for anything that writes config back."""
+        for c in self.raw_courses:
             if c.shortname == shortname:
                 return c
         return None
@@ -1405,6 +1419,7 @@ def load_settings(toml_path: str | Path, data_dir: str | Path | None = None) -> 
     macro_table = macros_from_raw(editable_raw) if editable_raw else {}
     if data_dir is not None:
         courses = merge_console_overrides(courses, data_dir)
+    raw_courses = courses
     courses = expand_macros_in_courses(courses, macro_table)
     conflict_calendars = tuple(
         _conflict_calendar_from_raw(entry, i, {c.shortname for c in courses})
@@ -1457,6 +1472,7 @@ def load_settings(toml_path: str | Path, data_dir: str | Path | None = None) -> 
             privacy.get("how_many_days_before_account_deletion_send_warning_mail", 0) or 0
         ),
         courses=courses,
+        raw_courses=raw_courses,
         macros=macro_table,
         log_file=log_file_from_raw(raw),
         watchdog_enabled=bool(watchdog.get("enabled", True)),
