@@ -180,6 +180,32 @@ capacity = 10
         self.assertEqual(entry.all_day_non_blocking_title_marker, "")
         self.assertTrue(entry.all_day_free_events_do_not_block)
 
+    def test_requires_max_event_hours_parses_and_defaults_to_off(self):
+        settings = load_settings(self._write_with_conflict_entry(
+            'ics_url = "https://cal.example.org/feed.ics"'))
+        self.assertEqual(settings.conflict_calendars[0].requires_max_event_hours, 0.0)
+        settings = load_settings(self._write_with_conflict_entry(
+            'ics_url = "https://cal.example.org/feed.ics"\n'
+            "requires_max_event_hours = 4"))
+        self.assertEqual(settings.conflict_calendars[0].requires_max_event_hours, 4.0)
+
+    def test_requires_max_event_hours_rejects_a_negative_cap(self):
+        with self.assertRaises(ValueError) as ctx:
+            load_settings(self._write_with_conflict_entry(
+                'ics_url = "https://cal.example.org/feed.ics"\n'
+                "requires_max_event_hours = -1"))
+        self.assertIn("requires_max_event_hours", str(ctx.exception))
+
+    def test_requires_max_event_hours_is_refused_in_blocks_mode(self):
+        # In blocks mode a long absence SHOULD block; a cap there would
+        # break the one case that already works, so it is an error rather
+        # than a silently ignored key.
+        with self.assertRaises(ValueError) as ctx:
+            load_settings(self._write_with_conflict_entry(
+                'source = "booking_calendar"\nmode = "blocks"\n'
+                "requires_max_event_hours = 4"))
+        self.assertIn("requires_max_event_hours", str(ctx.exception))
+
     def test_blocks_mode_defaults_show_as_any(self):
         # "oof" as a blocks-mode default would silently stop plain BUSY
         # vacation events from blocking -- the default is mode-dependent.

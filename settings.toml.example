@@ -134,6 +134,12 @@ mode    = "blocks"              # "requires" (default) | "blocks"  <-- USED:
 #from    = "HH:MM"              # OPTIONAL window start (default: this course's start)
 #till    = "HH:MM"              # OPTIONAL window end   (default: this course's end);
 #                               #   both work in EITHER mode (overlap/span window)
+#requires_max_event_hours = 0   # requires-only, default 0 = no limit. An event
+#                               #   LONGER than this many hours can no longer be
+#                               #   "the slot you reserved" -- a week of Away, or
+#                               #   an 08:00-17:00 working day, spans the course
+#                               #   hours but is an ABSENCE, not a reservation.
+#                               #   Set e.g. 4 if your reserved slots are short.
 
 # (3) FILTERS -- which events COUNT, and which courses (any source, any mode)
 #show_as = "any"               # DEFAULT DEPENDS ON MODE: "any" for blocks (this),
@@ -183,6 +189,10 @@ mode    = "blocks"              # "requires" (default) | "blocks"  <-- USED:
 ##from    = "HH:MM"             # OPTIONAL window start (default: this course's start)
 ##till    = "HH:MM"             # OPTIONAL window end   (default: this course's end);
 #                               #   both work in EITHER mode (span/overlap window)
+##requires_max_event_hours = 4 # requires-only, default 0 = no limit: an event
+#                               #   longer than this cannot satisfy the requirement
+#                               #   (a week of "Away" spans the hours but is an
+#                               #   absence, not a slot you reserved for the course)
 #
 # (3) FILTERS -- which events COUNT, and which courses
 ##show_as = "oof"              # DEFAULT DEPENDS ON MODE: "oof" for requires (this),

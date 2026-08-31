@@ -6,10 +6,12 @@ no SMTP."""
 import logging
 import tempfile
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from app.caldav_client import CalDAVError
+from app.config import ConflictCalendar
 from app.conflict import ConflictEngine, _matches_entry
 from app import ics_feed
 
@@ -664,3 +666,44 @@ class MatchesEntryTest(unittest.TestCase):
             busy_status="", transparent=False,
         )
         self.assertFalse(_matches_entry(entry, busy))
+
+
+class RequiresIgnoresLongAbsencesTest(EngineFixture):
+    """A long out-of-office must not satisfy a `requires` entry.
+
+    2026-08-31, from the live site: the operator was away for a week --
+    one OOF event from Sunday 23:00 to the next Sunday 23:00 -- and every
+    Lux course inside it stayed bookable, because "a single matching event
+    spanning the course hours" is exactly what a week of absence looks
+    like. A reserved slot is short; an absence is long, and nothing in the
+    event itself distinguishes them except its duration."""
+
+    def entry(self, **overrides):
+        defaults = dict(name="work", mode="requires", show_as="oof",
+                        use_booking_calendar=False, ics_url="https://x/feed.ics",
+                        requires_max_event_hours=4.0)
+        defaults.update(overrides)
+        return make_conflict_calendar(**defaults)
+
+    def test_a_week_long_absence_does_not_count_as_the_slot(self):
+        self.fetch_result = ics_with(timed_event(
+            start="20260705T210000Z", end="20260712T210000Z", summary="Away"))
+        self.assertTrue(self.hidden(self.engine(self.entry())))
+
+    def test_a_whole_workday_block_does_not_count_either(self):
+        # 08:00-17:00 local (06:00-15:00 UTC) still spans nothing useful:
+        # it is a working day, not a slot reserved for the course.
+        self.fetch_result = ics_with(timed_event(
+            start="20260708T060000Z", end="20260708T160000Z"))
+        self.assertTrue(self.hidden(self.engine(self.entry())))
+
+    def test_the_reserved_slot_itself_still_counts(self):
+        self.fetch_result = ics_with(timed_event())  # 14:00-18:00 UTC = 4h
+        self.assertFalse(self.hidden(self.engine(self.entry())))
+
+    def test_without_the_cap_a_long_absence_still_counts(self):
+        # Default 0 = no limit, i.e. exactly the behaviour before the knob.
+        self.fetch_result = ics_with(timed_event(
+            start="20260705T210000Z", end="20260712T210000Z", summary="Away"))
+        self.assertFalse(self.hidden(self.engine(
+            self.entry(requires_max_event_hours=0.0))))

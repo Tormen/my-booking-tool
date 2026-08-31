@@ -690,6 +690,17 @@ calendar" URL), a CalDAV calendar with its own credentials, or `source =
 the span window for `requires` -- and both default to the course's own
 start/end.
 
+`requires_max_event_hours` (requires mode only, default `0` = no limit)
+caps how LONG a matching event may be and still count as the slot you
+reserved. A week of "Away", or a plain 08:00--17:00 working day, spans
+the course hours just as well as a 30-minute reservation does -- so
+without a cap an absence *enables* the very sessions it should hide.
+Set it to roughly the longest slot you would ever really book (e.g. `4`)
+and anything longer stops satisfying the requirement. Deliberately not
+available in `blocks` mode -- there a long absence *should* block, and a
+cap would break the case that already works, so setting it there is a
+load-time error rather than a silently ignored key.
+
 **Course scoping.** An entry applies to every course unless one of two
 mutually-exclusive keys narrows it: `courses = [...]` (a whitelist -- only
 those shortnames) or `all_courses_but = [...]` (a blacklist -- every

@@ -82,6 +82,25 @@ def _effective_status(occ: ics_feed.FeedOccurrence) -> str:
     return "free" if occ.transparent else "busy"
 
 
+def _can_satisfy_requires(entry: ConflictCalendar, occ: ics_feed.FeedOccurrence) -> bool:
+    """Is this event short enough to be a SLOT rather than an absence?
+
+    Only asked in requires mode. A reserved slot is short -- half an
+    hour, two hours -- while a workday block or a week away is long, and
+    to "spans the course hours" the two are indistinguishable: a
+    week-long out-of-office satisfied every course inside it, so the site
+    offered sessions the operator was away for (2026-08-31, live).
+
+    `requires_max_event_hours = 0` (the default) keeps the old behaviour
+    exactly. An all-day event counts as its real length, so a cap of any
+    ordinary size excludes those too -- which is the same intent, stated
+    once instead of twice."""
+    if entry.requires_max_event_hours <= 0:
+        return True
+    hours = (occ.end - occ.start).total_seconds() / 3600.0
+    return hours <= entry.requires_max_event_hours
+
+
 def _matches_entry(entry: ConflictCalendar, occ: ics_feed.FeedOccurrence) -> bool:
     """Does this occurrence COUNT for the entry at all (show_as + title +
     the all-day knobs)? Mode-independent -- blocks/requires decide what a
@@ -552,7 +571,8 @@ class ConflictEngine:
                 if any(self._overlaps(o, occ_date, win_start, win_end) for o in occs):
                     return True
             else:  # requires: a single event must span the whole window
-                if not any(self._spans(o, occ_date, win_start, win_end) for o in occs):
+                candidates = [o for o in occs if _can_satisfy_requires(entry, o)]
+                if not any(self._spans(o, occ_date, win_start, win_end) for o in candidates):
                     return True
         return False
 
@@ -619,7 +639,11 @@ class ConflictEngine:
                     if any(self._overlaps(o, occ_date, win_start, win_end) for o in fetched):
                         hidden[occ_date] = True
                 else:  # requires
-                    if not any(self._spans(o, occ_date, win_start, win_end) for o in fetched):
+                    # Same slot-vs-absence rule as occurrence_is_hidden --
+                    # this is the batched path for /admin and /book, and
+                    # the two must never disagree about a date.
+                    candidates = [o for o in fetched if _can_satisfy_requires(entry, o)]
+                    if not any(self._spans(o, occ_date, win_start, win_end) for o in candidates):
                         hidden[occ_date] = True
         return hidden
 

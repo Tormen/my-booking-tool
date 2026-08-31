@@ -260,6 +260,19 @@ class ConflictCalendar:
     # 2026-07-18 rename of ..._also_block_the_course -- "count" because in
     # requires mode a matching all-day event SATISFIES the requirement
     # (covers the whole day) rather than blocking anything.
+    # An event LONGER than this cannot satisfy a `requires` entry (hours;
+    # 0 = no limit, the default, so nothing changes unless it is set).
+    #
+    # A slot reservation is short -- 30 minutes, two hours. An absence is
+    # long: a whole workday, a week away. Both are OOF, and to "spans the
+    # course hours" they look identical, so a week-long holiday satisfied
+    # every course inside it and the site cheerfully offered sessions the
+    # operator was away for (2026-08-31, live). This is the difference
+    # the calendar itself cannot express.
+    #
+    # requires-only by design: in BLOCKS mode a long absence SHOULD block,
+    # and capping there would break exactly the case that works.
+    requires_max_event_hours: float = 0.0
     all_day_events_also_count: bool = True
     all_day_non_blocking_title_marker: str = ""
     all_day_free_events_do_not_block: bool = True
@@ -835,6 +848,16 @@ def _conflict_calendar_from_raw(
         if value and not _HM_RE.match(value):
             raise ValueError(f"[[conflict_calendar]] {name!r}: {label} must be \"HH:MM\", not {value!r}")
 
+    cap = float(entry.get("requires_max_event_hours", 0) or 0)
+    if cap < 0:
+        raise ValueError(
+            f"[[conflict_calendar]] {name!r}: requires_max_event_hours cannot be negative")
+    if cap and mode != "requires":
+        raise ValueError(
+            f"[[conflict_calendar]] {name!r}: requires_max_event_hours only means "
+            f'something in mode = "requires" -- in blocks mode a long absence SHOULD '
+            f"block, and a cap there would break exactly the case that works"
+        )
     return ConflictCalendar(
         name=name, mode=mode, show_as=show_as,
         ics_url=ics_url, caldav_url=caldav_url,
@@ -845,6 +868,7 @@ def _conflict_calendar_from_raw(
         from_hm=from_hm, till_hm=till_hm,
         title_contains=str(entry.get("title_contains", "")),
         cache_minutes=int(entry.get("cache_minutes", 10)),
+        requires_max_event_hours=float(entry.get("requires_max_event_hours", 0) or 0),
         all_day_events_also_count=bool(entry.get("all_day_events_also_count", True)),
         all_day_non_blocking_title_marker=str(entry.get("all_day_non_blocking_title_marker", "")),
         all_day_free_events_do_not_block=bool(entry.get("all_day_free_events_do_not_block", True)),
