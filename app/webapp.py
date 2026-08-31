@@ -1959,6 +1959,41 @@ class App:
 
     # -- /courses --------------------------------------------------------------
 
+    def _courses_by_demand(self) -> tuple:
+        """Courses in the order guests should meet them.
+
+        Three keys, and the first one is the operator's own:
+
+        1. `order_in_all_courses` when it is set. An explicit choice must
+           not be silently overridden by a statistic; 0 means "no
+           opinion" and falls through.
+        2. Bookings that STOOD, most first. Cancelled rows are not
+           demand -- counting them would rank a course people LEFT as
+           though it were popular. Waitlist entries do count: wanting a
+           seat that is already full is the strongest signal there is.
+        3. Title, alphabetically -- which covers every never-booked
+           course and any exact tie. Title rather than shortname because
+           this list is what a guest reads.
+
+        All-time rather than a recent window: simpler, stabler, and at
+        this scale the two orders agree. A window would stop a paused
+        course sitting high forever, and is the thing to add if the order
+        ever starts feeling stale."""
+        counts: dict[str, int] = {}
+        for row in self.store.read_registrations(scope="all"):
+            status = row.get("status", "")
+            if status in (STATUS_CANCELED_BY_GUEST, STATUS_CANCELED_BY_HOST,
+                          STATUS_PENDING_CONFIRMATION):
+                continue
+            name = row.get("course_shortname", "")
+            counts[name] = counts.get(name, 0) + 1
+        return tuple(sorted(
+            self.settings.courses,
+            key=lambda c: (c.order_in_all_courses,
+                           -counts.get(c.shortname, 0),
+                           c.title.lower()),
+        ))
+
     def courses(self, method: str, environ):
         """Overview of every configured course (2026-07-06: "an overview
         page as simplymeet.me... that shows all my possible courses", and
@@ -1986,7 +2021,7 @@ class App:
             # to a screenful, which is why the action no longer sits
             # underneath it.
             cards = []
-            for course in self.settings.courses:
+            for course in self._courses_by_demand():
                 desc_html = (f'<div class="description">{course.description}</div>'
                              if course.description else "")
                 cards.append(
@@ -3660,7 +3695,7 @@ class App:
         would mean every course's occurrence and conflict lookups on a
         page most people open just to read their bookings -- the exact
         cost that made /admin unusable before it was split up."""
-        courses = self.settings.courses
+        courses = self._courses_by_demand()
         if not courses:
             return ""
         wanted = parse_qs(environ.get("QUERY_STRING", "")).get("book", [""])[0]

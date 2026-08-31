@@ -6372,3 +6372,55 @@ class SortableTableIsWiredByMarkerTest(unittest.TestCase):
         frame = body[body.index('<div class="card">'):body.index("Future Sessions")]
         self.assertIn('type="search"', frame)
         self.assertIn("data-sortable", frame)
+
+
+class CoursesByDemandTest(unittest.TestCase):
+    """Most-booked course first, alphabetical for the rest.
+
+    The operator asked for this ordering on /courses and in /my's New
+    booking picker: a course nobody has ever booked should not sit above
+    the one everybody books, just because it happens to come first in
+    settings.toml."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.store = Store(self._tmp.name)
+        self.courses = (
+            make_course(shortname="zebra", title="Zebra"),
+            make_course(shortname="alpha", title="Alpha"),
+            make_course(shortname="busy", title="Busy"),
+        )
+        self.app = App(make_settings(courses=self.courses), self.store)
+
+    def _book(self, shortname, status=STATUS_CONFIRMED, n=1):
+        for i in range(n):
+            self.store.add_registration(shortname, "2026-09-02", f"u{i}", "h", status=status)
+
+    def order(self):
+        return [c.shortname for c in self.app._courses_by_demand()]
+
+    def test_never_booked_courses_are_alphabetical_by_title(self):
+        self.assertEqual(self.order(), ["alpha", "busy", "zebra"])
+
+    def test_the_most_booked_course_comes_first(self):
+        self._book("busy", n=3)
+        self._book("zebra", n=1)
+        self.assertEqual(self.order(), ["busy", "zebra", "alpha"])
+
+    def test_waitlist_entries_count_but_cancellations_do_not(self):
+        # Wanting a seat in a full session is the strongest demand signal
+        # there is; a booking someone LEFT is not demand at all.
+        self._book("zebra", status=STATUS_WAITLISTED, n=2)
+        self._book("busy", status=STATUS_CANCELED_BY_GUEST, n=5)
+        self._book("alpha", status=STATUS_PENDING_CONFIRMATION, n=5)
+        self.assertEqual(self.order(), ["zebra", "alpha", "busy"])
+
+    def test_an_explicit_order_still_wins_over_the_statistic(self):
+        courses = (
+            make_course(shortname="zebra", title="Zebra", order_in_all_courses=1),
+            make_course(shortname="busy", title="Busy", order_in_all_courses=2),
+        )
+        self.app = App(make_settings(courses=courses), self.store)
+        self._book("busy", n=9)
+        self.assertEqual(self.order(), ["zebra", "busy"])
