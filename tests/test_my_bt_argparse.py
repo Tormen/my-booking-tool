@@ -252,6 +252,34 @@ class GitSnapshotMessageArgTest(unittest.TestCase):
         self.assertEqual(args.message, "before the risky edit")
 
 
+class AdminBackupArgsTest(unittest.TestCase):
+    """`my-bt admin backup` -- one .tar.gz of everything the RPM does not
+    carry, written to the current directory by default."""
+
+    def test_bare_backup_keeps_the_secrets_and_writes_here(self):
+        args = my_bt_mod.build_parser().parse_args(["admin", "backup"])
+        self.assertFalse(args.no_secrets)
+        self.assertIsNone(args.dest)
+        self.assertEqual(args.func, my_bt_mod.cmd_admin_backup)
+
+    def test_no_secrets_is_opt_in(self):
+        args = my_bt_mod.build_parser().parse_args(["admin", "backup", "--no-secrets"])
+        self.assertTrue(args.no_secrets)
+
+    def test_dest_can_send_it_elsewhere(self):
+        args = my_bt_mod.build_parser().parse_args(["admin", "backup", "--dest", "/mnt/usb"])
+        self.assertEqual(args.dest, "/mnt/usb")
+
+    def test_the_help_warns_that_it_holds_credentials(self):
+        # The warning has to be where the operator decides where to put
+        # the file, not only in a manual they read once.
+        parser = my_bt_mod.build_parser()
+        admin = parser._subparsers._group_actions[0].choices["admin"]
+        self.assertIn("backup", admin.format_help())
+        backup_parser = admin._subparsers._group_actions[0].choices["backup"]
+        self.assertIn("PLAIN-TEXT CREDENTIALS", backup_parser.description)
+
+
 class UsersScopeArgsTest(unittest.TestCase):
     """2026-07-14: changing `my-bt users`'s bare-default scope --
     by default my-bt users now shows --live users that

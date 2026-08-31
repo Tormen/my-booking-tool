@@ -988,6 +988,38 @@ the network/CalDAV (same reasoning as `admin gdpr erase` -- no CalDAV
 dependency by design), so it still works to narrow things down even if
 your CalDAV/SMTP provider itself is unreachable.
 
+### `my-bt admin backup`
+
+Everything this deployment holds that the RPM does not, in one
+timestamped archive written to the current directory:
+
+    sudo my-bt admin backup
+    # my-booking-backup-2026-09-01_0004.tar.gz (UTC, mode 0600)
+
+In it: both halves of the configuration (`settings.toml` and the
+console-owned `web-editable/settings.web-editable.toml`), the secret
+files they point at, the data dir's CSVs, the deployed static pages, and
+the nginx vhost that publishes them. A `MANIFEST.txt` records the
+version, host and time, lists what went in, says what did **not** and
+why, and carries the restore steps -- an archive is opened on the worst
+day, by someone who has forgotten the details.
+
+Deliberately left out: the conflict-feed cache (it refetches itself, and
+a stale copy restored over a live one is worse than none) and the log
+(history, not state). The data dir's own hourly git snapshots are left
+out too -- they are already a backup of the same CSVs.
+
+**It contains plain-text credentials** -- the CalDAV and SMTP passwords,
+the admin password hash, the erasure pepper. Anyone who can read the file
+can act as this deployment, which is exactly true of the secrets
+directory it copies from: keeping it where it was written widens nothing,
+moving it somewhere less protected does. That is why it is created 0600
+before a byte is written to it, rather than chmod'ed afterwards. Run it
+as root, or the secrets and data it cannot read are silently missing --
+the manifest says which. `--no-secrets` leaves them out, which makes the
+archive safe to hand around and unable to restore a working service on
+its own; `--dest <DIR>` writes it somewhere other than here.
+
 ### `my-bt admin setup` / `my-bt admin setup --interactive`
 
 The same checks `admin health` runs, reorganized as a guided post-install

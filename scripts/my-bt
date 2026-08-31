@@ -29,6 +29,7 @@ HOME = os.environ.get("MY_BOOKING_HOME", "/opt/my-booking")
 sys.path.insert(0, HOME)
 
 try:
+    from app import backup
     from app import calendar_sync as app_calendar_sync
     from app import cancel_flow as app_cancel_flow
     from app import cli_cancel as app_cli_cancel
@@ -1406,6 +1407,34 @@ def _print_activity_summary(args) -> None:
     print("--last 24h` (the actual problem lines) or `admin log-report --last 24h` (everything).")
 
 
+def cmd_admin_backup(args) -> None:
+    """`my-bt admin backup` -- everything this deployment holds that the
+    RPM does not, in one timestamped .tar.gz in the current directory.
+
+    Prints what went in and what did not, both with reasons: a backup
+    whose contents you have to guess at gets trusted for years and then
+    turns out to be missing the one thing you needed."""
+    result = backup.create(
+        args.settings, args.data_dir,
+        dest_dir=args.dest or ".", with_secrets=not args.no_secrets,
+    )
+    for item in result.included:
+        print(f"  + {item.arcname}")
+    for label, why in result.skipped:
+        print(f"  - {label}: {why}")
+    size = result.archive.stat().st_size
+    print(f"\n{result.archive} ({size / 1024:.0f} KiB from "
+          f"{len(result.included)} file(s), mode 0600)")
+    if result.with_secrets:
+        # Said every time, not once in a manual: the file is only as safe
+        # as where it ends up, and that decision is made minutes from now.
+        print("CONTAINS SECRETS in plain text (CalDAV + SMTP passwords, admin "
+              "password hash, erasure pepper).")
+        print("Anyone who can read it can act as this deployment -- keep it 0600, "
+              "and think before copying it anywhere. `--no-secrets` omits them "
+              "(that archive cannot restore a working service on its own).")
+
+
 def cmd_admin_sync_overrides(args) -> None:
     """`my-bt admin sync-overrides` -- record in the exceptional-dates
     HISTORY whatever settings.toml currently says.
@@ -2709,6 +2738,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--dry-run", action="store_true", help="report what would be committed, without staging/committing")
     sp.add_argument("-m", "--message", help="custom commit message (default: \"automatic snapshot: <timestamp>\")")
     sp.set_defaults(func=cmd_git_snapshot)
+
+    sp = _add_subcommand(
+        admin_sub, "backup",
+        "collect settings, secrets, data and the site into one timestamped .tar.gz.",
+        "Everything this deployment holds that the RPM does not: both halves of "
+        "the configuration (settings.toml and the console-owned "
+        "settings.web-editable.toml), the secret files they point at, the data "
+        "dir's CSVs, the deployed static pages and the nginx vhost. Written to "
+        "the current directory as my-booking-backup-<YYYY-MM-DD_HHMM>.tar.gz "
+        "(UTC), mode 0600. The conflict-feed cache and the log are deliberately "
+        "left out -- the first refetches itself, the second is history, not "
+        "state. Needs root to read the secrets and the data dir. THE ARCHIVE "
+        "HOLDS PLAIN-TEXT CREDENTIALS: anyone who can read it can act as this "
+        "deployment, so keep it where it was written or somewhere equally "
+        "protected. --no-secrets omits them, which makes the archive safe to "
+        "hand around and unable to restore a working service on its own.",
+    )
+    sp.add_argument("--no-secrets", action="store_true",
+                    help="leave the secret files out (archive can then not restore a working service)")
+    sp.add_argument("--dest", metavar="<DIR>", help="write the archive here instead of the current directory")
+    sp.set_defaults(func=cmd_admin_backup)
 
     sp = _add_subcommand(
         admin_sub, "sync-overrides",
