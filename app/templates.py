@@ -701,7 +701,14 @@ dialog>h2:first-of-type,dialog>h3:first-of-type,dialog>p:first-of-type{padding-r
 details summary{cursor:pointer;margin:.8em 0;color:#196B24}
 button.danger{background:#b00020;color:#fff;border:1px solid #b00020;border-radius:6px}
 .tab-labels{display:flex;border-bottom:1px solid #ddd;margin-top:.6em}
-.tab-label{padding:.5em 1.2em;cursor:pointer;color:#555;border-bottom:2px solid transparent;margin-bottom:-1px}
+/* margin-top:0 -- a tab that is a <label> (the radio-based tabs on /my)
+   otherwise picks up the generic label{margin-top:.6em} and sits 9.6px
+   lower than the same tabs rendered as links, and lower than an <h2>
+   used as a frame title: exactly the difference between "New booking"
+   and "Upcoming" (2026-08-31). The ROW owns the space above it; a tab
+   inside it contributes none. */
+.tab-label{padding:.5em 1.2em;cursor:pointer;color:#555;border-bottom:2px solid transparent;
+  margin-top:0;margin-bottom:-1px}
 #my-tab-login:checked ~ .tab-labels label[for="my-tab-login"],
 #my-tab-signup:checked ~ .tab-labels label[for="my-tab-signup"],
 #book-tab-login:checked ~ .tab-labels label[for="book-tab-login"],

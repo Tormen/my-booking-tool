@@ -268,3 +268,33 @@ class CheckboxesStayInlineTest(unittest.TestCase):
     def test_ordinary_fields_still_get_their_own_line(self):
         css = self._css()
         self.assertIn("label > select,label > textarea{display:block}", css)
+
+
+class FrameTitlesStartAtTheSameHeightTest(unittest.TestCase):
+    """A frame's title sits at the frame's padding, whether it is an
+    <h2> or a row of tabs.
+
+    2026-08-31, from two screenshots side by side: "New booking" (an
+    <h2>) sat 9.6px higher than "Upcoming" (a tab). The tabs on /my are
+    <label> elements, so they picked up the generic
+    label{margin-top:.6em}; the same tabs on /admin are <a> elements and
+    never did, which is why only one frame looked wrong."""
+
+    def _css(self) -> str:
+        from app.templates import _CSS
+        return _CSS
+
+    def test_a_tab_contributes_no_top_margin_of_its_own(self):
+        css = self._css()
+        # the standalone rule, not ".tab-labels.tab-title .tab-label{"
+        i = css.index("\n.tab-label{") + 1
+        rule = css[i:css.index("}", i)]
+        self.assertIn("margin-top:0", rule)
+
+    def test_a_title_row_of_tabs_has_no_top_margin_either(self):
+        self.assertIn(".tab-labels.tab-title{margin:0 0 .6em}", self._css())
+
+    def test_an_h2_title_has_none(self):
+        css = self._css()
+        i = css.index(".card > h2:first-child")
+        self.assertIn("margin:0 0 .6em", css[i:i + 120])
