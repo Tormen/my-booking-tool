@@ -6306,6 +6306,9 @@ class App:
         note = f"{name} saved"
         if clean.dropped:
             note += " -- removed: " + ", ".join(clean.dropped)
+        broken = macros.describe_markup_problem(clean.html)
+        if broken:
+            note += " -- CHECK THE HTML: " + broken
         return self._settings_redirect(
             self._save_settings(table, self.settings.raw_courses or self.settings.courses), note)
 
@@ -6412,6 +6415,14 @@ class App:
         note = f"{updated.shortname} saved"
         if dropped:
             note += " -- removed: " + ", ".join(dropped)
+        # Saved either way -- the text is the operator's -- but never
+        # silently. A "</li>" that lost its "<" while editing is text by
+        # the time the sanitizer sees it, so nothing downstream can tell
+        # it was meant to be a tag; it sat on the live booking page for
+        # days before anyone noticed (2026-08-31, trier-sat-yoga).
+        broken = macros.describe_markup_problem(str(changes.get("description", "")))
+        if broken:
+            note += " -- CHECK THE HTML: " + broken
         if renaming:
             moved, calendar_note = self._migrate_shortname(old_shortname, new_shortname)
             note = (f"{old_shortname} is now {new_shortname}: {moved} booking(s) moved"

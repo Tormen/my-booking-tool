@@ -253,3 +253,71 @@ def sanitize(markup: str) -> SanitizeResult:
         if item not in seen:
             seen.append(item)
     return SanitizeResult("".join(parser.out), seen)
+
+
+# A closing tag whose "<" was lost while editing: "</li>" typed, or
+# half-deleted, into "/li>". The sanitizer escapes it faithfully -- it is
+# text, not markup, by then -- so nothing downstream can tell it was ever
+# meant to be a tag. It reached the live booking page that way once
+# (2026-08-31, trier-sat-yoga: "<li>{{no_slot}}/li&gt;").
+# Matched in both spellings: as typed ("/li>") and as the sanitizer
+# stores it once it has decided the text is data ("/li&gt;").
+_ORPHAN_END_TAG_RE = re.compile(r"(?<!<)/([A-Za-z][A-Za-z0-9]*)(?:>|&gt;)")
+
+# Tags HTML lets you leave unclosed: a new <li> ends the previous one,
+# and </ul> ends the last. Warning about those would fire on markup that
+# renders exactly as it reads, and a warning that cries wolf gets
+# ignored -- including on the day it is right.
+_IMPLICITLY_CLOSED = frozenset(("li", "p"))
+
+
+class _Balance(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[str] = []
+        self.problem = ""
+
+    def _close_implicit(self, until: str = "") -> None:
+        while self.stack and self.stack[-1] in _IMPLICITLY_CLOSED and self.stack[-1] != until:
+            self.stack.pop()
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in ALLOWED_TAGS and tag not in _VOID_TAGS:
+            if tag in _IMPLICITLY_CLOSED and self.stack[-1:] == [tag]:
+                self.stack.pop()
+            self.stack.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs) -> None:
+        return
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag not in ALLOWED_TAGS or tag in _VOID_TAGS or self.problem:
+            return
+        self._close_implicit(until=tag)
+        if not self.stack:
+            self.problem = f"</{tag}> closes a tag that was never opened"
+        elif self.stack[-1] != tag:
+            self.problem = f"</{tag}> closes out of order -- <{self.stack[-1]}> is still open"
+            self.stack.pop()
+        else:
+            self.stack.pop()
+
+
+def describe_markup_problem(markup: str) -> str:
+    """A one-line reason this markup does not hold together, or "".
+
+    Advisory, never a refusal: the text is the operator's, and saving it
+    is their call. But the console knows, and staying silent is how a
+    half-deleted tag ends up live for days."""
+    orphan = _ORPHAN_END_TAG_RE.search(markup)
+    if orphan and orphan.group(1).lower() in ALLOWED_TAGS:
+        return f'"{orphan.group(0)}" looks like a closing tag with its "<" missing'
+    parser = _Balance()
+    parser.feed(markup)
+    parser.close()
+    if parser.problem:
+        return parser.problem
+    parser._close_implicit()
+    if parser.stack:
+        return f"<{parser.stack[-1]}> is never closed"
+    return ""

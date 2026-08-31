@@ -125,3 +125,45 @@ class SanitizeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DescribeMarkupProblemTest(unittest.TestCase):
+    """The console warns, on save, about markup that will not render the
+    way it reads.
+
+    2026-08-31, from the live booking page: a course description held
+    `<li>{{no_slot}}/li&gt;`. The "<" had been lost while editing, so by
+    the time the sanitizer saw it, it was text -- correctly escaped, and
+    no longer recognisable as a tag by anything downstream. The console
+    saved it without a word and it stayed live for days."""
+
+    def test_a_closing_tag_that_lost_its_bracket(self):
+        self.assertIn('"/li>"', macros.describe_markup_problem("<ul><li>x/li></ul>"))
+
+    def test_the_same_after_it_has_been_escaped_and_stored(self):
+        # What the file actually holds once sanitize() has decided it is
+        # data -- the form the operator finds days later.
+        self.assertIn("/li&gt;", macros.describe_markup_problem("<ul><li>x/li&gt;</ul>"))
+
+    def test_tags_closed_out_of_order(self):
+        self.assertIn("</p>", macros.describe_markup_problem("<p><b>x</p></b>"))
+
+    def test_a_tag_left_open(self):
+        self.assertIn("<div>", macros.describe_markup_problem("<div><p>x</p>"))
+
+    def test_well_formed_markup_says_nothing(self):
+        self.assertEqual(macros.describe_markup_problem(
+            '<p>Details: <a href="https://x" target="_blank">x</a></p>'
+            "<ul><li>a</li><li>b</li></ul><hr><br>"), "")
+
+    def test_omitted_end_tags_html_allows_are_not_a_problem(self):
+        # A warning that fires on markup which renders exactly as it
+        # reads gets ignored -- including on the day it is right.
+        for markup in ("<ul><li>a<li>b</ul>", "<p>a<p>b", "<ul><li>a</ul>"):
+            with self.subTest(markup=markup):
+                self.assertEqual(macros.describe_markup_problem(markup), "")
+
+    def test_plain_text_is_not_markup(self):
+        for text in ("no markup at all", "a &gt; b", "2 < 3", ""):
+            with self.subTest(text=text):
+                self.assertEqual(macros.describe_markup_problem(text), "")

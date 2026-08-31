@@ -577,6 +577,41 @@ class UnsavedPromptAccuracyTest(unittest.TestCase):
         self.assertIn("textContent", script)
         self.assertNotIn("innerHTML = shorten", script)
 
+    def test_saving_broken_markup_says_so(self):
+        """Saved -- the text is the operator's -- but never silently.
+
+        The live case (2026-08-31): a "</li>" that lost its "<" while
+        editing, sitting on the booking page for days because nothing
+        along the way said a word."""
+        import tempfile
+        from pathlib import Path
+        tmp = tempfile.mkdtemp()
+        app = App(make_settings(courses=(make_course(shortname="yoga"),)),
+                  Store(tmp), settings_path=str(Path(tmp) / "settings.toml"))
+        body = urlencode({"old_shortname": "yoga", "shortname": "yoga", "description": "<ul><li>x/li></ul>"})
+        env = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}",
+               "PATH_INFO": "/admin/settings/course/yoga",
+               "CONTENT_LENGTH": str(len(body)),
+               "wsgi.input": io.BytesIO(body.encode())}
+        status, headers, _b = app.admin_settings_course("POST", env)
+        location = dict(headers)["Location"]
+        self.assertIn("yoga+saved", location)
+        self.assertIn("CHECK+THE+HTML", location)
+
+    def test_saving_sound_markup_stays_quiet(self):
+        import tempfile
+        from pathlib import Path
+        tmp = tempfile.mkdtemp()
+        app = App(make_settings(courses=(make_course(shortname="yoga"),)),
+                  Store(tmp), settings_path=str(Path(tmp) / "settings.toml"))
+        body = urlencode({"old_shortname": "yoga", "shortname": "yoga", "description": "<ul><li>x</li></ul>"})
+        env = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}",
+               "PATH_INFO": "/admin/settings/course/yoga",
+               "CONTENT_LENGTH": str(len(body)),
+               "wsgi.input": io.BytesIO(body.encode())}
+        _s, headers, _b = app.admin_settings_course("POST", env)
+        self.assertNotIn("CHECK", dict(headers)["Location"])
+
     def test_the_change_list_quotes_the_part_that_changed(self):
         """2026-08-31, from a screenshot of the real console: "this is not
         helpful". Both sides were cut to their first 70 characters, so
