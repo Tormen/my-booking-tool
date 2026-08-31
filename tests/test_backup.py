@@ -4,6 +4,7 @@ The one thing a backup must never do is look complete while missing
 something, so these tests are mostly about what is in the archive and
 what the manifest says about what is not.
 """
+import io
 import os
 import stat
 import tarfile
@@ -77,7 +78,8 @@ class BackupFixture(unittest.TestCase):
         (self.site / "index.html").write_text("<html></html>", encoding="utf-8")
 
     def create(self, **kwargs):
-        return backup.create(self.settings, self.data, dest_dir=self.out, now=NOW, **kwargs)
+        kwargs.setdefault("target", self.out)
+        return backup.create(self.settings, self.data, now=NOW, **kwargs)
 
     def names(self, result):
         with tarfile.open(result.archive) as tar:
@@ -188,3 +190,58 @@ class BackupPlanTest(BackupFixture):
     def test_nothing_is_written_by_planning(self):
         backup.plan(self.settings, self.data)
         self.assertEqual(list(self.out.iterdir()), [])
+
+
+class BackupTargetTest(BackupFixture):
+    """The optional TARGET: a directory, a filename, or "-" for stdout.
+
+    The operator's own use for the third one:
+    `ssh ovh sudo my-bt admin backup - > 2026-09-01_0014.my-bt-backup.tar.gz`."""
+
+    def test_no_target_writes_the_standard_name_here(self):
+        self.assertEqual(backup.resolve_target(None, NOW),
+                         Path(".") / "my-booking-backup-2026-09-01_0004.tar.gz")
+
+    def test_a_directory_takes_the_standard_name_inside_it(self):
+        self.assertEqual(backup.resolve_target(self.out, NOW),
+                         self.out / "my-booking-backup-2026-09-01_0004.tar.gz")
+
+    def test_anything_else_is_the_filename(self):
+        target = self.out / "2026-09-01_0014.my-bt-backup.tar.gz"
+        self.assertEqual(backup.resolve_target(target, NOW), target)
+
+    def test_a_path_that_does_not_exist_yet_is_a_filename_not_a_directory(self):
+        # Creating directories on the way to writing a backup turns a
+        # typo into a file nobody will ever look in again.
+        target = self.out / "nope" / "b.tar.gz"
+        self.assertEqual(backup.resolve_target(target, NOW), target)
+
+    def test_dash_means_stdout(self):
+        self.assertIsNone(backup.resolve_target("-", NOW))
+
+    def test_the_stream_is_a_valid_archive_and_nothing_else(self):
+        # Anything else printed on stdout corrupts the file the caller is
+        # redirecting into, so this checks the bytes ARE the archive:
+        # gzip magic first, every member present, manifest readable.
+        buf = io.BytesIO()
+        result = backup.create(self.settings, self.data, to_stdout=True,
+                               stdout=buf, now=NOW)
+        data = buf.getvalue()
+        self.assertEqual(data[:2], b"\x1f\x8b")
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            names = tar.getnames()
+            self.assertIn("config/settings.toml", names)
+            self.assertIn("MANIFEST.txt", names)
+            self.assertIn(b"RESTORE", tar.extractfile("MANIFEST.txt").read())
+        self.assertIsNone(result.archive)
+
+    def test_streaming_writes_no_file_anywhere(self):
+        backup.create(self.settings, self.data, to_stdout=True,
+                      stdout=io.BytesIO(), now=NOW)
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_the_manifest_says_stdout_when_there_is_no_file(self):
+        buf = io.BytesIO()
+        backup.create(self.settings, self.data, to_stdout=True, stdout=buf, now=NOW)
+        with tarfile.open(fileobj=io.BytesIO(buf.getvalue())) as tar:
+            self.assertIn(b"(stdout)", tar.extractfile("MANIFEST.txt").read())

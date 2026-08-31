@@ -996,6 +996,25 @@ timestamped archive written to the current directory:
     sudo my-bt admin backup
     # my-booking-backup-2026-09-01_0004.tar.gz (UTC, mode 0600)
 
+An optional TARGET says where it goes: a DIRECTORY takes the standard
+name inside it, anything else IS the filename, and `-` writes the archive
+to stdout with every message on stderr, so it can be pulled straight off
+the server:
+
+    ssh host sudo my-bt admin backup - > 2026-09-01_0014.backup.tar.gz
+
+`ssh host cmd` allocates no tty, so that channel is 8-bit clean and the
+gzip stream arrives byte for byte (verified against a real host with all
+256 byte values). Do NOT add `-t`: a tty translates line endings and will
+corrupt the archive.
+
+Only `-` streams. A redirect on its own does not: `ssh host sudo my-bt
+admin backup > log.txt` writes the archive as a file on the server and
+captures the messages -- the same command must not mean two different
+things depending on where its output happens to go. Streamed, the file
+lands under the LOCAL umask rather than 0600, so `chmod 600` it on
+arrival; it holds the same credentials either way.
+
 In it: both halves of the configuration (`settings.toml` and the
 console-owned `web-editable/settings.web-editable.toml`), the secret
 files they point at, the data dir's CSVs, the deployed static pages, and
@@ -1018,7 +1037,7 @@ before a byte is written to it, rather than chmod'ed afterwards. Run it
 as root, or the secrets and data it cannot read are silently missing --
 the manifest says which. `--no-secrets` leaves them out, which makes the
 archive safe to hand around and unable to restore a working service on
-its own; `--dest <DIR>` writes it somewhere other than here.
+its own.
 
 ### `my-bt admin setup` / `my-bt admin setup --interactive`
 

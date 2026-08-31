@@ -24,7 +24,9 @@ working service on its own.
 """
 from __future__ import annotations
 
+import io
 import os
+import sys
 import tarfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -45,7 +47,7 @@ class BackupItem:
 
 @dataclass
 class BackupResult:
-    archive: Path
+    archive: Path | None       # None = written to stdout
     included: list[BackupItem] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     total_bytes: int = 0
@@ -159,7 +161,7 @@ def _manifest(result: BackupResult, settings_path: Path, data_dir: Path) -> str:
     put it back is a puzzle, not a backup -- and it will be opened on the
     worst day, by someone who has forgotten the details."""
     lines = [
-        f"my-booking-tool backup -- {result.archive.name}",
+        f"my-booking-tool backup -- {result.archive.name if result.archive else '(stdout)'}",
         "",
         f"version   : {version.version_string(version._HOME)}",
         f"host      : {os.uname().nodename}",
@@ -192,39 +194,77 @@ def _manifest(result: BackupResult, settings_path: Path, data_dir: Path) -> str:
     return "\n".join(lines)
 
 
+def default_name(now: datetime | None = None) -> str:
+    return f"my-booking-backup-{timestamp(now)}.tar.gz"
+
+
+def resolve_target(target: str | Path | None, now: datetime | None = None) -> Path | None:
+    """Where the archive goes. None means stdout.
+
+    Three shapes, one rule each: "-" is stdout, an existing DIRECTORY
+    gets the standard name inside it, and anything else IS the name. A
+    path that does not exist yet is therefore a filename, not a directory
+    to create -- creating directories on the way to writing a backup
+    turns a typo into a file nobody will ever look in again."""
+    if target is None:
+        return Path(".") / default_name(now)
+    if str(target) == "-":
+        return None
+    path = Path(target)
+    if path.is_dir():
+        return path / default_name(now)
+    return path
+
+
 def create(
     settings_path: str | Path,
     data_dir: str | Path,
     *,
-    dest_dir: str | Path = ".",
+    target: str | Path | None = None,
+    to_stdout: bool = False,
+    stdout=None,
     with_secrets: bool = True,
     now: datetime | None = None,
 ) -> BackupResult:
     """Write the archive and return what went into it.
 
-    Created 0600 BEFORE anything is written to it (os.open with the mode,
-    not a chmod afterwards): a chmod leaves a window in which the secrets
-    are already on disk world-readable, and on a shared host that window
-    is all an attacker needs."""
+    To a file, it is created 0600 BEFORE anything is written to it
+    (os.open with the mode, not a chmod afterwards): a chmod leaves a
+    window in which the secrets are already on disk world-readable, and
+    that window is all an attacker on a shared host needs.
+
+    To stdout ("-"), the permissions belong to whatever the caller
+    redirects into -- `ssh host my-bt admin backup - > backup.tar.gz`
+    lands under the local umask, so the caller owns that decision. The
+    stream mode is "w|gz", not "w:gz": a pipe cannot seek, and the
+    seekable form fails on one."""
     settings_path = Path(settings_path)
     data_dir = Path(data_dir)
     items, skipped = plan(settings_path, data_dir, with_secrets=with_secrets)
-    archive = Path(dest_dir) / f"my-booking-backup-{timestamp(now)}.tar.gz"
+    archive = None if to_stdout else resolve_target(target, now)
     result = BackupResult(archive=archive, included=items, skipped=skipped,
                           with_secrets=with_secrets)
+
+    def fill(tar: tarfile.TarFile) -> None:
+        for item in items:
+            tar.add(item.source, arcname=item.arcname, recursive=False)
+            result.total_bytes += item.source.stat().st_size
+        text = _manifest(result, settings_path, data_dir).encode("utf-8")
+        info = tarfile.TarInfo("MANIFEST.txt")
+        info.size = len(text)
+        info.mtime = int((now or datetime.now(timezone.utc)).timestamp())
+        info.mode = 0o600
+        tar.addfile(info, io.BytesIO(text))
+
+    if archive is None:
+        out = stdout if stdout is not None else sys.stdout.buffer
+        with tarfile.open(fileobj=out, mode="w|gz") as tar:
+            fill(tar)
+        out.flush()
+        return result
 
     fd = os.open(archive, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as raw_file:
         with tarfile.open(fileobj=raw_file, mode="w:gz") as tar:
-            for item in items:
-                tar.add(item.source, arcname=item.arcname, recursive=False)
-                result.total_bytes += item.source.stat().st_size
-            text = _manifest(result, settings_path, data_dir).encode("utf-8")
-            info = tarfile.TarInfo("MANIFEST.txt")
-            info.size = len(text)
-            info.mtime = int((now or datetime.now(timezone.utc)).timestamp())
-            info.mode = 0o600
-            import io
-
-            tar.addfile(info, io.BytesIO(text))
+            fill(tar)
     return result

@@ -256,19 +256,35 @@ class AdminBackupArgsTest(unittest.TestCase):
     """`my-bt admin backup` -- one .tar.gz of everything the RPM does not
     carry, written to the current directory by default."""
 
-    def test_bare_backup_keeps_the_secrets_and_writes_here(self):
+    def test_bare_backup_keeps_the_secrets_and_has_no_target(self):
         args = my_bt_mod.build_parser().parse_args(["admin", "backup"])
         self.assertFalse(args.no_secrets)
-        self.assertIsNone(args.dest)
+        self.assertIsNone(args.target)
         self.assertEqual(args.func, my_bt_mod.cmd_admin_backup)
 
     def test_no_secrets_is_opt_in(self):
         args = my_bt_mod.build_parser().parse_args(["admin", "backup", "--no-secrets"])
         self.assertTrue(args.no_secrets)
 
-    def test_dest_can_send_it_elsewhere(self):
-        args = my_bt_mod.build_parser().parse_args(["admin", "backup", "--dest", "/mnt/usb"])
-        self.assertEqual(args.dest, "/mnt/usb")
+    def test_a_target_can_be_a_directory_or_a_filename(self):
+        parse = my_bt_mod.build_parser().parse_args
+        self.assertEqual(parse(["admin", "backup", "/mnt/usb"]).target, "/mnt/usb")
+        self.assertEqual(parse(["admin", "backup", "b.tar.gz"]).target, "b.tar.gz")
+
+    def test_only_a_dash_streams_never_a_redirect(self):
+        # The operator ruled out inferring stdout from an isatty() check:
+        # "this is otherwise not intuitive". `... backup > log.txt` writes
+        # the archive as a file and captures the messages.
+        with open(MY_BT_PATH, encoding="utf-8") as f:
+            source = f.read()
+        self.assertNotIn("sys.stdout.isatty()", source)
+
+    def test_a_dash_target_survives_argparse(self):
+        # A bare "-" is the shape argparse is most likely to swallow as a
+        # flag; it is the whole point of the operator's own use:
+        # `ssh ovh sudo my-bt admin backup - > backup.tar.gz`.
+        self.assertEqual(
+            my_bt_mod.build_parser().parse_args(["admin", "backup", "-"]).target, "-")
 
     def test_the_help_warns_that_it_holds_credentials(self):
         # The warning has to be where the operator decides where to put

@@ -1408,31 +1408,44 @@ def _print_activity_summary(args) -> None:
 
 
 def cmd_admin_backup(args) -> None:
-    """`my-bt admin backup` -- everything this deployment holds that the
-    RPM does not, in one timestamped .tar.gz in the current directory.
+    """`my-bt admin backup [<TARGET>]` -- everything this deployment holds
+    that the RPM does not, in one timestamped .tar.gz.
 
-    Prints what went in and what did not, both with reasons: a backup
-    whose contents you have to guess at gets trusted for years and then
-    turns out to be missing the one thing you needed."""
+    TARGET is a directory (standard name inside it), a filename, or "-"
+    for stdout. Omitted, it is the current directory -- a redirect does
+    NOT quietly turn into "-": guessing from an isatty() check would mean
+    the same command does two entirely different things depending on
+    where its output happens to go, and the operator ruled that out for
+    exactly that reason ("this is otherwise not intuitive"). "-" is the
+    standard spelling for stdout, and it is the only one.
+
+    When the archive does go to stdout, every human-readable line goes to
+    stderr instead, so the two never end up in the same pipe."""
+    to_stdout = str(args.target) == "-"
+    out = sys.stderr if to_stdout else sys.stdout
     result = backup.create(
         args.settings, args.data_dir,
-        dest_dir=args.dest or ".", with_secrets=not args.no_secrets,
+        target=args.target, to_stdout=to_stdout, with_secrets=not args.no_secrets,
     )
     for item in result.included:
-        print(f"  + {item.arcname}")
+        print(f"  + {item.arcname}", file=out)
     for label, why in result.skipped:
-        print(f"  - {label}: {why}")
-    size = result.archive.stat().st_size
-    print(f"\n{result.archive} ({size / 1024:.0f} KiB from "
-          f"{len(result.included)} file(s), mode 0600)")
+        print(f"  - {label}: {why}", file=out)
+    if to_stdout:
+        print(f"\n{len(result.included)} file(s) written to stdout "
+              f"({result.total_bytes / 1024:.0f} KiB before compression)", file=out)
+    else:
+        size = result.archive.stat().st_size
+        print(f"\n{result.archive} ({size / 1024:.0f} KiB from "
+              f"{len(result.included)} file(s), mode 0600)", file=out)
     if result.with_secrets:
         # Said every time, not once in a manual: the file is only as safe
         # as where it ends up, and that decision is made minutes from now.
         print("CONTAINS SECRETS in plain text (CalDAV + SMTP passwords, admin "
-              "password hash, erasure pepper).")
+              "password hash, erasure pepper).", file=out)
         print("Anyone who can read it can act as this deployment -- keep it 0600, "
               "and think before copying it anywhere. `--no-secrets` omits them "
-              "(that archive cannot restore a working service on its own).")
+              "(that archive cannot restore a working service on its own).", file=out)
 
 
 def cmd_admin_sync_overrides(args) -> None:
@@ -2747,7 +2760,12 @@ def build_parser() -> argparse.ArgumentParser:
         "settings.web-editable.toml), the secret files they point at, the data "
         "dir's CSVs, the deployed static pages and the nginx vhost. Written to "
         "the current directory as my-booking-backup-<YYYY-MM-DD_HHMM>.tar.gz "
-        "(UTC), mode 0600. The conflict-feed cache and the log are deliberately "
+        "(UTC), mode 0600. TARGET overrides that: a DIRECTORY takes the standard "
+        "name inside it, anything else IS the filename, and \"-\" writes the "
+        "archive to stdout with every message on stderr -- so `ssh host my-bt "
+        "admin backup - > backup.tar.gz` works. Only \"-\" streams: a redirect on "
+        "its own does not, so `... backup > log.txt` still writes the archive "
+        "as a file here and captures the messages. The conflict-feed cache and the log are deliberately "
         "left out -- the first refetches itself, the second is history, not "
         "state. Needs root to read the secrets and the data dir. THE ARCHIVE "
         "HOLDS PLAIN-TEXT CREDENTIALS: anyone who can read it can act as this "
@@ -2757,7 +2775,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--no-secrets", action="store_true",
                     help="leave the secret files out (archive can then not restore a working service)")
-    sp.add_argument("--dest", metavar="<DIR>", help="write the archive here instead of the current directory")
+    sp.add_argument("target", nargs="?", metavar="<TARGET>",
+                    help='directory (standard name inside it), filename, or "-" for stdout '
+                         "(default: the current directory, or stdout if it is redirected)")
     sp.set_defaults(func=cmd_admin_backup)
 
     sp = _add_subcommand(
