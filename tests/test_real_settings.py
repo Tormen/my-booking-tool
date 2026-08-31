@@ -78,6 +78,17 @@ class RealSettingsFileTest(unittest.TestCase):
         if raw is None:
             self.fail(f"{path} exists but could not be parsed as TOML")
         self.raw = raw
+        # Courses live in EITHER file since 2026-08-28: /admin owns the
+        # web-editable one, and once it does, the [[course]] blocks here
+        # are commented out. Every course check must therefore run on the
+        # MERGED set -- which is also what the service validates against,
+        # so a check on settings.toml alone would fail on a correctly
+        # migrated config and pass on a broken one.
+        self.editable_raw = app_config.load_web_editable(path)
+        self.courses = app_config.merge_courses(
+            app_config.courses_from_raw(self.raw),
+            app_config.courses_from_raw(self.editable_raw),
+        )
 
     # -- the mistakes that stop the service from starting --------------------
 
@@ -107,8 +118,12 @@ class RealSettingsFileTest(unittest.TestCase):
             self.assertTrue(key in booking, f"[booking_calendar].{key} is missing")
 
     def test_courses_parse_and_shortnames_are_unique(self):
-        courses = app_config.courses_from_raw(self.raw)
-        self.assertTrue(courses, "no [[course]] entries -- the site would have nothing to book")
+        courses = self.courses
+        self.assertTrue(
+            courses,
+            "no [[course]] entries in settings.toml OR in web-editable/"
+            f"{app_config.WEB_EDITABLE_FILENAME} -- the site would have nothing to book",
+        )
         names = [c.shortname for c in courses]
         self.assertCountEqual(
             names, set(names),
@@ -130,7 +145,7 @@ class RealSettingsFileTest(unittest.TestCase):
         # (exactly one source, known mode/show_as, HH:MM windows, and that
         # `courses`/`all_courses_but` name real shortnames). Anything it
         # rejects would fail the service at startup.
-        shortnames = {c.shortname for c in app_config.courses_from_raw(self.raw)}
+        shortnames = {c.shortname for c in self.courses}
         for i, entry in enumerate(self.raw.get("conflict_calendar", [])):
             name = entry.get("name") or f"conflict-{i + 1}"
             with self.subTest(entry=name):
