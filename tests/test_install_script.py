@@ -12,6 +12,7 @@ for build-time scripts -- rather than actually executing a root-only
 installer in the suite."""
 import os
 import unittest
+from pathlib import Path
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INSTALL_SH = os.path.join(REPO_ROOT, "scripts", "install.sh")
@@ -52,3 +53,21 @@ class InstallScriptParityTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BuildStagesBothSettingsFilesTest(unittest.TestCase):
+    """settings.toml and web-editable/settings.web-editable.toml are one
+    configuration in two files, and the build must stage both.
+
+    2026-08-31: once /admin owns a course, its [[course]] block in
+    settings.toml is commented out. Staging settings.toml alone therefore
+    hands %check a config with no courses in it at all, and
+    tests/test_real_settings.py fails the build -- on a checkout where
+    nothing is actually wrong."""
+
+    def test_the_real_file_list_carries_the_console_owned_half(self):
+        script = (Path(__file__).resolve().parent.parent
+                  / "scripts" / "build-rpm.sh").read_text(encoding="utf-8")
+        loop = script[script.index("for real in settings.toml"):]
+        loop = loop[:loop.index("; do")]
+        self.assertIn("web-editable/settings.web-editable.toml", loop)

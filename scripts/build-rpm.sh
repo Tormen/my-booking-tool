@@ -105,7 +105,16 @@ tar -C "$HERE" --exclude='./data' --exclude='./secrets' --exclude='./.git' \
 # my-booking-tool.spec's %install/%files), so `my-bt setup -i` on the
 # installed system could never find a real one to vimdiff against, no
 # matter how complete this SOURCE checkout's copy was.
-for real in settings.toml site/index.html site/impressum.html site/terms.html \
+#
+# web-editable/settings.web-editable.toml joined the list on 2026-08-31.
+# Once /admin owns a course, its [[course]] block in settings.toml is
+# commented out -- so staging settings.toml WITHOUT its companion gives
+# %check a config with no courses at all, and tests/test_real_settings.py
+# fails the build. The pair only means anything together. It is staged,
+# not packaged: the spec installs the directory and never this file, so
+# an installed system keeps whatever the console wrote there.
+for real in settings.toml web-editable/settings.web-editable.toml \
+            site/index.html site/impressum.html site/terms.html \
             site/privacy.html site/privacy.html.tmpl site/index_embedded.html \
             site/unavailable.html site/nginx-locations.conf; do
   # -p (preserve mtime) on both copies: app/version.py's SOURCE_STAMP is
