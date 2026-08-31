@@ -860,17 +860,30 @@ _SETTINGS_SCRIPT = r"""<script>
   if (!form) { return; }
   var dialog = document.getElementById("unsaved-dialog");
   var nextField = document.getElementById("course-next");
-  var initial = new FormData(form);
   var pendingHref = null;
 
+  // Dirty means "differs from what the SERVER sent", which every control
+  // already knows: defaultValue/defaultChecked/defaultSelected hold the
+  // value that came down in the HTML. Snapshotting FormData at load
+  // instead -- which this did -- compares against whatever the page
+  // happened to hold at script time, and a freshly saved page could come
+  // out "dirty" with nothing typed (2026-08-31, reported live: Save,
+  // then switching course still asked about unsaved changes).
   function isDirty() {
-    var now = new FormData(form);
-    var keys = {};
-    initial.forEach(function (v, k) { keys[k] = true; });
-    now.forEach(function (v, k) { keys[k] = true; });
-    for (var key in keys) {
-      if (key === "next") { continue; }
-      if (String(initial.get(key)) !== String(now.get(key))) { return true; }
+    var fields = Array.prototype.slice.call(form.elements);
+    for (var i = 0; i < fields.length; i++) {
+      var el = fields[i];
+      if (!el.name || el.name === "next" || el.type === "hidden") { continue; }
+      if (el.type === "checkbox" || el.type === "radio") {
+        if (el.checked !== el.defaultChecked) { return true; }
+      } else if (el.tagName === "SELECT") {
+        var options = Array.prototype.slice.call(el.options);
+        for (var j = 0; j < options.length; j++) {
+          if (options[j].selected !== options[j].defaultSelected) { return true; }
+        }
+      } else if (typeof el.defaultValue === "string") {
+        if (el.value !== el.defaultValue) { return true; }
+      }
     }
     return false;
   }
@@ -886,10 +899,63 @@ _SETTINGS_SCRIPT = r"""<script>
     ev.preventDefault();
     ev.stopPropagation();
     pendingHref = href;
+    listChanges();
     if (dialog && dialog.showModal) { dialog.showModal(); }
     else if (window.confirm("Save your changes before leaving?")) { save(); }
     else { leave(); }
   }, true);
+
+  // Discarding is irreversible, so the dialog says WHAT would go: the
+  // field's own name, and enough of the old and new text to recognise
+  // the edit (2026-08-31, the operator: "you must also show what they
+  // discard"). textContent throughout -- this is the operator's own
+  // half-typed markup, and it is being quoted back, not rendered.
+  function fieldLabel(el) {
+    var label = el.closest ? el.closest("label") : null;
+    var named = label ? label.querySelector(".lbl") : null;
+    var text = named ? named.textContent : (label ? label.textContent : el.name);
+    return (text || el.name).replace(/\s+/g, " ").trim().replace(/\(required\)$/, "").trim();
+  }
+
+  function shorten(value) {
+    var one = String(value == null ? "" : value).replace(/\s+/g, " ").trim();
+    if (!one) { return "(empty)"; }
+    return one.length > 70 ? one.slice(0, 70) + "..." : one;
+  }
+
+  function listChanges() {
+    var list = document.getElementById("unsaved-list");
+    if (!list) { return; }
+    list.textContent = "";
+    Array.prototype.slice.call(form.elements).forEach(function (el) {
+      if (!el.name || el.name === "next" || el.type === "hidden") { return; }
+      var was = null, now = null;
+      if (el.type === "checkbox" || el.type === "radio") {
+        if (el.checked === el.defaultChecked) { return; }
+        was = el.defaultChecked ? "on" : "off";
+        now = el.checked ? "on" : "off";
+      } else if (el.tagName === "SELECT") {
+        var previous = Array.prototype.slice.call(el.options).filter(function (o) {
+          return o.defaultSelected;
+        })[0];
+        if (previous && previous.selected) { return; }
+        was = previous ? previous.text : "(none)";
+        now = el.options[el.selectedIndex] ? el.options[el.selectedIndex].text : "(none)";
+      } else if (typeof el.defaultValue === "string") {
+        if (el.value === el.defaultValue) { return; }
+        was = el.defaultValue;
+        now = el.value;
+      } else {
+        return;
+      }
+      var item = document.createElement("li");
+      var name = document.createElement("b");
+      name.textContent = fieldLabel(el) + ": ";
+      item.appendChild(name);
+      item.appendChild(document.createTextNode(shorten(was) + "  \u2192  " + shorten(now)));
+      list.appendChild(item);
+    });
+  }
 
   function save() {
     if (nextField && pendingHref) { nextField.value = pendingHref; }
@@ -898,7 +964,9 @@ _SETTINGS_SCRIPT = r"""<script>
   }
 
   function leave() {
-    initial = new FormData(form);          // no longer dirty: stop warning
+    Array.prototype.slice.call(form.elements).forEach(function (el) {
+      if (typeof el.defaultValue === "string") { el.defaultValue = el.value; }
+    });                                    // no longer dirty: stop warning
     if (dialog && dialog.open) { dialog.close(); }
     window.location.href = pendingHref;
   }
@@ -930,7 +998,7 @@ _SETTINGS_SCRIPT = r"""<script>
       var field = form.elements[name];
       if (!field || field.type === "hidden") { return; }
       if (String(field.value) === String(data[name])) { return; }
-      field.value = data[name];
+      field.value = data[name];        // defaultValue untouched: still dirty
       changed.push(name);
     });
     if (!changed.length) { window.sessionStorage.removeItem(KEY); return; }
@@ -962,9 +1030,23 @@ _SETTINGS_SCRIPT = r"""<script>
   var discardBtn = document.getElementById("unsaved-discard");
   if (saveBtn) { saveBtn.addEventListener("click", save); }
   if (discardBtn) { discardBtn.addEventListener("click", leave); }
+  // "Stay here" closes it. It carries .dialog-close-btn, which is wired
+  // by _DIALOG_WIRING_SCRIPT -- and that script is NOT on this page, so
+  // the button did nothing at all (2026-08-31, reported live). Wired
+  // here, where the dialog lives.
+  if (dialog) {
+    dialog.querySelectorAll(".dialog-close-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () { pendingHref = null; dialog.close(); });
+    });
+  }
 
   form.addEventListener("submit", function () {
-    initial = new FormData(form);
+    // The page is about to be replaced by the server's own render, so
+    // the baseline moves with it. Belt and braces for the case where the
+    // navigation is cancelled.
+    Array.prototype.slice.call(form.elements).forEach(function (el) {
+      if (typeof el.defaultValue === "string") { el.defaultValue = el.value; }
+    });
     try { window.sessionStorage.removeItem(KEY); } catch (e) { /* nothing to clear */ }
   });
 
@@ -6050,6 +6132,7 @@ class App:
       </form>
       <dialog id="unsaved-dialog">
         <p><b>You have unsaved changes to {esc(course.shortname)}.</b></p>
+        <ul id="unsaved-list"></ul>
         <p>Save them before leaving this course?</p>
         <div class="submit-row">
           <button type="button" id="unsaved-save">Yes, save and continue</button>

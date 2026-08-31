@@ -522,3 +522,67 @@ description = "<p>See you at {{studio}}</p>"
         self.app.admin_settings_macro("POST", env)
         written = config.web_editable_path(self.toml).read_text()
         self.assertIn("{{studio}}", written)
+
+
+class UnsavedPromptAccuracyTest(unittest.TestCase):
+    """The prompt must fire only on real edits, and its buttons must work.
+
+    2026-08-31, both reported live: saving a course and then switching
+    tab still asked about unsaved changes, and "Stay here" did nothing at
+    all -- it carries .dialog-close-btn, wired by a script that is not on
+    this page."""
+
+    def _script(self) -> str:
+        return webapp._SETTINGS_SCRIPT
+
+    def test_dirtiness_is_measured_against_what_the_server_sent(self):
+        # Not a FormData snapshot taken at script time: that compares
+        # against whatever the page held then, so a freshly rendered page
+        # could read as dirty with nothing typed.
+        script = self._script()
+        self.assertIn("el.defaultValue", script)
+        self.assertIn("defaultChecked", script)
+        self.assertIn("defaultSelected", script)
+        self.assertNotIn("var initial", script)
+
+    def test_saving_moves_the_baseline(self):
+        self.assertIn("el.defaultValue = el.value", self._script())
+
+    def test_stay_here_is_wired_on_this_page(self):
+        script = self._script()
+        self.assertIn("dialog-close-btn", script)
+        self.assertIn("dialog.close()", script)
+
+    def test_the_page_does_not_rely_on_the_dialog_wiring_script(self):
+        # That script is what would normally close a .dialog-close-btn,
+        # and it is deliberately not included here -- so this page has to
+        # wire its own.
+        import tempfile
+        from pathlib import Path
+        tmp = tempfile.mkdtemp()
+        app = App(make_settings(courses=(make_course(shortname="yoga"),)),
+                  Store(tmp), settings_path=str(Path(tmp) / "settings.toml"))
+        env = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}"}
+        _s, _h, body = app.admin_settings("GET", env)
+        self.assertIn("dialog-close-btn", body)
+        self.assertNotIn("confirm-dialog-btn", body)
+
+    def test_the_dialog_says_what_would_be_discarded(self):
+        # Discarding is irreversible: the operator has to see WHICH
+        # fields changed and enough of the text to recognise the edit.
+        script = self._script()
+        self.assertIn("listChanges", script)
+        self.assertIn("unsaved-list", script)
+        # Quoted back, never rendered: this is half-typed markup.
+        self.assertIn("textContent", script)
+        self.assertNotIn("innerHTML = shorten", script)
+
+    def test_the_dialog_has_somewhere_to_put_that_list(self):
+        import tempfile
+        from pathlib import Path
+        tmp = tempfile.mkdtemp()
+        app = App(make_settings(courses=(make_course(shortname="yoga"),)),
+                  Store(tmp), settings_path=str(Path(tmp) / "settings.toml"))
+        env = {"HTTP_COOKIE": f"admin_session={webapp._new_session({'kind': 'admin'})}"}
+        _s, _h, body = app.admin_settings("GET", env)
+        self.assertIn('<ul id="unsaved-list">', body)
